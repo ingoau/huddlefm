@@ -79,8 +79,7 @@ export class Coordinator {
   }
 
   action(interaction: Interaction) {
-    if (interaction.actionId === "add_track_to_queue") return this.add(interaction, false);
-    if (interaction.actionId === "play_track_next") return this.add(interaction, true);
+    if (interaction.actionId === "add_track_to_queue") return this.add(interaction);
     const currentId = this.current?.id;
     return this.enqueue(async () => {
       if (interaction.type === "view_submission") return this.settingsSubmission(interaction);
@@ -93,6 +92,8 @@ export class Coordinator {
         next_track: () => this.next(interaction, currentId),
         volume_down: () => this.changeVolume(interaction, -0.05),
         volume_up: () => this.changeVolume(interaction, 0.05),
+        queue_move_up: () => this.reorder(interaction, -1),
+        queue_move_down: () => this.reorder(interaction, 1),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
         open_settings: () => this.settingsModal(interaction),
@@ -152,7 +153,7 @@ export class Coordinator {
     return false;
   }
 
-  private async add(interaction: Interaction, first: boolean) {
+  private async add(interaction: Interaction) {
     const accepted = await this.enqueue(async () => {
       if (this.state === "ended") return false;
       if (interaction.messageTs && interaction.messageTs !== this.uiTs) {
@@ -181,7 +182,7 @@ export class Coordinator {
       const entry: Entry = { ...metadata, id: crypto.randomUUID(), requesterId: interaction.userId, status: "preparing" };
       const controller = new AbortController();
       this.preparations.set(entry.id, controller);
-      first ? this.queue.unshift(entry) : this.queue.push(entry);
+      this.queue.push(entry);
       this.store.addTrack({ ...entry, sessionId: this.id, status: entry.status });
       await this.render();
       return { entry, controller };
@@ -322,10 +323,13 @@ export class Coordinator {
   }
 
   private async remove(interaction: Interaction) {
+    if (interaction.metadata && !this.validQueueView(interaction))
+      return this.notice(interaction.userId, "That queue view is stale; reopen it.");
     const entry = this.queue.find(track => track.id === interaction.value);
     if (!entry) return;
-    const capability = entry.requesterId === interaction.userId ? "remove-own" : "remove-any";
-    if (!(await this.require(interaction, capability))) return;
+    if (!this.can(interaction.userId, "manage-queue") &&
+      !(entry.requesterId === interaction.userId && this.can(interaction.userId, "remove-own")))
+      return this.notice(interaction.userId, "You do not have permission for that.");
     this.queue.splice(this.queue.indexOf(entry), 1);
     this.preparations.get(entry.id)?.abort();
     this.store.removeTrack(entry.id);
@@ -333,6 +337,20 @@ export class Coordinator {
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
+    await this.updateQueueModal(interaction);
+  }
+
+  private async reorder(interaction: Interaction, direction: number) {
+    if (!this.validQueueView(interaction))
+      return this.notice(interaction.userId, "That queue view is stale; reopen it.");
+    if (!(await this.require(interaction, "manage-queue"))) return;
+    const index = this.queue.findIndex(track => track.id === interaction.value);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= this.queue.length) return;
+    [this.queue[index], this.queue[target]] = [this.queue[target]!, this.queue[index]!];
+    await this.render();
+    this.syncPreloads();
+    await this.updateQueueModal(interaction);
   }
 
   private async clear(interaction: Interaction) {
@@ -350,17 +368,44 @@ export class Coordinator {
 
   private async queueModal(interaction: Interaction) {
     if (!interaction.triggerId) return;
-    await this.slack.modal(interaction.triggerId, {
+    await this.slack.modal(interaction.triggerId, this.queueView(interaction.userId));
+  }
+
+  private queueView(userId: string) {
+    return {
       type: "modal",
+      callback_id: "manage_queue",
+      private_metadata: JSON.stringify({ sessionId: this.id }),
       title: plain("HuddleFM queue"),
       close: plain("Close"),
-      blocks: [{
-        type: "section",
-        text: { type: "mrkdwn", text: this.queue.length
-          ? this.queue.map((track, i) => `*${i + 1}. ${escape(track.title)}* — ${escape(track.artist)}`).join("\n")
-          : "The queue is empty." },
-      }],
-    });
+      blocks: this.queue.length ? this.queue.flatMap((track, index) => {
+        const manages = this.can(userId, "manage-queue");
+        const controls = [
+          ...(manages && index ? [{ type: "button", action_id: "queue_move_up", text: plain("Up"), value: track.id }] : []),
+          ...(manages && index < this.queue.length - 1 ? [{ type: "button", action_id: "queue_move_down", text: plain("Down"), value: track.id }] : []),
+          ...(manages || (track.requesterId === userId && this.can(userId, "remove-own"))
+            ? [{ type: "button", action_id: "remove_queue_track", text: plain("Remove"), style: "danger", value: track.id }]
+            : []),
+        ];
+        return [
+          { type: "section", block_id: `queue_item_${track.id}`, text: { type: "mrkdwn", text: `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\nAdded by <@${track.requesterId}>` } },
+          ...(controls.length ? [{ type: "actions", block_id: `queue_actions_${track.id}`, elements: controls }] : []),
+        ];
+      }) : [{ type: "section", text: { type: "mrkdwn", text: "The queue is empty." } }],
+    };
+  }
+
+  private validQueueView(interaction: Interaction) {
+    try {
+      return interaction.viewId && JSON.parse(interaction.metadata).sessionId === this.id;
+    } catch {
+      return false;
+    }
+  }
+
+  private async updateQueueModal(interaction: Interaction) {
+    if (interaction.viewId && interaction.viewHash)
+      await this.slack.updateModal(interaction.viewId, interaction.viewHash, this.queueView(interaction.userId));
   }
 
   private async settingsModal(interaction: Interaction) {
@@ -484,7 +529,7 @@ export class Coordinator {
     const queueBlocks = this.queue.slice(0, 3).map((track, index) => ({
       type: "section",
       block_id: `queue_${id}_${track.id}`,
-      text: { type: "mrkdwn", text: `${index ? "" : "*Up Next*\n"}*${index + 1}. ${escape(track.title)}*${duration(track.duration)}\n${escape(track.artist)}${track.album ? ` · _${escape(track.album)}_` : ""}${track.status === "preparing" ? " · preparing" : ""}` },
+      text: { type: "mrkdwn", text: `${index ? "" : "*Up Next*\n"}*${index + 1}. ${escape(track.title)}*${duration(track.duration)}\n${escape(track.artist)}${track.album ? ` · _${escape(track.album)}_` : ""}${track.status === "preparing" ? " · preparing" : ""} · added by <@${track.requesterId}>` },
       accessory: { type: "button", action_id: "remove_queue_track", text: plain("Remove"), value: track.id },
     }));
     return [{
@@ -500,15 +545,14 @@ export class Coordinator {
           { type: "button", action_id: "next_track", text: plain("Next"), value: this.id },
         ] },
         { type: "actions", block_id: `volume_${id}`, elements: [
-          { type: "button", action_id: "volume_down", text: plain("Volume -5%"), value: this.id },
-          { type: "button", action_id: "volume_up", text: plain("Volume +5%"), value: this.id },
+          { type: "button", action_id: "volume_down", text: plain("-"), value: this.id },
+          { type: "button", action_id: "volume_up", text: plain("+"), value: this.id },
         ] },
         { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
         { type: "divider", block_id: `divider_${id}` },
         ...queueBlocks,
         { type: "actions", block_id: `add_${id}`, elements: [
           { type: "external_select", action_id: "add_track_to_queue", placeholder: plain("Add to queue"), min_query_length: 3 },
-          { type: "external_select", action_id: "play_track_next", placeholder: plain("Play next"), min_query_length: 3 },
         ] },
         { type: "actions", block_id: `actions_${id}`, elements: [
           { type: "button", action_id: "view_full_queue", text: plain("View queue"), value: this.id },

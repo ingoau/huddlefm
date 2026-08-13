@@ -15,6 +15,8 @@ type Body = {
     selected_option?: { value?: string };
   }[];
   view?: {
+    id?: string;
+    hash?: string;
     callback_id?: string;
     private_metadata?: string;
     state?: { values?: Record<string, Record<string, { value?: string; selected_user?: string; selected_options?: { value?: string }[] }>> };
@@ -46,6 +48,7 @@ export function normalizeInteraction(body: Body) {
     channelId: body.container?.channel_id ?? body.channel?.id ?? "",
     messageTs: body.container?.message_ts ?? body.message?.ts ?? "",
     triggerId: body.trigger_id ?? "",
+    ...(body.view?.id ? { viewId: body.view.id, viewHash: body.view.hash ?? "" } : {}),
     metadata: body.view?.private_metadata ?? "",
     state: body.view?.state?.values ?? {},
   };
@@ -95,6 +98,10 @@ export class SlackAppAdapter {
 
   async modal(triggerId: string, view: unknown) {
     await this.web.views.open({ trigger_id: triggerId, view: view as never });
+  }
+
+  async updateModal(viewId: string, hash: string, view: unknown) {
+    await this.web.views.update({ view_id: viewId, hash, view: view as never });
   }
 
   async privateChannelNotice(userId: string) {

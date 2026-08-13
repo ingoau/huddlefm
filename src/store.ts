@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 export const capabilities = [
   "add",
   "remove-own",
-  "remove-any",
+  "manage-queue",
   "skip",
   "pause",
   "volume",
