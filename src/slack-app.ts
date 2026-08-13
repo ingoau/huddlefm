@@ -23,6 +23,11 @@ type Body = {
 
 export type Interaction = ReturnType<typeof normalizeInteraction>;
 
+export function channelAccess(channel?: { is_member?: boolean; is_private?: boolean }) {
+  if (channel?.is_member) return "ready";
+  return !channel || channel.is_private ? "decline" : "join";
+}
+
 export function normalizeInteraction(body: Body) {
   const action = body.actions?.[0];
   return {
@@ -82,6 +87,33 @@ export class SlackAppAdapter {
 
   async modal(triggerId: string, view: unknown) {
     await this.web.views.open({ trigger_id: triggerId, view: view as never });
+  }
+
+  async ensureChannelAccess(channelId: string) {
+    let channel: { is_member?: boolean; is_private?: boolean } | undefined;
+    try {
+      channel = (await this.web.conversations.info({ channel: channelId })).channel;
+    } catch (error) {
+      if (slackError(error) !== "channel_not_found") throw error;
+    }
+    const access = channelAccess(channel);
+    if (access === "ready") return true;
+    if (access === "decline") return false;
+    await this.web.conversations.join({ channel: channelId });
+    return true;
+  }
+
+  async privateChannelNotice(userId: string) {
+    await this.dm(
+      userId,
+      "I can’t join that Huddle until I’m a member of its private channel. Add HuddleFM to the channel, then invite me again.",
+    );
+  }
+
+  private async dm(userId: string, text: string) {
+    const opened = await this.web.conversations.open({ users: userId });
+    if (!opened.channel?.id) throw new Error("conversations.open returned no channel");
+    await this.web.chat.postMessage({ channel: opened.channel.id, text });
   }
 
   private async connect() {
@@ -151,4 +183,8 @@ function safeError(error: unknown) {
     /(xox[acpbrs]-|token|cookie|authorization)[^\s,]*/gi,
     "$1[redacted]",
   );
+}
+
+function slackError(error: unknown) {
+  return (error as { data?: { error?: string } })?.data?.error;
 }

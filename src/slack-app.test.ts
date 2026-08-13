@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { normalizeInteraction } from "./slack-app.ts";
+import { channelAccess, normalizeInteraction } from "./slack-app.ts";
+
+test("classifies channel access", () => {
+  expect(channelAccess({ is_member: true, is_private: true })).toBe("ready");
+  expect(channelAccess({ is_member: false, is_private: false })).toBe("join");
+  expect(channelAccess({ is_member: false, is_private: true })).toBe("decline");
+  expect(channelAccess()).toBe("decline");
+});
 
 test("normalizes block actions using immutable values", () => {
   expect(

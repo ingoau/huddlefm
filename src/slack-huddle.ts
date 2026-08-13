@@ -216,6 +216,27 @@ export class SlackHuddleAdapter {
     if (!response.ok) throw new Error(`rooms.join HTTP ${response.status}`);
     return normalizeJoinResponse(await response.json());
   }
+
+  async decline(channelId: string, callId: string) {
+    const form = new FormData();
+    form.set("token", this.config.xoxc);
+    form.set("response", "decline");
+    form.set("channel_id", channelId);
+    form.set("room_id", callId);
+    form.set("_x_reason", "respond-to-huddle-invite");
+
+    const response = await fetch(
+      new URL("/api/rooms.inviteResponse", this.config.workspaceUrl),
+      {
+        method: "POST",
+        headers: { cookie: `d=${this.config.xoxd}` },
+        body: form,
+      },
+    );
+    const result = object(await response.json(), "invite response");
+    if (!response.ok || result.ok !== true)
+      throw new Error(`rooms.inviteResponse failed: ${String(result.error ?? response.status)}`);
+  }
 }
 
 export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {

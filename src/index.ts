@@ -27,44 +27,55 @@ let mediaState: { type: string; details?: unknown } | undefined;
 let active: Coordinator | undefined;
 let mediaBrowser: MediaBrowser;
 let botUserId = "";
+let joining = false;
 
-async function joinHuddle(channelId: string, inviterUserId: string) {
-  if (active || bootstrap) throw new Error("A Huddle session is already active");
-  const joined = await slackHuddle.join(channelId);
-  const token = crypto.randomUUID();
-  bootstrap = {
-    sessionId: crypto.randomUUID(),
-    meeting: joined.chimeMeeting,
-    attendee: joined.chimeAttendee,
-    initialVolume: config.initialVolume,
-    bridgeToken: token,
-  };
-  await mediaBrowser.start(bootstrap);
-  const coordinator = new Coordinator(
-    joined,
-    inviterUserId,
-    botUserId,
-    slackApp,
-    store,
-    catalog,
-    config,
-    token,
-    message => mediaSocket?.send(JSON.stringify(message)),
-    async () => {
-      bootstrap = undefined;
-      active = undefined;
-      await mediaBrowser.stop();
-    },
-  );
+async function joinHuddle(channelId: string, inviterUserId: string, callId?: string) {
+  if (active || bootstrap || joining) throw new Error("A Huddle session is already active");
+  joining = true;
   try {
-    await coordinator.start();
-    active = coordinator;
-  } catch (error) {
-    bootstrap = undefined;
-    await mediaBrowser.stop();
-    throw error;
+    if (!(await slackApp.ensureChannelAccess(channelId))) {
+      if (callId) await slackHuddle.decline(channelId, callId);
+      await slackApp.privateChannelNotice(inviterUserId);
+      return { declined: true };
+    }
+    const joined = await slackHuddle.join(channelId);
+    const token = crypto.randomUUID();
+    bootstrap = {
+      sessionId: crypto.randomUUID(),
+      meeting: joined.chimeMeeting,
+      attendee: joined.chimeAttendee,
+      initialVolume: config.initialVolume,
+      bridgeToken: token,
+    };
+    await mediaBrowser.start(bootstrap);
+    const coordinator = new Coordinator(
+      joined,
+      inviterUserId,
+      botUserId,
+      slackApp,
+      store,
+      catalog,
+      config,
+      token,
+      message => mediaSocket?.send(JSON.stringify(message)),
+      async () => {
+        bootstrap = undefined;
+        active = undefined;
+        await mediaBrowser.stop();
+      },
+    );
+    try {
+      await coordinator.start();
+      active = coordinator;
+    } catch (error) {
+      bootstrap = undefined;
+      await mediaBrowser.stop();
+      throw error;
+    }
+    return { sessionId: coordinator.id, huddleId: joined.huddleId };
+  } finally {
+    joining = false;
   }
-  return { sessionId: coordinator.id, huddleId: joined.huddleId };
 }
 
 const server = Bun.serve({
@@ -133,7 +144,7 @@ await slackApp.start();
 await slackHuddle.start(event => {
   if (event.type === "HuddleInvited") {
     console.log(`[huddle] invited ${event.callId} by ${event.inviterUserId}`);
-    void joinHuddle(event.channelId, event.inviterUserId).catch(error => console.error(safeError(error)));
+    void joinHuddle(event.channelId, event.inviterUserId, event.callId).catch(error => console.error(safeError(error)));
   } else if (active && event.type === "ThreadActivity" && event.channelId === active.room.uiChannelId && event.threadTs === active.room.uiThreadTs)
     active.threadActivity(event.userId);
   else if (active && "callId" in event && event.callId === active.room.huddleCallId) {
