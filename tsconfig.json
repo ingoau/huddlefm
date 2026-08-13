@@ -26,6 +26,5 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  },
-  "exclude": ["data"]
+  }
 }
