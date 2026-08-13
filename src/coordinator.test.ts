@@ -4,7 +4,7 @@ import type { SlackAppAdapter } from "./slack-app.ts";
 import type { Store } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 
-function setup() {
+function setup(tracks = {} as TrackCatalog) {
   const posted: unknown[] = [];
   const ephemeral: string[] = [];
   const sessions: unknown[] = [];
@@ -28,11 +28,40 @@ function setup() {
     huddleCallId: "call", huddleId: "huddle", huddleCreatorId: "creator",
     participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
     chimeMeeting: {}, chimeAttendee: {},
-  }, "host", "bot", slack, store, {} as TrackCatalog, {
+  }, "host", "bot", slack, store, tracks, {
     queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210,
   }, "token", message => media.push(message), async () => {});
   return { coordinator, posted, ephemeral, sessions, permissions, media };
 }
+
+test("a Next click during first-track preparation does not skip it", async () => {
+  let finish!: (path: string) => void;
+  const prepared = new Promise<string>(resolve => { finish = resolve; });
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
+      sourceId: "track", title: "Track", artist: "Artist",
+    }),
+    prepare: () => prepared,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  const add = result.coordinator.action({
+    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value: "ref",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  await Bun.sleep(0);
+  const next = result.coordinator.action({
+    type: "block_actions", userId: "host", actionId: "next_track", value: "",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  finish("track.opus");
+  await Promise.all([add, next]);
+  expect(result.media).toContainEqual(expect.objectContaining({ type: "play" }));
+  expect(result.media).not.toContainEqual({ type: "stop" });
+  expect(result.ephemeral).toContain("Nothing was playing when you pressed Next.");
+  await result.coordinator.endFromSlack();
+});
 
 test("rejects stale player actions", async () => {
   const test = setup();

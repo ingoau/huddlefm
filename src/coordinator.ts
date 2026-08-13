@@ -78,6 +78,7 @@ export class Coordinator {
   }
 
   action(interaction: Interaction) {
+    const currentId = this.current?.id;
     return this.enqueue(async () => {
       if (interaction.type === "view_submission") return this.settingsSubmission(interaction);
       if (interaction.actionId !== "claim_host" && interaction.messageTs && interaction.messageTs !== this.uiTs)
@@ -88,7 +89,7 @@ export class Coordinator {
         remove_queue_track: () => this.remove(interaction),
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
-        next_track: () => this.next(interaction),
+        next_track: () => this.next(interaction, currentId),
         volume_down: () => this.changeVolume(interaction, -0.1),
         volume_up: () => this.changeVolume(interaction, 0.1),
         clear_queue: () => this.clear(interaction),
@@ -252,8 +253,10 @@ export class Coordinator {
     await this.startNext();
   }
 
-  private async next(interaction: Interaction) {
+  private async next(interaction: Interaction, expectedId?: string) {
     if (!(await this.require(interaction, "skip"))) return;
+    if (!expectedId || this.current?.id !== expectedId)
+      return this.notice(interaction.userId, "Nothing was playing when you pressed Next.");
     await this.advance();
   }
 
@@ -439,8 +442,8 @@ export class Coordinator {
     return [{
       type: "container",
       block_id: `player_${id}`,
-      title: plain(current?.title ?? "HuddleFM"),
-      subtitle: plain(current ? `${current.album ? `${current.album} · ` : ""}${current.artist}` : "Ready for music"),
+      title: plain(current?.title ?? (this.queue[0]?.status === "preparing" ? `Preparing ${this.queue[0].title}` : "HuddleFM")),
+      subtitle: plain(current ? `${current.album ? `${current.album} · ` : ""}${current.artist}` : this.queue[0]?.status === "preparing" ? "Playback will start automatically" : "Ready for music"),
       ...(current?.artwork ? { icon: { type: "image", image_url: current.artwork, alt_text: `${current.title} artwork` } } : {}),
       child_blocks: [
         { type: "actions", block_id: `playback_${id}`, elements: [
