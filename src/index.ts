@@ -34,6 +34,7 @@ let mediaBrowser: MediaBrowser;
 let botUserId = "";
 let joining = false;
 let mediaJoin: { sessionId: string; gate: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
+let mediaLeave: { sessionId: string; gate: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
 let activeMediaSessionId: string | undefined;
 
 async function joinHuddle(channelId: string, inviterUserId: string, callId?: string) {
@@ -82,6 +83,15 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
       token,
       message => mediaSocket?.send(JSON.stringify(message)),
       async () => {
+        const gate = Promise.withResolvers<void>();
+        const leave = mediaLeave = { sessionId: attempt.sessionId, gate };
+        const timer = setTimeout(gate.resolve, 5_000);
+        try {
+          await gate.promise;
+        } finally {
+          clearTimeout(timer);
+          if (mediaLeave === leave) mediaLeave = undefined;
+        }
         await mediaBrowser.stop();
         if (active === coordinator) {
           active = undefined;
@@ -165,6 +175,9 @@ const server = Bun.serve({
         pendingJoin.gate.resolve();
       if (pendingJoin && message.sessionId === pendingJoin.sessionId && (message.type === "fatal" || message.type === "ended"))
         pendingJoin.gate.reject(new Error(`Chime join failed: ${detailMessage(message.details)}`));
+      const pendingLeave = mediaLeave;
+      if (pendingLeave && pendingLeave.sessionId === message.sessionId && message.type === "ended")
+        pendingLeave.gate.resolve();
       if (message.type === "ready" && bootstrap)
         socket.send(JSON.stringify({ type: "bootstrap", payload: bootstrap }));
       if (message.sessionId === activeMediaSessionId)
