@@ -255,6 +255,7 @@ export class Coordinator {
       title: next.title,
       artist: next.artist,
       album: next.album,
+      artwork: next.artwork,
       duration: next.duration,
       sourceId: next.sourceId,
     });

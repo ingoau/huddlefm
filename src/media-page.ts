@@ -16,6 +16,9 @@ const title = document.querySelector("#title")!;
 const artist = document.querySelector("#artist")!;
 const lyrics = document.querySelector<BraccatoLyricsElement>("#lyrics")!;
 const capture = document.querySelector<HTMLButtonElement>("#capture")!;
+const artwork = document.querySelector<HTMLElement>("#artwork")!;
+const progress = document.querySelector<HTMLElement>("#progress-fill")!;
+const stage = document.querySelector<HTMLElement>("#stage")!;
 lyrics.host = { getScrollElement: () => lyrics };
 const params = new URLSearchParams(location.search);
 const token = params.get("token");
@@ -42,6 +45,8 @@ type Deck = {
 const decks = new Map<string, Deck>();
 let currentId: string | undefined;
 let lyricPriority = Infinity;
+let transition = 0;
+let pendingLyrics: { entryId: string; priority: number; lines: Lyric[]; source: string } | undefined;
 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
@@ -119,6 +124,9 @@ function preload(entries: { entryId: string; url: string }[]) {
 }
 
 function stop() {
+  transition++;
+  pendingLyrics = undefined;
+  stage.classList.remove("changing");
   currentId = undefined;
   lyricPriority = Infinity;
   for (const [entryId, value] of decks) dispose(entryId, value);
@@ -126,6 +134,31 @@ function stop() {
   lyrics.lyrics = [];
   title.textContent = "Ready for music";
   artist.textContent = "Waiting for the next track";
+  artwork.style.backgroundImage = "";
+  progress.style.transform = "scaleX(0)";
+}
+
+function updateProgress() {
+  const player = currentId ? decks.get(currentId)?.audio : undefined;
+  const amount = player && Number.isFinite(player.duration) && player.duration > 0
+    ? player.currentTime / player.duration
+    : 0;
+  progress.style.transform = `scaleX(${Math.min(1, Math.max(0, amount))})`;
+  requestAnimationFrame(updateProgress);
+}
+requestAnimationFrame(updateProgress);
+
+function showLyrics(message: { priority: number; lines: Lyric[]; source: string }) {
+  if (message.priority >= lyricPriority) return;
+  lyricPriority = message.priority;
+  lyrics.lyrics = message.lines;
+  console.log(`[lyrics] received ${message.lines.length} lines from ${message.source}`);
+}
+
+function takePendingLyrics() {
+  const message = pendingLyrics;
+  pendingLyrics = undefined;
+  return message;
 }
 
 async function join(payload: {
@@ -187,23 +220,31 @@ socket.addEventListener("message", async event => {
     if (message.type === "tone") playTone(message.frequency);
     if (message.type === "preload") preload(message.entries);
     if (message.type === "play") {
+      const change = ++transition;
+      pendingLyrics = undefined;
+      stage.classList.add("changing");
       tone?.stop();
       if (currentId && currentId !== message.entryId) decks.get(currentId)?.audio.pause();
       currentId = message.entryId;
       lyricPriority = Infinity;
       const player = deck(message.entryId, message.url).audio;
-      title.textContent = message.title;
-      artist.textContent = message.artist;
-      lyrics.lyrics = [];
-      lyrics.source = player;
       player.currentTime = 0;
       await player.play();
       send("playing", { entryId: message.entryId });
+      await new Promise(resolve => setTimeout(resolve, 220));
+      if (change !== transition || currentId !== message.entryId) return;
+      title.textContent = message.title;
+      artist.textContent = message.artist;
+      artwork.style.backgroundImage = message.artwork ? `url(${JSON.stringify(message.artwork)})` : "";
+      lyrics.lyrics = [];
+      lyrics.source = player;
+      const queuedLyrics = takePendingLyrics();
+      if (queuedLyrics && queuedLyrics.entryId === message.entryId) showLyrics(queuedLyrics);
+      requestAnimationFrame(() => requestAnimationFrame(() => stage.classList.remove("changing")));
     }
     if (message.type === "lyrics" && currentId === message.entryId && message.priority < lyricPriority) {
-      lyricPriority = message.priority;
-      lyrics.lyrics = message.lines as Lyric[];
-      console.log(`[lyrics] received ${message.lines.length} lines from ${message.source}`);
+      if (stage.classList.contains("changing")) pendingLyrics = message;
+      else showLyrics(message);
     }
     if (message.type === "pause") {
       if (currentId) decks.get(currentId)?.audio.pause();
