@@ -17,6 +17,7 @@
   "dependencies": {
     "@slack/web-api": "8",
     "amazon-chime-sdk-js": "3.31.0",
-    "playwright-core": "1.55.0"
+    "playwright-core": "1.55.0",
+    "ytmusic-api": "5.3.1"
   }
 }
