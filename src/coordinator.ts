@@ -121,8 +121,11 @@ export class Coordinator {
 
   memberLeft(userId: string) {
     this.participants.delete(userId);
-    if (userId === this.hostId) void this.enqueue(() => this.hostLeft());
+    const changed = userId === this.hostId
+      ? this.enqueue(() => this.hostLeft())
+      : Promise.resolve();
     this.refreshIdle();
+    return changed;
   }
 
   endFromSlack() {
