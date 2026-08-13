@@ -22,9 +22,15 @@ const gain = audioContext.createGain();
 const limiter = audioContext.createDynamicsCompressor();
 const destination = audioContext.createMediaStreamDestination();
 gain.connect(limiter).connect(destination);
-const player = new Audio();
-player.preload = "auto";
-audioContext.createMediaElementSource(player).connect(gain);
+
+type Deck = {
+  audio: HTMLAudioElement;
+  node: MediaElementAudioSourceNode;
+  url: string;
+};
+
+const decks = new Map<string, Deck>();
+let currentId: string | undefined;
 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
@@ -40,9 +46,48 @@ function playTone(frequency = 440) {
   send("playing", { frequency });
 }
 
-player.addEventListener("ended", () => send("track_ended"));
-player.addEventListener("stalled", () => send("stalled"));
-player.addEventListener("error", () => send("track_error", player.error?.message));
+function deck(entryId: string, url: string) {
+  const existing = decks.get(entryId);
+  if (existing?.url === url) return existing;
+  if (existing) dispose(entryId, existing);
+  const audio = new Audio(url);
+  audio.preload = "auto";
+  const value = { audio, node: audioContext.createMediaElementSource(audio), url };
+  value.node.connect(gain);
+  audio.addEventListener("ended", () => {
+    if (currentId === entryId) send("track_ended");
+  });
+  audio.addEventListener("stalled", () => {
+    if (currentId === entryId) send("stalled");
+  });
+  audio.addEventListener("error", () => {
+    if (currentId === entryId) send("track_error", audio.error?.message);
+  });
+  audio.addEventListener("canplaythrough", () => send("preloaded", { entryId }), { once: true });
+  decks.set(entryId, value);
+  return value;
+}
+
+function dispose(entryId: string, value = decks.get(entryId)) {
+  if (!value) return;
+  value.audio.pause();
+  value.audio.removeAttribute("src");
+  value.audio.load();
+  value.node.disconnect();
+  decks.delete(entryId);
+}
+
+function preload(entries: { entryId: string; url: string }[]) {
+  const keep = new Set([currentId, ...entries.map(entry => entry.entryId)]);
+  for (const entry of entries) deck(entry.entryId, entry.url).audio.load();
+  for (const [entryId, value] of decks)
+    if (!keep.has(entryId)) dispose(entryId, value);
+}
+
+function stop() {
+  currentId = undefined;
+  for (const [entryId, value] of decks) dispose(entryId, value);
+}
 
 async function join(payload: {
   meeting: Record<string, unknown>;
@@ -95,30 +140,29 @@ socket.addEventListener("message", async event => {
   try {
     if (message.type === "bootstrap") await join(message.payload);
     if (message.type === "tone") playTone(message.frequency);
+    if (message.type === "preload") preload(message.entries);
     if (message.type === "play") {
       tone?.stop();
-      player.src = message.url;
+      if (currentId && currentId !== message.entryId) decks.get(currentId)?.audio.pause();
+      currentId = message.entryId;
+      const player = deck(message.entryId, message.url).audio;
+      player.currentTime = 0;
       await player.play();
       send("playing", { entryId: message.entryId });
     }
     if (message.type === "pause") {
-      player.pause();
+      if (currentId) decks.get(currentId)?.audio.pause();
       send("paused");
     }
     if (message.type === "resume") {
-      await player.play();
+      if (currentId) await decks.get(currentId)?.audio.play();
       send("playing");
     }
-    if (message.type === "stop") {
-      player.pause();
-      player.removeAttribute("src");
-      player.load();
-    }
+    if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = message.value;
     if (message.type === "leave") {
       tone?.stop();
-      player.pause();
-      player.removeAttribute("src");
+      stop();
       await session?.audioVideo.stopAudioInput();
       session?.audioVideo.stop();
     }

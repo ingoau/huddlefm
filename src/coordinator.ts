@@ -174,14 +174,20 @@ export class Coordinator {
       entry.status = "ready";
       this.store.setTrack(entry.id, { status: "ready", filePath: entry.filePath });
       if (!this.current) await this.startNext();
-      else await this.render();
+      else {
+        await this.render();
+        this.syncPreloads();
+      }
     } catch (error) {
       entry.status = "failed";
       this.queue = this.queue.filter(item => item !== entry);
       this.store.setTrack(entry.id, { status: "failed", position: null });
       await this.notice(entry.requesterId, `Could not prepare ${entry.title}: ${message(error)}`);
       if (!this.current) await this.startNext();
-      else await this.render();
+      else {
+        await this.render();
+        this.syncPreloads();
+      }
     }
   }
 
@@ -203,16 +209,34 @@ export class Coordinator {
     this.sendMedia({
       type: "play",
       entryId: next.id,
-      url: `http://127.0.0.1:${this.config.port}/audio/${next.id}?token=${encodeURIComponent(this.mediaToken)}`,
+      url: this.mediaUrl(next),
     });
+    this.syncPreloads();
     await this.render();
     this.refreshIdle();
   }
 
   audioPath(entryId: string, token: string) {
-    return token === this.mediaToken && this.current?.id === entryId
-      ? this.current.filePath
-      : undefined;
+    if (token !== this.mediaToken) return;
+    return [this.current, ...this.queue, ...this.history]
+      .find(entry => entry?.id === entryId)?.filePath;
+  }
+
+  private mediaUrl(entry: Entry) {
+    return `http://127.0.0.1:${this.config.port}/audio/${entry.id}?token=${encodeURIComponent(this.mediaToken)}`;
+  }
+
+  private syncPreloads() {
+    const entries = [
+      this.queue.find(entry => entry.status === "ready" && entry.filePath),
+      this.history.at(-1),
+    ].filter((entry, index, all): entry is Entry =>
+      Boolean(entry?.filePath) && all.findIndex(other => other?.id === entry?.id) === index,
+    );
+    this.sendMedia({
+      type: "preload",
+      entries: entries.map(entry => ({ entryId: entry.id, url: this.mediaUrl(entry) })),
+    });
   }
 
   private async advance(reason = "played") {
@@ -273,6 +297,7 @@ export class Coordinator {
     this.store.removeTrack(entry.id);
     if (entry.filePath) await rm(entry.filePath, { force: true });
     await this.render();
+    this.syncPreloads();
     this.refreshIdle();
   }
 
@@ -284,6 +309,7 @@ export class Coordinator {
     }
     this.queue = [];
     await this.render();
+    this.syncPreloads();
     this.refreshIdle();
   }
 
