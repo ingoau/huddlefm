@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
+import type { LyricsCatalog } from "./lyrics.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
 import type { Store } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
@@ -26,11 +27,12 @@ function setup(tracks = {} as TrackCatalog) {
     setSession: (_id: string, value: unknown) => { sessions.push(value); },
     setPermission: (_id: string, capability: string, allowed: boolean) => { permissions.push({ capability, allowed }); },
   } as unknown as Store;
+  const lyrics = { get: async () => undefined } as unknown as LyricsCatalog;
   const coordinator = new Coordinator({
     huddleCallId: "call", huddleId: "huddle", huddleCreatorId: "creator",
     participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
     chimeMeeting: {}, chimeAttendee: {},
-  }, "host", "bot", slack, store, tracks, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
+  }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
   return { coordinator, posted, ephemeral, sessions, permissions, media, audit };
@@ -60,6 +62,7 @@ test("a Next click during first-track preparation does not skip it", async () =>
   finish("track.opus");
   await Promise.all([add, next]);
   expect(result.media).toContainEqual(expect.objectContaining({ type: "play" }));
+  expect(result.media).toContainEqual(expect.objectContaining({ type: "lyrics_unavailable" }));
   expect(result.media).not.toContainEqual({ type: "stop" });
   expect(result.ephemeral).toContain("Nothing was playing when you pressed Next.");
   await result.coordinator.endFromSlack();
@@ -230,12 +233,14 @@ test("host transfers ownership and global permissions atomically", async () => {
     state: {
       volume: { percent: { value: "37.25" } },
       host: { user: { selected_user: "guest" } },
+      lyrics: { enabled: { selected_options: [] } },
       permissions: { selected: { selected_options: [{ value: "add" }, { value: "pause" }] } },
     },
   });
   expect(test.sessions).toContainEqual({ hostId: "guest" });
   expect(test.sessions).toContainEqual({ volume: 0.3725 });
   expect(test.media).toContainEqual({ type: "volume", value: 0.3725 });
+  expect(test.media).toContainEqual({ type: "lyrics_enabled", enabled: false });
   expect(test.permissions).toContainEqual({ capability: "pause", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
   await test.coordinator.endFromSlack();

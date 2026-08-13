@@ -6,8 +6,20 @@ import {
   LogLevel,
   MeetingSessionConfiguration,
 } from "amazon-chime-sdk-js";
+import "@braccato/core/element";
+import type { BraccatoLyricsElement } from "@braccato/core/element";
+import type { Lyric } from "@braccato/core";
+import "./media-page.css";
 
 const status = document.querySelector("#status")!;
+const title = document.querySelector("#title")!;
+const artist = document.querySelector("#artist")!;
+const lyrics = document.querySelector<BraccatoLyricsElement>("#lyrics")!;
+const capture = document.querySelector<HTMLButtonElement>("#capture")!;
+const artwork = document.querySelector<HTMLElement>("#artwork")!;
+const progress = document.querySelector<HTMLElement>("#progress-fill")!;
+const stage = document.querySelector<HTMLElement>("#stage")!;
+lyrics.host = { getScrollElement: () => lyrics };
 const params = new URLSearchParams(location.search);
 const token = params.get("token");
 if (!token) throw new Error("Missing bridge token");
@@ -33,10 +45,57 @@ type Deck = {
 
 const decks = new Map<string, Deck>();
 let currentId: string | undefined;
+let lyricPriority = Infinity;
+let transition = 0;
+let pendingLyrics: { entryId: string; priority: number; lines: Lyric[]; source: string } | undefined;
+let pendingNoLyrics: string | undefined;
 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
 let audioReported = false;
+let cameraEnabled = true;
+let cameraRunning = false;
+let cameraInputReady = false;
+const camera = Promise.withResolvers<MediaStream>();
+
+lyrics.addEventListener("braccato:lyrics-loaded", event => {
+  const detail = (event as CustomEvent).detail;
+  console.log(`[lyrics] rendered ${detail.lineCount} ${detail.syncType} lines`);
+});
+lyrics.addEventListener("braccato:error", event => {
+  const detail = (event as CustomEvent).detail;
+  console.warn(`[lyrics] render ${detail.phase}: ${detail.error?.message ?? detail.error}`);
+});
+
+capture.addEventListener("click", async () => {
+  capture.remove();
+  try {
+    camera.resolve(await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: "browser", width: 720, height: 720, frameRate: 30 },
+      audio: false,
+      preferCurrentTab: true,
+    } as DisplayMediaStreamOptions));
+  } catch (error) {
+    camera.reject(error);
+  }
+}, { once: true });
+
+async function setCameraEnabled(enabled: boolean) {
+  cameraEnabled = enabled;
+  if (!session || enabled === cameraRunning) return;
+  if (!enabled) {
+    cameraRunning = false;
+    session.audioVideo.stopLocalVideoTile();
+    return;
+  }
+  if (!cameraInputReady) {
+    await session.audioVideo.startVideoInput(await camera.promise);
+    cameraInputReady = true;
+  }
+  if (!cameraEnabled) return;
+  session.audioVideo.startLocalVideoTile();
+  cameraRunning = true;
+}
 
 function playTone(frequency = 440) {
   tone?.stop();
@@ -93,8 +152,48 @@ function preload(entries: { entryId: string; url: string }[]) {
 }
 
 function stop() {
+  transition++;
+  pendingLyrics = undefined;
+  pendingNoLyrics = undefined;
+  stage.classList.remove("changing");
   currentId = undefined;
+  lyricPriority = Infinity;
   for (const [entryId, value] of decks) dispose(entryId, value);
+  lyrics.source = null;
+  lyrics.lyrics = [];
+  title.textContent = "Ready for music";
+  artist.textContent = "Waiting for the next track";
+  artwork.style.backgroundImage = "";
+  progress.style.transform = "scaleX(0)";
+}
+
+function updateProgress() {
+  const player = currentId ? decks.get(currentId)?.audio : undefined;
+  const amount = player && Number.isFinite(player.duration) && player.duration > 0
+    ? player.currentTime / player.duration
+    : 0;
+  progress.style.transform = `scaleX(${Math.min(1, Math.max(0, amount))})`;
+  requestAnimationFrame(updateProgress);
+}
+requestAnimationFrame(updateProgress);
+
+function showLyrics(message: { priority: number; lines: Lyric[]; source: string }) {
+  if (message.priority >= lyricPriority) return;
+  lyricPriority = message.priority;
+  lyrics.lyricsOptions = {};
+  lyrics.lyrics = message.lines;
+  console.log(`[lyrics] received ${message.lines.length} lines from ${message.source}`);
+}
+
+function showNoLyrics() {
+  lyrics.lyricsOptions = { noLyrics: true };
+  lyrics.lyrics = [{ startTimeMs: 0, durationMs: 0, words: "No lyrics found" }];
+}
+
+function takePendingLyrics() {
+  const message = pendingLyrics;
+  pendingLyrics = undefined;
+  return message;
 }
 
 async function join(payload: {
@@ -114,8 +213,10 @@ async function join(payload: {
   session.audioVideo.setAudioProfile(AudioProfile.fullbandMusicStereo());
   session.audioVideo.addObserver({
     audioVideoDidStart: () => {
-      status.textContent = "joined";
-      send("joined");
+      void setCameraEnabled(cameraEnabled).then(() => {
+        status.textContent = "joined";
+        send("joined");
+      }).catch(error => send("fatal", { message: error instanceof Error ? error.message : String(error) }));
     },
     metricsDidReceive: report => {
       if (!audioReported) {
@@ -152,13 +253,39 @@ socket.addEventListener("message", async event => {
     if (message.type === "tone") playTone(message.frequency);
     if (message.type === "preload") preload(message.entries);
     if (message.type === "play") {
+      const change = ++transition;
+      pendingLyrics = undefined;
+      pendingNoLyrics = undefined;
+      stage.classList.add("changing");
       tone?.stop();
       if (currentId && currentId !== message.entryId) decks.get(currentId)?.audio.pause();
       currentId = message.entryId;
+      lyricPriority = Infinity;
       const player = deck(message.entryId, message.url).audio;
       player.currentTime = 0;
       await player.play();
       send("playing", { entryId: message.entryId });
+      await new Promise(resolve => setTimeout(resolve, 220));
+      if (change !== transition || currentId !== message.entryId) return;
+      title.textContent = message.title;
+      artist.textContent = message.artist;
+      artwork.style.backgroundImage = message.artwork ? `url(${JSON.stringify(message.artwork)})` : "";
+      lyrics.lyricsOptions = {};
+      lyrics.lyrics = [];
+      lyrics.source = player;
+      const queuedLyrics = takePendingLyrics();
+      if (queuedLyrics && queuedLyrics.entryId === message.entryId) showLyrics(queuedLyrics);
+      else if (pendingNoLyrics === message.entryId) showNoLyrics();
+      pendingNoLyrics = undefined;
+      requestAnimationFrame(() => requestAnimationFrame(() => stage.classList.remove("changing")));
+    }
+    if (message.type === "lyrics" && currentId === message.entryId && message.priority < lyricPriority) {
+      if (stage.classList.contains("changing")) pendingLyrics = message;
+      else showLyrics(message);
+    }
+    if (message.type === "lyrics_unavailable" && currentId === message.entryId) {
+      if (stage.classList.contains("changing")) pendingNoLyrics = message.entryId;
+      else showNoLyrics();
     }
     if (message.type === "pause") {
       if (currentId) decks.get(currentId)?.audio.pause();
@@ -177,10 +304,15 @@ socket.addEventListener("message", async event => {
     }
     if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = message.value;
+    if (message.type === "lyrics_enabled") await setCameraEnabled(message.enabled);
     if (message.type === "leave") {
       tone?.stop();
       stop();
       await session?.audioVideo.stopAudioInput();
+      session?.audioVideo.stopLocalVideoTile();
+      await session?.audioVideo.stopVideoInput();
+      cameraRunning = false;
+      cameraInputReady = false;
       session?.audioVideo.stop();
     }
   } catch (error) {

@@ -1,6 +1,6 @@
 # HuddleFM
 
-Single-workspace Slack Huddle music player. Inviting the dedicated HuddleFM user joins the Huddle, posts an interactive thread player, searches YouTube Music, validates direct media URLs, and publishes prepared audio through Amazon Chime.
+Single-workspace Slack Huddle music player. Inviting the dedicated HuddleFM user joins the Huddle, posts an interactive thread player, searches YouTube Music, validates direct media URLs, and publishes prepared audio through Amazon Chime. It also fetches timed lyrics from Better Lyrics' Unison service, renders them with Better Lyrics' Braccato engine, and sends the square page capture as the Huddle camera.
 
 Requirements: Bun, Chrome, yt-dlp, Deno, FFmpeg, and network access. HuddleFM lets yt-dlp select supported YouTube clients automatically.
 
