@@ -6,8 +6,17 @@ import {
   LogLevel,
   MeetingSessionConfiguration,
 } from "amazon-chime-sdk-js";
+import "@braccato/core/element";
+import type { BraccatoLyricsElement } from "@braccato/core/element";
+import type { Lyric } from "@braccato/core";
+import "./media-page.css";
 
 const status = document.querySelector("#status")!;
+const title = document.querySelector("#title")!;
+const artist = document.querySelector("#artist")!;
+const lyrics = document.querySelector<BraccatoLyricsElement>("#lyrics")!;
+const capture = document.querySelector<HTMLButtonElement>("#capture")!;
+lyrics.host = { getScrollElement: () => lyrics };
 const params = new URLSearchParams(location.search);
 const token = params.get("token");
 if (!token) throw new Error("Missing bridge token");
@@ -32,10 +41,34 @@ type Deck = {
 
 const decks = new Map<string, Deck>();
 let currentId: string | undefined;
+let lyricPriority = Infinity;
 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
 let audioReported = false;
+const camera = Promise.withResolvers<MediaStream>();
+
+lyrics.addEventListener("braccato:lyrics-loaded", event => {
+  const detail = (event as CustomEvent).detail;
+  console.log(`[lyrics] rendered ${detail.lineCount} ${detail.syncType} lines`);
+});
+lyrics.addEventListener("braccato:error", event => {
+  const detail = (event as CustomEvent).detail;
+  console.warn(`[lyrics] render ${detail.phase}: ${detail.error?.message ?? detail.error}`);
+});
+
+capture.addEventListener("click", async () => {
+  capture.remove();
+  try {
+    camera.resolve(await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: "browser", width: 720, height: 720, frameRate: 30 },
+      audio: false,
+      preferCurrentTab: true,
+    } as DisplayMediaStreamOptions));
+  } catch (error) {
+    camera.reject(error);
+  }
+}, { once: true });
 
 function playTone(frequency = 440) {
   tone?.stop();
@@ -87,7 +120,12 @@ function preload(entries: { entryId: string; url: string }[]) {
 
 function stop() {
   currentId = undefined;
+  lyricPriority = Infinity;
   for (const [entryId, value] of decks) dispose(entryId, value);
+  lyrics.source = null;
+  lyrics.lyrics = [];
+  title.textContent = "Ready for music";
+  artist.textContent = "Waiting for the next track";
 }
 
 async function join(payload: {
@@ -107,8 +145,12 @@ async function join(payload: {
   session.audioVideo.setAudioProfile(AudioProfile.fullbandMusicStereo());
   session.audioVideo.addObserver({
     audioVideoDidStart: () => {
-      status.textContent = "joined";
-      send("joined");
+      void camera.promise.then(async stream => {
+        await session!.audioVideo.startVideoInput(stream);
+        session!.audioVideo.startLocalVideoTile();
+        status.textContent = "joined";
+        send("joined");
+      }).catch(error => send("fatal", { message: error instanceof Error ? error.message : String(error) }));
     },
     metricsDidReceive: report => {
       if (!audioReported) {
@@ -148,10 +190,20 @@ socket.addEventListener("message", async event => {
       tone?.stop();
       if (currentId && currentId !== message.entryId) decks.get(currentId)?.audio.pause();
       currentId = message.entryId;
+      lyricPriority = Infinity;
       const player = deck(message.entryId, message.url).audio;
+      title.textContent = message.title;
+      artist.textContent = message.artist;
+      lyrics.lyrics = [];
+      lyrics.source = player;
       player.currentTime = 0;
       await player.play();
       send("playing", { entryId: message.entryId });
+    }
+    if (message.type === "lyrics" && currentId === message.entryId && message.priority < lyricPriority) {
+      lyricPriority = message.priority;
+      lyrics.lyrics = message.lines as Lyric[];
+      console.log(`[lyrics] received ${message.lines.length} lines from ${message.source}`);
     }
     if (message.type === "pause") {
       if (currentId) decks.get(currentId)?.audio.pause();
@@ -167,6 +219,8 @@ socket.addEventListener("message", async event => {
       tone?.stop();
       stop();
       await session?.audioVideo.stopAudioInput();
+      session?.audioVideo.stopLocalVideoTile();
+      await session?.audioVideo.stopVideoInput();
       session?.audioVideo.stop();
     }
   } catch (error) {

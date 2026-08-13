@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
+import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
 import { capabilities, Store } from "./store.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 
@@ -9,6 +10,7 @@ type Entry = TrackMetadata & {
   requesterId: string;
   status: string;
   filePath?: string;
+  lyrics?: Promise<LyricsPayload | undefined>;
 };
 
 export class Coordinator {
@@ -37,6 +39,7 @@ export class Coordinator {
     private slack: SlackAppAdapter,
     private store: Store,
     private tracks: TrackCatalog,
+    private lyrics: LyricsCatalog,
     private config: { queueLimit: number; initialVolume: number; idleMs: number; port: number; managerUserId: string },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
@@ -175,7 +178,16 @@ export class Coordinator {
         await this.notice(interaction.userId, "The queue is full.");
         return;
       }
-      const entry: Entry = { ...metadata, id: crypto.randomUUID(), requesterId: interaction.userId, status: "preparing" };
+      const entry: Entry = {
+        ...metadata,
+        id: crypto.randomUUID(),
+        requesterId: interaction.userId,
+        status: "preparing",
+        lyrics: this.lyrics.get(metadata).catch(error => {
+          console.warn(`[lyrics] ${message(error)}`);
+          return undefined;
+        }),
+      };
       const controller = new AbortController();
       this.preparations.set(entry.id, controller);
       this.queue.push(entry);
@@ -240,6 +252,17 @@ export class Coordinator {
       type: "play",
       entryId: next.id,
       url: this.mediaUrl(next),
+      title: next.title,
+      artist: next.artist,
+      album: next.album,
+      duration: next.duration,
+      sourceId: next.sourceId,
+    });
+    void next.lyrics?.then(lyrics => {
+      if (lyrics && this.current === next) {
+        console.log(`[lyrics] ${next.title}: ${lyrics.source}, ${lyrics.lines.length} lines`);
+        this.sendMedia({ type: "lyrics", entryId: next.id, ...lyrics });
+      }
     });
     this.syncPreloads();
     await this.render();

@@ -2,6 +2,7 @@ import type { ServerWebSocket } from "bun";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { controlDenied } from "./local-control.ts";
+import { LyricsCatalog } from "./lyrics.ts";
 import { MediaBrowser } from "./media-browser.ts";
 import { SlackAppAdapter } from "./slack-app.ts";
 import { SlackHuddleAdapter, verifySlackIdentity, type ChimeBootstrap } from "./slack-huddle.ts";
@@ -20,6 +21,7 @@ if (!build.success) throw new AggregateError(build.logs, "Media page build faile
 
 const store = new Store();
 const catalog = new TrackCatalog(config);
+const lyrics = new LyricsCatalog();
 const slackApp = new SlackAppAdapter(config);
 const slackHuddle = new SlackHuddleAdapter(config);
 let bootstrap: ChimeBootstrap | undefined;
@@ -72,6 +74,7 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
       slackApp,
       store,
       catalog,
+      lyrics,
       config,
       token,
       message => mediaSocket?.send(JSON.stringify(message)),
@@ -106,10 +109,11 @@ const server = Bun.serve({
     "/health": () => Response.json({ ok: true, sessionId: active?.id ?? null, media: mediaState ?? null }),
     "/favicon.ico": () => new Response(null, { status: 204 }),
     "/media": () => new Response(
-      "<!doctype html><meta charset=utf-8><title>HuddleFM media</title><p id=status>connecting</p><script type=module src=/media-page.js></script>",
+      "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>HuddleFM media</title><link rel=stylesheet href=/media-page.css><main id=stage><header><div id=eyebrow>HUDDLEFM · LIVE LYRICS</div><h1 id=title>Ready for music</h1><p id=artist>Waiting for the next track</p></header><section id=lyrics-frame><braccato-lyrics id=lyrics></braccato-lyrics></section></main><button id=capture>Start camera</button><p id=status>connecting</p><script type=module src=/media-page.js></script>",
       { headers: { "content-type": "text/html" } },
     ),
     "/media-page.js": () => new Response(Bun.file("dist/media-page.js"), { headers: { "content-type": "text/javascript" } }),
+    "/media-page.css": () => new Response(Bun.file("dist/media-page.css"), { headers: { "content-type": "text/css" } }),
     "/join": {
       POST: async request => {
         const denied = controlDenied(request, config.localControlToken);

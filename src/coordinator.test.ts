@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Coordinator } from "./coordinator.ts";
+import type { LyricsCatalog } from "./lyrics.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
 import type { Store } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
@@ -24,11 +25,12 @@ function setup(tracks = {} as TrackCatalog) {
     setSession: (_id: string, value: unknown) => { sessions.push(value); },
     setPermission: (_id: string, capability: string, allowed: boolean) => { permissions.push({ capability, allowed }); },
   } as unknown as Store;
+  const lyrics = { get: async () => undefined } as unknown as LyricsCatalog;
   const coordinator = new Coordinator({
     huddleCallId: "call", huddleId: "huddle", huddleCreatorId: "creator",
     participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
     chimeMeeting: {}, chimeAttendee: {},
-  }, "host", "bot", slack, store, tracks, {
+  }, "host", "bot", slack, store, tracks, lyrics, {
     queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
   return { coordinator, posted, ephemeral, sessions, permissions, media };
