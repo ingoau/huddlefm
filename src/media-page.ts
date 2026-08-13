@@ -51,6 +51,8 @@ let pendingLyrics: { entryId: string; priority: number; lines: Lyric[]; source: 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
 let audioReported = false;
+let cameraEnabled = true;
+let cameraRunning = false;
 const camera = Promise.withResolvers<MediaStream>();
 
 lyrics.addEventListener("braccato:lyrics-loaded", event => {
@@ -74,6 +76,26 @@ capture.addEventListener("click", async () => {
     camera.reject(error);
   }
 }, { once: true });
+
+async function setCameraEnabled(enabled: boolean) {
+  cameraEnabled = enabled;
+  if (!session || enabled === cameraRunning) return;
+  if (!enabled) {
+    cameraRunning = false;
+    session.audioVideo.stopLocalVideoTile();
+    await session.audioVideo.stopVideoInput();
+    return;
+  }
+  const stream = await camera.promise;
+  if (!cameraEnabled) return;
+  await session.audioVideo.startVideoInput(stream);
+  if (!cameraEnabled) {
+    await session.audioVideo.stopVideoInput();
+    return;
+  }
+  session.audioVideo.startLocalVideoTile();
+  cameraRunning = true;
+}
 
 function playTone(frequency = 440) {
   tone?.stop();
@@ -178,9 +200,7 @@ async function join(payload: {
   session.audioVideo.setAudioProfile(AudioProfile.fullbandMusicStereo());
   session.audioVideo.addObserver({
     audioVideoDidStart: () => {
-      void camera.promise.then(async stream => {
-        await session!.audioVideo.startVideoInput(stream);
-        session!.audioVideo.startLocalVideoTile();
+      void setCameraEnabled(cameraEnabled).then(() => {
         status.textContent = "joined";
         send("joined");
       }).catch(error => send("fatal", { message: error instanceof Error ? error.message : String(error) }));
@@ -256,12 +276,14 @@ socket.addEventListener("message", async event => {
     }
     if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = message.value;
+    if (message.type === "lyrics_enabled") await setCameraEnabled(message.enabled);
     if (message.type === "leave") {
       tone?.stop();
       stop();
       await session?.audioVideo.stopAudioInput();
       session?.audioVideo.stopLocalVideoTile();
       await session?.audioVideo.stopVideoInput();
+      cameraRunning = false;
       session?.audioVideo.stop();
     }
   } catch (error) {

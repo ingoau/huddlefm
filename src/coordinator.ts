@@ -21,6 +21,7 @@ export class Coordinator {
   private current?: Entry;
   private state = "ready";
   private volume: number;
+  private lyricsEnabled = true;
   private revision = 0;
   private uiTs = "";
   private hostId: string | undefined;
@@ -451,6 +452,21 @@ export class Coordinator {
         },
         {
           type: "input",
+          block_id: "lyrics",
+          optional: true,
+          label: plain("Lyrics camera"),
+          hint: plain("Turning this off stops HuddleFM's camera feed."),
+          element: {
+            type: "checkboxes",
+            action_id: "enabled",
+            options: [{ text: plain("Show animated lyrics"), value: "enabled" }],
+            initial_options: this.lyricsEnabled
+              ? [{ text: plain("Show animated lyrics"), value: "enabled" }]
+              : [],
+          },
+        },
+        {
+          type: "input",
           block_id: "host",
           optional: true,
           label: plain("Transfer host"),
@@ -496,6 +512,14 @@ export class Coordinator {
     this.volume = Math.round(percent * 100) / 10_000;
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
+    const lyricsState = interaction.state.lyrics?.enabled;
+    const lyricsEnabled = lyricsState
+      ? lyricsState.selected_options?.some(option => option.value === "enabled") ?? false
+      : this.lyricsEnabled;
+    if (lyricsEnabled !== this.lyricsEnabled) {
+      this.lyricsEnabled = lyricsEnabled;
+      this.sendMedia({ type: "lyrics_enabled", enabled: lyricsEnabled });
+    }
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
     this.allowed = new Set(selected.map(option => option.value).filter(Boolean) as string[]);
     for (const capability of capabilities)

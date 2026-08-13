@@ -188,12 +188,14 @@ test("host transfers ownership and global permissions atomically", async () => {
     state: {
       volume: { percent: { value: "37.25" } },
       host: { user: { selected_user: "guest" } },
+      lyrics: { enabled: { selected_options: [] } },
       permissions: { selected: { selected_options: [{ value: "add" }, { value: "pause" }] } },
     },
   });
   expect(test.sessions).toContainEqual({ hostId: "guest" });
   expect(test.sessions).toContainEqual({ volume: 0.3725 });
   expect(test.media).toContainEqual({ type: "volume", value: 0.3725 });
+  expect(test.media).toContainEqual({ type: "lyrics_enabled", enabled: false });
   expect(test.permissions).toContainEqual({ capability: "pause", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
   await test.coordinator.endFromSlack();
