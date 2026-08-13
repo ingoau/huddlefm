@@ -18,6 +18,7 @@ COPY --chown=bun:bun package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 COPY --chown=bun:bun index.ts tsconfig.json ./
 COPY --chown=bun:bun src ./src
+RUN mkdir /app/dist && chown bun:bun /app/dist
 
 USER bun
 VOLUME ["/app/data"]
