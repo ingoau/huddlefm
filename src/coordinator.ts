@@ -543,23 +543,22 @@ export class Coordinator {
         { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
       ],
     },
-    { type: "section", block_id: `next_label_${id}`, text: { type: "mrkdwn", text: "*Next up:*" } },
     {
       type: "container",
       block_id: `next_${id}`,
-      title: plain(next?.title ?? "Nothing queued"),
+      title: plain(next ? `Next: ${next.title}` : "Nothing queued"),
       subtitle: plain(next ? `${next.album ? `${next.album} · ` : ""}${next.artist}${next.status === "preparing" ? " · preparing" : ""}` : "Add a song to keep the music going"),
       ...(next?.artwork ? { icon: { type: "image", image_url: next.artwork, alt_text: `${next.title} artwork` } } : {}),
       child_blocks: [{
         type: "context",
         block_id: `queue_status_${id}`,
-        elements: [{ type: "mrkdwn", text: `${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue${next ? ` · Added by <@${next.requesterId}>` : ""}` }],
+        elements: [{ type: "mrkdwn", text: `${next ? `Added by <@${next.requesterId}> · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue` }],
       }],
     },
     {
       type: "container",
       block_id: `queue_controls_${id}`,
-      title: plain("Queue"),
+      title: plain("Controls"),
       child_blocks: [
         { type: "actions", block_id: `add_${id}`, elements: [
           { type: "external_select", action_id: "add_track_to_queue", placeholder: plain("Add to queue"), min_query_length: 3 },
