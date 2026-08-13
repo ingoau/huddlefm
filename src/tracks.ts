@@ -75,15 +75,12 @@ export class TrackCatalog {
     const stored = this.references.get(reference);
     this.references.delete(reference);
     if (!stored) throw new Error("Track selection expired; search again");
-    const input = typeof stored === "string" ? stored : stored.canonicalUrl;
-    const resolved = await this.resolveUrl(input);
-    return {
-      ...resolved,
-      sourceInput: typeof stored === "string" ? stored : stored.sourceInput,
-      album: resolved.album ?? (typeof stored === "string" ? undefined : stored.album),
-      artwork:
-        resolved.artwork ?? (typeof stored === "string" ? undefined : stored.artwork),
-    };
+    if (typeof stored !== "string") {
+      if (stored.duration && stored.duration > this.limits.durationSeconds)
+        throw new Error("Track exceeds the duration limit");
+      return stored;
+    }
+    return this.resolveUrl(stored);
   }
 
   async resolveUrl(input: string): Promise<TrackMetadata> {
