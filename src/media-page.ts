@@ -104,7 +104,7 @@ async function join(payload: {
   const deviceController = new DefaultDeviceController(logger);
   const configuration = new MeetingSessionConfiguration(payload.meeting, payload.attendee);
   session = new DefaultMeetingSession(configuration, logger, deviceController);
-  session.audioVideo.setAudioProfile(AudioProfile.fullbandMusicMono());
+  session.audioVideo.setAudioProfile(AudioProfile.fullbandMusicStereo());
   session.audioVideo.addObserver({
     audioVideoDidStart: () => {
       status.textContent = "joined";

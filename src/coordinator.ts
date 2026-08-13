@@ -91,8 +91,8 @@ export class Coordinator {
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
         next_track: () => this.next(interaction, currentId),
-        volume_down: () => this.changeVolume(interaction, -0.1),
-        volume_up: () => this.changeVolume(interaction, 0.1),
+        volume_down: () => this.changeVolume(interaction, -0.05),
+        volume_up: () => this.changeVolume(interaction, 0.05),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
         open_settings: () => this.settingsModal(interaction),
@@ -315,7 +315,7 @@ export class Coordinator {
 
   private async changeVolume(interaction: Interaction, delta: number) {
     if (!(await this.require(interaction, "volume"))) return;
-    this.volume = Math.max(0, Math.min(1, Math.round((this.volume + delta) * 10) / 10));
+    this.volume = Math.max(0, Math.min(1, Math.round((this.volume + delta) * 10_000) / 10_000));
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
     await this.render();
@@ -376,6 +376,16 @@ export class Coordinator {
       blocks: [
         {
           type: "input",
+          block_id: "volume",
+          label: plain("Volume (%)"),
+          element: {
+            type: "plain_text_input",
+            action_id: "percent",
+            initial_value: String(Math.round(this.volume * 10_000) / 100),
+          },
+        },
+        {
+          type: "input",
           block_id: "host",
           optional: true,
           label: plain("Transfer host"),
@@ -414,6 +424,13 @@ export class Coordinator {
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
       return this.notice(interaction.userId, "The selected host is not in this Huddle.");
+    const value = interaction.state.volume?.percent?.value?.trim();
+    const percent = Number(value);
+    if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
+      return this.notice(interaction.userId, "Volume must be between 0 and 100.");
+    this.volume = Math.round(percent * 100) / 10_000;
+    this.sendMedia({ type: "volume", value: this.volume });
+    this.store.setSession(this.id, { volume: this.volume });
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
     this.allowed = new Set(selected.map(option => option.value).filter(Boolean) as string[]);
     for (const capability of capabilities)
@@ -483,10 +500,10 @@ export class Coordinator {
           { type: "button", action_id: "next_track", text: plain("Next"), value: this.id },
         ] },
         { type: "actions", block_id: `volume_${id}`, elements: [
-          { type: "button", action_id: "volume_down", text: plain("Volume -"), value: this.id },
-          { type: "button", action_id: "volume_up", text: plain("Volume +"), value: this.id },
+          { type: "button", action_id: "volume_down", text: plain("Volume -5%"), value: this.id },
+          { type: "button", action_id: "volume_up", text: plain("Volume +5%"), value: this.id },
         ] },
-        { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 100)}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
+        { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
         { type: "divider", block_id: `divider_${id}` },
         ...queueBlocks,
         { type: "actions", block_id: `add_${id}`, elements: [

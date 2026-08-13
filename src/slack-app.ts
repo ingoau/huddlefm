@@ -17,7 +17,7 @@ type Body = {
   view?: {
     callback_id?: string;
     private_metadata?: string;
-    state?: { values?: Record<string, Record<string, { selected_user?: string; selected_options?: { value?: string }[] }>> };
+    state?: { values?: Record<string, Record<string, { value?: string; selected_user?: string; selected_options?: { value?: string }[] }>> };
   };
 };
 

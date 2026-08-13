@@ -163,7 +163,7 @@ test("manager overrides permissions and HuddleFM cannot become host", async () =
     metadata: JSON.stringify({ sessionId: result.coordinator.id, hostId: "host" }),
     state: { host: { user: { selected_user: "bot" } } },
   });
-  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
   expect(result.ephemeral).toContain("HuddleFM cannot be the host.");
   await result.coordinator.endFromSlack();
 });
@@ -184,11 +184,14 @@ test("host transfers ownership and global permissions atomically", async () => {
     channelId: "channel", messageTs: "", triggerId: "",
     metadata: JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }),
     state: {
+      volume: { percent: { value: "37.25" } },
       host: { user: { selected_user: "guest" } },
       permissions: { selected: { selected_options: [{ value: "add" }, { value: "pause" }] } },
     },
   });
   expect(test.sessions).toContainEqual({ hostId: "guest" });
+  expect(test.sessions).toContainEqual({ volume: 0.3725 });
+  expect(test.media).toContainEqual({ type: "volume", value: 0.3725 });
   expect(test.permissions).toContainEqual({ capability: "pause", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
   await test.coordinator.endFromSlack();
