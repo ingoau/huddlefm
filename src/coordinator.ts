@@ -261,10 +261,11 @@ export class Coordinator {
       sourceId: next.sourceId,
     });
     void next.lyrics?.then(lyrics => {
-      if (lyrics && this.current === next) {
+      if (this.current !== next) return;
+      if (lyrics) {
         console.log(`[lyrics] ${next.title}: ${lyrics.source}, ${lyrics.lines.length} lines`);
         this.sendMedia({ type: "lyrics", entryId: next.id, ...lyrics });
-      }
+      } else this.sendMedia({ type: "lyrics_unavailable", entryId: next.id });
     });
     this.syncPreloads();
     await this.render();

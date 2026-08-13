@@ -60,6 +60,7 @@ test("a Next click during first-track preparation does not skip it", async () =>
   finish("track.opus");
   await Promise.all([add, next]);
   expect(result.media).toContainEqual(expect.objectContaining({ type: "play" }));
+  expect(result.media).toContainEqual(expect.objectContaining({ type: "lyrics_unavailable" }));
   expect(result.media).not.toContainEqual({ type: "stop" });
   expect(result.ephemeral).toContain("Nothing was playing when you pressed Next.");
   await result.coordinator.endFromSlack();

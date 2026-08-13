@@ -47,6 +47,7 @@ let currentId: string | undefined;
 let lyricPriority = Infinity;
 let transition = 0;
 let pendingLyrics: { entryId: string; priority: number; lines: Lyric[]; source: string } | undefined;
+let pendingNoLyrics: string | undefined;
 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
@@ -146,6 +147,7 @@ function preload(entries: { entryId: string; url: string }[]) {
 function stop() {
   transition++;
   pendingLyrics = undefined;
+  pendingNoLyrics = undefined;
   stage.classList.remove("changing");
   currentId = undefined;
   lyricPriority = Infinity;
@@ -171,8 +173,14 @@ requestAnimationFrame(updateProgress);
 function showLyrics(message: { priority: number; lines: Lyric[]; source: string }) {
   if (message.priority >= lyricPriority) return;
   lyricPriority = message.priority;
+  lyrics.lyricsOptions = {};
   lyrics.lyrics = message.lines;
   console.log(`[lyrics] received ${message.lines.length} lines from ${message.source}`);
+}
+
+function showNoLyrics() {
+  lyrics.lyricsOptions = { noLyrics: true };
+  lyrics.lyrics = [{ startTimeMs: 0, durationMs: 0, words: "No lyrics found" }];
 }
 
 function takePendingLyrics() {
@@ -240,6 +248,7 @@ socket.addEventListener("message", async event => {
     if (message.type === "play") {
       const change = ++transition;
       pendingLyrics = undefined;
+      pendingNoLyrics = undefined;
       stage.classList.add("changing");
       tone?.stop();
       if (currentId && currentId !== message.entryId) decks.get(currentId)?.audio.pause();
@@ -254,15 +263,22 @@ socket.addEventListener("message", async event => {
       title.textContent = message.title;
       artist.textContent = message.artist;
       artwork.style.backgroundImage = message.artwork ? `url(${JSON.stringify(message.artwork)})` : "";
+      lyrics.lyricsOptions = {};
       lyrics.lyrics = [];
       lyrics.source = player;
       const queuedLyrics = takePendingLyrics();
       if (queuedLyrics && queuedLyrics.entryId === message.entryId) showLyrics(queuedLyrics);
+      else if (pendingNoLyrics === message.entryId) showNoLyrics();
+      pendingNoLyrics = undefined;
       requestAnimationFrame(() => requestAnimationFrame(() => stage.classList.remove("changing")));
     }
     if (message.type === "lyrics" && currentId === message.entryId && message.priority < lyricPriority) {
       if (stage.classList.contains("changing")) pendingLyrics = message;
       else showLyrics(message);
+    }
+    if (message.type === "lyrics_unavailable" && currentId === message.entryId) {
+      if (stage.classList.contains("changing")) pendingNoLyrics = message.entryId;
+      else showNoLyrics();
     }
     if (message.type === "pause") {
       if (currentId) decks.get(currentId)?.audio.pause();

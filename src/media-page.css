@@ -112,6 +112,11 @@ braccato-lyrics {
 
 .blyrics-container > div { cursor: default; }
 
+.blyrics-container[data-no-lyrics="true"] {
+  padding-top: 120px;
+  font-size: 28px;
+}
+
 #capture {
   position: fixed;
   inset: 0;
