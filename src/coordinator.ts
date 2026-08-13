@@ -175,10 +175,6 @@ export class Coordinator {
         await this.notice(interaction.userId, "The queue is full.");
         return;
       }
-      if ([this.current, ...this.queue].some(track => track?.sourceId === metadata.sourceId)) {
-        await this.notice(interaction.userId, "That track is already queued.");
-        return;
-      }
       const entry: Entry = { ...metadata, id: crypto.randomUUID(), requesterId: interaction.userId, status: "preparing" };
       const controller = new AbortController();
       this.preparations.set(entry.id, controller);
