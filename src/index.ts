@@ -1,5 +1,6 @@
 import { loadConfig } from "./config.ts";
 import { MediaBrowser } from "./media-browser.ts";
+import { SlackAppAdapter } from "./slack-app.ts";
 import { SlackHuddleAdapter, verifySlackIdentity, type ChimeBootstrap } from "./slack-huddle.ts";
 import type { ServerWebSocket } from "bun";
 
@@ -17,6 +18,7 @@ let bootstrap: ChimeBootstrap | undefined;
 let mediaSocket: ServerWebSocket<unknown> | undefined;
 let mediaBrowser: MediaBrowser;
 let mediaState: { type: string; details?: unknown } | undefined;
+const slackApp = new SlackAppAdapter(config);
 
 const server = Bun.serve({
   hostname: "127.0.0.1",
@@ -74,6 +76,27 @@ const server = Bun.serve({
         return Response.json({ ok: true });
       },
     },
+    "/gate2/events": () => Response.json(slackApp.events),
+    "/gate2/message": {
+      POST: async request => {
+        const { channelId } = (await request.json()) as { channelId?: string };
+        if (!channelId?.match(/^[A-Z0-9]+$/))
+          return Response.json({ error: "Invalid channelId" }, { status: 400 });
+        return Response.json({ ts: await slackApp.postGate2Test(channelId) });
+      },
+    },
+    "/gate2/delete": {
+      POST: async request => {
+        const { channelId, ts } = (await request.json()) as {
+          channelId?: string;
+          ts?: string;
+        };
+        if (!channelId || !ts)
+          return Response.json({ error: "Missing channelId or ts" }, { status: 400 });
+        await slackApp.deleteMessage(channelId, ts);
+        return Response.json({ ok: true });
+      },
+    },
   },
   fetch(request, server) {
     const url = new URL(request.url);
@@ -109,10 +132,12 @@ const server = Bun.serve({
 
 mediaBrowser = new MediaBrowser(config.chromePath, server.url.origin);
 const userId = await verifySlackIdentity(config);
+await slackApp.start();
 console.log(`HuddleFM ready as ${userId} on ${server.url}`);
 
 const shutdown = async () => {
   server.stop();
+  await slackApp.stop();
   await mediaBrowser.close();
   process.exit();
 };
