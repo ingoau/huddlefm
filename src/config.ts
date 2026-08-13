@@ -16,6 +16,7 @@ export function loadConfig() {
     xoxc: process.env.SLACK_XOXC!,
     xoxd: process.env.SLACK_XOXD!,
     port: Number(process.env.PORT ?? 3210),
+    bindAddress: process.env.BIND_ADDRESS ?? "127.0.0.1",
     mediaRegion: process.env.CHIME_MEDIA_REGION ?? "ap-southeast-2",
     queueLimit: Number(process.env.QUEUE_LIMIT ?? 50),
     durationSeconds: Number(process.env.TRACK_DURATION_LIMIT_SECONDS ?? 1_200),

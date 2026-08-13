@@ -100,7 +100,7 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
 }
 
 const server = Bun.serve({
-  hostname: "127.0.0.1",
+  hostname: config.bindAddress,
   port: config.port,
   routes: {
     "/health": () => Response.json({ ok: true, sessionId: active?.id ?? null, media: mediaState ?? null }),

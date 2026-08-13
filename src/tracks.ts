@@ -24,10 +24,7 @@ export class TrackCatalog {
   constructor(
     private limits: { durationSeconds: number; downloadBytes: number },
   ) {
-    this.command = [
-      "uvx", "--python", "3.13", "--prerelease", "allow",
-      "--from", "yt-dlp[default]", "yt-dlp", "--force-ipv4",
-    ];
+    this.command = ["yt-dlp", "--force-ipv4"];
   }
 
   async initialize() {
