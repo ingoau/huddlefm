@@ -19,6 +19,7 @@ export class Coordinator {
   private history: Entry[] = [];
   private current?: Entry;
   private state = "ready";
+  private playbackSeconds = 0;
   private volume: number;
   private revision = 0;
   private uiTs = "";
@@ -97,6 +98,8 @@ export class Coordinator {
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
         next_track: () => this.next(interaction, currentId),
+        seek_back: () => this.seek(interaction, -10),
+        seek_forward: () => this.seek(interaction, 10),
         volume_down: () => this.changeVolume(interaction, -0.05),
         volume_up: () => this.changeVolume(interaction, 0.05),
         queue_move_up: () => this.reorder(interaction, -1),
@@ -111,7 +114,11 @@ export class Coordinator {
     });
   }
 
-  mediaEvent(type: string, details?: { entryId?: string }) {
+  mediaEvent(type: string, details?: { entryId?: string; seconds?: number }) {
+    if (type === "playback_position" && details && details.entryId === this.current?.id && typeof details.seconds === "number" && Number.isFinite(details.seconds)) {
+      this.playbackSeconds = details.seconds;
+      return;
+    }
     if (type === "track_ended" || type === "track_error" || type === "stalled")
       return this.enqueue(() => this.advance(type, details?.entryId));
     if (type === "fatal" || type === "ended")
@@ -242,6 +249,7 @@ export class Coordinator {
     }
     this.queue.splice(this.queue.indexOf(next), 1);
     this.current = next;
+    this.playbackSeconds = 0;
     next.status = "playing";
     this.state = "playing";
     this.store.setTrack(next.id, { status: "playing" });
@@ -304,7 +312,14 @@ export class Coordinator {
   }
 
   private async previous(interaction: Interaction) {
-    if (!(await this.require(interaction, "skip")) || !this.history.length) return;
+    if (!(await this.require(interaction, "skip"))) return;
+    if (this.current && this.playbackSeconds > 5) {
+      this.audit.record("playback.seeked", interaction.userId, { sessionId: this.id, trackId: this.current.id, previous: this.playbackSeconds, seconds: 0 });
+      this.playbackSeconds = 0;
+      this.sendMedia({ type: "seek", seconds: 0 });
+      return;
+    }
+    if (!this.history.length) return;
     const prior = this.history.pop()!;
     this.audit.record("track.previous", interaction.userId, { sessionId: this.id, ...auditTrack(prior) });
     if (this.current) {
@@ -317,6 +332,14 @@ export class Coordinator {
     this.queue.unshift(prior);
     this.store.setTrack(prior.id, { status: "ready" });
     await this.startNext();
+  }
+
+  private async seek(interaction: Interaction, offset: number) {
+    if (!(await this.require(interaction, "skip")) || !this.current) return;
+    const previous = this.playbackSeconds;
+    this.playbackSeconds = Math.max(0, previous + offset);
+    this.sendMedia({ type: "seek", offset });
+    this.audit.record("playback.seeked", interaction.userId, { sessionId: this.id, trackId: this.current.id, previous, seconds: this.playbackSeconds });
   }
 
   private async toggle(interaction: Interaction) {
@@ -570,6 +593,10 @@ export class Coordinator {
           { type: "button", action_id: "previous_track", text: plain("Previous"), value: this.id },
           { type: "button", action_id: "toggle_playback", text: plain(this.state === "paused" ? "Resume" : "Pause"), style: "primary", value: this.id },
           { type: "button", action_id: "next_track", text: plain("Next"), value: this.id },
+        ] },
+        { type: "actions", block_id: `seek_${id}`, elements: [
+          { type: "button", action_id: "seek_back", text: plain("10s back"), value: this.id },
+          { type: "button", action_id: "seek_forward", text: plain("10s forward"), value: this.id },
         ] },
         { type: "actions", block_id: `volume_${id}`, elements: [
           { type: "button", action_id: "volume_down", text: plain("Volume -"), value: this.id },
