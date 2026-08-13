@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
 import type { Store } from "./store.ts";
@@ -10,6 +11,7 @@ function setup(tracks = {} as TrackCatalog) {
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
   const media: unknown[] = [];
+  const audit: unknown[] = [];
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
@@ -28,10 +30,10 @@ function setup(tracks = {} as TrackCatalog) {
     huddleCallId: "call", huddleId: "huddle", huddleCreatorId: "creator",
     participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
     chimeMeeting: {}, chimeAttendee: {},
-  }, "host", "bot", slack, store, tracks, {
+  }, "host", "bot", slack, store, tracks, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
-  return { coordinator, posted, ephemeral, sessions, permissions, media };
+  return { coordinator, posted, ephemeral, sessions, permissions, media, audit };
 }
 
 test("a Next click during first-track preparation does not skip it", async () => {

@@ -7,7 +7,4 @@ services:
     ports:
       - "3210:3210"
     volumes:
-      - huddlefm-data:/app/data
-
-volumes:
-  huddlefm-data:
+      - ./data:/app/data

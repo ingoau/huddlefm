@@ -57,6 +57,7 @@ export function normalizeInteraction(body: Body) {
 export class SlackAppAdapter {
   private socket?: WebSocket;
   private web: WebClient;
+  private names = new Map<string, Promise<string>>();
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
   private stopping = false;
@@ -102,6 +103,20 @@ export class SlackAppAdapter {
 
   async updateModal(viewId: string, hash: string, view: unknown) {
     await this.web.views.update({ view_id: viewId, hash, view: view as never });
+  }
+
+  userName(userId: string) {
+    const cached = this.names.get(userId);
+    if (cached) return cached;
+    const name = this.web.users.info({ user: userId }).then(result =>
+      result.user?.profile?.real_name?.trim() || result.user?.real_name?.trim() ||
+      result.user?.profile?.display_name?.trim() || result.user?.name || userId,
+    ).catch(error => {
+      console.error(`[slack-app] user lookup failed: ${safeError(error)}`);
+      return userId;
+    });
+    this.names.set(userId, name);
+    return name;
   }
 
   async privateChannelNotice(userId: string) {

@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
 import { capabilities, Store } from "./store.ts";
@@ -37,6 +38,7 @@ export class Coordinator {
     private slack: SlackAppAdapter,
     private store: Store,
     private tracks: TrackCatalog,
+    private audit: AuditLog,
     private config: { queueLimit: number; initialVolume: number; idleMs: number; port: number; managerUserId: string },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
@@ -67,6 +69,11 @@ export class Coordinator {
       this.blocks(),
     );
     this.store.setUi(this.id, this.uiTs, this.revision);
+    this.audit.record("session.started", this.hostId, {
+      sessionId: this.id,
+      huddleId: this.room.huddleId,
+      channelId: this.room.uiChannelId,
+    });
     this.refreshIdle();
   }
 
@@ -149,6 +156,7 @@ export class Coordinator {
 
   private async require(interaction: Interaction, capability: string) {
     if (this.can(interaction.userId, capability)) return true;
+    this.audit.record("action.denied", interaction.userId, { sessionId: this.id, capability });
     await this.notice(interaction.userId, "You do not have permission for that.");
     return false;
   }
@@ -180,6 +188,7 @@ export class Coordinator {
       this.preparations.set(entry.id, controller);
       this.queue.push(entry);
       this.store.addTrack({ ...entry, sessionId: this.id, status: entry.status });
+      this.audit.record("track.added", interaction.userId, { sessionId: this.id, ...auditTrack(entry) });
       await this.render();
       return { entry, controller };
     });
@@ -211,6 +220,7 @@ export class Coordinator {
         entry.status = "failed";
         this.queue = this.queue.filter(item => item !== entry);
         this.store.setTrack(entry.id, { status: "failed" });
+        this.audit.record("track.failed", undefined, { sessionId: this.id, ...auditTrack(entry), reason: safeAuditError(error) });
         await this.notice(entry.requesterId, `Could not prepare ${entry.title}: ${message(error)}`);
         if (!this.current) await this.startNext();
         else {
@@ -236,6 +246,7 @@ export class Coordinator {
     this.state = "playing";
     this.store.setTrack(next.id, { status: "playing" });
     this.store.setSession(this.id, { status: "playing" });
+    this.audit.record("track.started", undefined, { sessionId: this.id, ...auditTrack(next) });
     this.sendMedia({
       type: "play",
       entryId: next.id,
@@ -275,6 +286,10 @@ export class Coordinator {
       this.current.status = reason === "played" || reason === "track_ended" ? "played" : "failed";
       if (reason === "played" || reason === "track_ended") this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
+      if (reason === "track_ended")
+        this.audit.record("track.finished", undefined, { sessionId: this.id, ...auditTrack(this.current) });
+      if (reason === "track_error" || reason === "stalled")
+        this.audit.record("track.failed", undefined, { sessionId: this.id, ...auditTrack(this.current), reason });
     }
     this.current = undefined;
     await this.startNext();
@@ -284,12 +299,14 @@ export class Coordinator {
     if (!(await this.require(interaction, "skip"))) return;
     if (!expectedId || this.current?.id !== expectedId)
       return this.notice(interaction.userId, "Nothing was playing when you pressed Next.");
+    this.audit.record("track.skipped", interaction.userId, { sessionId: this.id, ...auditTrack(this.current) });
     await this.advance();
   }
 
   private async previous(interaction: Interaction) {
     if (!(await this.require(interaction, "skip")) || !this.history.length) return;
     const prior = this.history.pop()!;
+    this.audit.record("track.previous", interaction.userId, { sessionId: this.id, ...auditTrack(prior) });
     if (this.current) {
       this.current.status = "ready";
       this.queue.unshift(this.current);
@@ -307,14 +324,17 @@ export class Coordinator {
     this.state = this.state === "paused" ? "playing" : "paused";
     this.sendMedia({ type: this.state === "paused" ? "pause" : "resume" });
     this.store.setSession(this.id, { status: this.state });
+    this.audit.record(`playback.${this.state === "paused" ? "paused" : "resumed"}`, interaction.userId, { sessionId: this.id, trackId: this.current.id });
     await this.render();
   }
 
   private async changeVolume(interaction: Interaction, delta: number) {
     if (!(await this.require(interaction, "volume"))) return;
+    const previous = this.volume;
     this.volume = Math.max(0, Math.min(1, Math.round((this.volume + delta) * 10_000) / 10_000));
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
+    this.audit.record("volume.changed", interaction.userId, { sessionId: this.id, previous, volume: this.volume });
     await this.render();
   }
 
@@ -329,6 +349,7 @@ export class Coordinator {
     this.queue.splice(this.queue.indexOf(entry), 1);
     this.preparations.get(entry.id)?.abort();
     this.store.removeTrack(entry.id);
+    this.audit.record("track.removed", interaction.userId, { sessionId: this.id, ...auditTrack(entry) });
     if (entry.filePath) await rm(entry.filePath, { force: true });
     await this.render();
     this.syncPreloads();
@@ -344,6 +365,7 @@ export class Coordinator {
     const target = index + direction;
     if (index < 0 || target < 0 || target >= this.queue.length) return;
     [this.queue[index], this.queue[target]] = [this.queue[target]!, this.queue[index]!];
+    this.audit.record("queue.reordered", interaction.userId, { sessionId: this.id, trackId: interaction.value, from: index, to: target });
     await this.render();
     this.syncPreloads();
     await this.updateQueueModal(interaction);
@@ -351,12 +373,14 @@ export class Coordinator {
 
   private async clear(interaction: Interaction) {
     if (!(await this.require(interaction, "clear"))) return;
+    const count = this.queue.length;
     for (const entry of this.queue) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
       if (entry.filePath) await rm(entry.filePath, { force: true });
     }
     this.queue = [];
+    this.audit.record("queue.cleared", interaction.userId, { sessionId: this.id, count });
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
@@ -469,6 +493,7 @@ export class Coordinator {
     const percent = Number(value);
     if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
       return this.notice(interaction.userId, "Volume must be between 0 and 100.");
+    const previous = { hostId: this.hostId, volume: this.volume, permissions: [...this.allowed] };
     this.volume = Math.round(percent * 100) / 10_000;
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
@@ -480,12 +505,21 @@ export class Coordinator {
       this.hostId = nextHost;
       this.store.setSession(this.id, { hostId: nextHost });
     }
+    this.audit.record("settings.changed", interaction.userId, {
+      sessionId: this.id,
+      previous,
+      hostId: this.hostId,
+      volume: this.volume,
+      permissions: [...this.allowed],
+    });
     await this.render();
   }
 
   private async hostLeft() {
+    const hostId = this.hostId;
     this.hostId = undefined;
     this.store.setSession(this.id, { hostId: null });
+    this.audit.record("host.left", hostId, { sessionId: this.id });
     await this.render();
   }
 
@@ -497,6 +531,7 @@ export class Coordinator {
       return this.notice(interaction.userId, "Join the Huddle before taking over.");
     this.hostId = interaction.userId;
     this.store.setSession(this.id, { hostId: interaction.userId });
+    this.audit.record("host.claimed", interaction.userId, { sessionId: this.id });
     await this.render();
   }
 
@@ -590,20 +625,31 @@ export class Coordinator {
 
   private async end(userId: string | undefined, reason: string) {
     if (this.state === "ended") return;
-    if (userId && !this.can(userId, "end-session"))
+    if (userId && !this.can(userId, "end-session")) {
+      this.audit.record("action.denied", userId, { sessionId: this.id, capability: "end-session" });
       return this.notice(userId, "Only the host can end this session.");
+    }
     this.state = "ended";
     for (const controller of this.preparations.values()) controller.abort();
     this.preparations.clear();
     clearTimeout(this.idleTimer);
     clearTimeout(this.anchorTimer);
     this.store.setSession(this.id, { status: "ended" });
+    this.audit.record("session.ended", userId, { sessionId: this.id, reason });
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();
     await rm(`data/media/${this.id}`, { recursive: true, force: true });
     if (this.uiTs)
       await this.slack.update(this.room.uiChannelId, this.uiTs, `HuddleFM ended: ${reason}`, [{ type: "section", text: { type: "mrkdwn", text: `*HuddleFM ended* — ${reason}` } }]);
   }
+}
+
+function auditTrack(track: Entry) {
+  return { trackId: track.id, title: track.title, artist: track.artist, requesterId: track.requesterId };
+}
+
+function safeAuditError(error: unknown) {
+  return message(error).replace(/(xox[acpbrs]-|token|cookie|authorization|JoinToken)[^\s,]*/gi, "$1[redacted]");
 }
 
 function plain(text: string) {
