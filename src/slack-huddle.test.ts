@@ -13,11 +13,13 @@ test("normalizes the private join response without nullable MeetingFeatures", ()
         },
       },
       canvas: { thread_channel_id: "channel", root_thread_ts: "123.456" },
-      huddle: { id: "huddle" },
+      huddle: { id: "huddle", created_by: "creator", participants: ["U1"] },
     }),
   ).toEqual({
     huddleCallId: "call",
     huddleId: "huddle",
+    huddleCreatorId: "creator",
+    participantIds: ["U1"],
     uiChannelId: "channel",
     uiThreadTs: "123.456",
     chimeMeeting: { MeetingId: "meeting" },
@@ -69,4 +71,17 @@ test("ignores partial lifecycle events", () => {
       room: { id: "room" },
     }),
   ).toBeUndefined();
+});
+
+test("normalizes membership lifecycle events", () => {
+  expect(normalizeRealtimeEvent({
+    type: "sh_room_join",
+    room: { call_id: "R123" },
+    user: "U123",
+  })).toEqual({ type: "MemberJoined", callId: "R123", userId: "U123" });
+  expect(normalizeRealtimeEvent({
+    type: "sh_room_leave",
+    call_id: "R123",
+    user: "U123",
+  })).toEqual({ type: "MemberLeft", callId: "R123", userId: "U123" });
 });

@@ -1,23 +1,40 @@
 import { WebClient } from "@slack/web-api";
 
-type InteractiveEnvelope = {
-  body: {
-    type?: string;
-    value?: string;
+type Body = {
+  type?: string;
+  value?: string;
+  action_id?: string;
+  trigger_id?: string;
+  user?: { id?: string };
+  channel?: { id?: string };
+  container?: { channel_id?: string; message_ts?: string };
+  message?: { ts?: string; thread_ts?: string };
+  actions?: {
     action_id?: string;
-    user?: { id?: string };
-    actions?: { action_id?: string; value?: string }[];
+    value?: string;
+    selected_option?: { value?: string };
+  }[];
+  view?: {
+    callback_id?: string;
+    private_metadata?: string;
+    state?: { values?: Record<string, Record<string, { selected_user?: string; selected_options?: { value?: string }[] }>> };
   };
-  ack(response?: unknown): Promise<void>;
 };
 
-export function normalizeInteraction(body: InteractiveEnvelope["body"]) {
+export type Interaction = ReturnType<typeof normalizeInteraction>;
+
+export function normalizeInteraction(body: Body) {
   const action = body.actions?.[0];
   return {
     type: body.type ?? "unknown",
     userId: body.user?.id ?? "unknown",
-    actionId: action?.action_id ?? body.action_id ?? "unknown",
-    value: action?.value ?? body.value ?? "",
+    actionId: action?.action_id ?? body.action_id ?? body.view?.callback_id ?? "unknown",
+    value: action?.selected_option?.value ?? action?.value ?? body.value ?? "",
+    channelId: body.container?.channel_id ?? body.channel?.id ?? "",
+    messageTs: body.container?.message_ts ?? body.message?.ts ?? "",
+    triggerId: body.trigger_id ?? "",
+    metadata: body.view?.private_metadata ?? "",
+    state: body.view?.state?.values ?? {},
   };
 }
 
@@ -27,7 +44,8 @@ export class SlackAppAdapter {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
   private stopping = false;
-  readonly events: ReturnType<typeof normalizeInteraction>[] = [];
+  onAction?: (interaction: Interaction) => void | Promise<void>;
+  onSuggestion?: (interaction: Interaction) => Promise<unknown[]>;
 
   constructor(private config: { xapp: string; xoxp: string }) {
     this.web = new WebClient(config.xoxp);
@@ -44,16 +62,34 @@ export class SlackAppAdapter {
     this.socket?.close();
   }
 
+  async post(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[]) {
+    const result = await this.web.chat.postMessage({ channel, thread_ts: threadTs, text, blocks: blocks as never });
+    if (!result.ts) throw new Error("chat.postMessage returned no timestamp");
+    return result.ts;
+  }
+
+  async update(channel: string, ts: string, text: string, blocks: unknown[]) {
+    await this.web.chat.update({ channel, ts, text, blocks: blocks as never });
+  }
+
+  async delete(channel: string, ts: string) {
+    await this.web.chat.delete({ channel, ts });
+  }
+
+  async ephemeral(channel: string, user: string, text: string, threadTs?: string) {
+    await this.web.chat.postEphemeral({ channel, user, text, thread_ts: threadTs });
+  }
+
+  async modal(triggerId: string, view: unknown) {
+    await this.web.views.open({ trigger_id: triggerId, view: view as never });
+  }
+
   private async connect() {
     const response = await fetch("https://slack.com/api/apps.connections.open", {
       method: "POST",
       headers: { authorization: `Bearer ${this.config.xapp}` },
     });
-    const result = (await response.json()) as {
-      ok?: boolean;
-      error?: string;
-      url?: string;
-    };
+    const result = (await response.json()) as { ok?: boolean; error?: string; url?: string };
     if (!result.ok || !result.url)
       throw new Error(`apps.connections.open failed: ${result.error ?? response.status}`);
 
@@ -65,9 +101,7 @@ export class SlackAppAdapter {
         if (envelope.type === "hello") {
           this.reconnectAttempts = 0;
           resolve();
-        } else {
-          void this.handleEnvelope(envelope);
-        }
+        } else void this.handleEnvelope(envelope);
       });
       socket.addEventListener("error", () => reject(new Error("Socket Mode connection failed")));
       socket.addEventListener("close", () => this.scheduleReconnect());
@@ -86,81 +120,35 @@ export class SlackAppAdapter {
     }, delay);
   }
 
-  private async handleEnvelope(envelope: {
-    envelope_id?: string;
-    type?: string;
-    payload?: InteractiveEnvelope["body"];
-  }) {
+  private async handleEnvelope(envelope: { envelope_id?: string; type?: string; payload?: Body }) {
     if (!envelope.envelope_id) return;
-    const ack = (payload?: unknown) => {
-      this.socket?.send(
-        JSON.stringify({
-          envelope_id: envelope.envelope_id,
-          ...(payload === undefined ? {} : { payload }),
-        }),
-      );
-    };
+    const ack = (payload?: unknown) => this.socket?.send(JSON.stringify({
+      envelope_id: envelope.envelope_id,
+      ...(payload === undefined ? {} : { payload }),
+    }));
     if (envelope.type !== "interactive" || !envelope.payload) return ack();
 
     const interaction = normalizeInteraction(envelope.payload);
     if (envelope.payload.type === "block_suggestion") {
-      ack({
-        options: [
-          {
-            text: {
-              type: "plain_text",
-              text: `Test result: ${interaction.value}`.slice(0, 75),
-            },
-            value: "gate2_result",
-          },
-        ],
-      });
-    } else {
-      ack();
+      try {
+        ack({ options: (await this.onSuggestion?.(interaction)) ?? [] });
+      } catch (error) {
+        console.error(`[slack-app] suggestion failed: ${safeError(error)}`);
+        ack({ options: [] });
+      }
+      return;
     }
-    this.events.push(interaction);
-    console.log(
-      `[slack-app] ${interaction.type} ${interaction.actionId} ${interaction.userId}`,
+    ack();
+    console.log(`[slack-app] ${interaction.type} ${interaction.actionId} ${interaction.userId}`);
+    void Promise.resolve(this.onAction?.(interaction)).catch(error =>
+      console.error(`[slack-app] action failed: ${safeError(error)}`),
     );
   }
+}
 
-  async postGate2Test(channel: string) {
-    const result = await this.web.chat.postMessage({
-      channel,
-      text: "HuddleFM interaction test",
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: "*HuddleFM gate 2 test*\nUse both controls to verify Socket Mode actions and suggestions.",
-          },
-        },
-        {
-          type: "actions",
-          block_id: `gate2_${crypto.randomUUID()}`,
-          elements: [
-            {
-              type: "button",
-              action_id: "gate2_ping",
-              text: { type: "plain_text", text: "Test action" },
-              value: "ping",
-            },
-            {
-              type: "external_select",
-              action_id: "gate2_search",
-              placeholder: { type: "plain_text", text: "Type three characters" },
-              min_query_length: 3,
-            },
-          ],
-        },
-      ],
-    });
-    if (!result.ts) throw new Error("chat.postMessage returned no timestamp");
-    return result.ts;
-  }
-
-  async deleteMessage(channel: string, ts: string) {
-    await this.web.chat.delete({ channel, ts });
-  }
+function safeError(error: unknown) {
+  return (error instanceof Error ? error.message : String(error)).replace(
+    /(xox[acpbrs]-|token|cookie|authorization)[^\s,]*/gi,
+    "$1[redacted]",
+  );
 }

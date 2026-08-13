@@ -13,6 +13,11 @@ test("normalizes block actions using immutable values", () => {
     userId: "U123",
     actionId: "next_track",
     value: "queue_123",
+    channelId: "",
+    messageTs: "",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
 });
 
@@ -29,5 +34,10 @@ test("normalizes suggestion queries", () => {
     userId: "U123",
     actionId: "add_track_to_queue",
     value: "midnight city",
+    channelId: "",
+    messageTs: "",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
 });

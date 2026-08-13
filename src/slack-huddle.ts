@@ -9,6 +9,8 @@ export type ChimeBootstrap = {
 export type JoinedHuddle = {
   huddleCallId: string;
   huddleId: string;
+  huddleCreatorId: string;
+  participantIds: string[];
   uiChannelId: string;
   uiThreadTs: string;
   chimeMeeting: Record<string, unknown>;
@@ -30,6 +32,7 @@ export type HuddleEvent =
       userId: string;
     }
   | { type: "MemberLeft"; callId: string; userId: string }
+  | { type: "MemberJoined"; callId: string; userId: string }
   | { type: "HuddleEnded"; callId: string };
 
 function object(value: unknown, name: string) {
@@ -60,6 +63,15 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
   return {
     huddleCallId: text(call.call_id, "call.call_id"),
     huddleId: text(huddle.id, "huddle.id"),
+    huddleCreatorId: text(huddle.created_by, "huddle.created_by"),
+    participantIds: Array.isArray(huddle.participants)
+      ? huddle.participants.flatMap(value => {
+          if (typeof value === "string") return [value];
+          if (value && typeof value === "object" && typeof (value as { user_id?: unknown }).user_id === "string")
+            return [(value as { user_id: string }).user_id];
+          return [];
+        })
+      : [],
     uiChannelId: text(canvas.thread_channel_id, "canvas.thread_channel_id"),
     uiThreadTs: text(canvas.root_thread_ts, "canvas.root_thread_ts"),
     chimeMeeting: meeting,
@@ -239,6 +251,12 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
       callId,
       userId: event.user,
     };
+  }
+  if (event.type === "sh_room_join") {
+    const room = event.room as Record<string, unknown> | undefined;
+    const callId = event.call_id ?? room?.call_id;
+    if (typeof callId !== "string" || typeof event.user !== "string") return;
+    return { type: "MemberJoined", callId, userId: event.user };
   }
   if (event.type === "sh_room_update") {
     const huddle = event.huddle as Record<string, unknown> | undefined;

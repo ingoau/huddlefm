@@ -22,20 +22,27 @@ const gain = audioContext.createGain();
 const limiter = audioContext.createDynamicsCompressor();
 const destination = audioContext.createMediaStreamDestination();
 gain.connect(limiter).connect(destination);
+const player = new Audio();
+player.preload = "auto";
+audioContext.createMediaElementSource(player).connect(gain);
 
 let session: DefaultMeetingSession | undefined;
-let source: AudioScheduledSourceNode | undefined;
+let tone: OscillatorNode | undefined;
 let audioReported = false;
 
 function playTone(frequency = 440) {
-  source?.stop();
+  tone?.stop();
   const oscillator = audioContext.createOscillator();
   oscillator.frequency.value = frequency;
   oscillator.connect(gain);
   oscillator.start();
-  source = oscillator;
+  tone = oscillator;
   send("playing", { frequency });
 }
+
+player.addEventListener("ended", () => send("track_ended"));
+player.addEventListener("stalled", () => send("stalled"));
+player.addEventListener("error", () => send("track_error", player.error?.message));
 
 async function join(payload: {
   meeting: Record<string, unknown>;
@@ -54,7 +61,6 @@ async function join(payload: {
     audioVideoDidStart: () => {
       status.textContent = "joined";
       send("joined");
-      playTone();
     },
     metricsDidReceive: report => {
       if (!audioReported) {
@@ -89,9 +95,30 @@ socket.addEventListener("message", async event => {
   try {
     if (message.type === "bootstrap") await join(message.payload);
     if (message.type === "tone") playTone(message.frequency);
+    if (message.type === "play") {
+      tone?.stop();
+      player.src = message.url;
+      await player.play();
+      send("playing", { entryId: message.entryId });
+    }
+    if (message.type === "pause") {
+      player.pause();
+      send("paused");
+    }
+    if (message.type === "resume") {
+      await player.play();
+      send("playing");
+    }
+    if (message.type === "stop") {
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+    }
     if (message.type === "volume") gain.gain.value = message.value;
     if (message.type === "leave") {
-      source?.stop();
+      tone?.stop();
+      player.pause();
+      player.removeAttribute("src");
       await session?.audioVideo.stopAudioInput();
       session?.audioVideo.stop();
     }

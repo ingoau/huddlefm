@@ -1,25 +1,16 @@
 # HuddleFM
 
-Gate 1 of the prototype joins an active Slack Huddle through the dedicated user's private Slack session and publishes a generated tone through Amazon Chime.
+Single-workspace Slack Huddle music player. Inviting the dedicated HuddleFM user joins the Huddle, posts an interactive thread player, searches YouTube Music, validates direct media URLs, and publishes prepared audio through Amazon Chime.
 
-Install dependencies:
+Requirements: Bun, Chrome, `uv`, Python 3.13, FFmpeg, and network access. `uv` runs current `yt-dlp` with its maintained browser-based proof-of-origin plugin; its Chrome profile is isolated and unsigned-in.
 
 ```bash
 bun install
-```
-
-Run the loopback service:
-
-```bash
+bun run check
+bun test
 bun run start
 ```
 
-Join an active Huddle in a channel:
+Configure `.env` with `SLACK_WORKSPACE_URL`, `SLACK_XOXP`, `SLACK_XAPP`, `SLACK_XOXC`, and `SLACK_XOXD`. Optional limits are `QUEUE_LIMIT`, `TRACK_DURATION_LIMIT_SECONDS`, `TRACK_DOWNLOAD_LIMIT_BYTES`, `INITIAL_VOLUME`, `IDLE_TIMEOUT_MS`, `CHIME_MEDIA_REGION`, `CHROME_PATH`, and `PORT`.
 
-```bash
-curl -X POST http://127.0.0.1:3210/join \
-  -H 'content-type: application/json' \
-  -d '{"channelId":"C0BPVPVLQ4D"}'
-```
-
-Use `POST /tone` with a numeric `frequency`, or `POST /leave`. The service binds only to loopback, authenticates its media WebSocket, and never sends Slack credentials to the media page.
+The service binds to loopback. It keeps Slack and Chime credentials in memory, authenticates its media bridge and audio URLs, stores only session/queue state in `data/huddlefm.sqlite`, and removes prepared media when the session ends.

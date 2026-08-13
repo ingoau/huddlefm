@@ -63,6 +63,9 @@ export class Store {
         PRIMARY KEY (session_id, capability)
       );
     `);
+    this.db
+      .query("UPDATE sessions SET status = 'ended', updated_at = ? WHERE status != 'ended'")
+      .run(Date.now());
   }
 
   createSession(session: {
@@ -181,6 +184,12 @@ export class Store {
 
   removeTrack(id: string) {
     this.db.query("DELETE FROM tracks WHERE id = ?").run(id);
+  }
+
+  setPermission(sessionId: string, capability: string, allowed: boolean) {
+    this.db
+      .query("UPDATE permissions SET allowed = ? WHERE session_id = ? AND capability = ?")
+      .run(allowed ? 1 : 0, sessionId, capability);
   }
 
   close() {

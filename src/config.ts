@@ -17,6 +17,11 @@ export function loadConfig() {
     xoxd: process.env.SLACK_XOXD!,
     port: Number(process.env.PORT ?? 3210),
     mediaRegion: process.env.CHIME_MEDIA_REGION ?? "ap-southeast-2",
+    queueLimit: Number(process.env.QUEUE_LIMIT ?? 50),
+    durationSeconds: Number(process.env.TRACK_DURATION_LIMIT_SECONDS ?? 1_200),
+    downloadBytes: Number(process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000),
+    initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.6),
+    idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 120_000),
     chromePath:
       process.env.CHROME_PATH ??
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

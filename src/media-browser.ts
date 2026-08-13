@@ -29,4 +29,10 @@ export class MediaBrowser {
     await this.context?.close();
     await this.browser?.close();
   }
+
+  async stop() {
+    await this.context?.close();
+    this.context = undefined;
+    this.page = undefined;
+  }
 }

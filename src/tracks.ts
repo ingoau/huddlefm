@@ -17,10 +17,18 @@ export type TrackMetadata = {
 export class TrackCatalog {
   private music = new YTMusic();
   private references = new Map<string, TrackMetadata | string>();
+  private command: string[];
 
   constructor(
-    private limits: { durationSeconds: number; downloadBytes: number },
-  ) {}
+    private limits: { durationSeconds: number; downloadBytes: number; chromePath: string },
+  ) {
+    this.command = [
+      "uvx", "--python", "3.13", "--from", "yt-dlp", "--with",
+      "yt-dlp-getpot-wpc", "yt-dlp", "--remote-components", "ejs:github",
+      "--extractor-args",
+      `youtube:player_client=mweb;youtubepot-wpc:browser_path=${limits.chromePath}`,
+    ];
+  }
 
   async initialize() {
     await this.music.initialize();
@@ -72,7 +80,7 @@ export class TrackCatalog {
     if (!url) throw new Error("Only absolute HTTP or HTTPS URLs are supported");
     await assertPublicUrl(url);
     const metadata = await runJson([
-      "yt-dlp",
+      ...this.command,
       "--dump-single-json",
       "--skip-download",
       "--no-playlist",
@@ -110,7 +118,7 @@ export class TrackCatalog {
     await mkdir(directory, { recursive: true });
     const path = `${directory}/${entryId}.%(ext)s`;
     const result = await run([
-      "yt-dlp",
+      ...this.command,
       "--extract-audio",
       "--audio-format",
       "opus",
