@@ -545,8 +545,8 @@ export class Coordinator {
           { type: "button", action_id: "next_track", text: plain("Next"), value: this.id },
         ] },
         { type: "actions", block_id: `volume_${id}`, elements: [
-          { type: "button", action_id: "volume_down", text: plain("-"), value: this.id },
-          { type: "button", action_id: "volume_up", text: plain("+"), value: this.id },
+          { type: "button", action_id: "volume_down", text: plain("Volume -"), value: this.id },
+          { type: "button", action_id: "volume_up", text: plain("Volume +"), value: this.id },
         ] },
         { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
         { type: "divider", block_id: `divider_${id}` },
