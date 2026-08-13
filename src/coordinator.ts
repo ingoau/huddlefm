@@ -526,17 +526,13 @@ export class Coordinator {
   private blocks() {
     const id = `${this.id}_${this.revision}`;
     const current = this.current;
-    const queueBlocks = this.queue.slice(0, 3).map((track, index) => ({
-      type: "section",
-      block_id: `queue_${id}_${track.id}`,
-      text: { type: "mrkdwn", text: `${index ? "" : "*Up Next*\n"}*${index + 1}. ${escape(track.title)}*${duration(track.duration)}\n${escape(track.artist)}${track.album ? ` · _${escape(track.album)}_` : ""}${track.status === "preparing" ? " · preparing" : ""} · added by <@${track.requesterId}>` },
-      accessory: { type: "button", action_id: "remove_queue_track", text: plain("Remove"), value: track.id },
-    }));
-    return [{
+    const next = this.queue[0];
+    return [
+      {
       type: "container",
       block_id: `player_${id}`,
-      title: plain(current?.title ?? (this.queue[0]?.status === "preparing" ? `Preparing ${this.queue[0].title}` : "HuddleFM")),
-      subtitle: plain(current ? `${current.album ? `${current.album} · ` : ""}${current.artist}` : this.queue[0]?.status === "preparing" ? "Playback will start automatically" : "Ready for music"),
+      title: plain(current?.title ?? "Nothing playing"),
+      subtitle: plain(current ? `${current.album ? `${current.album} · ` : ""}${current.artist}` : "Ready for music"),
       ...(current?.artwork ? { icon: { type: "image", image_url: current.artwork, alt_text: `${current.title} artwork` } } : {}),
       child_blocks: [
         { type: "actions", block_id: `playback_${id}`, elements: [
@@ -549,8 +545,26 @@ export class Coordinator {
           { type: "button", action_id: "volume_up", text: plain("Volume +"), value: this.id },
         ] },
         { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
-        { type: "divider", block_id: `divider_${id}` },
-        ...queueBlocks,
+      ],
+    },
+    { type: "section", block_id: `next_label_${id}`, text: { type: "mrkdwn", text: "*Next up:*" } },
+    {
+      type: "container",
+      block_id: `next_${id}`,
+      title: plain(next?.title ?? "Nothing queued"),
+      subtitle: plain(next ? `${next.album ? `${next.album} · ` : ""}${next.artist}${next.status === "preparing" ? " · preparing" : ""}` : "Add a song to keep the music going"),
+      ...(next?.artwork ? { icon: { type: "image", image_url: next.artwork, alt_text: `${next.title} artwork` } } : {}),
+      child_blocks: [{
+        type: "context",
+        block_id: `queue_status_${id}`,
+        elements: [{ type: "mrkdwn", text: `${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue${next ? ` · Added by <@${next.requesterId}>` : ""}` }],
+      }],
+    },
+    {
+      type: "container",
+      block_id: `queue_controls_${id}`,
+      title: plain("Queue"),
+      child_blocks: [
         { type: "actions", block_id: `add_${id}`, elements: [
           { type: "external_select", action_id: "add_track_to_queue", placeholder: plain("Add to queue"), min_query_length: 3 },
         ] },
