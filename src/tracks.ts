@@ -1,5 +1,6 @@
 import YTMusic from "ytmusic-api";
 import { mkdir, rm, stat } from "node:fs/promises";
+import { BgUtilsProvider } from "./bgutils.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
 export { assertPublicUrl } from "./public-proxy.ts";
@@ -20,21 +21,26 @@ export class TrackCatalog {
   private references = new Map<string, TrackMetadata | string>();
   private command: string[];
   private proxy?: PublicNetworkProxy;
+  private bgutils: BgUtilsProvider;
 
   constructor(
-    private limits: { durationSeconds: number; downloadBytes: number; chromePath: string },
+    private limits: { durationSeconds: number; downloadBytes: number; bgutilsPort: number },
   ) {
+    this.bgutils = new BgUtilsProvider(limits.bgutilsPort);
     this.command = [
       "uvx", "--python", "3.13", "--from", "yt-dlp", "--with",
-      "yt-dlp-getpot-wpc", "yt-dlp", "--remote-components", "ejs:github",
+      `bgutil-ytdlp-pot-provider==1.3.1`, "yt-dlp", "--remote-components", "ejs:github",
       "--extractor-args",
-      `youtube:player_client=mweb;youtubepot-wpc:browser_path=${limits.chromePath}`,
+      "youtube:player_client=mweb",
+      "--extractor-args",
+      `youtubepot-bgutilhttp:base_url=${this.bgutils.url}`,
     ];
   }
 
   async initialize() {
     this.proxy = await PublicNetworkProxy.start();
     try {
+      await this.bgutils.start();
       await this.music.initialize();
     } catch (error) {
       await this.close();
@@ -45,6 +51,7 @@ export class TrackCatalog {
   async close() {
     await this.proxy?.close();
     this.proxy = undefined;
+    await this.bgutils.close();
   }
 
   async suggestions(query: string) {

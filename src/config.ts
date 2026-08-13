@@ -22,6 +22,7 @@ export function loadConfig() {
     downloadBytes: Number(process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000),
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.1),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 120_000),
+    bgutilsPort: Number(process.env.BGUTIL_PORT ?? 4416),
     managerUserId: process.env.MANAGER_USER_ID ?? "U0923H02Y3B",
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,
     chromePath:
