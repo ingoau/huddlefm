@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { LyricsCatalog } from "./lyrics.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
@@ -11,6 +12,7 @@ function setup(tracks = {} as TrackCatalog) {
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
   const media: unknown[] = [];
+  const audit: unknown[] = [];
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
@@ -30,10 +32,10 @@ function setup(tracks = {} as TrackCatalog) {
     huddleCallId: "call", huddleId: "huddle", huddleCreatorId: "creator",
     participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
     chimeMeeting: {}, chimeAttendee: {},
-  }, "host", "bot", slack, store, tracks, lyrics, {
+  }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
-  return { coordinator, posted, ephemeral, sessions, permissions, media };
+  return { coordinator, posted, ephemeral, sessions, permissions, media, audit };
 }
 
 test("a Next click during first-track preparation does not skip it", async () => {
@@ -150,6 +152,48 @@ test("late media events cannot advance a newer track", async () => {
   await result.coordinator.mediaEvent("track_ended", { entryId: first });
   expect(plays()).toHaveLength(2);
   expect(plays().at(-1)?.entryId).toBe(second);
+  await result.coordinator.endFromSlack();
+});
+
+test("Previous restarts after five seconds and seek controls move ten seconds", async () => {
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
+      sourceId: value, title: value, artist: "Artist",
+    }),
+    prepare: async (_track: unknown, _directory: string, id: string) => `${id}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  const action = (actionId: string, value = "") => result.coordinator.action({
+    type: "block_actions", userId: "host", actionId, value,
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  const plays = () => result.media.filter((message): message is { type: string; entryId: string } =>
+    Boolean(message && typeof message === "object" && (message as { type?: string }).type === "play"),
+  );
+
+  await result.coordinator.start();
+  expect(JSON.stringify(result.posted[0])).toContain('"block_id":"seek_');
+  expect(JSON.stringify(result.posted[0])).toContain('"action_id":"seek_back"');
+  expect(JSON.stringify(result.posted[0])).toContain('"action_id":"seek_forward"');
+  await action("add_track_to_queue", "a");
+  await action("add_track_to_queue", "b");
+  const first = plays()[0]!.entryId;
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  const second = plays()[1]!.entryId;
+
+  result.coordinator.mediaEvent("playback_position", { entryId: second, seconds: 6 });
+  await action("previous_track");
+  expect(result.media).toContainEqual({ type: "seek", seconds: 0 });
+  expect(plays()).toHaveLength(2);
+
+  result.coordinator.mediaEvent("playback_position", { entryId: second, seconds: 5 });
+  await action("previous_track");
+  expect(plays().at(-1)?.entryId).toBe(first);
+  await action("seek_back");
+  await action("seek_forward");
+  expect(result.media).toContainEqual({ type: "seek", offset: -10 });
+  expect(result.media).toContainEqual({ type: "seek", offset: 10 });
   await result.coordinator.endFromSlack();
 });
 

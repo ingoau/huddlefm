@@ -40,6 +40,7 @@ type Deck = {
   audio: HTMLAudioElement;
   node: MediaElementAudioSourceNode;
   url: string;
+  pastRestartThreshold: boolean;
 };
 
 const decks = new Map<string, Deck>();
@@ -112,7 +113,7 @@ function deck(entryId: string, url: string) {
   if (existing) dispose(entryId, existing);
   const audio = new Audio(url);
   audio.preload = "auto";
-  const value = { audio, node: audioContext.createMediaElementSource(audio), url };
+  const value = { audio, node: audioContext.createMediaElementSource(audio), url, pastRestartThreshold: false };
   value.node.connect(gain);
   audio.addEventListener("ended", () => {
     if (currentId === entryId) send("track_ended", { entryId });
@@ -124,6 +125,12 @@ function deck(entryId: string, url: string) {
     if (currentId === entryId) send("track_error", { entryId, message: audio.error?.message });
   });
   audio.addEventListener("canplaythrough", () => send("preloaded", { entryId }), { once: true });
+  audio.addEventListener("timeupdate", () => {
+    const pastRestartThreshold = audio.currentTime > 5;
+    if (pastRestartThreshold === value.pastRestartThreshold) return;
+    value.pastRestartThreshold = pastRestartThreshold;
+    send("playback_position", { entryId, seconds: audio.currentTime });
+  });
   decks.set(entryId, value);
   return value;
 }
@@ -287,6 +294,13 @@ socket.addEventListener("message", async event => {
     if (message.type === "resume") {
       if (currentId) await decks.get(currentId)?.audio.play();
       send("playing", { entryId: currentId });
+    }
+    if (message.type === "seek" && currentId) {
+      const current = decks.get(currentId)!;
+      const seconds = message.seconds ?? current.audio.currentTime + message.offset;
+      current.audio.currentTime = Math.max(0, Math.min(current.audio.duration || Infinity, seconds));
+      current.pastRestartThreshold = current.audio.currentTime > 5;
+      send("playback_position", { entryId: currentId, seconds: current.audio.currentTime });
     }
     if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = message.value;

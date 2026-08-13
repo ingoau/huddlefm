@@ -1,4 +1,5 @@
 import type { ServerWebSocket } from "bun";
+import { AuditLog } from "./audit-log.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { controlDenied } from "./local-control.ts";
@@ -23,6 +24,7 @@ const store = new Store();
 const catalog = new TrackCatalog(config);
 const lyrics = new LyricsCatalog();
 const slackApp = new SlackAppAdapter(config);
+const audit = new AuditLog("data/audit.jsonl", id => slackApp.userName(id));
 const slackHuddle = new SlackHuddleAdapter(config);
 let bootstrap: ChimeBootstrap | undefined;
 let mediaSocket: ServerWebSocket<unknown> | undefined;
@@ -75,6 +77,7 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
       store,
       catalog,
       lyrics,
+      audit,
       config,
       token,
       message => mediaSocket?.send(JSON.stringify(message)),
@@ -200,6 +203,7 @@ const shutdown = async () => {
   await mediaBrowser.close();
   await catalog.close();
   store.close();
+  await audit.flush();
   process.exit();
 };
 process.on("SIGINT", shutdown);
