@@ -15,6 +15,23 @@ export type JoinedHuddle = {
   chimeAttendee: Record<string, unknown>;
 };
 
+export type HuddleEvent =
+  | {
+      type: "HuddleInvited";
+      channelId: string;
+      callId: string;
+      inviterUserId: string;
+    }
+  | {
+      type: "ThreadActivity";
+      channelId: string;
+      threadTs: string;
+      messageTs: string;
+      userId: string;
+    }
+  | { type: "MemberLeft"; callId: string; userId: string }
+  | { type: "HuddleEnded"; callId: string };
+
 function object(value: unknown, name: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Slack response is missing ${name}`);
@@ -51,6 +68,14 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
 }
 
 export class SlackHuddleAdapter {
+  private socket?: WebSocket;
+  private pingTimer?: ReturnType<typeof setInterval>;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private reconnectAttempts = 0;
+  private stopping = false;
+  private reconnectUrl?: string;
+  private onEvent?: (event: HuddleEvent) => void;
+
   constructor(
     private config: {
       workspaceUrl: string;
@@ -59,6 +84,107 @@ export class SlackHuddleAdapter {
       mediaRegion: string;
     },
   ) {}
+
+  async start(onEvent: (event: HuddleEvent) => void) {
+    this.stopping = false;
+    this.onEvent = onEvent;
+    await this.connect();
+  }
+
+  stop() {
+    this.stopping = true;
+    clearInterval(this.pingTimer);
+    clearTimeout(this.reconnectTimer);
+    this.socket?.close();
+  }
+
+  private async connect() {
+    const response = await fetch(
+      new URL("/api/auth.test", this.config.workspaceUrl),
+      {
+        method: "POST",
+        headers: { cookie: `d=${this.config.xoxd}` },
+        body: new URLSearchParams({ token: this.config.xoxc }),
+      },
+    );
+    const auth = (await response.json()) as {
+      ok?: boolean;
+      error?: string;
+      team_id?: string;
+    };
+    if (!auth.ok || !auth.team_id)
+      throw new Error(`Selfbot auth failed: ${auth.error ?? response.status}`);
+
+    const url = this.reconnectUrl
+      ? new URL(this.reconnectUrl)
+      : this.gatewayUrl(auth.team_id);
+    await new Promise<void>((resolve, reject) => {
+      const socket = new WebSocket(url, {
+        headers: { cookie: `d=${this.config.xoxd}` },
+      } as never);
+      this.socket = socket;
+      let ready = false;
+      socket.addEventListener("message", event => {
+        const message = JSON.parse(String(event.data));
+        if (message.type === "hello") {
+          ready = true;
+          this.reconnectAttempts = 0;
+          clearInterval(this.pingTimer);
+          this.pingTimer = setInterval(
+            () => socket.send(JSON.stringify({ type: "ping", id: Date.now() })),
+            5_000,
+          );
+          resolve();
+          return;
+        }
+        if (message.type === "reconnect_url" && typeof message.url === "string")
+          this.reconnectUrl = message.url;
+        try {
+          const normalized = normalizeRealtimeEvent(message);
+          if (normalized) this.onEvent?.(normalized);
+        } catch {
+          console.warn(`[slack-huddle] ignored invalid ${String(message.type)} event`);
+        }
+      });
+      socket.addEventListener("error", () => {
+        if (!ready) reject(new Error("Private Slack realtime connection failed"));
+      });
+      socket.addEventListener("close", () => this.scheduleReconnect());
+    });
+  }
+
+  private gatewayUrl(enterpriseId: string) {
+    const url = new URL("wss://wss-primary.slack.com/");
+    const params = {
+      token: this.config.xoxc,
+      sync_desync: "1",
+      slack_client: "desktop",
+      start_args:
+        "?agent=client&org_wide_aware=true&eac_cache_ts=true&cache_ts=0&name_tagging=true&only_self_subteams=true&connect_only=true&ms_latest=true",
+      no_query_on_subscribe: "1",
+      flannel: "3",
+      lazy_channels: "1",
+      gateway_server: `T${enterpriseId.slice(1)}-1`,
+      enterprise_id: enterpriseId,
+      batch_presence_aware: "1",
+    };
+    for (const [key, value] of Object.entries(params))
+      url.searchParams.set(key, value);
+    return url;
+  }
+
+  private scheduleReconnect() {
+    clearInterval(this.pingTimer);
+    if (this.stopping || this.reconnectTimer) return;
+    const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempts++);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.connect().catch(error => {
+        console.error(error instanceof Error ? error.message : error);
+        this.scheduleReconnect();
+      });
+    }, delay);
+  }
 
   async join(channelId: string) {
     const form = new FormData();
@@ -77,6 +203,55 @@ export class SlackHuddleAdapter {
     );
     if (!response.ok) throw new Error(`rooms.join HTTP ${response.status}`);
     return normalizeJoinResponse(await response.json());
+  }
+}
+
+export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
+  const event = object(raw, "realtime event");
+  if (event.type === "huddle_invite") {
+    return {
+      type: "HuddleInvited",
+      channelId: text(event.channel_id, "huddle_invite.channel_id"),
+      callId: text(event.call_id, "huddle_invite.call_id"),
+      inviterUserId: text(event.sender_user_id, "huddle_invite.sender_user_id"),
+    };
+  }
+  if (
+    event.type === "message" &&
+    !event.subtype &&
+    event.thread_ts &&
+    event.user
+  ) {
+    return {
+      type: "ThreadActivity",
+      channelId: text(event.channel, "message.channel"),
+      threadTs: text(event.thread_ts, "message.thread_ts"),
+      messageTs: text(event.ts, "message.ts"),
+      userId: text(event.user, "message.user"),
+    };
+  }
+  if (event.type === "sh_room_leave") {
+    const room = event.room as Record<string, unknown> | undefined;
+    const callId = event.call_id ?? room?.call_id;
+    if (typeof callId !== "string" || typeof event.user !== "string") return;
+    return {
+      type: "MemberLeft",
+      callId,
+      userId: event.user,
+    };
+  }
+  if (event.type === "sh_room_update") {
+    const huddle = event.huddle as Record<string, unknown> | undefined;
+    const room = event.room as Record<string, unknown> | undefined;
+    const callId = room?.call_id ?? huddle?.id;
+    if (
+      (huddle?.has_ended || huddle?.date_end) &&
+      typeof callId === "string"
+    )
+      return {
+        type: "HuddleEnded",
+        callId,
+      };
   }
 }
 

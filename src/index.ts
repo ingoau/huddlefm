@@ -1,7 +1,11 @@
 import { loadConfig } from "./config.ts";
 import { MediaBrowser } from "./media-browser.ts";
 import { SlackAppAdapter } from "./slack-app.ts";
-import { SlackHuddleAdapter, verifySlackIdentity, type ChimeBootstrap } from "./slack-huddle.ts";
+import {
+  SlackHuddleAdapter,
+  verifySlackIdentity,
+  type ChimeBootstrap,
+} from "./slack-huddle.ts";
 import type { ServerWebSocket } from "bun";
 
 const config = loadConfig();
@@ -19,6 +23,21 @@ let mediaSocket: ServerWebSocket<unknown> | undefined;
 let mediaBrowser: MediaBrowser;
 let mediaState: { type: string; details?: unknown } | undefined;
 const slackApp = new SlackAppAdapter(config);
+const slackHuddle = new SlackHuddleAdapter(config);
+
+async function joinHuddle(channelId: string) {
+  if (bootstrap) throw new Error("A Huddle session is already active");
+  const joined = await slackHuddle.join(channelId);
+  bootstrap = {
+    sessionId: crypto.randomUUID(),
+    meeting: joined.chimeMeeting,
+    attendee: joined.chimeAttendee,
+    initialVolume: 0.25,
+    bridgeToken: crypto.randomUUID(),
+  };
+  await mediaBrowser.start(bootstrap);
+  return { sessionId: bootstrap.sessionId, huddleId: joined.huddleId };
+}
 
 const server = Bun.serve({
   hostname: "127.0.0.1",
@@ -46,16 +65,7 @@ const server = Bun.serve({
         if (!channelId?.match(/^[A-Z0-9]+$/))
           return Response.json({ error: "Invalid channelId" }, { status: 400 });
         try {
-          const joined = await new SlackHuddleAdapter(config).join(channelId);
-          bootstrap = {
-            sessionId: crypto.randomUUID(),
-            meeting: joined.chimeMeeting,
-            attendee: joined.chimeAttendee,
-            initialVolume: 0.25,
-            bridgeToken: crypto.randomUUID(),
-          };
-          await mediaBrowser.start(bootstrap);
-          return Response.json({ ok: true, sessionId: bootstrap.sessionId, huddleId: joined.huddleId });
+          return Response.json({ ok: true, ...(await joinHuddle(channelId)) });
         } catch (error) {
           console.error(error instanceof Error ? error.message : error);
           return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
@@ -133,11 +143,20 @@ const server = Bun.serve({
 mediaBrowser = new MediaBrowser(config.chromePath, server.url.origin);
 const userId = await verifySlackIdentity(config);
 await slackApp.start();
+await slackHuddle.start(event => {
+  if (event.type === "HuddleInvited") {
+    console.log(`[huddle] invited ${event.callId} by ${event.inviterUserId}`);
+    void joinHuddle(event.channelId).catch(error =>
+      console.error(error instanceof Error ? error.message : error),
+    );
+  }
+});
 console.log(`HuddleFM ready as ${userId} on ${server.url}`);
 
 const shutdown = async () => {
   server.stop();
   await slackApp.stop();
+  slackHuddle.stop();
   await mediaBrowser.close();
   process.exit();
 };
