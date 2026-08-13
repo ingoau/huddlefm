@@ -3,10 +3,19 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "start": "bun run index.ts",
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "amazon-chime-sdk-js": "3.31.0",
+    "playwright-core": "1.55.0"
   }
 }
