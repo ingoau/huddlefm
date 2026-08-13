@@ -1,0 +1,13 @@
+services:
+  huddlefm:
+    image: ghcr.io/ingoau/huddlefm:latest
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3210:3210"
+    volumes:
+      - huddlefm-data:/app/data
+
+volumes:
+  huddlefm-data:
