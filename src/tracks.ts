@@ -124,8 +124,7 @@ export class TrackCatalog {
     await mkdir(directory, { recursive: true });
     if (signal?.aborted) throw new Error("Track preparation cancelled");
     const path = `${directory}/${entryId}.%(ext)s`;
-    const result = await run([
-      ...this.extractor(),
+    const download = [
       "--extract-audio",
       "--audio-format",
       "opus",
@@ -140,7 +139,19 @@ export class TrackCatalog {
       path,
       "--",
       track.canonicalUrl,
-    ], 180_000, signal);
+    ];
+    let result;
+    try {
+      result = await run([...this.extractor(), ...download], 180_000, signal);
+    } catch (error) {
+      if (signal?.aborted || !String(error).includes("HTTP Error 403")) throw error;
+      result = await run([
+        ...this.extractor(),
+        "--extractor-args",
+        "youtube:player_client=web_embedded",
+        ...download,
+      ], 180_000, signal);
+    }
     const filePath = result.stdout.trim().split("\n").at(-1);
     if (!filePath || !(await Bun.file(filePath).exists()))
       throw new Error("Extractor produced no playable file");
