@@ -29,7 +29,7 @@ function setup(tracks = {} as TrackCatalog) {
     participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
     chimeMeeting: {}, chimeAttendee: {},
   }, "host", "bot", slack, store, tracks, {
-    queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210,
+    queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
   return { coordinator, posted, ephemeral, sessions, permissions, media };
 }
@@ -79,13 +79,101 @@ test("first current participant claims a vacant host role", async () => {
   const test = setup();
   await test.coordinator.start();
   await test.coordinator.memberLeft("host");
+  expect(test.posted).toHaveLength(1);
   await test.coordinator.action({
-    type: "block_actions", userId: "guest", actionId: "claim_host", value: "",
-    channelId: "channel", messageTs: "2", triggerId: "", metadata: "", state: {},
+    type: "block_actions", userId: "guest", actionId: "claim_host", value: "old-session",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  expect(test.ephemeral).toContain("That takeover request is stale.");
+  await test.coordinator.action({
+    type: "block_actions", userId: "guest", actionId: "claim_host", value: test.coordinator.id,
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
   });
   expect(test.sessions).toContainEqual({ hostId: null });
   expect(test.sessions).toContainEqual({ hostId: "guest" });
   await test.coordinator.endFromSlack();
+});
+
+test("downloads do not block End and are cancelled", async () => {
+  let signal: AbortSignal | undefined;
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
+      sourceId: "track", title: "Track", artist: "Artist",
+    }),
+    prepare: (_track: unknown, _directory: string, _id: string, value: AbortSignal) => {
+      signal = value;
+      return new Promise<string>((_resolve, reject) =>
+        value.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }),
+      );
+    },
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  const add = result.coordinator.action({
+    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value: "ref",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  while (!signal) await Bun.sleep(0);
+  await result.coordinator.action({
+    type: "block_actions", userId: "host", actionId: "end_session", value: result.coordinator.id,
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  await add;
+  expect(signal.aborted).toBeTrue();
+  expect(result.media).toContainEqual({ type: "leave" });
+});
+
+test("late media events cannot advance a newer track", async () => {
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
+      sourceId: value, title: value, artist: "Artist",
+    }),
+    prepare: async (_track: unknown, _directory: string, id: string) => `${id}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  for (const value of ["a", "b"]) await result.coordinator.action({
+    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value,
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  const plays = () => result.media.filter((message): message is { type: string; entryId: string } =>
+    Boolean(message && typeof message === "object" && (message as { type?: string }).type === "play"),
+  );
+  const first = plays()[0]!.entryId;
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  const second = plays()[1]!.entryId;
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  expect(plays()).toHaveLength(2);
+  expect(plays().at(-1)?.entryId).toBe(second);
+  await result.coordinator.endFromSlack();
+});
+
+test("manager overrides permissions and HuddleFM cannot become host", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.action({
+    type: "block_actions", userId: "manager", actionId: "volume_up", value: "",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  });
+  await result.coordinator.action({
+    type: "view_submission", userId: "manager", actionId: "save_settings", value: "",
+    channelId: "channel", messageTs: "", triggerId: "",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id, hostId: "host" }),
+    state: { host: { user: { selected_user: "bot" } } },
+  });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
+  expect(result.ephemeral).toContain("HuddleFM cannot be the host.");
+  await result.coordinator.endFromSlack();
+});
+
+test("HuddleFM leaving ends playback", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.memberLeft("bot");
+  expect(result.media).toContainEqual({ type: "leave" });
+  expect(result.sessions).toContainEqual({ status: "ended" });
 });
 
 test("host transfers ownership and global permissions atomically", async () => {

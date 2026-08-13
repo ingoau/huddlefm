@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { normalizeJoinResponse, normalizeRealtimeEvent } from "./slack-huddle.ts";
+import { channelAccess, normalizeJoinResponse, normalizeRealtimeEvent } from "./slack-huddle.ts";
+
+test("classifies channel access", () => {
+  expect(channelAccess({ is_member: true, is_private: true })).toBe("ready");
+  expect(channelAccess({ is_member: false, is_private: false })).toBe("join");
+  expect(channelAccess({ is_member: false, is_private: true })).toBe("decline");
+  expect(channelAccess()).toBe("decline");
+});
 
 test("normalizes the private join response without nullable MeetingFeatures", () => {
   expect(

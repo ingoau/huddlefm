@@ -1,11 +1,10 @@
 import { expect, test } from "bun:test";
-import { channelAccess, normalizeInteraction } from "./slack-app.ts";
+import { ackEnvelope, normalizeInteraction } from "./slack-app.ts";
 
-test("classifies channel access", () => {
-  expect(channelAccess({ is_member: true, is_private: true })).toBe("ready");
-  expect(channelAccess({ is_member: false, is_private: false })).toBe("join");
-  expect(channelAccess({ is_member: false, is_private: true })).toBe("decline");
-  expect(channelAccess()).toBe("decline");
+test("acknowledges on the socket that received the envelope", () => {
+  const sent: string[] = [];
+  expect(ackEnvelope({ send: value => sent.push(String(value)) }, "envelope", { options: [] })).toBeTrue();
+  expect(sent).toEqual([JSON.stringify({ envelope_id: "envelope", payload: { options: [] } })]);
 });
 
 test("normalizes block actions using immutable values", () => {

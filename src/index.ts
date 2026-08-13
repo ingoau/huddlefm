@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from "bun";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
+import { controlDenied } from "./local-control.ts";
 import { MediaBrowser } from "./media-browser.ts";
 import { SlackAppAdapter } from "./slack-app.ts";
 import { SlackHuddleAdapter, verifySlackIdentity, type ChimeBootstrap } from "./slack-huddle.ts";
@@ -28,27 +29,43 @@ let active: Coordinator | undefined;
 let mediaBrowser: MediaBrowser;
 let botUserId = "";
 let joining = false;
+let mediaJoin: { sessionId: string; gate: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
+let activeMediaSessionId: string | undefined;
 
 async function joinHuddle(channelId: string, inviterUserId: string, callId?: string) {
   if (active || bootstrap || joining) throw new Error("A Huddle session is already active");
   joining = true;
   try {
-    if (!(await slackApp.ensureChannelAccess(channelId))) {
+    if (!(await slackHuddle.ensureChannelAccess(channelId))) {
       if (callId) await slackHuddle.decline(channelId, callId);
       await slackApp.privateChannelNotice(inviterUserId);
       return { declined: true };
     }
     const joined = await slackHuddle.join(channelId);
     const token = crypto.randomUUID();
-    bootstrap = {
+    const attempt = bootstrap = {
       sessionId: crypto.randomUUID(),
       meeting: joined.chimeMeeting,
       attendee: joined.chimeAttendee,
       initialVolume: config.initialVolume,
       bridgeToken: token,
     };
-    await mediaBrowser.start(bootstrap);
-    const coordinator = new Coordinator(
+    const gate = Promise.withResolvers<void>();
+    const mediaAttempt = mediaJoin = { sessionId: attempt.sessionId, gate };
+    const timer = setTimeout(() => gate.reject(new Error("Timed out joining Chime")), 30_000);
+    try {
+      await mediaBrowser.start(attempt);
+      await gate.promise;
+    } catch (error) {
+      await mediaBrowser.stop();
+      if (bootstrap === attempt) bootstrap = undefined;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      if (mediaJoin === mediaAttempt) mediaJoin = undefined;
+    }
+    let coordinator: Coordinator;
+    coordinator = new Coordinator(
       joined,
       inviterUserId,
       botUserId,
@@ -59,17 +76,21 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
       token,
       message => mediaSocket?.send(JSON.stringify(message)),
       async () => {
-        bootstrap = undefined;
-        active = undefined;
         await mediaBrowser.stop();
+        if (active === coordinator) {
+          active = undefined;
+          activeMediaSessionId = undefined;
+        }
+        if (bootstrap === attempt) bootstrap = undefined;
       },
     );
     try {
       await coordinator.start();
       active = coordinator;
+      activeMediaSessionId = attempt.sessionId;
     } catch (error) {
-      bootstrap = undefined;
       await mediaBrowser.stop();
+      if (bootstrap === attempt) bootstrap = undefined;
       throw error;
     }
     return { sessionId: coordinator.id, huddleId: joined.huddleId };
@@ -91,6 +112,8 @@ const server = Bun.serve({
     "/media-page.js": () => new Response(Bun.file("dist/media-page.js"), { headers: { "content-type": "text/javascript" } }),
     "/join": {
       POST: async request => {
+        const denied = controlDenied(request, config.localControlToken);
+        if (denied) return denied;
         const { channelId, inviterUserId } = await request.json() as { channelId?: string; inviterUserId?: string };
         if (!channelId?.match(/^[A-Z0-9]+$/) || !inviterUserId?.match(/^[A-Z0-9]+$/))
           return Response.json({ error: "Invalid channelId or inviterUserId" }, { status: 400 });
@@ -102,11 +125,15 @@ const server = Bun.serve({
         }
       },
     },
-    "/tone": { POST: () => {
+    "/tone": { POST: request => {
+      const denied = controlDenied(request, config.localControlToken);
+      if (denied) return denied;
       mediaSocket?.send(JSON.stringify({ type: "tone", frequency: 440 }));
       return Response.json({ ok: Boolean(mediaSocket) });
     } },
-    "/leave": { POST: async () => {
+    "/leave": { POST: async request => {
+      const denied = controlDenied(request, config.localControlToken);
+      if (denied) return denied;
       await active?.endFromSlack();
       return Response.json({ ok: true });
     } },
@@ -126,10 +153,16 @@ const server = Bun.serve({
     message(socket, raw) {
       const message = JSON.parse(String(raw));
       mediaState = { type: message.type, details: message.details };
+      const pendingJoin = mediaJoin;
+      if (pendingJoin && message.sessionId === pendingJoin.sessionId && message.type === "joined")
+        pendingJoin.gate.resolve();
+      if (pendingJoin && message.sessionId === pendingJoin.sessionId && (message.type === "fatal" || message.type === "ended"))
+        pendingJoin.gate.reject(new Error(`Chime join failed: ${detailMessage(message.details)}`));
       if (message.type === "ready" && bootstrap)
         socket.send(JSON.stringify({ type: "bootstrap", payload: bootstrap }));
-      active?.mediaEvent(message.type);
-      console.log(`[media] ${message.type}${message.type === "fatal" ? `: ${safeError(message.details)}` : ""}`);
+      if (message.sessionId === activeMediaSessionId)
+        active?.mediaEvent(message.type, message.details);
+      console.log(`[media] ${message.type}${message.type === "fatal" ? `: ${detailMessage(message.details)}` : ""}`);
     },
     close(socket) { if (mediaSocket === socket) mediaSocket = undefined; },
   },
@@ -161,6 +194,7 @@ const shutdown = async () => {
   await slackApp.stop();
   slackHuddle.stop();
   await mediaBrowser.close();
+  await catalog.close();
   store.close();
   process.exit();
 };
@@ -171,5 +205,13 @@ function safeError(error: unknown) {
   return (error instanceof Error ? error.message : String(error)).replace(
     /(xox[acpbrs]-|token|cookie|authorization|JoinToken)[^\s,]*/gi,
     "$1[redacted]",
+  );
+}
+
+function detailMessage(details: unknown) {
+  return safeError(
+    details && typeof details === "object" && "message" in details
+      ? (details as { message?: unknown }).message
+      : details,
   );
 }

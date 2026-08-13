@@ -51,8 +51,6 @@ export class Store {
         duration INTEGER,
         artwork TEXT,
         status TEXT NOT NULL,
-        position INTEGER,
-        history_sequence INTEGER,
         file_path TEXT,
         created_at INTEGER NOT NULL
       );
@@ -63,9 +61,13 @@ export class Store {
         PRIMARY KEY (session_id, capability)
       );
     `);
-    this.db
-      .query("UPDATE sessions SET status = 'ended', updated_at = ? WHERE status != 'ended'")
-      .run(Date.now());
+    const closeUnfinished = this.db.transaction(() => {
+      this.db.run("DELETE FROM tracks WHERE session_id IN (SELECT id FROM sessions WHERE status != 'ended')");
+      this.db
+        .query("UPDATE sessions SET status = 'ended', updated_at = ? WHERE status != 'ended'")
+        .run(Date.now());
+    });
+    closeUnfinished();
   }
 
   createSession(session: {
@@ -145,12 +147,11 @@ export class Store {
     duration?: number;
     artwork?: string;
     status: string;
-    position: number;
   }) {
     this.db
       .query(`INSERT INTO tracks
-        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, status, position, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         track.id,
         track.sessionId,
@@ -164,20 +165,13 @@ export class Store {
         track.duration ?? null,
         track.artwork ?? null,
         track.status,
-        track.position,
         Date.now(),
       );
   }
 
-  setTrack(id: string, fields: { status?: string; position?: number | null; history?: number | null; filePath?: string | null }) {
+  setTrack(id: string, fields: { status?: string; filePath?: string | null }) {
     if (fields.status !== undefined)
       this.db.query("UPDATE tracks SET status = ? WHERE id = ?").run(fields.status, id);
-    if (fields.position !== undefined)
-      this.db.query("UPDATE tracks SET position = ? WHERE id = ?").run(fields.position, id);
-    if (fields.history !== undefined)
-      this.db
-        .query("UPDATE tracks SET history_sequence = ? WHERE id = ?")
-        .run(fields.history, id);
     if (fields.filePath !== undefined)
       this.db.query("UPDATE tracks SET file_path = ? WHERE id = ?").run(fields.filePath, id);
   }

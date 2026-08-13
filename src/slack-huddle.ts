@@ -79,6 +79,11 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
   };
 }
 
+export function channelAccess(channel?: { is_member?: boolean; is_private?: boolean }) {
+  if (channel?.is_member) return "ready";
+  return !channel || channel.is_private ? "decline" : "join";
+}
+
 export class SlackHuddleAdapter {
   private socket?: WebSocket;
   private pingTimer?: ReturnType<typeof setInterval>;
@@ -196,6 +201,31 @@ export class SlackHuddleAdapter {
         this.scheduleReconnect();
       });
     }, delay);
+  }
+
+  async ensureChannelAccess(channelId: string) {
+    const info = await this.api("conversations.info", { channel: channelId });
+    if (info.ok !== true) {
+      if (info.error === "channel_not_found") return false;
+      throw new Error(`conversations.info failed: ${String(info.error ?? "unknown_error")}`);
+    }
+    const access = channelAccess(object(info.channel, "channel"));
+    if (access === "ready") return true;
+    if (access === "decline") return false;
+    const joined = await this.api("conversations.join", { channel: channelId });
+    if (joined.ok !== true)
+      throw new Error(`conversations.join failed: ${String(joined.error ?? "unknown_error")}`);
+    return true;
+  }
+
+  private async api(method: string, fields: Record<string, string>) {
+    const response = await fetch(new URL(`/api/${method}`, this.config.workspaceUrl), {
+      method: "POST",
+      headers: { cookie: `d=${this.config.xoxd}` },
+      body: new URLSearchParams({ token: this.config.xoxc, ...fields }),
+    });
+    if (!response.ok) throw new Error(`${method} HTTP ${response.status}`);
+    return object(await response.json(), method);
   }
 
   async join(channelId: string) {

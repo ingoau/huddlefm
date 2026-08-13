@@ -23,9 +23,17 @@ type Body = {
 
 export type Interaction = ReturnType<typeof normalizeInteraction>;
 
-export function channelAccess(channel?: { is_member?: boolean; is_private?: boolean }) {
-  if (channel?.is_member) return "ready";
-  return !channel || channel.is_private ? "decline" : "join";
+export function ackEnvelope(socket: Pick<WebSocket, "send"> & Partial<Pick<WebSocket, "readyState">>, envelopeId: string, payload?: unknown) {
+  if (socket.readyState !== undefined && socket.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(JSON.stringify({
+      envelope_id: envelopeId,
+      ...(payload === undefined ? {} : { payload }),
+    }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeInteraction(body: Body) {
@@ -89,20 +97,6 @@ export class SlackAppAdapter {
     await this.web.views.open({ trigger_id: triggerId, view: view as never });
   }
 
-  async ensureChannelAccess(channelId: string) {
-    let channel: { is_member?: boolean; is_private?: boolean } | undefined;
-    try {
-      channel = (await this.web.conversations.info({ channel: channelId })).channel;
-    } catch (error) {
-      if (slackError(error) !== "channel_not_found") throw error;
-    }
-    const access = channelAccess(channel);
-    if (access === "ready") return true;
-    if (access === "decline") return false;
-    await this.web.conversations.join({ channel: channelId });
-    return true;
-  }
-
   async privateChannelNotice(userId: string) {
     await this.dm(
       userId,
@@ -133,10 +127,14 @@ export class SlackAppAdapter {
         if (envelope.type === "hello") {
           this.reconnectAttempts = 0;
           resolve();
-        } else void this.handleEnvelope(envelope);
+        } else void this.handleEnvelope(socket, envelope);
       });
       socket.addEventListener("error", () => reject(new Error("Socket Mode connection failed")));
-      socket.addEventListener("close", () => this.scheduleReconnect());
+      socket.addEventListener("close", () => {
+        if (this.socket !== socket) return;
+        this.socket = undefined;
+        this.scheduleReconnect();
+      });
     });
   }
 
@@ -152,12 +150,9 @@ export class SlackAppAdapter {
     }, delay);
   }
 
-  private async handleEnvelope(envelope: { envelope_id?: string; type?: string; payload?: Body }) {
+  private async handleEnvelope(socket: WebSocket, envelope: { envelope_id?: string; type?: string; payload?: Body }) {
     if (!envelope.envelope_id) return;
-    const ack = (payload?: unknown) => this.socket?.send(JSON.stringify({
-      envelope_id: envelope.envelope_id,
-      ...(payload === undefined ? {} : { payload }),
-    }));
+    const ack = (payload?: unknown) => ackEnvelope(socket, envelope.envelope_id!, payload);
     if (envelope.type !== "interactive" || !envelope.payload) return ack();
 
     const interaction = normalizeInteraction(envelope.payload);
@@ -183,8 +178,4 @@ function safeError(error: unknown) {
     /(xox[acpbrs]-|token|cookie|authorization)[^\s,]*/gi,
     "$1[redacted]",
   );
-}
-
-function slackError(error: unknown) {
-  return (error as { data?: { error?: string } })?.data?.error;
 }

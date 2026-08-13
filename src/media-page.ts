@@ -14,8 +14,9 @@ if (!token) throw new Error("Missing bridge token");
 
 const protocol = location.protocol === "https:" ? "wss" : "ws";
 const socket = new WebSocket(`${protocol}://${location.host}/bridge?token=${encodeURIComponent(token)}`);
+let mediaSessionId: string | undefined;
 const send = (type: string, details?: unknown) =>
-  socket.send(JSON.stringify({ type, details }));
+  socket.send(JSON.stringify({ type, details, sessionId: mediaSessionId }));
 
 const audioContext = new AudioContext();
 const gain = audioContext.createGain();
@@ -55,13 +56,13 @@ function deck(entryId: string, url: string) {
   const value = { audio, node: audioContext.createMediaElementSource(audio), url };
   value.node.connect(gain);
   audio.addEventListener("ended", () => {
-    if (currentId === entryId) send("track_ended");
+    if (currentId === entryId) send("track_ended", { entryId });
   });
   audio.addEventListener("stalled", () => {
-    if (currentId === entryId) send("stalled");
+    if (currentId === entryId) send("stalled", { entryId });
   });
   audio.addEventListener("error", () => {
-    if (currentId === entryId) send("track_error", audio.error?.message);
+    if (currentId === entryId) send("track_error", { entryId, message: audio.error?.message });
   });
   audio.addEventListener("canplaythrough", () => send("preloaded", { entryId }), { once: true });
   decks.set(entryId, value);
@@ -90,10 +91,12 @@ function stop() {
 }
 
 async function join(payload: {
+  sessionId: string;
   meeting: Record<string, unknown>;
   attendee: Record<string, unknown>;
   initialVolume: number;
 }) {
+  mediaSessionId = payload.sessionId;
   await audioContext.resume();
   gain.gain.value = payload.initialVolume;
 
@@ -156,7 +159,7 @@ socket.addEventListener("message", async event => {
     }
     if (message.type === "resume") {
       if (currentId) await decks.get(currentId)?.audio.play();
-      send("playing");
+      send("playing", { entryId: currentId });
     }
     if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = message.value;
@@ -168,6 +171,10 @@ socket.addEventListener("message", async event => {
     }
   } catch (error) {
     status.textContent = "error";
-    send("fatal", error instanceof Error ? error.message : String(error));
+    const details = {
+      entryId: currentId,
+      message: error instanceof Error ? error.message : String(error),
+    };
+    send(message.type === "play" || message.type === "resume" ? "track_error" : "fatal", details);
   }
 });

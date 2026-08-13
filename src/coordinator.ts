@@ -24,9 +24,10 @@ export class Coordinator {
   private hostId: string | undefined;
   private allowed = new Set(["add", "remove-own"]);
   private serial = Promise.resolve();
+  private preparationSerial = Promise.resolve();
+  private preparations = new Map<string, AbortController>();
   private anchorTimer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setTimeout>;
-  private takeoverTs?: string;
   private lastSearch = new Map<string, number>();
 
   constructor(
@@ -36,7 +37,7 @@ export class Coordinator {
     private slack: SlackAppAdapter,
     private store: Store,
     private tracks: TrackCatalog,
-    private config: { queueLimit: number; initialVolume: number; idleMs: number; port: number },
+    private config: { queueLimit: number; initialVolume: number; idleMs: number; port: number; managerUserId: string },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
     private leaveMedia: () => Promise<void>,
@@ -78,14 +79,14 @@ export class Coordinator {
   }
 
   action(interaction: Interaction) {
+    if (interaction.actionId === "add_track_to_queue") return this.add(interaction, false);
+    if (interaction.actionId === "play_track_next") return this.add(interaction, true);
     const currentId = this.current?.id;
     return this.enqueue(async () => {
       if (interaction.type === "view_submission") return this.settingsSubmission(interaction);
-      if (interaction.actionId !== "claim_host" && interaction.messageTs && interaction.messageTs !== this.uiTs)
+      if (interaction.messageTs && interaction.messageTs !== this.uiTs)
         return this.notice(interaction.userId, "That player is stale; use the newest one.");
       const handlers: Record<string, () => Promise<void> | void> = {
-        add_track_to_queue: () => this.add(interaction, false),
-        play_track_next: () => this.add(interaction, true),
         remove_queue_track: () => this.remove(interaction),
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
@@ -102,11 +103,11 @@ export class Coordinator {
     });
   }
 
-  mediaEvent(type: string) {
+  mediaEvent(type: string, details?: { entryId?: string }) {
     if (type === "track_ended" || type === "track_error" || type === "stalled")
-      void this.enqueue(() => this.advance(type));
+      return this.enqueue(() => this.advance(type, details?.entryId));
     if (type === "fatal" || type === "ended")
-      void this.enqueue(() => this.end(undefined, "media connection ended"));
+      return this.enqueue(() => this.end(undefined, "media connection ended"));
   }
 
   threadActivity(userId: string) {
@@ -122,7 +123,9 @@ export class Coordinator {
 
   memberLeft(userId: string) {
     this.participants.delete(userId);
-    const changed = userId === this.hostId
+    const changed = userId === this.botUserId
+      ? this.enqueue(() => this.end(undefined, "removed from Huddle"))
+      : userId === this.hostId
       ? this.enqueue(() => this.hostLeft())
       : Promise.resolve();
     this.refreshIdle();
@@ -140,7 +143,7 @@ export class Coordinator {
   }
 
   private can(userId: string, capability: string) {
-    return userId === this.hostId || this.allowed.has(capability);
+    return userId === this.config.managerUserId || userId === this.hostId || this.allowed.has(capability);
   }
 
   private async require(interaction: Interaction, capability: string) {
@@ -150,45 +153,74 @@ export class Coordinator {
   }
 
   private async add(interaction: Interaction, first: boolean) {
-    if (!(await this.require(interaction, "add"))) return;
-    if (this.queue.length + Number(Boolean(this.current)) >= this.config.queueLimit)
-      return this.notice(interaction.userId, "The queue is full.");
+    const accepted = await this.enqueue(async () => {
+      if (this.state === "ended") return false;
+      if (interaction.messageTs && interaction.messageTs !== this.uiTs) {
+        await this.notice(interaction.userId, "That player is stale; use the newest one.");
+        return false;
+      }
+      return this.require(interaction, "add");
+    });
+    if (!accepted) return;
     let metadata: TrackMetadata;
     try {
       metadata = await this.tracks.resolve(interaction.value);
     } catch (error) {
       return this.notice(interaction.userId, message(error));
     }
-    if ([this.current, ...this.queue].some(track => track?.sourceId === metadata.sourceId))
-      return this.notice(interaction.userId, "That track is already queued.");
-    const entry: Entry = { ...metadata, id: crypto.randomUUID(), requesterId: interaction.userId, status: "preparing" };
-    first ? this.queue.unshift(entry) : this.queue.push(entry);
-    this.store.addTrack({
-      ...entry,
-      sessionId: this.id,
-      status: entry.status,
-      position: this.queue.indexOf(entry),
+    const pending = await this.enqueue(async () => {
+      if (this.state === "ended" || !(await this.require(interaction, "add"))) return;
+      if (this.queue.length + Number(Boolean(this.current)) >= this.config.queueLimit) {
+        await this.notice(interaction.userId, "The queue is full.");
+        return;
+      }
+      if ([this.current, ...this.queue].some(track => track?.sourceId === metadata.sourceId)) {
+        await this.notice(interaction.userId, "That track is already queued.");
+        return;
+      }
+      const entry: Entry = { ...metadata, id: crypto.randomUUID(), requesterId: interaction.userId, status: "preparing" };
+      const controller = new AbortController();
+      this.preparations.set(entry.id, controller);
+      first ? this.queue.unshift(entry) : this.queue.push(entry);
+      this.store.addTrack({ ...entry, sessionId: this.id, status: entry.status });
+      await this.render();
+      return { entry, controller };
     });
-    await this.render();
+    if (!pending) return;
+    const { entry, controller } = pending;
+    const prepared = this.preparationSerial.then(() =>
+      this.tracks.prepare(entry, `data/media/${this.id}`, entry.id, controller.signal),
+    );
+    this.preparationSerial = prepared.then(() => undefined, () => undefined);
     try {
-      entry.filePath = await this.tracks.prepare(entry, `data/media/${this.id}`, entry.id);
-      entry.status = "ready";
-      this.store.setTrack(entry.id, { status: "ready", filePath: entry.filePath });
-      if (!this.current) await this.startNext();
-      else {
-        await this.render();
-        this.syncPreloads();
-      }
+      const filePath = await prepared;
+      await this.enqueue(async () => {
+        this.preparations.delete(entry.id);
+        if (this.state === "ended" || !this.queue.includes(entry))
+          return rm(filePath, { force: true });
+        entry.filePath = filePath;
+        entry.status = "ready";
+        this.store.setTrack(entry.id, { status: "ready", filePath });
+        if (!this.current) await this.startNext();
+        else {
+          await this.render();
+          this.syncPreloads();
+        }
+      });
     } catch (error) {
-      entry.status = "failed";
-      this.queue = this.queue.filter(item => item !== entry);
-      this.store.setTrack(entry.id, { status: "failed", position: null });
-      await this.notice(entry.requesterId, `Could not prepare ${entry.title}: ${message(error)}`);
-      if (!this.current) await this.startNext();
-      else {
-        await this.render();
-        this.syncPreloads();
-      }
+      await this.enqueue(async () => {
+        this.preparations.delete(entry.id);
+        if (this.state === "ended" || !this.queue.includes(entry)) return;
+        entry.status = "failed";
+        this.queue = this.queue.filter(item => item !== entry);
+        this.store.setTrack(entry.id, { status: "failed" });
+        await this.notice(entry.requesterId, `Could not prepare ${entry.title}: ${message(error)}`);
+        if (!this.current) await this.startNext();
+        else {
+          await this.render();
+          this.syncPreloads();
+        }
+      });
     }
   }
 
@@ -205,7 +237,7 @@ export class Coordinator {
     this.current = next;
     next.status = "playing";
     this.state = "playing";
-    this.store.setTrack(next.id, { status: "playing", position: null });
+    this.store.setTrack(next.id, { status: "playing" });
     this.store.setSession(this.id, { status: "playing" });
     this.sendMedia({
       type: "play",
@@ -240,14 +272,12 @@ export class Coordinator {
     });
   }
 
-  private async advance(reason = "played") {
+  private async advance(reason = "played", expectedId?: string) {
+    if (expectedId && this.current?.id !== expectedId) return;
     if (this.current) {
       this.current.status = reason === "played" || reason === "track_ended" ? "played" : "failed";
       if (reason === "played" || reason === "track_ended") this.history.push(this.current);
-      this.store.setTrack(this.current.id, {
-        status: this.current.status,
-        history: this.current.status === "played" ? this.history.length : null,
-      });
+      this.store.setTrack(this.current.id, { status: this.current.status });
     }
     this.current = undefined;
     await this.startNext();
@@ -266,12 +296,12 @@ export class Coordinator {
     if (this.current) {
       this.current.status = "ready";
       this.queue.unshift(this.current);
-      this.store.setTrack(this.current.id, { status: "ready", position: 0, history: null });
+      this.store.setTrack(this.current.id, { status: "ready" });
     }
     this.current = undefined;
     prior.status = "ready";
     this.queue.unshift(prior);
-    this.store.setTrack(prior.id, { status: "ready", position: 0, history: null });
+    this.store.setTrack(prior.id, { status: "ready" });
     await this.startNext();
   }
 
@@ -297,6 +327,7 @@ export class Coordinator {
     const capability = entry.requesterId === interaction.userId ? "remove-own" : "remove-any";
     if (!(await this.require(interaction, capability))) return;
     this.queue.splice(this.queue.indexOf(entry), 1);
+    this.preparations.get(entry.id)?.abort();
     this.store.removeTrack(entry.id);
     if (entry.filePath) await rm(entry.filePath, { force: true });
     await this.render();
@@ -307,6 +338,7 @@ export class Coordinator {
   private async clear(interaction: Interaction) {
     if (!(await this.require(interaction, "clear"))) return;
     for (const entry of this.queue) {
+      this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
       if (entry.filePath) await rm(entry.filePath, { force: true });
     }
@@ -332,7 +364,7 @@ export class Coordinator {
   }
 
   private async settingsModal(interaction: Interaction) {
-    if (interaction.userId !== this.hostId)
+    if (interaction.userId !== this.hostId && interaction.userId !== this.config.managerUserId)
       return this.notice(interaction.userId, "Only the host can change settings.");
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
@@ -347,7 +379,11 @@ export class Coordinator {
           block_id: "host",
           optional: true,
           label: plain("Transfer host"),
-          element: { type: "users_select", action_id: "user", initial_user: this.hostId },
+          element: {
+            type: "users_select",
+            action_id: "user",
+            ...(this.hostId ? { initial_user: this.hostId } : {}),
+          },
         },
         {
           type: "input",
@@ -368,9 +404,14 @@ export class Coordinator {
   private async settingsSubmission(interaction: Interaction) {
     if (interaction.actionId !== "save_settings") return;
     const metadata = JSON.parse(interaction.metadata || "{}") as { sessionId?: string; hostId?: string };
-    if (metadata.sessionId !== this.id || metadata.hostId !== this.hostId || interaction.userId !== this.hostId)
+    if (
+      metadata.sessionId !== this.id || metadata.hostId !== this.hostId ||
+      (interaction.userId !== this.hostId && interaction.userId !== this.config.managerUserId)
+    )
       return this.notice(interaction.userId, "Settings are stale; reopen them.");
     const nextHost = interaction.state.host?.user?.selected_user;
+    if (nextHost === this.botUserId)
+      return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
       return this.notice(interaction.userId, "The selected host is not in this Huddle.");
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
@@ -388,26 +429,16 @@ export class Coordinator {
     this.hostId = undefined;
     this.store.setSession(this.id, { hostId: null });
     await this.render();
-    this.takeoverTs = await this.slack.post(
-      this.room.uiChannelId,
-      this.room.uiThreadTs,
-      "The host left. Take over to manage HuddleFM.",
-      [{ type: "actions", block_id: `takeover_${this.id}_${this.revision}`, elements: [{
-        type: "button", action_id: "claim_host", text: plain("Take over"), value: this.id,
-      }] }],
-    );
   }
 
   private async claimHost(interaction: Interaction) {
+    if (interaction.value !== this.id || interaction.messageTs !== this.uiTs)
+      return this.notice(interaction.userId, "That takeover request is stale.");
     if (this.hostId) return this.notice(interaction.userId, "Host already claimed.");
-    if (!this.participants.has(interaction.userId))
+    if (interaction.userId === this.botUserId || !this.participants.has(interaction.userId))
       return this.notice(interaction.userId, "Join the Huddle before taking over.");
     this.hostId = interaction.userId;
     this.store.setSession(this.id, { hostId: interaction.userId });
-    if (this.takeoverTs) {
-      await this.slack.delete(this.room.uiChannelId, this.takeoverTs).catch(() => {});
-      this.takeoverTs = undefined;
-    }
     await this.render();
   }
 
@@ -465,6 +496,7 @@ export class Coordinator {
         { type: "actions", block_id: `actions_${id}`, elements: [
           { type: "button", action_id: "view_full_queue", text: plain("View queue"), value: this.id },
           { type: "button", action_id: "clear_queue", text: plain("Clear"), value: this.id, confirm: confirm("Clear queue?", "This removes every upcoming track.", "Clear") },
+          ...(!this.hostId ? [{ type: "button", action_id: "claim_host", text: plain("Take over"), value: this.id }] : []),
           { type: "button", action_id: "open_settings", text: plain("Settings"), value: this.id },
           { type: "button", action_id: "end_session", text: plain("End"), style: "danger", value: this.id, confirm: confirm("End playback?", "This stops playback and ends the session.", "End") },
         ] },
@@ -488,9 +520,11 @@ export class Coordinator {
 
   private async end(userId: string | undefined, reason: string) {
     if (this.state === "ended") return;
-    if (userId && userId !== this.hostId && !this.allowed.has("end-session"))
+    if (userId && !this.can(userId, "end-session"))
       return this.notice(userId, "Only the host can end this session.");
     this.state = "ended";
+    for (const controller of this.preparations.values()) controller.abort();
+    this.preparations.clear();
     clearTimeout(this.idleTimer);
     clearTimeout(this.anchorTimer);
     this.store.setSession(this.id, { status: "ended" });

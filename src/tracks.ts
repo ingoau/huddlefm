@@ -1,7 +1,8 @@
 import YTMusic from "ytmusic-api";
-import { isIP } from "node:net";
-import { lookup } from "node:dns/promises";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
+import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
+
+export { assertPublicUrl } from "./public-proxy.ts";
 
 export type TrackMetadata = {
   sourceInput: string;
@@ -18,6 +19,7 @@ export class TrackCatalog {
   private music = new YTMusic();
   private references = new Map<string, TrackMetadata | string>();
   private command: string[];
+  private proxy?: PublicNetworkProxy;
 
   constructor(
     private limits: { durationSeconds: number; downloadBytes: number; chromePath: string },
@@ -31,7 +33,18 @@ export class TrackCatalog {
   }
 
   async initialize() {
-    await this.music.initialize();
+    this.proxy = await PublicNetworkProxy.start();
+    try {
+      await this.music.initialize();
+    } catch (error) {
+      await this.close();
+      throw error;
+    }
+  }
+
+  async close() {
+    await this.proxy?.close();
+    this.proxy = undefined;
   }
 
   async suggestions(query: string) {
@@ -80,7 +93,7 @@ export class TrackCatalog {
     if (!url) throw new Error("Only absolute HTTP or HTTPS URLs are supported");
     await assertPublicUrl(url);
     const metadata = await runJson([
-      ...this.command,
+      ...this.extractor(),
       "--dump-single-json",
       "--skip-download",
       "--no-playlist",
@@ -114,11 +127,13 @@ export class TrackCatalog {
     };
   }
 
-  async prepare(track: TrackMetadata, directory: string, entryId: string) {
+  async prepare(track: TrackMetadata, directory: string, entryId: string, signal?: AbortSignal) {
+    if (signal?.aborted) throw new Error("Track preparation cancelled");
     await mkdir(directory, { recursive: true });
+    if (signal?.aborted) throw new Error("Track preparation cancelled");
     const path = `${directory}/${entryId}.%(ext)s`;
     const result = await run([
-      ...this.command,
+      ...this.extractor(),
       "--extract-audio",
       "--audio-format",
       "opus",
@@ -133,11 +148,32 @@ export class TrackCatalog {
       path,
       "--",
       track.canonicalUrl,
-    ], 180_000);
+    ], 180_000, signal);
     const filePath = result.stdout.trim().split("\n").at(-1);
     if (!filePath || !(await Bun.file(filePath).exists()))
       throw new Error("Extractor produced no playable file");
-    return filePath;
+    try {
+      if ((await stat(filePath)).size > this.limits.downloadBytes)
+        throw new Error("Track exceeds the download limit");
+      const probe = await run([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", filePath,
+      ], 15_000, signal);
+      const duration = Number(probe.stdout.trim());
+      if (!Number.isFinite(duration) || duration <= 0)
+        throw new Error("Could not verify the downloaded track duration");
+      if (duration > this.limits.durationSeconds)
+        throw new Error("Track exceeds the duration limit");
+      return filePath;
+    } catch (error) {
+      await rm(filePath, { force: true });
+      throw error;
+    }
+  }
+
+  private extractor() {
+    if (!this.proxy) throw new Error("Track catalog is not initialized");
+    return [...this.command, "--proxy", this.proxy.url];
   }
 
   private remember(value: TrackMetadata | string) {
@@ -164,59 +200,25 @@ function parseHttpUrl(input: string) {
   }
 }
 
-export async function assertPublicUrl(url: URL) {
-  if (url.username || url.password) throw new Error("Credentials in URLs are not allowed");
-  if (url.hostname === "localhost" || url.hostname.endsWith(".localhost"))
-    throw new Error("Local URLs are not allowed");
-  const addresses = isIP(url.hostname)
-    ? [{ address: url.hostname }]
-    : await lookup(url.hostname, { all: true });
-  if (!addresses.length || addresses.some(({ address }) => !publicIp(address)))
-    throw new Error("Private or reserved network destinations are not allowed");
-}
-
-function publicIp(address: string) {
-  if (address.includes(":")) {
-    const value = address.toLowerCase();
-    return !(
-      value === "::" ||
-      value === "::1" ||
-      value.startsWith("fc") ||
-      value.startsWith("fd") ||
-      value.startsWith("fe8") ||
-      value.startsWith("fe9") ||
-      value.startsWith("fea") ||
-      value.startsWith("feb") ||
-      value.startsWith("2001:db8:")
-    );
-  }
-  const [a, b] = address.split(".").map(Number);
-  return !(
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b! >= 16 && b! <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b! >= 64 && b! <= 127) ||
-    a! >= 224
-  );
-}
-
 async function runJson(command: string[]) {
   const { stdout } = await run(command, 30_000);
   return JSON.parse(stdout);
 }
 
-async function run(command: string[], timeout: number) {
+async function run(command: string[], timeout: number, signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error("Track preparation cancelled");
   const process = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => process.kill(), timeout);
+  const abort = () => process.kill();
+  signal?.addEventListener("abort", abort, { once: true });
   const [stdout, stderr, code] = await Promise.all([
     new Response(process.stdout).text(),
     new Response(process.stderr).text(),
     process.exited,
   ]);
   clearTimeout(timer);
+  signal?.removeEventListener("abort", abort);
+  if (signal?.aborted) throw new Error("Track preparation cancelled");
   if (code) throw new Error(stderr.trim().split("\n").at(-1) ?? "Extractor failed");
   return { stdout, stderr };
 }
