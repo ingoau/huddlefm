@@ -53,6 +53,7 @@ let tone: OscillatorNode | undefined;
 let audioReported = false;
 let cameraEnabled = true;
 let cameraRunning = false;
+let cameraInputReady = false;
 const camera = Promise.withResolvers<MediaStream>();
 
 lyrics.addEventListener("braccato:lyrics-loaded", event => {
@@ -83,16 +84,13 @@ async function setCameraEnabled(enabled: boolean) {
   if (!enabled) {
     cameraRunning = false;
     session.audioVideo.stopLocalVideoTile();
-    await session.audioVideo.stopVideoInput();
     return;
   }
-  const stream = await camera.promise;
+  if (!cameraInputReady) {
+    await session.audioVideo.startVideoInput(await camera.promise);
+    cameraInputReady = true;
+  }
   if (!cameraEnabled) return;
-  await session.audioVideo.startVideoInput(stream);
-  if (!cameraEnabled) {
-    await session.audioVideo.stopVideoInput();
-    return;
-  }
   session.audioVideo.startLocalVideoTile();
   cameraRunning = true;
 }
@@ -284,6 +282,7 @@ socket.addEventListener("message", async event => {
       session?.audioVideo.stopLocalVideoTile();
       await session?.audioVideo.stopVideoInput();
       cameraRunning = false;
+      cameraInputReady = false;
       session?.audioVideo.stop();
     }
   } catch (error) {
