@@ -25,8 +25,8 @@ export class TrackCatalog {
     private limits: { durationSeconds: number; downloadBytes: number },
   ) {
     this.command = [
-      "uvx", "--python", "3.13", "--from", "yt-dlp", "yt-dlp",
-      "--remote-components", "ejs:github",
+      "uvx", "--python", "3.13", "--prerelease", "allow",
+      "--from", "yt-dlp[default]", "yt-dlp", "--force-ipv4",
     ];
   }
 

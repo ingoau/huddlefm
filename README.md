@@ -2,7 +2,7 @@
 
 Single-workspace Slack Huddle music player. Inviting the dedicated HuddleFM user joins the Huddle, posts an interactive thread player, searches YouTube Music, validates direct media URLs, and publishes prepared audio through Amazon Chime.
 
-Requirements: Bun, Chrome, `uv`, Python 3.13, FFmpeg, and network access. `yt-dlp` selects its currently supported YouTube clients automatically.
+Requirements: Bun, Chrome, `uv`, Python 3.13, Deno, FFmpeg, and network access. HuddleFM runs the current yt-dlp nightly release and lets it select supported YouTube clients automatically.
 
 ```bash
 bun install
