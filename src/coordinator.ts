@@ -91,6 +91,19 @@ export class Coordinator {
     return this.tracks.suggestions(interaction.value);
   }
 
+  handles(interaction: Interaction) {
+    if (
+      interaction.channelId === this.room.uiChannelId &&
+      interaction.messageTs === this.uiTs
+    ) return true;
+    if (interaction.value === this.id) return true;
+    try {
+      return JSON.parse(interaction.metadata || "{}").sessionId === this.id;
+    } catch {
+      return false;
+    }
+  }
+
   action(interaction: Interaction) {
     if (interaction.actionId === "add_track_to_queue") return this.add(interaction);
     const currentId = this.current?.id;
