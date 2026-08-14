@@ -9,6 +9,7 @@ import {
 import "@braccato/core/element";
 import type { BraccatoLyricsElement } from "@braccato/core/element";
 import type { Lyric } from "@braccato/core";
+import { volumeGain } from "./volume.ts";
 import "./media-page.css";
 
 const status = document.querySelector("#status")!;
@@ -205,7 +206,7 @@ async function join(payload: {
 }) {
   mediaSessionId = payload.sessionId;
   await audioContext.resume();
-  gain.gain.value = payload.initialVolume;
+  gain.gain.value = volumeGain(payload.initialVolume);
 
   const logger = new ConsoleLogger("HuddleFM", LogLevel.WARN);
   const deviceController = new DefaultDeviceController(logger);
@@ -304,7 +305,7 @@ socket.addEventListener("message", async event => {
       send("playback_position", { entryId: currentId, seconds: current.audio.currentTime });
     }
     if (message.type === "stop") stop();
-    if (message.type === "volume") gain.gain.value = message.value;
+    if (message.type === "volume") gain.gain.value = volumeGain(message.value);
     if (message.type === "lyrics_enabled") await setCameraEnabled(message.enabled);
     if (message.type === "leave") {
       tone?.stop();
