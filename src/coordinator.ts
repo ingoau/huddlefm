@@ -737,6 +737,18 @@ export class Coordinator {
               .map(value => ({ text: plain(permissionLabels[value]), value })),
           },
         },
+        {
+          type: "actions",
+          block_id: "session_actions",
+          elements: [{
+            type: "button",
+            action_id: "end_session",
+            text: plain("End"),
+            style: "danger",
+            value: this.id,
+            confirm: confirm("End playback?", "This stops playback and ends the session.", "End"),
+          }],
+        },
       ],
     });
   }
@@ -871,11 +883,13 @@ export class Coordinator {
           { type: "button", action_id: "toggle_playback", text: icon(this.state === "paused" ? ":ms-play:" : ":ms-pause:"), style: "primary", value: this.id },
           { type: "button", action_id: "next_track", text: icon(":ms-skip-forward:"), value: this.id },
         ] },
+        { type: "actions", block_id: `volume_${id}`, elements: [
+          { type: "button", action_id: "volume_down", text: icon(":ms-speaker-low-volume:"), value: this.id },
+          { type: "button", action_id: "volume_up", text: icon(":ms-speaker-loud-volume:"), value: this.id },
+        ] },
         { type: "actions", block_id: `seek_${id}`, elements: [
           { type: "button", action_id: "seek_back", text: icon(":ms-rewind:"), value: this.id },
           { type: "button", action_id: "seek_forward", text: icon(":ms-fast-forward:"), value: this.id },
-          { type: "button", action_id: "volume_down", text: icon(":ms-speaker-low-volume:"), value: this.id },
-          { type: "button", action_id: "volume_up", text: icon(":ms-speaker-loud-volume:"), value: this.id },
         ] },
         { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
       ],
@@ -886,8 +900,6 @@ export class Coordinator {
       title: plain(next ? `Next: ${next.title}` : "Nothing queued"),
       subtitle: plain(next ? `${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}` : "Add a song to keep the music going"),
       ...(next?.artwork ? { icon: { type: "image", image_url: next.artwork, alt_text: `${next.title} artwork` } } : {}),
-      is_collapsible: true,
-      default_collapsed: true,
       child_blocks: [
         { type: "context", block_id: `queue_status_${id}`, elements: [
           { type: "mrkdwn", text: `${next ? `${next.automatic ? "Autoplay recommendation" : `Added by <@${next.requesterId}>`} · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue` },
@@ -896,11 +908,10 @@ export class Coordinator {
           { type: "external_select", action_id: "add_track_to_queue", placeholder: plain("Add to queue"), min_query_length: 3 },
         ] },
         { type: "actions", block_id: `actions_${id}`, elements: [
-          { type: "button", action_id: "view_full_queue", text: plain("View queue"), value: this.id },
+          { type: "button", action_id: "view_full_queue", text: plain("Queue"), value: this.id },
           { type: "button", action_id: "clear_queue", text: plain("Clear"), value: this.id, confirm: confirm("Clear queue?", "This removes every upcoming track.", "Clear") },
           ...(!this.hostId ? [{ type: "button", action_id: "claim_host", text: plain("Take over"), value: this.id }] : []),
           { type: "button", action_id: "open_settings", text: plain("Settings"), value: this.id },
-          { type: "button", action_id: "end_session", text: plain("End"), style: "danger", value: this.id, confirm: confirm("End playback?", "This stops playback and ends the session.", "End") },
         ] },
       ],
     }];
