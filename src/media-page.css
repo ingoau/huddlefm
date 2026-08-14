@@ -149,9 +149,8 @@ braccato-lyrics {
 }
 
 .blyrics-container:not(.blyrics-user-scrolling) > .blyrics--line:has(~ .blyrics--active):not(.blyrics--animating) {
-  opacity: 0;
   filter: blur(5px);
-  transition: filter .25s, opacity .9s, transform .166s var(--blyrics-anim-delay, 0s) !important;
+  transition: filter .25s, transform .166s var(--blyrics-anim-delay, 0s) !important;
 }
 
 .blyrics-container > .blyrics--line.blyrics--active,
