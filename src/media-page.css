@@ -9,9 +9,9 @@ html, body {
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #09090b;
+  background: #08080a;
   color: white;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
 }
 
 #stage {
@@ -21,18 +21,18 @@ html, body {
   width: 100vw;
   height: 100vh;
   padding: 52px 52px 34px;
-  background: #0b0b0f;
+  background: #0a0a0c;
 }
 
 #artwork {
   position: absolute;
   z-index: 0;
-  inset: -15%;
+  inset: -18%;
   background-position: center;
   background-size: cover;
-  filter: blur(72px) brightness(.6) saturate(1.55);
-  opacity: .82;
-  transform: scale(1.08);
+  filter: blur(76px) brightness(.54) saturate(1.55);
+  opacity: .86;
+  transform: scale(1.1);
   transition: opacity .65s ease, transform .9s cubic-bezier(.2, .8, .2, 1);
 }
 
@@ -41,39 +41,33 @@ html, body {
   position: absolute;
   z-index: 0;
   inset: 0;
-  background: linear-gradient(145deg, rgb(8 8 12 / .46), rgb(4 4 8 / .82));
+  background: linear-gradient(115deg, rgb(0 0 0 / .22), rgb(5 5 8 / .5) 48%, rgb(0 0 0 / .66));
 }
 
-#stage::after {
-  content: "";
-  position: absolute;
-  z-index: 0;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(115deg, transparent, rgb(255 255 255 / .04), transparent);
-  animation: sheen 9s ease-in-out infinite alternate;
-}
+#lyrics-frame, #progress, header { position: relative; z-index: 1; }
 
-header, #lyrics-frame, #progress { position: relative; z-index: 1; }
-
-header, #lyrics-frame {
+#lyrics-frame, header {
   opacity: 1;
   transform: translateY(0);
   transition: opacity .32s ease, transform .55s cubic-bezier(.2, .8, .2, 1);
 }
 
-#stage.changing #artwork { opacity: 0; transform: scale(1.14); }
+#stage.changing #artwork { opacity: 0; transform: scale(1.16); }
 
 #stage.changing header,
 #stage.changing #lyrics-frame { opacity: 0; transform: translateY(-10px); }
 
-header { min-width: 0; padding-bottom: 22px; }
+header {
+  min-width: 0;
+  padding-bottom: 22px;
+}
 
 h1 {
   margin: 0 0 4px;
   overflow: hidden;
   font-size: 28px;
-  line-height: 1.1;
+  font-weight: 700;
+  line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -81,17 +75,17 @@ h1 {
 #artist {
   margin: 0;
   overflow: hidden;
-  color: rgb(255 255 255 / .6);
+  color: rgb(255 255 255 / .58);
   font-size: 17px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 #lyrics-frame {
-  position: relative;
   min-height: 0;
   overflow: hidden;
-  mask-image: linear-gradient(to bottom, transparent, #000 9%, #000 78%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 12%, #000 78%, transparent);
 }
 
 braccato-lyrics {
@@ -101,20 +95,66 @@ braccato-lyrics {
 }
 
 .blyrics-container {
-  --blyrics-font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  --blyrics-font-size: 42px;
-  --blyrics-padding: 14px;
+  --blyrics-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+  --blyrics-font-size: 38px;
+  --blyrics-font-weight: 700;
+  --blyrics-line-height: 1.16;
+  --blyrics-padding: 13px;
+  --blyrics-scale: 1;
+  --blyrics-active-scale: 1;
   --blyrics-lyric-active-color: white;
-  --blyrics-lyric-inactive-color: rgb(255 255 255 / .22);
-  --blyrics-glow-color: rgb(216 180 254 / .72);
-  padding-top: var(--blyrics-padding-top, 40px);
+  --blyrics-lyric-inactive-color: rgb(255 255 255 / .2);
+  --blyrics-glow-color: rgb(255 255 255 / .0001);
+  --blyrics-lyric-scroll-duration: 400ms;
+  --blyrics-lyric-scroll-timing-function: ease-in-out;
+  padding-top: 40px;
 }
 
 .blyrics-container > div { cursor: default; }
 
+.blyrics-container:not([data-sync="none"]):not(.blyrics-user-scrolling) > .blyrics--line {
+  filter: blur(8px);
+  transition: filter .5s, opacity .5s, transform .4s !important;
+}
+
+.blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line:not(.blyrics--active) {
+  filter: blur(1.5px) !important;
+}
+
+.blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line + .blyrics--line {
+  filter: blur(3px) !important;
+}
+
+.blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line + .blyrics--line + .blyrics--line {
+  filter: blur(5px) !important;
+}
+
+.blyrics-container:not(.blyrics-user-scrolling) > .blyrics--line:has(~ .blyrics--active):not(.blyrics--animating) {
+  opacity: 0;
+  filter: blur(5px);
+}
+
+.blyrics-container > .blyrics--line.blyrics--active,
+.blyrics-container > .blyrics--line.blyrics--animating {
+  opacity: 1;
+  filter: none !important;
+}
+
+.blyrics--word { transform: translateY(3px); }
+.blyrics--word.blyrics--animating { transform: none; }
+
+.blyrics--translated,
+.blyrics--romanized {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: rgb(255 255 255 / .38);
+  font-size: 18px;
+}
+
 .blyrics-container[data-no-lyrics="true"] {
-  padding-top: 120px;
-  font-size: 28px;
+  padding-top: 220px;
+  font-size: 26px;
 }
 
 #capture {
@@ -129,26 +169,29 @@ braccato-lyrics {
 
 #progress {
   position: absolute;
-  right: 52px;
+  right: 48px;
   bottom: 20px;
-  left: 52px;
-  height: 4px;
+  left: 48px;
+  height: 3px;
   overflow: hidden;
   border-radius: 999px;
-  background: rgb(255 255 255 / .18);
+  background: rgb(255 255 255 / .16);
 }
 
 #progress-fill {
   width: 100%;
   height: 100%;
   border-radius: inherit;
-  background: rgb(255 255 255 / .9);
-  box-shadow: 0 0 12px rgb(255 255 255 / .35);
+  background: rgb(255 255 255 / .88);
   transform: scaleX(0);
   transform-origin: left;
 }
 
-@keyframes sheen {
-  from { transform: translateX(-18%); }
-  to { transform: translateX(18%); }
+@media (max-width: 560px) {
+  #stage {
+    padding: 44px 34px 32px;
+  }
+
+  .blyrics-container { --blyrics-font-size: 34px; padding-top: 80px; }
+  #progress { right: 34px; left: 34px; }
 }
