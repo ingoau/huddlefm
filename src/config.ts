@@ -21,7 +21,7 @@ export function loadConfig() {
     queueLimit: Number(process.env.QUEUE_LIMIT ?? 50),
     durationSeconds: Number(process.env.TRACK_DURATION_LIMIT_SECONDS ?? 1_200),
     downloadBytes: Number(process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000),
-    initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.1),
+    initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.5),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 120_000),
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     managerUserId: process.env.MANAGER_USER_ID ?? "U0923H02Y3B",
