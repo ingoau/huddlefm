@@ -95,6 +95,22 @@ test("rejects stale player actions", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("routes message and modal interactions to their session", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const interaction = {
+    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value: "ref",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  };
+  expect(test.coordinator.handles(interaction)).toBeTrue();
+  expect(test.coordinator.handles({ ...interaction, messageTs: "other" })).toBeFalse();
+  expect(test.coordinator.handles({
+    ...interaction, channelId: "", messageTs: "", metadata: JSON.stringify({ sessionId: test.coordinator.id }),
+  })).toBeTrue();
+  expect(test.coordinator.handles({ ...interaction, value: test.coordinator.id, channelId: "", messageTs: "" })).toBeTrue();
+  await test.coordinator.endFromSlack();
+});
+
 test("first current participant claims a vacant host role", async () => {
   const test = setup();
   await test.coordinator.start();
@@ -393,4 +409,48 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
   const finalPlays = result.media.filter(value => (value as { type?: string }).type === "play") as { sourceId: string }[];
   expect(finalPlays[1]?.sourceId).toBe(ids.b);
   await result.coordinator.endFromSlack();
+});
+
+test("collaborative preset grants everything except destructive permissions", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.action({
+    type: "view_submission", userId: "host", actionId: "save_settings", value: "",
+    channelId: "channel", messageTs: "", triggerId: "",
+    metadata: JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }),
+    state: {
+      volume: { percent: { value: "60" } },
+      permission_preset: { selected: { selected_option: { value: "collaborative" } } },
+      permissions: { selected: { selected_options: [] } },
+    },
+  });
+  expect(test.permissions).toContainEqual({ capability: "manage-queue", allowed: true });
+  expect(test.permissions).toContainEqual({ capability: "volume", allowed: true });
+  expect(test.permissions).toContainEqual({ capability: "clear", allowed: false });
+  expect(test.permissions).toContainEqual({ capability: "end-session", allowed: false });
+  await test.coordinator.endFromSlack();
+});
+
+test("thread anchoring is enabled by default and can be disabled", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const action = (type: string, state = {}) => test.coordinator.action({
+    type, userId: "host", actionId: type === "view_submission" ? "save_settings" : "open_settings", value: "",
+    channelId: "channel", messageTs: type === "view_submission" ? "" : "1", triggerId: "trigger",
+    metadata: type === "view_submission" ? JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }) : "",
+    state,
+  });
+
+  await action("block_actions");
+  expect(JSON.stringify(test.modals[0])).toContain('"block_id":"anchor","optional":true');
+  expect(JSON.stringify(test.modals[0])).toContain('"initial_options":[{"text":{"type":"plain_text","text":"Keep player at bottom of thread"}');
+  await action("view_submission", {
+    volume: { percent: { value: "60" } },
+    anchor: { enabled: { selected_options: [] } },
+  });
+  await action("block_actions");
+  const anchor = (test.modals[1] as [string, { blocks: { block_id: string; element: { initial_options: unknown[] } }[] }])[1]
+    .blocks.find(block => block.block_id === "anchor");
+  expect(anchor?.element.initial_options).toEqual([]);
+  await test.coordinator.endFromSlack();
 });

@@ -3,7 +3,7 @@ import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
-import { capabilities, Store } from "./store.ts";
+import { capabilities, permissionPresets, Store } from "./store.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 
 type Entry = TrackMetadata & {
@@ -28,10 +28,11 @@ export class Coordinator {
   private autoplayEnabled = false;
   private autoplayGeneration = 0;
   private autoplayPending = false;
+  private anchorEnabled = true;
   private revision = 0;
   private uiTs = "";
   private hostId: string | undefined;
-  private allowed = new Set(["add", "remove-own"]);
+  private allowed = new Set<string>(permissionPresets.default);
   private serial = Promise.resolve();
   private preparationSerial = Promise.resolve();
   private preparations = new Map<string, AbortController>();
@@ -94,6 +95,19 @@ export class Coordinator {
     return this.tracks.suggestions(interaction.value);
   }
 
+  handles(interaction: Interaction) {
+    if (
+      interaction.channelId === this.room.uiChannelId &&
+      interaction.messageTs === this.uiTs
+    ) return true;
+    if (interaction.value === this.id) return true;
+    try {
+      return JSON.parse(interaction.metadata || "{}").sessionId === this.id;
+    } catch {
+      return false;
+    }
+  }
+
   action(interaction: Interaction) {
     if (interaction.actionId === "add_track_to_queue") return this.add(interaction);
     const currentId = this.current?.id;
@@ -134,7 +148,7 @@ export class Coordinator {
   }
 
   threadActivity(userId: string) {
-    if (userId === this.botUserId || this.state === "ended") return;
+    if (userId === this.botUserId || this.state === "ended" || !this.anchorEnabled) return;
     clearTimeout(this.anchorTimer);
     this.anchorTimer = setTimeout(() => void this.enqueue(() => this.reanchor()), 5_000);
   }
@@ -666,6 +680,21 @@ export class Coordinator {
         },
         {
           type: "input",
+          block_id: "anchor",
+          optional: true,
+          label: plain("Thread position"),
+          hint: plain("After thread activity, HuddleFM deletes and re-sends the player."),
+          element: {
+            type: "checkboxes",
+            action_id: "enabled",
+            options: [{ text: plain("Keep player at bottom of thread"), value: "enabled" }],
+            initial_options: this.anchorEnabled
+              ? [{ text: plain("Keep player at bottom of thread"), value: "enabled" }]
+              : [],
+          },
+        },
+        {
+          type: "input",
           block_id: "host",
           optional: true,
           label: plain("Transfer host"),
@@ -673,6 +702,24 @@ export class Coordinator {
             type: "users_select",
             action_id: "user",
             ...(this.hostId ? { initial_user: this.hostId } : {}),
+          },
+        },
+        {
+          type: "input",
+          block_id: "permission_preset",
+          optional: true,
+          label: plain("Apply permission preset"),
+          hint: plain("Optional. Saving applies the preset to the custom permissions below."),
+          element: {
+            type: "static_select",
+            action_id: "selected",
+            placeholder: plain("Choose a preset"),
+            options: ([
+              ["default", "Default"],
+              ["host-only", "Host only"],
+              ["collaborative", "Collaborative"],
+              ["communism", "Communism"],
+            ] satisfies [string, string][]).map(([value, label]) => ({ text: plain(label), value })),
           },
         },
         {
@@ -708,7 +755,13 @@ export class Coordinator {
     const percent = Number(value);
     if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
       return this.notice(interaction.userId, "Volume must be between 0 and 100.");
-    const previous = { hostId: this.hostId, volume: this.volume, autoplay: this.autoplayEnabled, permissions: [...this.allowed] };
+    const previous = {
+      hostId: this.hostId,
+      volume: this.volume,
+      autoplay: this.autoplayEnabled,
+      anchorEnabled: this.anchorEnabled,
+      permissions: [...this.allowed],
+    };
     this.volume = Math.round(percent * 100) / 10_000;
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
@@ -729,8 +782,17 @@ export class Coordinator {
       this.store.setSession(this.id, { autoplay: autoplayEnabled });
       if (!autoplayEnabled) await this.removeQueuedAutoplay();
     }
+    const anchorState = interaction.state.anchor?.enabled;
+    const anchorEnabled = anchorState
+      ? anchorState.selected_options?.some(option => option.value === "enabled") ?? false
+      : this.anchorEnabled;
+    if (!anchorEnabled) clearTimeout(this.anchorTimer);
+    this.anchorEnabled = anchorEnabled;
+    const preset = interaction.state.permission_preset?.selected?.selected_option?.value;
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
-    this.allowed = new Set(selected.map(option => option.value).filter(Boolean) as string[]);
+    this.allowed = new Set(preset
+      ? permissionPresets[preset as keyof typeof permissionPresets]
+      : selected.map(option => option.value).filter(Boolean) as string[]);
     for (const capability of capabilities)
       this.store.setPermission(this.id, capability, this.allowed.has(capability));
     if (nextHost) {
@@ -743,6 +805,7 @@ export class Coordinator {
       hostId: this.hostId,
       volume: this.volume,
       autoplay: this.autoplayEnabled,
+      anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     });
     await this.render();
