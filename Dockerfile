@@ -3,9 +3,9 @@ FROM oven/bun:debian
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates chromium ffmpeg python3 python3-venv \
-  && python3 -m venv /opt/yt-dlp \
-  && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade --pre "yt-dlp[default]" \
   && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv /opt/yt-dlp \
+  && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade --pre "yt-dlp[default]"
 
 COPY --from=deno /deno /usr/local/bin/deno
 ENV PATH="/opt/yt-dlp/bin:${PATH}" \
