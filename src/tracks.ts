@@ -47,7 +47,7 @@ export class TrackCatalog {
     if (url) {
       await assertPublicUrl(url);
       const reference = this.remember(url.href);
-      return [option(`Use this link: ${url.href}`, reference)];
+      return [option(`Link: ${url.href}`, reference)];
     }
     const songs = (await this.music.searchSongs(query)).slice(0, 5);
     return songs.map(song => {

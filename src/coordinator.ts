@@ -163,7 +163,7 @@ export class Coordinator {
   memberLeft(userId: string) {
     this.participants.delete(userId);
     const changed = userId === this.botUserId
-      ? this.enqueue(() => this.end(undefined, "removed from Huddle"))
+      ? this.enqueue(() => this.end(undefined, "removed from huddle"))
       : userId === this.hostId
       ? this.enqueue(() => this.hostLeft())
       : Promise.resolve();
@@ -172,7 +172,7 @@ export class Coordinator {
   }
 
   endFromSlack() {
-    return this.enqueue(() => this.end(this.hostId, "Huddle ended"));
+    return this.enqueue(() => this.end(this.hostId, "huddle ended"));
   }
 
   private enqueue<T>(work: () => Promise<T> | T) {
@@ -655,14 +655,13 @@ export class Coordinator {
           type: "input",
           block_id: "lyrics",
           optional: true,
-          label: plain("Lyrics camera"),
-          hint: plain("Turning this off stops HuddleFM's camera feed."),
+          label: plain("Lyrics"),
           element: {
             type: "checkboxes",
             action_id: "enabled",
-            options: [{ text: plain("Show animated lyrics"), value: "enabled" }],
+            options: [{ text: plain("Show lyrics"), value: "enabled" }],
             initial_options: this.lyricsEnabled
-              ? [{ text: plain("Show animated lyrics"), value: "enabled" }]
+              ? [{ text: plain("Show lyrics"), value: "enabled" }]
               : [],
           },
         },
@@ -670,14 +669,14 @@ export class Coordinator {
           type: "input",
           block_id: "autoplay",
           optional: true,
-          label: plain("YouTube Music autoplay"),
-          hint: plain("Adds one recommendation when the manual queue is empty."),
+          label: plain("Autoplay"),
+          hint: plain("Play recommendations when queue is empty"),
           element: {
             type: "checkboxes",
             action_id: "enabled",
-            options: [{ text: plain("Keep playing recommendations"), value: "enabled" }],
+            options: [{ text: plain("Enabled"), value: "enabled" }],
             initial_options: this.autoplayEnabled
-              ? [{ text: plain("Keep playing recommendations"), value: "enabled" }]
+              ? [{ text: plain("Enabled"), value: "enabled" }]
               : [],
           },
         },
@@ -686,7 +685,6 @@ export class Coordinator {
           block_id: "anchor",
           optional: true,
           label: plain("Thread position"),
-          hint: plain("After thread activity, HuddleFM deletes and re-sends the player."),
           element: {
             type: "checkboxes",
             action_id: "enabled",
@@ -712,7 +710,7 @@ export class Coordinator {
           block_id: "permission_preset",
           optional: true,
           label: plain("Apply permission preset"),
-          hint: plain("Optional. Saving applies the preset to the custom permissions below."),
+          hint: plain("Saving overwrites the custom permissions below."),
           element: {
             type: "static_select",
             action_id: "selected",
@@ -733,8 +731,10 @@ export class Coordinator {
           element: {
             type: "checkboxes",
             action_id: "selected",
-            options: capabilities.map(value => ({ text: plain(value), value })),
-            initial_options: [...this.allowed].map(value => ({ text: plain(value), value })),
+            options: capabilities.map(value => ({ text: plain(permissionLabels[value]), value })),
+            initial_options: capabilities
+              .filter(value => this.allowed.has(value))
+              .map(value => ({ text: plain(permissionLabels[value]), value })),
           },
         },
       ],
@@ -753,7 +753,7 @@ export class Coordinator {
     if (nextHost === this.botUserId)
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
-      return this.notice(interaction.userId, "The selected host is not in this Huddle.");
+      return this.notice(interaction.userId, "The selected host is not in this huddle.");
     const value = interaction.state.volume?.percent?.value?.trim();
     const percent = Number(value);
     if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
@@ -828,7 +828,7 @@ export class Coordinator {
       return this.notice(interaction.userId, "That takeover request is stale.");
     if (this.hostId) return this.notice(interaction.userId, "Host already claimed.");
     if (interaction.userId === this.botUserId || !this.participants.has(interaction.userId))
-      return this.notice(interaction.userId, "Join the Huddle before taking over.");
+      return this.notice(interaction.userId, "Join the huddle before taking over.");
     this.hostId = interaction.userId;
     this.store.setSession(this.id, { hostId: interaction.userId });
     this.audit.record("host.claimed", interaction.userId, { sessionId: this.id });
@@ -863,7 +863,7 @@ export class Coordinator {
       type: "container",
       block_id: `player_${id}`,
       title: plain(current?.title ?? "Nothing playing"),
-      subtitle: plain(current ? `${current.album ? `${current.album} · ` : ""}${current.artist}${current.automatic ? " · Autoplay" : ""}` : "Ready for music"),
+      subtitle: plain(current ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}` : "Ready for music"),
       ...(current?.artwork ? { icon: { type: "image", image_url: current.artwork, alt_text: `${current.title} artwork` } } : {}),
       child_blocks: [
         { type: "actions", block_id: `playback_${id}`, elements: [
@@ -886,7 +886,7 @@ export class Coordinator {
       type: "container",
       block_id: `next_${id}`,
       title: plain(next ? `Next: ${next.title}` : "Nothing queued"),
-      subtitle: plain(next ? `${next.album ? `${next.album} · ` : ""}${next.artist}${next.automatic ? " · Autoplay" : ""}${next.status === "preparing" ? " · preparing" : ""}` : "Add a song to keep the music going"),
+      subtitle: plain(next ? `${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}` : "Add a song to keep the music going"),
       ...(next?.artwork ? { icon: { type: "image", image_url: next.artwork, alt_text: `${next.title} artwork` } } : {}),
       child_blocks: [{
         type: "context",
@@ -978,9 +978,20 @@ export class Coordinator {
     await this.leaveMedia();
     await rm(`data/media/${this.id}`, { recursive: true, force: true });
     if (this.uiTs)
-      await this.slack.update(this.room.uiChannelId, this.uiTs, `HuddleFM ended: ${reason}`, [{ type: "section", text: { type: "mrkdwn", text: `*HuddleFM ended* — ${reason}` } }]);
+      await this.slack.update(this.room.uiChannelId, this.uiTs, `Session ended: ${reason}`, [{ type: "section", text: { type: "mrkdwn", text: `*Session ended: ${reason}*` } }]);
   }
 }
+
+const permissionLabels = {
+  add: "Add songs",
+  "remove-own": "Remove songs they added",
+  "manage-queue": "Manage queue",
+  skip: "Skip songs",
+  pause: "Pause or resume",
+  volume: "Change volume",
+  clear: "Clear queue",
+  "end-session": "End session",
+};
 
 function auditTrack(track: Entry) {
   return {

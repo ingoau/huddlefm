@@ -122,7 +122,7 @@ export class SlackAppAdapter {
   async privateChannelNotice(userId: string) {
     await this.dm(
       userId,
-      "I can’t join that Huddle until I’m a member of its private channel. Add HuddleFM to the channel, then invite me again.",
+      "I can’t join that huddle until I’m a member of its private channel. Add HuddleFM to the channel, then invite me again.",
     );
   }
 
