@@ -3,16 +3,17 @@ import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { LyricsCatalog } from "./lyrics.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
-import type { Store } from "./store.ts";
+import type { SavedSession, Store } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 
-function setup(tracks = {} as TrackCatalog, timeouts = { idleMs: 60_000, pausedMs: 600_000 }) {
+function setup(tracks = {} as TrackCatalog, timeouts = { idleMs: 60_000, pausedMs: 600_000 }, restored?: SavedSession) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
   const modals: unknown[] = [];
   const ephemeral: string[] = [];
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
+  const suspensions: unknown[] = [];
   const media: unknown[] = [];
   const audit: unknown[] = [];
   let post = 0;
@@ -28,6 +29,8 @@ function setup(tracks = {} as TrackCatalog, timeouts = { idleMs: 60_000, pausedM
     createSession: () => {}, setUi: () => {}, setTrack: () => {}, removeTrack: () => {},
     addTrack: () => {},
     setSession: (_id: string, value: unknown) => { sessions.push(value); },
+    activateSession: (_id: string, status: string) => { sessions.push({ activated: status }); },
+    suspendSession: (...args: unknown[]) => { suspensions.push(args); },
     setPermission: (_id: string, capability: string, allowed: boolean) => { permissions.push({ capability, allowed }); },
   } as unknown as Store;
   const lyrics = { get: async () => undefined } as unknown as LyricsCatalog;
@@ -37,8 +40,8 @@ function setup(tracks = {} as TrackCatalog, timeouts = { idleMs: 60_000, pausedM
     chimeMeeting: {}, chimeAttendee: {},
   }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, ...timeouts, port: 3210, managerUserId: "manager",
-  }, "token", message => media.push(message), async () => {});
-  return { coordinator, posted, updates, modals, ephemeral, sessions, permissions, media, audit };
+  }, "token", message => media.push(message), async () => {}, restored);
+  return { coordinator, posted, updates, modals, ephemeral, sessions, permissions, suspensions, media, audit };
 }
 
 const interaction = (coordinator: Coordinator, actionId: string, value = "", type = "block_actions") => ({
@@ -52,6 +55,35 @@ async function until(predicate: () => boolean) {
   for (let index = 0; index < 100 && !predicate(); index++) await Bun.sleep(1);
   expect(predicate()).toBeTrue();
 }
+
+test("suspends with a restart notice and restores playback", async () => {
+  const first = setup();
+  await first.coordinator.start();
+  first.coordinator.mediaEvent("playback_position", { seconds: 42 });
+  await first.coordinator.suspendForRestart(180_000);
+  expect(first.posted.at(-1)).toEqual([
+    "channel", "1.0", "HuddleFM is restarting. Playback should resume shortly.",
+  ]);
+  expect(first.suspensions).toEqual([[first.coordinator.id, expect.objectContaining({ state: "ready" }), 180_000]]);
+  expect(first.media).toContainEqual({ type: "leave" });
+
+  const restored: SavedSession = {
+    id: "saved", huddleId: "huddle", callId: "call", channelId: "channel", threadTs: "1.0",
+    uiTs: "player", revision: 2, creatorId: "creator", hostId: "host", state: "paused",
+    volume: 0.4, autoplay: false, lyricsEnabled: true, anchorEnabled: true,
+    playbackSeconds: 42, resumeUntil: 180_000, permissions: ["add"], tracks: [{
+      id: "track", requesterId: "host", sourceInput: "package.json", canonicalUrl: "package.json",
+      sourceId: "source", title: "Track", artist: "Artist", status: "playing", filePath: "package.json",
+    }],
+  };
+  const second = setup(undefined, undefined, restored);
+  await second.coordinator.resume();
+  expect(second.coordinator.id).toBe("saved");
+  expect(second.media).toContainEqual(expect.objectContaining({ type: "play", entryId: "track" }));
+  expect(second.media).toContainEqual({ type: "seek", seconds: 42 });
+  expect(second.media).toContainEqual({ type: "pause" });
+  await second.coordinator.endFromSlack();
+});
 
 test("a Next click during first-track preparation does not skip it", async () => {
   let finish!: (path: string) => void;

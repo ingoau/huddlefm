@@ -115,7 +115,7 @@ function deck(entryId: string, url: string) {
   if (existing) dispose(entryId, existing);
   const audio = new Audio(url);
   audio.preload = "auto";
-  const value = { audio, node: audioContext.createMediaElementSource(audio), url, pastRestartThreshold: false };
+  const value = { audio, node: audioContext.createMediaElementSource(audio), url, pastRestartThreshold: false, lastReportedSecond: -1 };
   value.node.connect(gain);
   audio.addEventListener("ended", () => {
     if (currentId === entryId) send("track_ended", { entryId });
@@ -129,8 +129,10 @@ function deck(entryId: string, url: string) {
   audio.addEventListener("canplaythrough", () => send("preloaded", { entryId }), { once: true });
   audio.addEventListener("timeupdate", () => {
     const pastRestartThreshold = audio.currentTime > 5;
-    if (pastRestartThreshold === value.pastRestartThreshold) return;
+    const second = Math.floor(audio.currentTime);
+    if (pastRestartThreshold === value.pastRestartThreshold && second - value.lastReportedSecond < 2) return;
     value.pastRestartThreshold = pastRestartThreshold;
+    value.lastReportedSecond = second;
     send("playback_position", { entryId, seconds: audio.currentTime });
   });
   decks.set(entryId, value);

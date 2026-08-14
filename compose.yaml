@@ -3,6 +3,7 @@ services:
     image: ghcr.io/ingoau/huddlefm:latest
     init: true
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file: .env
     volumes:
       - ./data:/app/data
