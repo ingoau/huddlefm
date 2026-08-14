@@ -51,7 +51,9 @@ function coordinatorFor(interaction: Interaction) {
 }
 
 function runtimeForCall(callId: string) {
-  return [...runtimes.values()].find(runtime => runtime.callId === callId);
+  return [...runtimes.values()].find(runtime =>
+    runtime.callId === callId || runtime.coordinator?.room.huddleId === callId
+  );
 }
 
 async function joinHuddle(channelId: string, inviterUserId: string, callId?: string) {

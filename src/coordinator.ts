@@ -38,6 +38,8 @@ export class Coordinator {
   private preparations = new Map<string, AbortController>();
   private anchorTimer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setTimeout>;
+  private aloneTimer?: ReturnType<typeof setTimeout>;
+  private pausedTimer?: ReturnType<typeof setTimeout>;
   private lastSearch = new Map<string, number>();
 
   constructor(
@@ -49,7 +51,7 @@ export class Coordinator {
     private tracks: TrackCatalog,
     private lyrics: LyricsCatalog,
     private audit: AuditLog,
-    private config: { queueLimit: number; initialVolume: number; idleMs: number; port: number; managerUserId: string },
+    private config: { queueLimit: number; initialVolume: number; idleMs: number; pausedMs: number; port: number; managerUserId: string },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
     private leaveMedia: () => Promise<void>,
@@ -521,6 +523,7 @@ export class Coordinator {
     this.store.setSession(this.id, { status: this.state });
     this.audit.record(`playback.${this.state === "paused" ? "paused" : "resumed"}`, interaction.userId, { sessionId: this.id, trackId: this.current.id });
     await this.render();
+    this.refreshIdle();
   }
 
   private async changeVolume(interaction: Interaction, delta: number) {
@@ -915,13 +918,43 @@ export class Coordinator {
   }
 
   private refreshIdle() {
-    clearTimeout(this.idleTimer);
     if (this.state === "ended") return;
-    const idle = (!this.current && !this.queue.length) || ![...this.participants].some(id => id !== this.botUserId);
-    if (idle) this.idleTimer = setTimeout(() => void this.enqueue(async () => {
-      const stillIdle = (!this.current && !this.queue.length) || ![...this.participants].some(id => id !== this.botUserId);
-      if (stillIdle) await this.end(this.hostId, "idle timeout");
-    }), this.config.idleMs);
+    const alone = ![...this.participants].some(id => id !== this.botUserId);
+    if (alone && !this.aloneTimer) {
+      void this.slack.post(
+        this.room.uiChannelId,
+        this.room.uiThreadTs,
+        "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
+      ).catch(error => console.error(`[idle] could not post leave notice: ${message(error)}`));
+      this.aloneTimer = setTimeout(() => void this.enqueue(async () => {
+        this.aloneTimer = undefined;
+        if (![...this.participants].some(id => id !== this.botUserId))
+          await this.end(undefined, "alone timeout");
+      }), this.config.idleMs);
+    } else if (!alone) {
+      clearTimeout(this.aloneTimer);
+      this.aloneTimer = undefined;
+    }
+
+    if (!this.current && !this.idleTimer) {
+      this.idleTimer = setTimeout(() => void this.enqueue(async () => {
+        this.idleTimer = undefined;
+        if (!this.current) await this.end(undefined, "idle timeout");
+      }), this.config.idleMs);
+    } else if (this.current) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
+    }
+
+    if (this.state === "paused" && !this.pausedTimer) {
+      this.pausedTimer = setTimeout(() => void this.enqueue(async () => {
+        this.pausedTimer = undefined;
+        if (this.state === "paused") await this.end(undefined, "paused timeout");
+      }), this.config.pausedMs);
+    } else if (this.state !== "paused") {
+      clearTimeout(this.pausedTimer);
+      this.pausedTimer = undefined;
+    }
   }
 
   private async end(userId: string | undefined, reason: string) {
@@ -936,6 +969,8 @@ export class Coordinator {
     for (const controller of this.preparations.values()) controller.abort();
     this.preparations.clear();
     clearTimeout(this.idleTimer);
+    clearTimeout(this.aloneTimer);
+    clearTimeout(this.pausedTimer);
     clearTimeout(this.anchorTimer);
     this.store.setSession(this.id, { status: "ended" });
     this.audit.record("session.ended", userId, { sessionId: this.id, reason });

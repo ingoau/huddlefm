@@ -75,7 +75,7 @@ test("ignores partial lifecycle events", () => {
     normalizeRealtimeEvent({
       type: "sh_room_leave",
       user: "U123",
-      room: { id: "room" },
+      room: { name: "room" },
     }),
   ).toBeUndefined();
 });
@@ -88,7 +88,7 @@ test("normalizes membership lifecycle events", () => {
   })).toEqual({ type: "MemberJoined", callId: "R123", userId: "U123" });
   expect(normalizeRealtimeEvent({
     type: "sh_room_leave",
-    call_id: "R123",
+    room: { id: "R123" },
     user: "U123",
   })).toEqual({ type: "MemberLeft", callId: "R123", userId: "U123" });
 });

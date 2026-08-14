@@ -13,7 +13,7 @@ bun test
 bun run start
 ```
 
-Configure `.env` with `SLACK_WORKSPACE_URL`, `SLACK_XOXP`, `SLACK_XAPP`, `SLACK_XOXC`, and `SLACK_XOXD`. Optional settings are `MANAGER_USER_ID`, `LOCAL_CONTROL_TOKEN`, `QUEUE_LIMIT`, `TRACK_DURATION_LIMIT_SECONDS`, `TRACK_DOWNLOAD_LIMIT_BYTES`, `INITIAL_VOLUME`, `IDLE_TIMEOUT_MS`, `CHIME_MEDIA_REGION`, `CHROME_PATH`, `BIND_ADDRESS`, and `PORT`. The local `/join`, `/leave`, and `/tone` development routes require `Authorization: Bearer $LOCAL_CONTROL_TOKEN` and remain disabled when it is unset.
+Configure `.env` with `SLACK_WORKSPACE_URL`, `SLACK_XOXP`, `SLACK_XAPP`, `SLACK_XOXC`, and `SLACK_XOXD`. Optional settings are `MANAGER_USER_ID`, `LOCAL_CONTROL_TOKEN`, `QUEUE_LIMIT`, `TRACK_DURATION_LIMIT_SECONDS`, `TRACK_DOWNLOAD_LIMIT_BYTES`, `INITIAL_VOLUME`, `IDLE_TIMEOUT_MS`, `PAUSED_TIMEOUT_MS`, `CHIME_MEDIA_REGION`, `CHROME_PATH`, `BIND_ADDRESS`, and `PORT`. The local `/join`, `/leave`, and `/tone` development routes require `Authorization: Bearer $LOCAL_CONTROL_TOKEN` and remain disabled when it is unset.
 
 When multiple Huddles are active, `/leave` and `/tone` require the target coordinator ID as the `sessionId` query parameter. `/health` lists active coordinator IDs under `sessions`.
 

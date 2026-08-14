@@ -295,7 +295,8 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
   }
   if (event.type === "sh_room_leave") {
     const room = event.room as Record<string, unknown> | undefined;
-    const callId = event.call_id ?? room?.call_id;
+    const huddle = event.huddle as Record<string, unknown> | undefined;
+    const callId = event.call_id ?? room?.call_id ?? room?.id ?? huddle?.id;
     if (typeof callId !== "string" || typeof event.user !== "string") return;
     return {
       type: "MemberLeft",
@@ -305,7 +306,8 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
   }
   if (event.type === "sh_room_join") {
     const room = event.room as Record<string, unknown> | undefined;
-    const callId = event.call_id ?? room?.call_id;
+    const huddle = event.huddle as Record<string, unknown> | undefined;
+    const callId = event.call_id ?? room?.call_id ?? room?.id ?? huddle?.id;
     if (typeof callId !== "string" || typeof event.user !== "string") return;
     return { type: "MemberJoined", callId, userId: event.user };
   }
