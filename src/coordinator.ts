@@ -114,6 +114,7 @@ export class Coordinator {
     if (interaction.actionId === "add_track_to_queue") return this.add(interaction);
     const currentId = this.current?.id;
     return this.enqueue(async () => {
+      if (!this.isParticipantOrManager(interaction.userId)) return this.rejectNonParticipant(interaction);
       if (interaction.type === "view_submission") return this.settingsSubmission(interaction);
       if (interaction.messageTs && interaction.messageTs !== this.uiTs)
         return this.notice(interaction.userId, "That player is stale; use the newest one.");
@@ -182,14 +183,32 @@ export class Coordinator {
   }
 
   private can(userId: string, capability: string) {
-    return userId === this.config.managerUserId || userId === this.hostId || this.allowed.has(capability);
+    return userId === this.config.managerUserId ||
+      (this.participants.has(userId) && (userId === this.hostId || this.allowed.has(capability)));
   }
 
   private async require(interaction: Interaction, capability: string) {
     if (this.can(interaction.userId, capability)) return true;
+    if (!this.isParticipantOrManager(interaction.userId)) {
+      await this.rejectNonParticipant(interaction);
+      return false;
+    }
     this.audit.record("action.denied", interaction.userId, { sessionId: this.id, capability });
     await this.notice(interaction.userId, "You do not have permission for that.");
     return false;
+  }
+
+  private isParticipantOrManager(userId: string) {
+    return userId === this.config.managerUserId || this.participants.has(userId);
+  }
+
+  private rejectNonParticipant(interaction: Interaction) {
+    this.audit.record("action.denied", interaction.userId, {
+      sessionId: this.id,
+      actionId: interaction.actionId,
+      reason: "not in huddle",
+    });
+    return this.notice(interaction.userId, "Join the huddle before using the player.");
   }
 
   private async add(interaction: Interaction) {

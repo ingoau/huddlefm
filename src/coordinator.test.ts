@@ -95,6 +95,33 @@ test("rejects stale player actions", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("rejects actions and track searches from outside the huddle", async () => {
+  let searches = 0;
+  let resolves = 0;
+  const test = setup({
+    suggestions: async () => (searches++, []),
+    resolve: async () => (resolves++, {}),
+  } as unknown as TrackCatalog);
+  await test.coordinator.start();
+  const outside = {
+    type: "block_actions", userId: "outside", actionId: "add_track_to_queue", value: "track",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  };
+
+  expect(await test.coordinator.suggestions(outside)).toEqual([]);
+  await test.coordinator.action(outside);
+  await test.coordinator.action({ ...outside, actionId: "volume_up" });
+
+  expect(searches).toBe(0);
+  expect(resolves).toBe(0);
+  expect(test.media).toEqual([]);
+  expect(test.ephemeral).toEqual([
+    "Join the huddle before using the player.",
+    "Join the huddle before using the player.",
+  ]);
+  await test.coordinator.endFromSlack();
+});
+
 test("routes message and modal interactions to their session", async () => {
   const test = setup();
   await test.coordinator.start();
