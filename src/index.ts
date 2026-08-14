@@ -248,7 +248,7 @@ function selectedRuntime(request: Request) {
     : active.length <= 1 ? active[0] : undefined;
   if (runtime) return runtime;
   if (!sessionId && !active.length) return;
-  return Response.json({ error: sessionId ? "Session not found" : "sessionId is required when multiple Huddles are active" }, { status: 400 });
+  return Response.json({ error: sessionId ? "Session not found" : "sessionId is required when multiple huddles are active" }, { status: 400 });
 }
 
 botUserId = await verifySlackIdentity(config);
