@@ -897,6 +897,7 @@ export class Coordinator {
       subtitle: plain(current ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}` : "Ready for music"),
       ...(current?.artwork ? { icon: { type: "image", image_url: current.artwork, alt_text: `${current.title} artwork` } } : {}),
       child_blocks: [
+        ...(current ? [{ type: "context", block_id: `current_status_${id}`, elements: [{ type: "mrkdwn", text: current.automatic ? "Autoplay recommendation" : `Added by <@${current.requesterId}>` }] }] : []),
         { type: "actions", block_id: `playback_${id}`, elements: [
           { type: "button", action_id: "previous_track", text: icon(":ms-skip-back:"), value: this.id },
           { type: "button", action_id: "toggle_playback", text: icon(this.state === "paused" ? ":ms-play:" : ":ms-pause:"), style: "primary", value: this.id },

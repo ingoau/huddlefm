@@ -235,6 +235,7 @@ test("Previous restarts after five seconds and seek controls move ten seconds", 
   expect(JSON.stringify(result.posted[0])).toContain('"action_id":"seek_back"');
   expect(JSON.stringify(result.posted[0])).toContain('"action_id":"seek_forward"');
   await action("add_track_to_queue", "a");
+  expect(JSON.stringify(result.updates)).toContain("Added by <@host>");
   await action("add_track_to_queue", "b");
   const first = plays()[0]!.entryId;
   await result.coordinator.mediaEvent("track_ended", { entryId: first });
