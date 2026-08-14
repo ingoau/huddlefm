@@ -231,6 +231,16 @@ export class SlackHuddleAdapter {
     return activeHuddleCallId(replies, threadTs);
   }
 
+  async react(channelId: string, messageTs: string) {
+    const result = await this.api("reactions.add", {
+      channel: channelId,
+      timestamp: messageTs,
+      name: "thumbup",
+    });
+    if (result.ok !== true && result.error !== "already_reacted")
+      throw new Error(`reactions.add failed: ${String(result.error ?? "unknown_error")}`);
+  }
+
   private async api(method: string, fields: Record<string, string>) {
     const response = await fetch(new URL(`/api/${method}`, this.config.workspaceUrl), {
       method: "POST",
