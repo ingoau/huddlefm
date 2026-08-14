@@ -6,7 +6,7 @@ import type { SlackAppAdapter } from "./slack-app.ts";
 import type { Store } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 
-function setup(tracks = {} as TrackCatalog) {
+function setup(tracks = {} as TrackCatalog, timeouts = { idleMs: 60_000, pausedMs: 600_000 }) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
   const modals: unknown[] = [];
@@ -36,7 +36,7 @@ function setup(tracks = {} as TrackCatalog) {
     participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
     chimeMeeting: {}, chimeAttendee: {},
   }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
-    queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
+    queueLimit: 50, initialVolume: 0.6, ...timeouts, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
   return { coordinator, posted, updates, modals, ephemeral, sessions, permissions, media, audit };
 }
@@ -251,6 +251,48 @@ test("HuddleFM leaving ends playback", async () => {
   await result.coordinator.start();
   await result.coordinator.memberLeft("bot");
   expect(result.media).toContainEqual({ type: "leave" });
+  expect(result.sessions).toContainEqual({ status: "ended" });
+});
+
+test("announces and leaves two minutes after becoming the only Huddle participant", async () => {
+  const result = setup(undefined, { idleMs: 10, pausedMs: 100 });
+  await result.coordinator.start();
+  await result.coordinator.memberLeft("host");
+  await result.coordinator.memberLeft("guest");
+  await until(() => result.posted.length === 2);
+  expect(result.posted[1]).toEqual([
+    "channel", "1.0", "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
+  ]);
+  await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
+  expect(result.media).toContainEqual({ type: "leave" });
+});
+
+test("leaves after two minutes with nothing playing", async () => {
+  const result = setup(undefined, { idleMs: 10, pausedMs: 100 });
+  await result.coordinator.start();
+  await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
+  expect(result.sessions).toContainEqual({ status: "ended" });
+});
+
+test("leaves after ten paused minutes and cancels the timer when resumed", async () => {
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
+      sourceId: "track", title: "Track", artist: "Artist",
+    }),
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog;
+  const result = setup(tracks, { idleMs: 10, pausedMs: 30 });
+  await result.coordinator.start();
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "track"));
+  await result.coordinator.action(interaction(result.coordinator, "toggle_playback"));
+  await Bun.sleep(15);
+  expect(result.media).not.toContainEqual({ type: "leave" });
+  await result.coordinator.action(interaction(result.coordinator, "toggle_playback"));
+  await Bun.sleep(20);
+  expect(result.media).not.toContainEqual({ type: "leave" });
+  await result.coordinator.action(interaction(result.coordinator, "toggle_playback"));
+  await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
   expect(result.sessions).toContainEqual({ status: "ended" });
 });
 
