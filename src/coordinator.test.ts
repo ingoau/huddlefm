@@ -245,3 +245,23 @@ test("host transfers ownership and global permissions atomically", async () => {
   expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
   await test.coordinator.endFromSlack();
 });
+
+test("collaborative preset grants everything except destructive permissions", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.action({
+    type: "view_submission", userId: "host", actionId: "save_settings", value: "",
+    channelId: "channel", messageTs: "", triggerId: "",
+    metadata: JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }),
+    state: {
+      volume: { percent: { value: "60" } },
+      permission_preset: { selected: { selected_option: { value: "collaborative" } } },
+      permissions: { selected: { selected_options: [] } },
+    },
+  });
+  expect(test.permissions).toContainEqual({ capability: "manage-queue", allowed: true });
+  expect(test.permissions).toContainEqual({ capability: "volume", allowed: true });
+  expect(test.permissions).toContainEqual({ capability: "clear", allowed: false });
+  expect(test.permissions).toContainEqual({ capability: "end-session", allowed: false });
+  await test.coordinator.endFromSlack();
+});

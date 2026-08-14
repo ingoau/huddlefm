@@ -19,7 +19,7 @@ type Body = {
     hash?: string;
     callback_id?: string;
     private_metadata?: string;
-    state?: { values?: Record<string, Record<string, { value?: string; selected_user?: string; selected_options?: { value?: string }[] }>> };
+    state?: { values?: Record<string, Record<string, { value?: string; selected_user?: string; selected_option?: { value?: string }; selected_options?: { value?: string }[] }>> };
   };
 };
 
