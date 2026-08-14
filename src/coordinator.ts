@@ -867,17 +867,15 @@ export class Coordinator {
       ...(current?.artwork ? { icon: { type: "image", image_url: current.artwork, alt_text: `${current.title} artwork` } } : {}),
       child_blocks: [
         { type: "actions", block_id: `playback_${id}`, elements: [
-          { type: "button", action_id: "previous_track", text: plain("Previous"), value: this.id },
-          { type: "button", action_id: "toggle_playback", text: plain(this.state === "paused" ? "Resume" : "Pause"), style: "primary", value: this.id },
-          { type: "button", action_id: "next_track", text: plain("Next"), value: this.id },
+          { type: "button", action_id: "previous_track", text: icon(":ms-skip-back:"), value: this.id },
+          { type: "button", action_id: "toggle_playback", text: icon(this.state === "paused" ? ":ms-play:" : ":ms-pause:"), style: "primary", value: this.id },
+          { type: "button", action_id: "next_track", text: icon(":ms-skip-forward:"), value: this.id },
         ] },
         { type: "actions", block_id: `seek_${id}`, elements: [
-          { type: "button", action_id: "seek_back", text: plain("10s back"), value: this.id },
-          { type: "button", action_id: "seek_forward", text: plain("10s forward"), value: this.id },
-        ] },
-        { type: "actions", block_id: `volume_${id}`, elements: [
-          { type: "button", action_id: "volume_down", text: plain("Volume -"), value: this.id },
-          { type: "button", action_id: "volume_up", text: plain("Volume +"), value: this.id },
+          { type: "button", action_id: "seek_back", text: icon(":ms-rewind:"), value: this.id },
+          { type: "button", action_id: "seek_forward", text: icon(":ms-fast-forward:"), value: this.id },
+          { type: "button", action_id: "volume_down", text: icon(":ms-speaker-low-volume:"), value: this.id },
+          { type: "button", action_id: "volume_up", text: icon(":ms-speaker-loud-volume:"), value: this.id },
         ] },
         { type: "context", block_id: `volume_status_${id}`, elements: [{ type: "mrkdwn", text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}` }] },
       ],
@@ -888,17 +886,12 @@ export class Coordinator {
       title: plain(next ? `Next: ${next.title}` : "Nothing queued"),
       subtitle: plain(next ? `${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}` : "Add a song to keep the music going"),
       ...(next?.artwork ? { icon: { type: "image", image_url: next.artwork, alt_text: `${next.title} artwork` } } : {}),
-      child_blocks: [{
-        type: "context",
-        block_id: `queue_status_${id}`,
-        elements: [{ type: "mrkdwn", text: `${next ? `${next.automatic ? "Autoplay recommendation" : `Added by <@${next.requesterId}>`} · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue` }],
-      }],
-    },
-    {
-      type: "container",
-      block_id: `queue_controls_${id}`,
-      title: plain("Controls"),
+      is_collapsible: true,
+      default_collapsed: true,
       child_blocks: [
+        { type: "context", block_id: `queue_status_${id}`, elements: [
+          { type: "mrkdwn", text: `${next ? `${next.automatic ? "Autoplay recommendation" : `Added by <@${next.requesterId}>`} · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue` },
+        ] },
         { type: "actions", block_id: `add_${id}`, elements: [
           { type: "external_select", action_id: "add_track_to_queue", placeholder: plain("Add to queue"), min_query_length: 3 },
         ] },
@@ -1010,6 +1003,10 @@ function safeAuditError(error: unknown) {
 
 function plain(text: string) {
   return { type: "plain_text", text: text.slice(0, 150) };
+}
+
+function icon(text: string) {
+  return { ...plain(text), emoji: true };
 }
 
 function confirm(title: string, text: string, confirmText: string) {
