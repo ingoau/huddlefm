@@ -1,19 +1,30 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import type { ChimeBootstrap } from "./slack-huddle.ts";
 
-export class MediaBrowser {
+export class MediaBrowserPool {
   private browser?: Browser;
-  private context?: BrowserContext;
-  private page?: Page;
-  private storageState?: Awaited<ReturnType<BrowserContext["storageState"]>>;
+  private launching?: Promise<Browser>;
 
-  constructor(
-    private chromePath: string,
-    private baseUrl: string,
-  ) {}
+  constructor(private chromePath: string) {}
 
-  async start(bootstrap: ChimeBootstrap) {
-    this.browser ??= await chromium.launch({
+  session(baseUrl: string) {
+    return new MediaBrowser(this, baseUrl);
+  }
+
+  async context() {
+    const browser = await this.getBrowser();
+    return browser.newContext({ viewport: { width: 720, height: 720 } });
+  }
+
+  async close() {
+    const browser = this.browser ?? await this.launching?.catch(() => undefined);
+    this.browser = undefined;
+    await browser?.close();
+  }
+
+  private async getBrowser() {
+    if (this.browser?.isConnected()) return this.browser;
+    this.launching ??= chromium.launch({
       executablePath: this.chromePath,
       headless: true,
       args: [
@@ -21,33 +32,45 @@ export class MediaBrowser {
         "--use-fake-ui-for-media-stream",
         "--allow-http-screen-capture",
         "--enable-usermedia-screen-capturing",
-        "--auto-select-tab-capture-source-by-title=HuddleFM media",
+        "--this-tab-capture-auto-accept",
       ],
     });
-    if (this.context) {
-      this.storageState = await this.context.storageState();
-      await this.context.close();
+    try {
+      const browser = await this.launching;
+      this.browser = browser;
+      browser.on("disconnected", () => {
+        if (this.browser === browser) this.browser = undefined;
+      });
+      return browser;
+    } finally {
+      this.launching = undefined;
     }
-    this.context = await this.browser.newContext({
-      viewport: { width: 720, height: 720 },
-      storageState: this.storageState,
-    });
+  }
+}
+
+export class MediaBrowser {
+  private context?: BrowserContext;
+  private page?: Page;
+
+  constructor(
+    private pool: MediaBrowserPool,
+    private baseUrl: string,
+  ) {}
+
+  async start(bootstrap: ChimeBootstrap) {
+    await this.close();
+    this.context = await this.pool.context();
     this.page = await this.context.newPage();
-    this.page.on("console", message => console.log(`[media:${message.type()}] ${message.text()}`));
-    this.page.on("pageerror", error => console.error(`[media:error] ${error.message}`));
+    this.page.on("console", message => console.log(`[media:${bootstrap.sessionId}:${message.type()}] ${message.text()}`));
+    this.page.on("pageerror", error => console.error(`[media:${bootstrap.sessionId}:error] ${error.message}`));
     await this.page.goto(`${this.baseUrl}/media?token=${encodeURIComponent(bootstrap.bridgeToken)}`);
     await this.page.click("#capture");
   }
 
   async close() {
-    await this.context?.close();
-    await this.browser?.close();
-  }
-
-  async stop() {
-    this.storageState = await this.context?.storageState();
-    await this.context?.close();
+    const context = this.context;
     this.context = undefined;
     this.page = undefined;
+    await context?.close();
   }
 }

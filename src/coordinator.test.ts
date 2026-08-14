@@ -80,6 +80,22 @@ test("rejects stale player actions", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("routes message and modal interactions to their session", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const interaction = {
+    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value: "ref",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  };
+  expect(test.coordinator.handles(interaction)).toBeTrue();
+  expect(test.coordinator.handles({ ...interaction, messageTs: "other" })).toBeFalse();
+  expect(test.coordinator.handles({
+    ...interaction, channelId: "", messageTs: "", metadata: JSON.stringify({ sessionId: test.coordinator.id }),
+  })).toBeTrue();
+  expect(test.coordinator.handles({ ...interaction, value: test.coordinator.id, channelId: "", messageTs: "" })).toBeTrue();
+  await test.coordinator.endFromSlack();
+});
+
 test("first current participant claims a vacant host role", async () => {
   const test = setup();
   await test.coordinator.start();
