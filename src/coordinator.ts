@@ -24,6 +24,7 @@ export class Coordinator {
   private playbackSeconds = 0;
   private volume: number;
   private lyricsEnabled = true;
+  private anchorEnabled = true;
   private revision = 0;
   private uiTs = "";
   private hostId: string | undefined;
@@ -130,7 +131,7 @@ export class Coordinator {
   }
 
   threadActivity(userId: string) {
-    if (userId === this.botUserId || this.state === "ended") return;
+    if (userId === this.botUserId || this.state === "ended" || !this.anchorEnabled) return;
     clearTimeout(this.anchorTimer);
     this.anchorTimer = setTimeout(() => void this.enqueue(() => this.reanchor()), 5_000);
   }
@@ -515,6 +516,21 @@ export class Coordinator {
         },
         {
           type: "input",
+          block_id: "anchor",
+          optional: true,
+          label: plain("Thread position"),
+          hint: plain("After thread activity, HuddleFM deletes and re-sends the player."),
+          element: {
+            type: "checkboxes",
+            action_id: "enabled",
+            options: [{ text: plain("Keep player at bottom of thread"), value: "enabled" }],
+            initial_options: this.anchorEnabled
+              ? [{ text: plain("Keep player at bottom of thread"), value: "enabled" }]
+              : [],
+          },
+        },
+        {
+          type: "input",
           block_id: "host",
           optional: true,
           label: plain("Transfer host"),
@@ -557,7 +573,7 @@ export class Coordinator {
     const percent = Number(value);
     if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
       return this.notice(interaction.userId, "Volume must be between 0 and 100.");
-    const previous = { hostId: this.hostId, volume: this.volume, permissions: [...this.allowed] };
+    const previous = { hostId: this.hostId, volume: this.volume, anchorEnabled: this.anchorEnabled, permissions: [...this.allowed] };
     this.volume = Math.round(percent * 100) / 10_000;
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
@@ -569,6 +585,12 @@ export class Coordinator {
       this.lyricsEnabled = lyricsEnabled;
       this.sendMedia({ type: "lyrics_enabled", enabled: lyricsEnabled });
     }
+    const anchorState = interaction.state.anchor?.enabled;
+    const anchorEnabled = anchorState
+      ? anchorState.selected_options?.some(option => option.value === "enabled") ?? false
+      : this.anchorEnabled;
+    if (!anchorEnabled) clearTimeout(this.anchorTimer);
+    this.anchorEnabled = anchorEnabled;
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
     this.allowed = new Set(selected.map(option => option.value).filter(Boolean) as string[]);
     for (const capability of capabilities)
@@ -582,6 +604,7 @@ export class Coordinator {
       previous,
       hostId: this.hostId,
       volume: this.volume,
+      anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     });
     await this.render();
