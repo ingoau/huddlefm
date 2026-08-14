@@ -96,52 +96,103 @@ braccato-lyrics {
 
 .blyrics-container {
   --blyrics-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
-  --blyrics-font-size: 38px;
+  --blyrics-font-size: 2.9rem;
   --blyrics-font-weight: 700;
   --blyrics-line-height: 1.16;
-  --blyrics-padding: 13px;
-  --blyrics-scale: 1;
-  --blyrics-active-scale: 1;
+  --blyrics-padding: 1.5rem;
   --blyrics-lyric-active-color: white;
   --blyrics-lyric-inactive-color: rgb(255 255 255 / .2);
   --blyrics-glow-color: rgb(255 255 255 / .0001);
   --blyrics-lyric-scroll-duration: 400ms;
   --blyrics-lyric-scroll-timing-function: ease-in-out;
-  padding-top: 40px;
+  --blyrics-scale-transition-duration: .6s;
+  --blyrics-scroll-timing-offset: .6s;
+  --blyrics-animate-word-wobble: 0;
+  padding-top: var(--blyrics-padding-top, 40px);
 }
 
 .blyrics-container > div { cursor: default; }
 
 .blyrics-container:not([data-sync="none"]):not(.blyrics-user-scrolling) > .blyrics--line {
-  filter: blur(8px);
-  transition: filter .5s, opacity .5s, transform .4s !important;
+  filter: blur(9.5px);
+  transition: filter .5s, opacity .5s, transform .166s var(--blyrics-anim-delay, 0s) !important;
+}
+
+.blyrics-container[data-sync="richsync"] .blyrics--line[data-agent]:not([data-agent="v1"]) {
+  justify-content: flex-end;
+  text-align: right;
+  transform-origin: right center !important;
 }
 
 .blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line:not(.blyrics--active) {
-  filter: blur(1.5px) !important;
+  filter: blur(2px) !important;
 }
 
 .blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line + .blyrics--line {
-  filter: blur(3px) !important;
+  filter: blur(3.5px) !important;
 }
 
 .blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line + .blyrics--line + .blyrics--line {
   filter: blur(5px) !important;
 }
 
+.blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line + .blyrics--line + .blyrics--line + .blyrics--line {
+  filter: blur(6.5px) !important;
+}
+
+.blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line + .blyrics--line + .blyrics--line + .blyrics--line + .blyrics--line {
+  filter: blur(8px) !important;
+}
+
+.blyrics-container:not(.blyrics-user-scrolling) > .blyrics--active + .blyrics--line + .blyrics--line + .blyrics--line + .blyrics--line + .blyrics--line + .blyrics--line {
+  filter: blur(9.5px) !important;
+}
+
 .blyrics-container:not(.blyrics-user-scrolling) > .blyrics--line:has(~ .blyrics--active):not(.blyrics--animating) {
   opacity: 0;
   filter: blur(5px);
+  transition: filter .25s, opacity .9s, transform .166s var(--blyrics-anim-delay, 0s) !important;
 }
 
 .blyrics-container > .blyrics--line.blyrics--active,
 .blyrics-container > .blyrics--line.blyrics--animating {
   opacity: 1;
-  filter: none !important;
+  filter: blur(0) !important;
 }
 
-.blyrics--word { transform: translateY(3px); }
-.blyrics--word.blyrics--animating { transform: none; }
+.blyrics-word-group { white-space: normal; }
+
+.blyrics--word {
+  transform: translateY(3px);
+  transition: transform calc(var(--blyrics-duration, 0ms) + 200ms) calc(var(--blyrics-anim-delay, .05s) - .05s) !important;
+}
+
+.blyrics--word.blyrics--animating {
+  animation: none;
+  transform: translateY(0) !important;
+}
+
+.blyrics--word::after { --blyrics-glow-color: rgb(255 255 255 / .0001); }
+.blyrics--word[data-long-word]::after { --blyrics-glow-color: white; }
+
+.blyrics--word.blyrics-line-synced-word {
+  animation: none !important;
+  transition: none !important;
+}
+
+.blyrics-container[data-sync="synced"] .blyrics--word {
+  animation: none;
+  transform: none !important;
+  transition: color calc(var(--blyrics-lyric-scroll-duration) * 3) !important;
+}
+
+.blyrics-container[data-sync="synced"] > .blyrics--line:not(.blyrics--active):not(.blyrics--animating) .blyrics--word {
+  color: var(--blyrics-lyric-inactive-color) !important;
+}
+
+.blyrics-container[data-sync="synced"] > .blyrics--line.blyrics--active.blyrics--animating .blyrics--word {
+  color: var(--blyrics-lyric-active-color) !important;
+}
 
 .blyrics--translated,
 .blyrics--romanized {
