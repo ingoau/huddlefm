@@ -10,11 +10,15 @@ test("persists session and permission defaults", () => {
     id: "session", huddleId: "huddle", callId: "call", channelId: "channel",
     threadTs: "1.0", creatorId: "creator", hostId: "host", volume: 0.6,
   });
-  expect(store.db.query("SELECT status FROM sessions").get()).toEqual({ status: "ready" });
+  expect(store.db.query("SELECT status, autoplay FROM sessions").get()).toEqual({ status: "ready", autoplay: 0 });
+  store.setSession("session", { autoplay: true });
+  expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({ autoplay: 1 });
   expect(store.db.query("SELECT capability FROM permissions WHERE allowed = 1 ORDER BY capability").all())
     .toEqual([{ capability: "add" }, { capability: "remove-own" }]);
   expect(store.db.query("PRAGMA table_info(tracks)").all().map(row => (row as { name: string }).name))
     .not.toContain("position");
+  expect(store.db.query("PRAGMA table_info(tracks)").all().map(row => (row as { name: string }).name))
+    .toContain("automatic");
   store.close();
 });
 

@@ -119,6 +119,22 @@ export class TrackCatalog {
     };
   }
 
+  async upNextIds(videoId: string) {
+    const results: unknown = await this.music.getUpNexts(videoId);
+    if (!Array.isArray(results)) return [];
+    return results.flatMap(result => {
+      if (!result || typeof result !== "object") return [];
+      const id = (result as { videoId?: unknown }).videoId;
+      return typeof id === "string" && /^[a-zA-Z0-9_-]{11}$/.test(id) ? [id] : [];
+    });
+  }
+
+  resolveVideoId(videoId: string) {
+    if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId))
+      throw new Error("Invalid YouTube Music video ID");
+    return this.resolveUrl(`https://music.youtube.com/watch?v=${videoId}`);
+  }
+
   async prepare(track: TrackMetadata, directory: string, entryId: string, signal?: AbortSignal) {
     if (signal?.aborted) throw new Error("Track preparation cancelled");
     await mkdir(directory, { recursive: true });
