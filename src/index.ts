@@ -137,6 +137,16 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
   }
 }
 
+async function joinMentionedHuddle(event: Extract<import("./slack-huddle.ts").HuddleEvent, { type: "ThreadActivity" }>) {
+  const callId = await slackHuddle.activeHuddleCall(event.channelId, event.threadTs);
+  if (!callId) {
+    await slackApp.ephemeral(event.channelId, event.userId, "This isn’t an active Huddle thread.", event.threadTs);
+    return;
+  }
+  if (joiningChannels.has(event.channelId) || joiningCalls.has(callId) || runtimeForCall(callId)) return;
+  await joinHuddle(event.channelId, event.userId, callId);
+}
+
 const server = Bun.serve<SocketData>({
   hostname: config.bindAddress,
   port: config.port,
@@ -263,6 +273,8 @@ await slackHuddle.start(event => {
     return;
   }
   if (event.type === "ThreadActivity") {
+    if (event.userId !== botUserId && event.text.includes(`<@${botUserId}>`))
+      void joinMentionedHuddle(event).catch(error => console.error(safeError(error)));
     const runtime = [...runtimes.values()].find(runtime =>
       event.channelId === runtime.coordinator?.room.uiChannelId &&
       event.threadTs === runtime.coordinator.room.uiThreadTs
