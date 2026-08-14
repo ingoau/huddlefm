@@ -24,3 +24,17 @@ test("uses search metadata without extracting it again", async () => {
   catalog.resolveUrl = async () => { throw new Error("unexpected extraction"); };
   expect(await catalog.resolve("reference")).toBe(track);
 });
+
+test("only accepts video IDs from getUpNexts runtime data", async () => {
+  const catalog = new TrackCatalog({ durationSeconds: 1_200, downloadBytes: 100_000_000 });
+  Reflect.set(catalog, "music", {
+    getUpNexts: async () => [
+      { videoId: "abcdefghijk", title: 42 },
+      { videoId: "too-short" },
+      { videoId: 123 },
+      null,
+      { videoId: "ZYXWVUTSRQ-" },
+    ],
+  });
+  expect(await catalog.upNextIds("seedseedsee")).toEqual(["abcdefghijk", "ZYXWVUTSRQ-"]);
+});

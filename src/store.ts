@@ -34,6 +34,7 @@ export class Store {
         host_id TEXT,
         status TEXT NOT NULL,
         volume REAL NOT NULL DEFAULT 0.6,
+        autoplay INTEGER NOT NULL DEFAULT 0,
         idle_deadline INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -50,6 +51,7 @@ export class Store {
         album TEXT,
         duration INTEGER,
         artwork TEXT,
+        automatic INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL,
         file_path TEXT,
         created_at INTEGER NOT NULL
@@ -61,6 +63,8 @@ export class Store {
         PRIMARY KEY (session_id, capability)
       );
     `);
+    this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     const closeUnfinished = this.db.transaction(() => {
       this.db.run("DELETE FROM tracks WHERE session_id IN (SELECT id FROM sessions WHERE status != 'ended')");
       this.db
@@ -119,7 +123,7 @@ export class Store {
       .run(timestamp, revision, Date.now(), sessionId);
   }
 
-  setSession(sessionId: string, fields: { status?: string; hostId?: string | null; volume?: number }) {
+  setSession(sessionId: string, fields: { status?: string; hostId?: string | null; volume?: number; autoplay?: boolean }) {
     if (fields.status !== undefined)
       this.db
         .query("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?")
@@ -132,6 +136,10 @@ export class Store {
       this.db
         .query("UPDATE sessions SET volume = ?, updated_at = ? WHERE id = ?")
         .run(fields.volume, Date.now(), sessionId);
+    if (fields.autoplay !== undefined)
+      this.db
+        .query("UPDATE sessions SET autoplay = ?, updated_at = ? WHERE id = ?")
+        .run(fields.autoplay ? 1 : 0, Date.now(), sessionId);
   }
 
   addTrack(track: {
@@ -146,12 +154,13 @@ export class Store {
     album?: string;
     duration?: number;
     artwork?: string;
+    automatic?: boolean;
     status: string;
   }) {
     this.db
       .query(`INSERT INTO tracks
-        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, automatic, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         track.id,
         track.sessionId,
@@ -164,6 +173,7 @@ export class Store {
         track.album ?? null,
         track.duration ?? null,
         track.artwork ?? null,
+        track.automatic ? 1 : 0,
         track.status,
         Date.now(),
       );
@@ -188,5 +198,11 @@ export class Store {
 
   close() {
     this.db.close();
+  }
+
+  private ensureColumn(table: string, column: string, definition: string) {
+    const columns = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!columns.some(value => value.name === column))
+      this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }

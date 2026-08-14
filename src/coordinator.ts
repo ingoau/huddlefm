@@ -9,6 +9,7 @@ import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 type Entry = TrackMetadata & {
   id: string;
   requesterId: string;
+  automatic?: boolean;
   status: string;
   filePath?: string;
   lyrics?: Promise<LyricsPayload | undefined>;
@@ -24,6 +25,9 @@ export class Coordinator {
   private playbackSeconds = 0;
   private volume: number;
   private lyricsEnabled = true;
+  private autoplayEnabled = false;
+  private autoplayGeneration = 0;
+  private autoplayPending = false;
   private revision = 0;
   private uiTs = "";
   private hostId: string | undefined;
@@ -190,6 +194,7 @@ export class Coordinator {
     }
     const pending = await this.enqueue(async () => {
       if (this.state === "ended" || !(await this.require(interaction, "add"))) return;
+      await this.removeQueuedAutoplay();
       if (this.queue.length + Number(Boolean(this.current)) >= this.config.queueLimit) {
         await this.notice(interaction.userId, "The queue is full.");
         return;
@@ -206,7 +211,8 @@ export class Coordinator {
       };
       const controller = new AbortController();
       this.preparations.set(entry.id, controller);
-      this.queue.push(entry);
+      const automatic = this.queue.findIndex(track => track.automatic);
+      this.queue.splice(automatic < 0 ? this.queue.length : automatic, 0, entry);
       this.store.addTrack({ ...entry, sessionId: this.id, status: entry.status });
       this.audit.record("track.added", interaction.userId, { sessionId: this.id, ...auditTrack(entry) });
       await this.render();
@@ -247,12 +253,137 @@ export class Coordinator {
           await this.render();
           this.syncPreloads();
         }
+        this.scheduleAutoplay();
       });
     }
   }
 
+  private scheduleAutoplay() {
+    const seed = this.current?.sourceId ?? this.history.at(-1)?.sourceId;
+    if (
+      !seed || !this.autoplayEnabled || this.autoplayPending || this.state === "ended" ||
+      this.queue.some(track => !track.automatic) || this.queue.some(track => track.automatic) ||
+      this.queue.length + Number(Boolean(this.current)) >= this.config.queueLimit
+    ) return;
+    const generation = this.autoplayGeneration;
+    this.autoplayPending = true;
+    void this.recommend(seed, generation).finally(() => {
+      if (generation === this.autoplayGeneration) this.autoplayPending = false;
+    });
+  }
+
+  private async recommend(seed: string, generation: number) {
+    try {
+      const ids = [...new Set(await this.tracks.upNextIds(seed))];
+      const excluded = new Set([
+        this.current?.sourceId,
+        ...this.queue.map(track => track.sourceId),
+        ...this.history.slice(-20).map(track => track.sourceId),
+      ]);
+      for (const id of ids) {
+        if (excluded.has(id)) continue;
+        let metadata: TrackMetadata;
+        try {
+          metadata = await this.tracks.resolveVideoId(id);
+        } catch {
+          continue;
+        }
+        const pending = await this.enqueue(async () => {
+          if (!this.canAddAutoplay(seed, generation)) return;
+          const currentIds = new Set([
+            this.current?.sourceId,
+            ...this.queue.map(track => track.sourceId),
+            ...this.history.slice(-20).map(track => track.sourceId),
+          ]);
+          if (currentIds.has(metadata.sourceId)) return false;
+          const entry: Entry = {
+            ...metadata,
+            id: crypto.randomUUID(),
+            requesterId: this.botUserId,
+            automatic: true,
+            status: "preparing",
+            lyrics: this.lyrics.get(metadata).catch(() => undefined),
+          };
+          const controller = new AbortController();
+          this.preparations.set(entry.id, controller);
+          this.queue.push(entry);
+          this.store.addTrack({ ...entry, sessionId: this.id, status: entry.status });
+          this.audit.record("track.autoplay_added", undefined, { sessionId: this.id, seedSourceId: seed, ...auditTrack(entry) });
+          await this.render();
+          return { entry, controller };
+        });
+        if (pending === undefined) return;
+        if (pending === false) continue;
+        if (await this.prepareAutoplay(pending.entry, pending.controller)) return;
+        if (!this.canAddAutoplay(seed, generation)) return;
+      }
+      this.audit.record("autoplay.recommendation_failed", undefined, { sessionId: this.id, seedSourceId: seed, reason: "no usable recommendations" });
+    } catch (error) {
+      this.audit.record("autoplay.recommendation_failed", undefined, { sessionId: this.id, seedSourceId: seed, reason: safeAuditError(error) });
+    }
+  }
+
+  private canAddAutoplay(seed: string, generation: number) {
+    return this.autoplayEnabled && generation === this.autoplayGeneration && this.state !== "ended" &&
+      (this.current?.sourceId ?? this.history.at(-1)?.sourceId) === seed &&
+      !this.queue.some(track => !track.automatic) && !this.queue.some(track => track.automatic) &&
+      this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit;
+  }
+
+  private async prepareAutoplay(entry: Entry, controller: AbortController) {
+    const prepared = this.preparationSerial.then(() =>
+      this.tracks.prepare(entry, `data/media/${this.id}`, entry.id, controller.signal),
+    );
+    this.preparationSerial = prepared.then(() => undefined, () => undefined);
+    try {
+      const filePath = await prepared;
+      return await this.enqueue(async () => {
+        this.preparations.delete(entry.id);
+        if (this.state === "ended" || !this.queue.includes(entry)) {
+          await rm(filePath, { force: true });
+          return false;
+        }
+        entry.filePath = filePath;
+        entry.status = "ready";
+        this.store.setTrack(entry.id, { status: "ready", filePath });
+        if (!this.current) await this.startNext();
+        else {
+          await this.render();
+          this.syncPreloads();
+        }
+        return true;
+      });
+    } catch (error) {
+      return this.enqueue(async () => {
+        this.preparations.delete(entry.id);
+        if (!this.queue.includes(entry)) return false;
+        entry.status = "failed";
+        this.queue = this.queue.filter(track => track !== entry);
+        this.store.setTrack(entry.id, { status: "failed" });
+        this.audit.record("track.failed", undefined, { sessionId: this.id, ...auditTrack(entry), reason: safeAuditError(error) });
+        if (!this.current) await this.startNext();
+        else await this.render();
+        return false;
+      });
+    }
+  }
+
+  private async removeQueuedAutoplay() {
+    this.autoplayGeneration++;
+    this.autoplayPending = false;
+    const automatic = this.queue.filter(track => track.automatic);
+    this.queue = this.queue.filter(track => !track.automatic);
+    for (const entry of automatic) {
+      this.preparations.get(entry.id)?.abort();
+      this.store.removeTrack(entry.id);
+      if (entry.filePath) await rm(entry.filePath, { force: true });
+    }
+  }
+
   private async startNext() {
-    const next = this.queue.find(track => track.status === "ready");
+    const manual = this.queue.some(track => !track.automatic);
+    const next = this.queue.find(track => !track.automatic && track.status === "ready") ??
+      (!manual ? this.queue.find(track => track.status === "ready") : undefined);
     if (!next) {
       this.current = undefined;
       this.state = "ready";
@@ -289,6 +420,7 @@ export class Coordinator {
     this.syncPreloads();
     await this.render();
     this.refreshIdle();
+    this.scheduleAutoplay();
   }
 
   audioPath(entryId: string, token: string) {
@@ -403,6 +535,7 @@ export class Coordinator {
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
+    this.scheduleAutoplay();
     await this.updateQueueModal(interaction);
   }
 
@@ -422,6 +555,8 @@ export class Coordinator {
 
   private async clear(interaction: Interaction) {
     if (!(await this.require(interaction, "clear"))) return;
+    this.autoplayGeneration++;
+    this.autoplayPending = false;
     const count = this.queue.length;
     for (const entry of this.queue) {
       this.preparations.get(entry.id)?.abort();
@@ -433,6 +568,7 @@ export class Coordinator {
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
+    this.scheduleAutoplay();
   }
 
   private async queueModal(interaction: Interaction) {
@@ -457,7 +593,7 @@ export class Coordinator {
             : []),
         ];
         return [
-          { type: "section", block_id: `queue_item_${track.id}`, text: { type: "mrkdwn", text: `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\nAdded by <@${track.requesterId}>` } },
+          { type: "section", block_id: `queue_item_${track.id}`, text: { type: "mrkdwn", text: `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.automatic ? "Autoplay recommendation" : `Added by <@${track.requesterId}>`}` } },
           ...(controls.length ? [{ type: "actions", block_id: `queue_actions_${track.id}`, elements: controls }] : []),
         ];
       }) : [{ type: "section", text: { type: "mrkdwn", text: "The queue is empty." } }],
@@ -515,6 +651,21 @@ export class Coordinator {
         },
         {
           type: "input",
+          block_id: "autoplay",
+          optional: true,
+          label: plain("YouTube Music autoplay"),
+          hint: plain("Adds one recommendation when the manual queue is empty."),
+          element: {
+            type: "checkboxes",
+            action_id: "enabled",
+            options: [{ text: plain("Keep playing recommendations"), value: "enabled" }],
+            initial_options: this.autoplayEnabled
+              ? [{ text: plain("Keep playing recommendations"), value: "enabled" }]
+              : [],
+          },
+        },
+        {
+          type: "input",
           block_id: "host",
           optional: true,
           label: plain("Transfer host"),
@@ -557,7 +708,7 @@ export class Coordinator {
     const percent = Number(value);
     if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
       return this.notice(interaction.userId, "Volume must be between 0 and 100.");
-    const previous = { hostId: this.hostId, volume: this.volume, permissions: [...this.allowed] };
+    const previous = { hostId: this.hostId, volume: this.volume, autoplay: this.autoplayEnabled, permissions: [...this.allowed] };
     this.volume = Math.round(percent * 100) / 10_000;
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
@@ -568,6 +719,15 @@ export class Coordinator {
     if (lyricsEnabled !== this.lyricsEnabled) {
       this.lyricsEnabled = lyricsEnabled;
       this.sendMedia({ type: "lyrics_enabled", enabled: lyricsEnabled });
+    }
+    const autoplayState = interaction.state.autoplay?.enabled;
+    const autoplayEnabled = autoplayState
+      ? autoplayState.selected_options?.some(option => option.value === "enabled") ?? false
+      : this.autoplayEnabled;
+    if (autoplayEnabled !== this.autoplayEnabled) {
+      this.autoplayEnabled = autoplayEnabled;
+      this.store.setSession(this.id, { autoplay: autoplayEnabled });
+      if (!autoplayEnabled) await this.removeQueuedAutoplay();
     }
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
     this.allowed = new Set(selected.map(option => option.value).filter(Boolean) as string[]);
@@ -582,9 +742,11 @@ export class Coordinator {
       previous,
       hostId: this.hostId,
       volume: this.volume,
+      autoplay: this.autoplayEnabled,
       permissions: [...this.allowed],
     });
     await this.render();
+    this.scheduleAutoplay();
   }
 
   private async hostLeft() {
@@ -635,7 +797,7 @@ export class Coordinator {
       type: "container",
       block_id: `player_${id}`,
       title: plain(current?.title ?? "Nothing playing"),
-      subtitle: plain(current ? `${current.album ? `${current.album} · ` : ""}${current.artist}` : "Ready for music"),
+      subtitle: plain(current ? `${current.album ? `${current.album} · ` : ""}${current.artist}${current.automatic ? " · Autoplay" : ""}` : "Ready for music"),
       ...(current?.artwork ? { icon: { type: "image", image_url: current.artwork, alt_text: `${current.title} artwork` } } : {}),
       child_blocks: [
         { type: "actions", block_id: `playback_${id}`, elements: [
@@ -658,12 +820,12 @@ export class Coordinator {
       type: "container",
       block_id: `next_${id}`,
       title: plain(next ? `Next: ${next.title}` : "Nothing queued"),
-      subtitle: plain(next ? `${next.album ? `${next.album} · ` : ""}${next.artist}${next.status === "preparing" ? " · preparing" : ""}` : "Add a song to keep the music going"),
+      subtitle: plain(next ? `${next.album ? `${next.album} · ` : ""}${next.artist}${next.automatic ? " · Autoplay" : ""}${next.status === "preparing" ? " · preparing" : ""}` : "Add a song to keep the music going"),
       ...(next?.artwork ? { icon: { type: "image", image_url: next.artwork, alt_text: `${next.title} artwork` } } : {}),
       child_blocks: [{
         type: "context",
         block_id: `queue_status_${id}`,
-        elements: [{ type: "mrkdwn", text: `${next ? `Added by <@${next.requesterId}> · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue` }],
+        elements: [{ type: "mrkdwn", text: `${next ? `${next.automatic ? "Autoplay recommendation" : `Added by <@${next.requesterId}>`} · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue` }],
       }],
     },
     {
@@ -706,6 +868,8 @@ export class Coordinator {
       return this.notice(userId, "Only the host can end this session.");
     }
     this.state = "ended";
+    this.autoplayGeneration++;
+    this.autoplayPending = false;
     for (const controller of this.preparations.values()) controller.abort();
     this.preparations.clear();
     clearTimeout(this.idleTimer);
@@ -721,7 +885,14 @@ export class Coordinator {
 }
 
 function auditTrack(track: Entry) {
-  return { trackId: track.id, title: track.title, artist: track.artist, requesterId: track.requesterId };
+  return {
+    trackId: track.id,
+    sourceId: track.sourceId,
+    title: track.title,
+    artist: track.artist,
+    requesterId: track.requesterId,
+    origin: track.automatic ? "autoplay" : "manual",
+  };
 }
 
 function safeAuditError(error: unknown) {

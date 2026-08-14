@@ -8,6 +8,8 @@ import type { TrackCatalog } from "./tracks.ts";
 
 function setup(tracks = {} as TrackCatalog) {
   const posted: unknown[] = [];
+  const updates: unknown[] = [];
+  const modals: unknown[] = [];
   const ephemeral: string[] = [];
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
@@ -16,10 +18,11 @@ function setup(tracks = {} as TrackCatalog) {
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
-    update: async () => {},
+    update: async (...args: unknown[]) => { updates.push(args); },
     delete: async () => {},
     ephemeral: async (_channel: string, _user: string, text: string) => { ephemeral.push(text); },
-    modal: async () => {},
+    modal: async (...args: unknown[]) => { modals.push(args); },
+    updateModal: async () => {},
   } as unknown as SlackAppAdapter;
   const store = {
     createSession: () => {}, setUi: () => {}, setTrack: () => {}, removeTrack: () => {},
@@ -35,7 +38,19 @@ function setup(tracks = {} as TrackCatalog) {
   }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
-  return { coordinator, posted, ephemeral, sessions, permissions, media, audit };
+  return { coordinator, posted, updates, modals, ephemeral, sessions, permissions, media, audit };
+}
+
+const interaction = (coordinator: Coordinator, actionId: string, value = "", type = "block_actions") => ({
+  type, userId: "host", actionId, value, channelId: "channel",
+  messageTs: type === "view_submission" ? "" : "1", triggerId: "trigger",
+  metadata: type === "view_submission" ? JSON.stringify({ sessionId: coordinator.id, hostId: "host" }) : "",
+  state: {},
+});
+
+async function until(predicate: () => boolean) {
+  for (let index = 0; index < 100 && !predicate(); index++) await Bun.sleep(1);
+  expect(predicate()).toBeTrue();
 }
 
 test("a Next click during first-track preparation does not skip it", async () => {
@@ -244,4 +259,138 @@ test("host transfers ownership and global permissions atomically", async () => {
   expect(test.permissions).toContainEqual({ capability: "pause", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
   await test.coordinator.endFromSlack();
+});
+
+test("autoplay defaults off and host settings persist both toggle states", async () => {
+  let recommendations = 0;
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a", canonicalUrl: "https://example.com/a",
+      sourceId: "aaaaaaaaaaa", title: "A", artist: "Artist",
+    }),
+    prepare: async () => "a.opus",
+    upNextIds: async () => (recommendations++, []),
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
+  await Bun.sleep(0);
+  expect(recommendations).toBe(0);
+
+  await result.coordinator.action(interaction(result.coordinator, "open_settings"));
+  const modal = JSON.stringify(result.modals.at(-1));
+  expect(modal).toContain('"block_id":"autoplay"');
+  expect(modal).toContain('"initial_options":[]');
+
+  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  await until(() => recommendations === 1);
+  expect(result.sessions).toContainEqual({ autoplay: true });
+
+  const disable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  disable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [] } },
+  };
+  await result.coordinator.action(disable);
+  expect(result.sessions).toContainEqual({ autoplay: false });
+  await result.coordinator.endFromSlack();
+});
+
+test("autoplay deduplicates current and recent tracks before resolving metadata", async () => {
+  const ids = { a: "aaaaaaaaaaa", b: "bbbbbbbbbbb", c: "ccccccccccc" };
+  const seeds: string[] = [];
+  const resolved: string[] = [];
+  const tracks = {
+    resolve: async (value: keyof typeof ids) => ({
+      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
+      sourceId: ids[value], title: value.toUpperCase(), artist: "Artist",
+    }),
+    upNextIds: async (seed: string) => (seeds.push(seed), [ids.b, ids.a, ids.c, ids.c]),
+    resolveVideoId: async (id: string) => (resolved.push(id), {
+      sourceInput: `https://music.youtube.com/watch?v=${id}`,
+      canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+      sourceId: id, title: "C", artist: "Radio",
+    }),
+    prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "b"));
+  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  const first = (result.media.find(value => (value as { type?: string }).type === "play") as { entryId: string }).entryId;
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  await until(() => result.audit.some(value => (value as unknown[])[0] === "track.autoplay_added"));
+  expect(seeds).toEqual([ids.b]);
+  expect(resolved).toEqual([ids.c]);
+  expect(JSON.stringify(result.updates)).toContain("Autoplay recommendation");
+  expect(JSON.stringify(result.audit)).toContain('"origin":"autoplay"');
+  await result.coordinator.endFromSlack();
+});
+
+test("failed recommendation lookup leaves the session running", async () => {
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a", canonicalUrl: "https://example.com/a",
+      sourceId: "aaaaaaaaaaa", title: "A", artist: "Artist",
+    }),
+    prepare: async () => "a.opus",
+    upNextIds: async () => { throw new Error("unavailable"); },
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
+  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  await until(() => result.audit.some(value => (value as unknown[])[0] === "autoplay.recommendation_failed"));
+  expect(result.media).not.toContainEqual({ type: "leave" });
+  expect(result.sessions).not.toContainEqual({ status: "ended" });
+  await result.coordinator.endFromSlack();
+});
+
+test("a manual track replaces a prepared autoplay recommendation", async () => {
+  const ids = { a: "aaaaaaaaaaa", b: "bbbbbbbbbbb", c: "ccccccccccc" };
+  const tracks = {
+    resolve: async (value: keyof typeof ids) => ({
+      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
+      sourceId: ids[value], title: value.toUpperCase(), artist: "Artist",
+    }),
+    upNextIds: async () => [ids.c],
+    resolveVideoId: async (id: string) => ({
+      sourceInput: `https://music.youtube.com/watch?v=${id}`,
+      canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+      sourceId: id, title: "C", artist: "Radio",
+    }),
+    prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
+  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  await until(() => JSON.stringify(result.updates).includes("Autoplay recommendation"));
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "b"));
+  const plays = result.media.filter(value => (value as { type?: string }).type === "play") as { entryId: string; sourceId: string }[];
+  await result.coordinator.mediaEvent("track_ended", { entryId: plays[0]!.entryId });
+  const finalPlays = result.media.filter(value => (value as { type?: string }).type === "play") as { sourceId: string }[];
+  expect(finalPlays[1]?.sourceId).toBe(ids.b);
+  await result.coordinator.endFromSlack();
 });
