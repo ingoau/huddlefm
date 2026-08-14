@@ -30,6 +30,7 @@ export type HuddleEvent =
       threadTs: string;
       messageTs: string;
       userId: string;
+      text: string;
     }
   | { type: "MemberLeft"; callId: string; userId: string }
   | { type: "MemberJoined"; callId: string; userId: string }
@@ -218,6 +219,18 @@ export class SlackHuddleAdapter {
     return true;
   }
 
+  async activeHuddleCall(channelId: string, threadTs: string) {
+    const replies = await this.api("conversations.replies", {
+      channel: channelId,
+      ts: threadTs,
+      limit: "1",
+      inclusive: "true",
+    });
+    if (replies.ok !== true)
+      throw new Error(`conversations.replies failed: ${String(replies.error ?? "unknown_error")}`);
+    return activeHuddleCallId(replies, threadTs);
+  }
+
   private async api(method: string, fields: Record<string, string>) {
     const response = await fetch(new URL(`/api/${method}`, this.config.workspaceUrl), {
       method: "POST",
@@ -291,6 +304,7 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
       threadTs: text(event.thread_ts, "message.thread_ts"),
       messageTs: text(event.ts, "message.ts"),
       userId: text(event.user, "message.user"),
+      text: typeof event.text === "string" ? event.text : "",
     };
   }
   if (event.type === "sh_room_leave") {
@@ -324,6 +338,19 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
         callId,
       };
   }
+}
+
+export function activeHuddleCallId(raw: unknown, threadTs: string) {
+  const messages = object(raw, "replies").messages;
+  if (!Array.isArray(messages)) return;
+  const root = messages.find(message =>
+    message && typeof message === "object" && (message as { ts?: unknown }).ts === threadTs
+  ) as Record<string, unknown> | undefined;
+  if (root?.subtype !== "huddle_thread" || !root.room || typeof root.room !== "object") return;
+  const room = root.room as Record<string, unknown>;
+  const endedAt = Number(room.date_end ?? 0);
+  if (room.has_ended === true || Number.isFinite(endedAt) && endedAt > 0) return;
+  return typeof room.id === "string" && room.id ? room.id : undefined;
 }
 
 export async function verifySlackIdentity(config: {
