@@ -28,4 +28,4 @@ docker run --rm --init --env-file .env -p 3210:3210 -v huddlefm-data:/app/data h
 
 Published images are available as `ghcr.io/ingoau/huddlefm:latest`.
 
-The service binds to loopback by default; the container binds to all interfaces. It keeps Slack and Chime credentials in memory, authenticates its media bridge and audio URLs, stores session data without restoring queues, and removes prepared media when the session ends. Audit events are appended as JSON Lines to `data/audit.jsonl`; Compose bind-mounts that directory so the file can be opened directly on the host.
+The service binds to loopback by default; the container binds to all interfaces. It keeps Slack and Chime credentials in memory and authenticates its media bridge and audio URLs. On `SIGINT` or `SIGTERM`, it announces the restart, saves active sessions in `data`, briefly leaves each Huddle, and restores playback if the container returns within three minutes. Expired sessions and sessions whose Huddles have ended are discarded. Audit events are appended as JSON Lines to `data/audit.jsonl`; Compose bind-mounts that directory so the file can be opened directly on the host.

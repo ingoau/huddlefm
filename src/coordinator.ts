@@ -3,7 +3,7 @@ import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
-import { capabilities, permissionPresets, Store } from "./store.ts";
+import { capabilities, permissionPresets, Store, type SavedSession } from "./store.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 
 type Entry = TrackMetadata & {
@@ -16,7 +16,7 @@ type Entry = TrackMetadata & {
 };
 
 export class Coordinator {
-  readonly id = crypto.randomUUID();
+  readonly id: string;
   readonly participants = new Set<string>();
   private queue: Entry[] = [];
   private history: Entry[] = [];
@@ -55,12 +55,30 @@ export class Coordinator {
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
     private leaveMedia: () => Promise<void>,
+    restored?: SavedSession,
   ) {
-    this.hostId = hostId;
-    this.volume = config.initialVolume;
+    this.id = restored?.id ?? crypto.randomUUID();
+    this.hostId = restored?.hostId ?? hostId;
+    this.volume = restored?.volume ?? config.initialVolume;
     this.participants.add(hostId);
     this.participants.add(botUserId);
     for (const id of room.participantIds) this.participants.add(id);
+    if (restored) {
+      this.state = restored.state;
+      this.playbackSeconds = restored.playbackSeconds;
+      this.autoplayEnabled = restored.autoplay;
+      this.lyricsEnabled = restored.lyricsEnabled;
+      this.anchorEnabled = restored.anchorEnabled;
+      this.revision = restored.revision;
+      this.uiTs = restored.uiTs;
+      this.allowed = new Set(restored.permissions);
+      const entries = restored.tracks.map(track => ({
+        ...track,
+        lyrics: this.lyrics.get(track).catch(() => undefined),
+      }));
+      this.current = entries.find(track => track.status === "playing");
+      this.queue = entries.filter(track => track !== this.current);
+    }
   }
 
   async start() {
@@ -87,6 +105,75 @@ export class Coordinator {
       channelId: this.room.uiChannelId,
     });
     this.refreshIdle();
+  }
+
+  async resume() {
+    const missing = await Promise.all([this.current, ...this.queue].filter(Boolean).map(async entry =>
+      entry!.filePath && await Bun.file(entry!.filePath).exists() ? undefined : entry,
+    ));
+    if (this.current && missing.includes(this.current)) {
+      this.current!.status = "preparing";
+      this.queue.unshift(this.current!);
+      this.current = undefined;
+    }
+    const missingEntries = missing.filter(Boolean) as Entry[];
+    for (const entry of missingEntries) {
+      entry.status = "preparing";
+      entry.filePath = undefined;
+      this.store.setTrack(entry.id, { status: "preparing", filePath: null });
+    }
+    this.store.activateSession(this.id, this.state);
+    this.audit.record("session.resumed", undefined, { sessionId: this.id, huddleId: this.room.huddleId });
+    this.sendMedia({ type: "volume", value: this.volume });
+    this.sendMedia({ type: "lyrics_enabled", enabled: this.lyricsEnabled });
+    if (!this.current) await this.startNext();
+    else {
+      this.sendMedia(this.playMessage(this.current));
+      if (this.playbackSeconds) this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
+      if (this.state === "paused") this.sendMedia({ type: "pause" });
+      void this.current.lyrics?.then(lyrics => {
+        if (this.current && lyrics)
+          this.sendMedia({ type: "lyrics", entryId: this.current.id, ...lyrics });
+      });
+      this.syncPreloads();
+      await this.render();
+      this.refreshIdle();
+      this.scheduleAutoplay();
+    }
+    for (const entry of missingEntries) void this.prepareRestored(entry);
+  }
+
+  private async prepareRestored(entry: Entry) {
+    const controller = new AbortController();
+    this.preparations.set(entry.id, controller);
+    try {
+      const prepared = this.preparationSerial.then(() =>
+        this.tracks.prepare(entry, `data/media/${this.id}`, entry.id, controller.signal),
+      );
+      this.preparationSerial = prepared.then(() => undefined, () => undefined);
+      const filePath = await prepared;
+      await this.enqueue(async () => {
+        this.preparations.delete(entry.id);
+        if (this.state === "ended" || this.state === "suspended" || !this.queue.includes(entry)) return;
+        entry.filePath = filePath;
+        entry.status = "ready";
+        this.store.setTrack(entry.id, { status: "ready", filePath });
+        if (!this.current) await this.startNext();
+        else {
+          await this.render();
+          this.syncPreloads();
+        }
+      });
+    } catch (error) {
+      await this.enqueue(async () => {
+        this.preparations.delete(entry.id);
+        if (this.state === "suspended" || !this.queue.includes(entry)) return;
+        this.queue = this.queue.filter(track => track !== entry);
+        this.store.setTrack(entry.id, { status: "failed" });
+        this.audit.record("track.failed", undefined, { sessionId: this.id, ...auditTrack(entry), reason: safeAuditError(error) });
+        if (!this.current) await this.startNext();
+      });
+    }
   }
 
   suggestions(interaction: Interaction) {
@@ -139,8 +226,10 @@ export class Coordinator {
   }
 
   mediaEvent(type: string, details?: { entryId?: string; seconds?: number }) {
+    if (this.state === "suspended") return;
     if (type === "playback_position" && details && details.entryId === this.current?.id && typeof details.seconds === "number" && Number.isFinite(details.seconds)) {
       this.playbackSeconds = details.seconds;
+      this.store.setSession(this.id, { playbackSeconds: details.seconds });
       return;
     }
     if (type === "track_ended" || type === "track_error" || type === "stalled")
@@ -162,6 +251,7 @@ export class Coordinator {
 
   memberLeft(userId: string) {
     this.participants.delete(userId);
+    if (this.state === "suspended") return;
     const changed = userId === this.botUserId
       ? this.enqueue(() => this.end(undefined, "removed from huddle"))
       : userId === this.hostId
@@ -173,6 +263,37 @@ export class Coordinator {
 
   endFromSlack() {
     return this.enqueue(() => this.end(this.hostId, "huddle ended"));
+  }
+
+  suspendForRestart(resumeUntil: number) {
+    return this.enqueue(async () => {
+      if (this.state === "ended" || this.state === "suspended") return;
+      const state = this.state;
+      this.state = "suspended";
+      this.autoplayGeneration++;
+      this.autoplayPending = false;
+      for (const controller of this.preparations.values()) controller.abort();
+      this.preparations.clear();
+      clearTimeout(this.idleTimer);
+      clearTimeout(this.aloneTimer);
+      clearTimeout(this.pausedTimer);
+      clearTimeout(this.anchorTimer);
+      this.store.suspendSession(this.id, {
+        state,
+        playbackSeconds: this.playbackSeconds,
+        lyricsEnabled: this.lyricsEnabled,
+        anchorEnabled: this.anchorEnabled,
+        queue: this.queue.map(track => track.id),
+      }, resumeUntil);
+      this.audit.record("session.suspended", undefined, { sessionId: this.id, resumeUntil });
+      await this.slack.post(
+        this.room.uiChannelId,
+        this.room.uiThreadTs,
+        "HuddleFM is restarting. Playback should resume shortly.",
+      ).catch(error => console.error(`[restart] could not post notice: ${message(error)}`));
+      this.sendMedia({ type: "leave" });
+      await this.leaveMedia();
+    });
   }
 
   private enqueue<T>(work: () => Promise<T> | T) {
@@ -194,7 +315,7 @@ export class Coordinator {
 
   private async add(interaction: Interaction) {
     const accepted = await this.enqueue(async () => {
-      if (this.state === "ended") return false;
+      if (this.state === "ended" || this.state === "suspended") return false;
       if (interaction.messageTs && interaction.messageTs !== this.uiTs) {
         await this.notice(interaction.userId, "That player is stale; use the newest one.");
         return false;
@@ -209,7 +330,7 @@ export class Coordinator {
       return this.notice(interaction.userId, message(error));
     }
     const pending = await this.enqueue(async () => {
-      if (this.state === "ended" || !(await this.require(interaction, "add"))) return;
+      if (this.state === "ended" || this.state === "suspended" || !(await this.require(interaction, "add"))) return;
       await this.removeQueuedAutoplay();
       if (this.queue.length + Number(Boolean(this.current)) >= this.config.queueLimit) {
         await this.notice(interaction.userId, "The queue is full.");
@@ -244,6 +365,7 @@ export class Coordinator {
       const filePath = await prepared;
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
+        if (this.state === "suspended") return;
         if (this.state === "ended" || !this.queue.includes(entry))
           return rm(filePath, { force: true });
         entry.filePath = filePath;
@@ -258,7 +380,7 @@ export class Coordinator {
     } catch (error) {
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
-        if (this.state === "ended" || !this.queue.includes(entry)) return;
+        if (this.state === "ended" || this.state === "suspended" || !this.queue.includes(entry)) return;
         entry.status = "failed";
         this.queue = this.queue.filter(item => item !== entry);
         this.store.setTrack(entry.id, { status: "failed" });
@@ -277,7 +399,7 @@ export class Coordinator {
   private scheduleAutoplay() {
     const seed = this.current?.sourceId ?? this.history.at(-1)?.sourceId;
     if (
-      !seed || !this.autoplayEnabled || this.autoplayPending || this.state === "ended" ||
+      !seed || !this.autoplayEnabled || this.autoplayPending || this.state === "ended" || this.state === "suspended" ||
       this.queue.some(track => !track.automatic) || this.queue.some(track => track.automatic) ||
       this.queue.length + Number(Boolean(this.current)) >= this.config.queueLimit
     ) return;
@@ -340,7 +462,7 @@ export class Coordinator {
   }
 
   private canAddAutoplay(seed: string, generation: number) {
-    return this.autoplayEnabled && generation === this.autoplayGeneration && this.state !== "ended" &&
+    return this.autoplayEnabled && generation === this.autoplayGeneration && this.state !== "ended" && this.state !== "suspended" &&
       (this.current?.sourceId ?? this.history.at(-1)?.sourceId) === seed &&
       !this.queue.some(track => !track.automatic) && !this.queue.some(track => track.automatic) &&
       this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit;
@@ -355,6 +477,7 @@ export class Coordinator {
       const filePath = await prepared;
       return await this.enqueue(async () => {
         this.preparations.delete(entry.id);
+        if (this.state === "suspended") return false;
         if (this.state === "ended" || !this.queue.includes(entry)) {
           await rm(filePath, { force: true });
           return false;
@@ -415,17 +538,7 @@ export class Coordinator {
     this.store.setTrack(next.id, { status: "playing" });
     this.store.setSession(this.id, { status: "playing" });
     this.audit.record("track.started", undefined, { sessionId: this.id, ...auditTrack(next) });
-    this.sendMedia({
-      type: "play",
-      entryId: next.id,
-      url: this.mediaUrl(next),
-      title: next.title,
-      artist: next.artist,
-      album: next.album,
-      artwork: next.artwork,
-      duration: next.duration,
-      sourceId: next.sourceId,
-    });
+    this.sendMedia(this.playMessage(next));
     void next.lyrics?.then(lyrics => {
       if (this.current !== next) return;
       if (lyrics) {
@@ -447,6 +560,20 @@ export class Coordinator {
 
   private mediaUrl(entry: Entry) {
     return `http://127.0.0.1:${this.config.port}/audio/${entry.id}?token=${encodeURIComponent(this.mediaToken)}`;
+  }
+
+  private playMessage(entry: Entry) {
+    return {
+      type: "play",
+      entryId: entry.id,
+      url: this.mediaUrl(entry),
+      title: entry.title,
+      artist: entry.artist,
+      album: entry.album,
+      artwork: entry.artwork,
+      duration: entry.duration,
+      sourceId: entry.sourceId,
+    };
   }
 
   private syncPreloads() {
@@ -775,6 +902,7 @@ export class Coordinator {
     if (lyricsEnabled !== this.lyricsEnabled) {
       this.lyricsEnabled = lyricsEnabled;
       this.sendMedia({ type: "lyrics_enabled", enabled: lyricsEnabled });
+      this.store.setSession(this.id, { lyricsEnabled });
     }
     const autoplayState = interaction.state.autoplay?.enabled;
     const autoplayEnabled = autoplayState
@@ -791,6 +919,7 @@ export class Coordinator {
       : this.anchorEnabled;
     if (!anchorEnabled) clearTimeout(this.anchorTimer);
     this.anchorEnabled = anchorEnabled;
+    this.store.setSession(this.id, { anchorEnabled });
     const preset = interaction.state.permission_preset?.selected?.selected_option?.value;
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
     this.allowed = new Set(preset
@@ -836,14 +965,14 @@ export class Coordinator {
   }
 
   private async render() {
-    if (!this.uiTs || this.state === "ended") return;
+    if (!this.uiTs || this.state === "ended" || this.state === "suspended") return;
     this.revision++;
     await this.slack.update(this.room.uiChannelId, this.uiTs, "HuddleFM player", this.blocks());
     this.store.setUi(this.id, this.uiTs, this.revision);
   }
 
   private async reanchor() {
-    if (this.state === "ended") return;
+    if (this.state === "ended" || this.state === "suspended") return;
     const revision = ++this.revision;
     const old = this.uiTs;
     const current = await this.slack.post(this.room.uiChannelId, this.room.uiThreadTs, "HuddleFM player", this.blocks());
@@ -918,7 +1047,7 @@ export class Coordinator {
   }
 
   private refreshIdle() {
-    if (this.state === "ended") return;
+    if (this.state === "ended" || this.state === "suspended") return;
     const alone = ![...this.participants].some(id => id !== this.botUserId);
     if (alone && !this.aloneTimer) {
       void this.slack.post(

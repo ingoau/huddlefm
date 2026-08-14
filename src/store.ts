@@ -20,6 +20,44 @@ export const permissionPresets = {
   communism: capabilities,
 };
 
+export type SavedTrack = {
+  id: string;
+  requesterId: string;
+  sourceInput: string;
+  canonicalUrl: string;
+  sourceId: string;
+  title: string;
+  artist: string;
+  album?: string;
+  duration?: number;
+  artwork?: string;
+  automatic?: boolean;
+  status: string;
+  filePath?: string;
+  queuePosition?: number;
+};
+
+export type SavedSession = {
+  id: string;
+  huddleId: string;
+  callId: string;
+  channelId: string;
+  threadTs: string;
+  uiTs: string;
+  revision: number;
+  creatorId: string;
+  hostId?: string;
+  state: string;
+  volume: number;
+  autoplay: boolean;
+  lyricsEnabled: boolean;
+  anchorEnabled: boolean;
+  playbackSeconds: number;
+  resumeUntil: number;
+  permissions: string[];
+  tracks: SavedTrack[];
+};
+
 export class Store {
   db: Database;
 
@@ -42,6 +80,11 @@ export class Store {
         status TEXT NOT NULL,
         volume REAL NOT NULL DEFAULT 0.6,
         autoplay INTEGER NOT NULL DEFAULT 0,
+        resume_state TEXT,
+        resume_until INTEGER,
+        playback_seconds REAL NOT NULL DEFAULT 0,
+        lyrics_enabled INTEGER NOT NULL DEFAULT 1,
+        anchor_enabled INTEGER NOT NULL DEFAULT 1,
         idle_deadline INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -61,6 +104,7 @@ export class Store {
         automatic INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL,
         file_path TEXT,
+        queue_position INTEGER,
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS permissions (
@@ -71,14 +115,13 @@ export class Store {
       );
     `);
     this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("sessions", "resume_state", "TEXT");
+    this.ensureColumn("sessions", "resume_until", "INTEGER");
+    this.ensureColumn("sessions", "playback_seconds", "REAL NOT NULL DEFAULT 0");
+    this.ensureColumn("sessions", "lyrics_enabled", "INTEGER NOT NULL DEFAULT 1");
+    this.ensureColumn("sessions", "anchor_enabled", "INTEGER NOT NULL DEFAULT 1");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
-    const closeUnfinished = this.db.transaction(() => {
-      this.db.run("DELETE FROM tracks WHERE session_id IN (SELECT id FROM sessions WHERE status != 'ended')");
-      this.db
-        .query("UPDATE sessions SET status = 'ended', updated_at = ? WHERE status != 'ended'")
-        .run(Date.now());
-    });
-    closeUnfinished();
+    this.ensureColumn("tracks", "queue_position", "INTEGER");
   }
 
   createSession(session: {
@@ -130,7 +173,15 @@ export class Store {
       .run(timestamp, revision, Date.now(), sessionId);
   }
 
-  setSession(sessionId: string, fields: { status?: string; hostId?: string | null; volume?: number; autoplay?: boolean }) {
+  setSession(sessionId: string, fields: {
+    status?: string;
+    hostId?: string | null;
+    volume?: number;
+    autoplay?: boolean;
+    playbackSeconds?: number;
+    lyricsEnabled?: boolean;
+    anchorEnabled?: boolean;
+  }) {
     if (fields.status !== undefined)
       this.db
         .query("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?")
@@ -147,6 +198,113 @@ export class Store {
       this.db
         .query("UPDATE sessions SET autoplay = ?, updated_at = ? WHERE id = ?")
         .run(fields.autoplay ? 1 : 0, Date.now(), sessionId);
+    if (fields.playbackSeconds !== undefined)
+      this.db
+        .query("UPDATE sessions SET playback_seconds = ?, updated_at = ? WHERE id = ?")
+        .run(fields.playbackSeconds, Date.now(), sessionId);
+    if (fields.lyricsEnabled !== undefined)
+      this.db
+        .query("UPDATE sessions SET lyrics_enabled = ?, updated_at = ? WHERE id = ?")
+        .run(fields.lyricsEnabled ? 1 : 0, Date.now(), sessionId);
+    if (fields.anchorEnabled !== undefined)
+      this.db
+        .query("UPDATE sessions SET anchor_enabled = ?, updated_at = ? WHERE id = ?")
+        .run(fields.anchorEnabled ? 1 : 0, Date.now(), sessionId);
+  }
+
+  suspendSession(sessionId: string, state: {
+    state: string;
+    playbackSeconds: number;
+    lyricsEnabled: boolean;
+    anchorEnabled: boolean;
+    queue: string[];
+  }, resumeUntil: number) {
+    this.db.transaction(() => {
+      this.db.query(`UPDATE sessions SET
+        status = 'suspended', resume_state = ?, resume_until = ?, playback_seconds = ?,
+        lyrics_enabled = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`)
+        .run(state.state, resumeUntil, state.playbackSeconds, state.lyricsEnabled ? 1 : 0,
+          state.anchorEnabled ? 1 : 0, Date.now(), sessionId);
+      this.db.query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?").run(sessionId);
+      const position = this.db.query("UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?");
+      state.queue.forEach((id, index) => position.run(index, id, sessionId));
+    })();
+  }
+
+  activateSession(sessionId: string, status: string) {
+    this.db.query(`UPDATE sessions SET
+      status = ?, resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?`)
+      .run(status, Date.now(), sessionId);
+  }
+
+  resumableSessions(now: number, ttlMs: number) {
+    const rows = this.db.query(`SELECT * FROM sessions WHERE status != 'ended'`).all() as Record<string, unknown>[];
+    const expiredIds: string[] = [];
+    const sessions = rows.flatMap(row => {
+      const deadline = Number(row.resume_until ?? Number(row.updated_at) + ttlMs);
+      if (deadline <= now) {
+        expiredIds.push(String(row.id));
+        return [];
+      }
+      const id = String(row.id);
+      const tracks = (this.db.query(`SELECT * FROM tracks
+        WHERE session_id = ? AND status IN ('playing', 'ready', 'preparing')
+        ORDER BY CASE WHEN status = 'playing' THEN -1 ELSE COALESCE(queue_position, created_at) END`).all(id) as Record<string, unknown>[])
+        .map(track => ({
+          id: String(track.id),
+          requesterId: String(track.requester_id),
+          sourceInput: String(track.source_input),
+          canonicalUrl: String(track.canonical_url),
+          sourceId: String(track.source_id),
+          title: String(track.title),
+          artist: String(track.artist),
+          ...(track.album ? { album: String(track.album) } : {}),
+          ...(track.duration === null ? {} : { duration: Number(track.duration) }),
+          ...(track.artwork ? { artwork: String(track.artwork) } : {}),
+          ...(track.automatic ? { automatic: true } : {}),
+          status: String(track.status),
+          ...(track.file_path ? { filePath: String(track.file_path) } : {}),
+          ...(track.queue_position === null ? {} : { queuePosition: Number(track.queue_position) }),
+        }));
+      return [{
+        id,
+        huddleId: String(row.huddle_id),
+        callId: String(row.call_id),
+        channelId: String(row.channel_id),
+        threadTs: String(row.thread_ts),
+        uiTs: String(row.ui_ts ?? ""),
+        revision: Number(row.revision),
+        creatorId: String(row.creator_id),
+        ...(row.host_id ? { hostId: String(row.host_id) } : {}),
+        state: String(row.status === "suspended" ? row.resume_state ?? "ready" : row.status),
+        volume: Number(row.volume),
+        autoplay: Boolean(row.autoplay),
+        lyricsEnabled: Boolean(row.lyrics_enabled),
+        anchorEnabled: Boolean(row.anchor_enabled),
+        playbackSeconds: Number(row.playback_seconds),
+        resumeUntil: deadline,
+        permissions: (this.db.query("SELECT capability FROM permissions WHERE session_id = ? AND allowed = 1").all(id) as { capability: string }[])
+          .map(value => value.capability),
+        tracks,
+      } satisfies SavedSession];
+    });
+    if (expiredIds.length) this.db.transaction(() => {
+      const end = this.db.query("UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?");
+      const clear = this.db.query("DELETE FROM tracks WHERE session_id = ?");
+      for (const id of expiredIds) {
+        clear.run(id);
+        end.run(now, id);
+      }
+    })();
+    return { sessions, expiredIds };
+  }
+
+  expireSession(sessionId: string) {
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM tracks WHERE session_id = ?").run(sessionId);
+      this.db.query("UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?")
+        .run(Date.now(), sessionId);
+    })();
   }
 
   addTrack(track: {

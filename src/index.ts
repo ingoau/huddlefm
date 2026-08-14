@@ -1,4 +1,5 @@
 import type { ServerWebSocket } from "bun";
+import { rm } from "node:fs/promises";
 import { AuditLog } from "./audit-log.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
@@ -7,9 +8,10 @@ import { LyricsCatalog } from "./lyrics.ts";
 import { MediaBrowserPool, type MediaBrowser } from "./media-browser.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import { SlackHuddleAdapter, verifySlackIdentity, type ChimeBootstrap } from "./slack-huddle.ts";
-import { Store } from "./store.ts";
+import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
 
+const resumeTtlMs = 3 * 60_000;
 const config = loadConfig();
 const build = await Bun.build({
   entrypoints: [new URL("./media-page.ts", import.meta.url).pathname],
@@ -21,6 +23,8 @@ const build = await Bun.build({
 if (!build.success) throw new AggregateError(build.logs, "Media page build failed");
 
 const store = new Store();
+const saved = store.resumableSessions(Date.now(), resumeTtlMs);
+await Promise.all(saved.expiredIds.map(id => rm(`data/media/${id}`, { recursive: true, force: true })));
 const catalog = new TrackCatalog(config);
 const lyrics = new LyricsCatalog();
 const slackApp = new SlackAppAdapter(config);
@@ -30,7 +34,12 @@ const mediaBrowsers = new MediaBrowserPool(config.chromePath);
 const runtimes = new Map<string, Runtime>();
 const joiningChannels = new Set<string>();
 const joiningCalls = new Set<string>();
+const pendingRestores = new Map<string, SavedSession>();
+const restoring = new Set<string>();
+const restoreWork = new Set<Promise<void>>();
 let botUserId = "";
+let restoreTimer: ReturnType<typeof setInterval> | undefined;
+let shuttingDown = false;
 
 type SocketData = { sessionId: string };
 type Gate = ReturnType<typeof Promise.withResolvers<void>>;
@@ -56,7 +65,8 @@ function runtimeForCall(callId: string) {
   );
 }
 
-async function joinHuddle(channelId: string, inviterUserId: string, callId?: string) {
+async function joinHuddle(channelId: string, inviterUserId: string, callId?: string, restored?: SavedSession) {
+  if (shuttingDown) throw new Error("HuddleFM is shutting down");
   if (
     joiningChannels.has(channelId) || callId && joiningCalls.has(callId) ||
     [...runtimes.values()].some(runtime => runtime.sourceChannelId === channelId || runtime.callId === callId)
@@ -77,7 +87,7 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
       sessionId: crypto.randomUUID(),
       meeting: joined.chimeMeeting,
       attendee: joined.chimeAttendee,
-      initialVolume: config.initialVolume,
+      initialVolume: restored?.volume ?? config.initialVolume,
       bridgeToken: crypto.randomUUID(),
     };
     runtime = {
@@ -124,9 +134,11 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
         await runtime!.browser.close();
         runtimes.delete(bootstrap.sessionId);
       },
+      restored,
     );
     try {
-      await coordinator.start();
+      if (restored) await coordinator.resume();
+      else await coordinator.start();
     } catch (error) {
       await runtime.browser.close();
       runtimes.delete(bootstrap.sessionId);
@@ -136,6 +148,45 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
   } finally {
     joiningChannels.delete(channelId);
     if (callId) joiningCalls.delete(callId);
+  }
+}
+
+async function restoreSession(saved: SavedSession) {
+  if (Date.now() >= saved.resumeUntil) {
+    store.expireSession(saved.id);
+    await rm(`data/media/${saved.id}`, { recursive: true, force: true });
+    pendingRestores.delete(saved.id);
+    return;
+  }
+  const callId = await slackHuddle.activeHuddleCall(saved.channelId, saved.threadTs);
+  if (!callId) {
+    store.expireSession(saved.id);
+    await rm(`data/media/${saved.id}`, { recursive: true, force: true });
+    pendingRestores.delete(saved.id);
+    return;
+  }
+  await joinHuddle(saved.channelId, saved.hostId ?? saved.creatorId, callId, saved);
+  pendingRestores.delete(saved.id);
+  console.log(`[restart] resumed ${saved.id}`);
+}
+
+async function retryRestores() {
+  if (shuttingDown) return;
+  const work = [...pendingRestores.values()].filter(saved => !restoring.has(saved.id)).map(saved => {
+    restoring.add(saved.id);
+    const task = restoreSession(saved)
+      .catch(error => console.error(`[restart] ${saved.id}: ${safeError(error)}`))
+      .finally(() => {
+        restoring.delete(saved.id);
+        restoreWork.delete(task);
+      });
+    restoreWork.add(task);
+    return task;
+  });
+  await Promise.all(work);
+  if (!pendingRestores.size && restoreTimer) {
+    clearInterval(restoreTimer);
+    restoreTimer = undefined;
   }
 }
 
@@ -294,10 +345,18 @@ await slackHuddle.start(event => {
   if (event.type === "MemberLeft") runtime.coordinator.memberLeft(event.userId);
   if (event.type === "HuddleEnded") void runtime.coordinator.endFromSlack();
 });
+for (const session of saved.sessions) pendingRestores.set(session.id, session);
+await retryRestores();
+if (pendingRestores.size) restoreTimer = setInterval(() => void retryRestores(), 5_000);
 console.log(`HuddleFM ready as ${botUserId} on ${server.url}`);
 
 const shutdown = async () => {
-  await Promise.all([...runtimes.values()].map(runtime => runtime.coordinator?.endFromSlack() ?? runtime.browser.close()));
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearInterval(restoreTimer);
+  await Promise.allSettled([...restoreWork]);
+  const resumeUntil = Date.now() + resumeTtlMs;
+  await Promise.allSettled([...runtimes.values()].map(runtime => runtime.coordinator?.suspendForRestart(resumeUntil) ?? runtime.browser.close()));
   await mediaBrowsers.close();
   server.stop();
   await slackApp.stop();
@@ -305,7 +364,7 @@ const shutdown = async () => {
   await catalog.close();
   store.close();
   await audit.flush();
-  process.exit();
+  process.exit(0);
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
