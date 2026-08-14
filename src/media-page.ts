@@ -20,6 +20,7 @@ const artwork = document.querySelector<HTMLElement>("#artwork")!;
 const progress = document.querySelector<HTMLElement>("#progress-fill")!;
 const stage = document.querySelector<HTMLElement>("#stage")!;
 lyrics.host = { getScrollElement: () => lyrics };
+lyrics.theme = "/* blyrics-target-scroll-pos-ratio = 0.45; */";
 const params = new URLSearchParams(location.search);
 const token = params.get("token");
 if (!token) throw new Error("Missing bridge token");
