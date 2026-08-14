@@ -13,13 +13,14 @@ function setup(tracks = {} as TrackCatalog) {
   const permissions: unknown[] = [];
   const media: unknown[] = [];
   const audit: unknown[] = [];
+  const modals: unknown[] = [];
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
     update: async () => {},
     delete: async () => {},
     ephemeral: async (_channel: string, _user: string, text: string) => { ephemeral.push(text); },
-    modal: async () => {},
+    modal: async (...args: unknown[]) => { modals.push(args); },
   } as unknown as SlackAppAdapter;
   const store = {
     createSession: () => {}, setUi: () => {}, setTrack: () => {}, removeTrack: () => {},
@@ -35,7 +36,7 @@ function setup(tracks = {} as TrackCatalog) {
   }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, idleMs: 60_000, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {});
-  return { coordinator, posted, ephemeral, sessions, permissions, media, audit };
+  return { coordinator, posted, ephemeral, sessions, permissions, media, audit, modals };
 }
 
 test("a Next click during first-track preparation does not skip it", async () => {
@@ -243,5 +244,29 @@ test("host transfers ownership and global permissions atomically", async () => {
   expect(test.media).toContainEqual({ type: "lyrics_enabled", enabled: false });
   expect(test.permissions).toContainEqual({ capability: "pause", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
+  await test.coordinator.endFromSlack();
+});
+
+test("thread anchoring is enabled by default and can be disabled", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const action = (type: string, state = {}) => test.coordinator.action({
+    type, userId: "host", actionId: type === "view_submission" ? "save_settings" : "open_settings", value: "",
+    channelId: "channel", messageTs: type === "view_submission" ? "" : "1", triggerId: "trigger",
+    metadata: type === "view_submission" ? JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }) : "",
+    state,
+  });
+
+  await action("block_actions");
+  expect(JSON.stringify(test.modals[0])).toContain('"block_id":"anchor","optional":true');
+  expect(JSON.stringify(test.modals[0])).toContain('"initial_options":[{"text":{"type":"plain_text","text":"Keep player at bottom of thread"}');
+  await action("view_submission", {
+    volume: { percent: { value: "60" } },
+    anchor: { enabled: { selected_options: [] } },
+  });
+  await action("block_actions");
+  const anchor = (test.modals[1] as [string, { blocks: { block_id: string; element: { initial_options: unknown[] } }[] }])[1]
+    .blocks.find(block => block.block_id === "anchor");
+  expect(anchor?.element.initial_options).toEqual([]);
   await test.coordinator.endFromSlack();
 });
