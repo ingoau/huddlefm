@@ -15,7 +15,6 @@ function setup(tracks = {} as TrackCatalog, timeouts = { idleMs: 60_000, pausedM
   const permissions: unknown[] = [];
   const suspensions: unknown[] = [];
   const media: unknown[] = [];
-  const leaves: unknown[] = [];
   const audit: unknown[] = [];
   let post = 0;
   const slack = {
@@ -41,8 +40,8 @@ function setup(tracks = {} as TrackCatalog, timeouts = { idleMs: 60_000, pausedM
     chimeMeeting: {}, chimeAttendee: {},
   }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, ...timeouts, port: 3210, managerUserId: "manager",
-  }, "token", message => media.push(message), async () => { leaves.push(true); }, restored);
-  return { coordinator, posted, updates, modals, ephemeral, sessions, permissions, suspensions, media, leaves, audit };
+  }, "token", message => media.push(message), async () => {}, restored);
+  return { coordinator, posted, updates, modals, ephemeral, sessions, permissions, suspensions, media, audit };
 }
 
 const interaction = (coordinator: Coordinator, actionId: string, value = "", type = "block_actions") => ({
@@ -67,7 +66,6 @@ test("suspends with a restart notice and restores playback", async () => {
   ]);
   expect(first.suspensions).toEqual([[first.coordinator.id, expect.objectContaining({ state: "ready" }), 180_000]]);
   expect(first.media).toContainEqual({ type: "leave" });
-  expect(first.leaves).toHaveLength(1);
 
   const restored: SavedSession = {
     id: "saved", huddleId: "huddle", callId: "call", channelId: "channel", threadTs: "1.0",

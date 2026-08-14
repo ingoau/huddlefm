@@ -292,7 +292,8 @@ export class Coordinator {
         this.room.uiThreadTs,
         "HuddleFM is restarting. Playback should resume shortly.",
       ).catch(error => console.error(`[restart] could not post notice: ${message(error)}`));
-      await this.leaveHuddle();
+      this.sendMedia({ type: "leave" });
+      await this.leaveMedia();
     });
   }
 
@@ -1126,15 +1127,11 @@ export class Coordinator {
     clearTimeout(this.anchorTimer);
     this.store.setSession(this.id, { status: "ended" });
     this.audit.record("session.ended", userId, { sessionId: this.id, reason });
-    await this.leaveHuddle();
+    this.sendMedia({ type: "leave" });
+    await this.leaveMedia();
     await rm(`data/media/${this.id}`, { recursive: true, force: true });
     if (this.uiTs)
       await this.slack.update(this.room.uiChannelId, this.uiTs, `Session ended: ${reason}`, [{ type: "section", text: { type: "mrkdwn", text: `*Session ended: ${reason}*` } }]);
-  }
-
-  private async leaveHuddle() {
-    this.sendMedia({ type: "leave" });
-    await this.leaveMedia();
   }
 }
 
