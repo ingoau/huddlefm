@@ -13,6 +13,13 @@ export const capabilities = [
   "end-session",
 ] as const;
 
+export const permissionPresets = {
+  default: ["add", "remove-own"],
+  "host-only": [],
+  collaborative: capabilities.filter(capability => capability !== "clear" && capability !== "end-session"),
+  communism: capabilities,
+};
+
 export class Store {
   db: Database;
 
@@ -105,7 +112,7 @@ export class Store {
         insert.run(
           session.id,
           capability,
-          capability === "add" || capability === "remove-own" ? 1 : 0,
+          permissionPresets.default.includes(capability) ? 1 : 0,
         );
     });
     transaction();

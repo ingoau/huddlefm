@@ -3,7 +3,7 @@ import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
-import { capabilities, Store } from "./store.ts";
+import { capabilities, permissionPresets, Store } from "./store.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 
 type Entry = TrackMetadata & {
@@ -28,7 +28,7 @@ export class Coordinator {
   private revision = 0;
   private uiTs = "";
   private hostId: string | undefined;
-  private allowed = new Set(["add", "remove-own"]);
+  private allowed = new Set<string>(permissionPresets.default);
   private serial = Promise.resolve();
   private preparationSerial = Promise.resolve();
   private preparations = new Map<string, AbortController>();
@@ -555,6 +555,24 @@ export class Coordinator {
         },
         {
           type: "input",
+          block_id: "permission_preset",
+          optional: true,
+          label: plain("Apply permission preset"),
+          hint: plain("Optional. Saving applies the preset to the custom permissions below."),
+          element: {
+            type: "static_select",
+            action_id: "selected",
+            placeholder: plain("Choose a preset"),
+            options: ([
+              ["default", "Default"],
+              ["host-only", "Host only"],
+              ["collaborative", "Collaborative"],
+              ["communism", "Communism"],
+            ] satisfies [string, string][]).map(([value, label]) => ({ text: plain(label), value })),
+          },
+        },
+        {
+          type: "input",
           block_id: "permissions",
           optional: true,
           label: plain("Everyone else may"),
@@ -604,8 +622,11 @@ export class Coordinator {
       : this.anchorEnabled;
     if (!anchorEnabled) clearTimeout(this.anchorTimer);
     this.anchorEnabled = anchorEnabled;
+    const preset = interaction.state.permission_preset?.selected?.selected_option?.value;
     const selected = interaction.state.permissions?.selected?.selected_options ?? [];
-    this.allowed = new Set(selected.map(option => option.value).filter(Boolean) as string[]);
+    this.allowed = new Set(preset
+      ? permissionPresets[preset as keyof typeof permissionPresets]
+      : selected.map(option => option.value).filter(Boolean) as string[]);
     for (const capability of capabilities)
       this.store.setPermission(this.id, capability, this.allowed.has(capability));
     if (nextHost) {
