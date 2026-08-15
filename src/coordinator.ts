@@ -56,7 +56,7 @@ export class Coordinator {
     private tracks: TrackCatalog,
     private lyrics: LyricsCatalog,
     private audit: AuditLog,
-    private config: { queueLimit: number; initialVolume: number; aloneMs: number; idleMs: number; pausedMs: number; warningMs: number; port: number; managerUserId: string },
+    private config: { queueLimit: number; initialVolume: number; aloneMs: number; idleMs: number; pausedMs: number; warningMs: number; port: number; managerUserId?: string },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
     private leaveMedia: () => Promise<void>,
