@@ -3,7 +3,7 @@ import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
-import { capabilities, permissionPresets, Store, type SavedSession } from "./store.ts";
+import { capabilities, displayModes, permissionPresets, Store, type DisplayMode, type SavedSession } from "./store.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 
 type Entry = TrackMetadata & {
@@ -24,7 +24,7 @@ export class Coordinator {
   private state = "ready";
   private playbackSeconds = 0;
   private volume: number;
-  private lyricsEnabled = true;
+  private displayMode: DisplayMode = "default";
   private autoplayEnabled = false;
   private autoplayGeneration = 0;
   private autoplayPending = false;
@@ -67,7 +67,7 @@ export class Coordinator {
       this.state = restored.state;
       this.playbackSeconds = restored.playbackSeconds;
       this.autoplayEnabled = restored.autoplay;
-      this.lyricsEnabled = restored.lyricsEnabled;
+      this.displayMode = restored.displayMode;
       this.anchorEnabled = restored.anchorEnabled;
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
@@ -125,7 +125,7 @@ export class Coordinator {
     this.store.activateSession(this.id, this.state);
     this.audit.record("session.resumed", undefined, { sessionId: this.id, huddleId: this.room.huddleId });
     this.sendMedia({ type: "volume", value: this.volume });
-    this.sendMedia({ type: "lyrics_enabled", enabled: this.lyricsEnabled });
+    this.sendMedia({ type: "display_mode", mode: this.displayMode });
     if (!this.current) await this.startNext();
     else {
       this.sendMedia(this.playMessage(this.current));
@@ -282,7 +282,7 @@ export class Coordinator {
       this.store.suspendSession(this.id, {
         state,
         playbackSeconds: this.playbackSeconds,
-        lyricsEnabled: this.lyricsEnabled,
+        displayMode: this.displayMode,
         anchorEnabled: this.anchorEnabled,
         queue: this.queue.map(track => track.id),
       }, resumeUntil);
@@ -799,16 +799,19 @@ export class Coordinator {
         },
         {
           type: "input",
-          block_id: "lyrics",
-          optional: true,
-          label: plain("Lyrics"),
+          block_id: "display",
+          label: plain("Display mode"),
           element: {
-            type: "checkboxes",
-            action_id: "enabled",
-            options: [{ text: plain("Show lyrics"), value: "enabled" }],
-            initial_options: this.lyricsEnabled
-              ? [{ text: plain("Show lyrics"), value: "enabled" }]
-              : [],
+            type: "static_select",
+            action_id: "mode",
+            options: displayModes.map(mode => ({
+              text: plain(mode[0]!.toUpperCase() + mode.slice(1)),
+              value: mode,
+            })),
+            initial_option: {
+              text: plain(this.displayMode[0]!.toUpperCase() + this.displayMode.slice(1)),
+              value: this.displayMode,
+            },
           },
         },
         {
@@ -926,14 +929,11 @@ export class Coordinator {
     this.volume = Math.round(percent * 100) / 10_000;
     this.sendMedia({ type: "volume", value: this.volume });
     this.store.setSession(this.id, { volume: this.volume });
-    const lyricsState = interaction.state.lyrics?.enabled;
-    const lyricsEnabled = lyricsState
-      ? lyricsState.selected_options?.some(option => option.value === "enabled") ?? false
-      : this.lyricsEnabled;
-    if (lyricsEnabled !== this.lyricsEnabled) {
-      this.lyricsEnabled = lyricsEnabled;
-      this.sendMedia({ type: "lyrics_enabled", enabled: lyricsEnabled });
-      this.store.setSession(this.id, { lyricsEnabled });
+    const displayMode = interaction.state.display?.mode?.selected_option?.value as DisplayMode | undefined;
+    if (displayMode && displayModes.includes(displayMode) && displayMode !== this.displayMode) {
+      this.displayMode = displayMode;
+      this.sendMedia({ type: "display_mode", mode: displayMode });
+      this.store.setSession(this.id, { displayMode });
     }
     const autoplayState = interaction.state.autoplay?.enabled;
     const autoplayEnabled = autoplayState
@@ -968,6 +968,7 @@ export class Coordinator {
       hostId: this.hostId,
       volume: this.volume,
       autoplay: this.autoplayEnabled,
+      displayMode: this.displayMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     });

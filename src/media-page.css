@@ -16,11 +16,8 @@ html, body {
 
 #stage {
   position: relative;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
-  padding: 52px 52px 34px;
   background: #0a0a0c;
 }
 
@@ -44,22 +41,38 @@ html, body {
   background: linear-gradient(115deg, rgb(0 0 0 / .22), rgb(5 5 8 / .5) 48%, rgb(0 0 0 / .66));
 }
 
-#lyrics-frame, #progress, header { position: relative; z-index: 1; }
+#cover, #lyrics-frame, #progress, header { position: absolute; z-index: 1; }
+
+#cover {
+  top: 10%;
+  left: 22%;
+  width: 56%;
+  aspect-ratio: 1;
+  border-radius: 24px;
+  background: rgb(255 255 255 / .06) center / cover;
+  box-shadow: 0 20px 60px rgb(0 0 0 / .32);
+  transition: top .65s cubic-bezier(.2, .8, .2, 1), left .65s cubic-bezier(.2, .8, .2, 1),
+    width .65s cubic-bezier(.2, .8, .2, 1), border-radius .65s ease,
+    opacity .32s ease, transform .65s cubic-bezier(.2, .8, .2, 1);
+}
 
 #lyrics-frame, header {
   opacity: 1;
-  transform: translateY(0);
-  transition: opacity .32s ease, transform .55s cubic-bezier(.2, .8, .2, 1);
+  transition: inset .65s cubic-bezier(.2, .8, .2, 1), opacity .35s ease,
+    transform .55s cubic-bezier(.2, .8, .2, 1);
 }
 
 #stage.changing #artwork { opacity: 0; transform: scale(1.16); }
 
+#stage.changing #cover,
 #stage.changing header,
 #stage.changing #lyrics-frame { opacity: 0; transform: translateY(-10px); }
 
 header {
+  top: 69%;
+  right: 8%;
+  left: 8%;
   min-width: 0;
-  padding-bottom: 22px;
 }
 
 h1 {
@@ -83,9 +96,34 @@ h1 {
 }
 
 #lyrics-frame {
-  min-height: 0;
+  top: 31%;
+  right: 6%;
+  bottom: 34px;
+  left: 6%;
   overflow: hidden;
   mask-image: linear-gradient(to bottom, transparent, #000 12%, #000 78%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(18px);
+}
+
+#stage[data-display-mode="lyrics"] #cover {
+  top: 6%;
+  left: 6%;
+  width: 16%;
+  border-radius: 16px;
+}
+
+#stage[data-display-mode="lyrics"] header {
+  top: 8%;
+  right: 6%;
+  left: 26%;
+}
+
+#stage[data-display-mode="lyrics"] #lyrics-frame {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 braccato-lyrics {
@@ -238,10 +276,6 @@ braccato-lyrics {
 }
 
 @media (max-width: 560px) {
-  #stage {
-    padding: 44px 34px 32px;
-  }
-
   .blyrics-container { --blyrics-font-size: 34px; padding-top: 80px; }
   #progress { right: 34px; left: 34px; }
 }

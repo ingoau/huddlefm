@@ -18,6 +18,7 @@ const artist = document.querySelector("#artist")!;
 const lyrics = document.querySelector<BraccatoLyricsElement>("#lyrics")!;
 const capture = document.querySelector<HTMLButtonElement>("#capture")!;
 const artwork = document.querySelector<HTMLElement>("#artwork")!;
+const cover = document.querySelector<HTMLElement>("#cover")!;
 const progress = document.querySelector<HTMLElement>("#progress-fill")!;
 const stage = document.querySelector<HTMLElement>("#stage")!;
 lyrics.host = { getScrollElement: () => lyrics };
@@ -59,6 +60,11 @@ let cameraEnabled = true;
 let cameraRunning = false;
 let cameraInputReady = false;
 const camera = Promise.withResolvers<MediaStream>();
+
+async function setDisplayMode(mode: "default" | "lyrics" | "off") {
+  stage.dataset.displayMode = mode === "lyrics" ? "lyrics" : "default";
+  await setCameraEnabled(mode !== "off");
+}
 
 lyrics.addEventListener("braccato:lyrics-loaded", event => {
   const detail = (event as CustomEvent).detail;
@@ -168,6 +174,7 @@ function stop() {
   title.textContent = "Ready for music";
   artist.textContent = "Waiting for the next track";
   artwork.style.backgroundImage = "";
+  cover.style.backgroundImage = "";
   progress.style.transform = "scaleX(0)";
 }
 
@@ -274,6 +281,7 @@ socket.addEventListener("message", async event => {
       title.textContent = message.title;
       artist.textContent = message.artist;
       artwork.style.backgroundImage = message.artwork ? `url(${JSON.stringify(message.artwork)})` : "";
+      cover.style.backgroundImage = message.artwork ? `url(${JSON.stringify(message.artwork)})` : "";
       lyrics.lyricsOptions = {};
       lyrics.lyrics = [];
       lyrics.source = player;
@@ -308,7 +316,7 @@ socket.addEventListener("message", async event => {
     }
     if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = volumeGain(message.value);
-    if (message.type === "lyrics_enabled") await setCameraEnabled(message.enabled);
+    if (message.type === "display_mode") await setDisplayMode(message.mode);
     if (message.type === "leave") {
       tone?.stop();
       stop();

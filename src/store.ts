@@ -20,6 +20,9 @@ export const permissionPresets = {
   communism: capabilities,
 };
 
+export const displayModes = ["default", "lyrics", "off"] as const;
+export type DisplayMode = typeof displayModes[number];
+
 export type SavedTrack = {
   id: string;
   requesterId: string;
@@ -50,7 +53,7 @@ export type SavedSession = {
   state: string;
   volume: number;
   autoplay: boolean;
-  lyricsEnabled: boolean;
+  displayMode: DisplayMode;
   anchorEnabled: boolean;
   playbackSeconds: number;
   resumeUntil: number;
@@ -84,6 +87,7 @@ export class Store {
         resume_until INTEGER,
         playback_seconds REAL NOT NULL DEFAULT 0,
         lyrics_enabled INTEGER NOT NULL DEFAULT 1,
+        display_mode TEXT NOT NULL DEFAULT 'default',
         anchor_enabled INTEGER NOT NULL DEFAULT 1,
         idle_deadline INTEGER,
         created_at INTEGER NOT NULL,
@@ -119,6 +123,10 @@ export class Store {
     this.ensureColumn("sessions", "resume_until", "INTEGER");
     this.ensureColumn("sessions", "playback_seconds", "REAL NOT NULL DEFAULT 0");
     this.ensureColumn("sessions", "lyrics_enabled", "INTEGER NOT NULL DEFAULT 1");
+    const hadDisplayMode = this.hasColumn("sessions", "display_mode");
+    this.ensureColumn("sessions", "display_mode", "TEXT NOT NULL DEFAULT 'default'");
+    if (!hadDisplayMode)
+      this.db.run("UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END");
     this.ensureColumn("sessions", "anchor_enabled", "INTEGER NOT NULL DEFAULT 1");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
@@ -179,7 +187,7 @@ export class Store {
     volume?: number;
     autoplay?: boolean;
     playbackSeconds?: number;
-    lyricsEnabled?: boolean;
+    displayMode?: DisplayMode;
     anchorEnabled?: boolean;
   }) {
     if (fields.status !== undefined)
@@ -202,10 +210,10 @@ export class Store {
       this.db
         .query("UPDATE sessions SET playback_seconds = ?, updated_at = ? WHERE id = ?")
         .run(fields.playbackSeconds, Date.now(), sessionId);
-    if (fields.lyricsEnabled !== undefined)
+    if (fields.displayMode !== undefined)
       this.db
-        .query("UPDATE sessions SET lyrics_enabled = ?, updated_at = ? WHERE id = ?")
-        .run(fields.lyricsEnabled ? 1 : 0, Date.now(), sessionId);
+        .query("UPDATE sessions SET display_mode = ?, updated_at = ? WHERE id = ?")
+        .run(fields.displayMode, Date.now(), sessionId);
     if (fields.anchorEnabled !== undefined)
       this.db
         .query("UPDATE sessions SET anchor_enabled = ?, updated_at = ? WHERE id = ?")
@@ -215,15 +223,15 @@ export class Store {
   suspendSession(sessionId: string, state: {
     state: string;
     playbackSeconds: number;
-    lyricsEnabled: boolean;
+    displayMode: DisplayMode;
     anchorEnabled: boolean;
     queue: string[];
   }, resumeUntil: number) {
     this.db.transaction(() => {
       this.db.query(`UPDATE sessions SET
         status = 'suspended', resume_state = ?, resume_until = ?, playback_seconds = ?,
-        lyrics_enabled = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`)
-        .run(state.state, resumeUntil, state.playbackSeconds, state.lyricsEnabled ? 1 : 0,
+        display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`)
+        .run(state.state, resumeUntil, state.playbackSeconds, state.displayMode,
           state.anchorEnabled ? 1 : 0, Date.now(), sessionId);
       this.db.query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?").run(sessionId);
       const position = this.db.query("UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?");
@@ -279,7 +287,9 @@ export class Store {
         state: String(row.status === "suspended" ? row.resume_state ?? "ready" : row.status),
         volume: Number(row.volume),
         autoplay: Boolean(row.autoplay),
-        lyricsEnabled: Boolean(row.lyrics_enabled),
+        displayMode: displayModes.includes(row.display_mode as DisplayMode)
+          ? row.display_mode as DisplayMode
+          : "default",
         anchorEnabled: Boolean(row.anchor_enabled),
         playbackSeconds: Number(row.playback_seconds),
         resumeUntil: deadline,
@@ -366,8 +376,12 @@ export class Store {
   }
 
   private ensureColumn(table: string, column: string, definition: string) {
-    const columns = this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
-    if (!columns.some(value => value.name === column))
+    if (!this.hasColumn(table, column))
       this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private hasColumn(table: string, column: string) {
+    return (this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[])
+      .some(value => value.name === column);
   }
 }
