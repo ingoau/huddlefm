@@ -28,7 +28,7 @@ export class Coordinator {
   private autoplayEnabled = false;
   private autoplayGeneration = 0;
   private autoplayPending = false;
-  private anchorEnabled = true;
+  private anchorEnabled = false;
   private revision = 0;
   private uiTs = "";
   private hostId: string | undefined;

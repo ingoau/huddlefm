@@ -11,8 +11,8 @@ test("persists session and permission defaults", () => {
     id: "session", huddleId: "huddle", callId: "call", channelId: "channel",
     threadTs: "1.0", creatorId: "creator", hostId: "host", volume: 0.6,
   });
-  expect(store.db.query("SELECT status, autoplay, display_mode FROM sessions").get())
-    .toEqual({ status: "ready", autoplay: 0, display_mode: "default" });
+  expect(store.db.query("SELECT status, autoplay, display_mode, anchor_enabled FROM sessions").get())
+    .toEqual({ status: "ready", autoplay: 0, display_mode: "default", anchor_enabled: 0 });
   store.setSession("session", { autoplay: true });
   expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({ autoplay: 1 });
   expect(store.db.query("SELECT capability FROM permissions WHERE allowed = 1 ORDER BY capability").all())

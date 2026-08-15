@@ -88,7 +88,7 @@ export class Store {
         playback_seconds REAL NOT NULL DEFAULT 0,
         lyrics_enabled INTEGER NOT NULL DEFAULT 1,
         display_mode TEXT NOT NULL DEFAULT 'default',
-        anchor_enabled INTEGER NOT NULL DEFAULT 1,
+        anchor_enabled INTEGER NOT NULL DEFAULT 0,
         idle_deadline INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -127,7 +127,7 @@ export class Store {
     this.ensureColumn("sessions", "display_mode", "TEXT NOT NULL DEFAULT 'default'");
     if (!hadDisplayMode)
       this.db.run("UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END");
-    this.ensureColumn("sessions", "anchor_enabled", "INTEGER NOT NULL DEFAULT 1");
+    this.ensureColumn("sessions", "anchor_enabled", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
   }
@@ -146,8 +146,8 @@ export class Store {
     const transaction = this.db.transaction(() => {
       this.db
         .query(`INSERT INTO sessions
-          (id, huddle_id, call_id, channel_id, thread_ts, creator_id, host_id, status, volume, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?)`)
+          (id, huddle_id, call_id, channel_id, thread_ts, creator_id, host_id, status, volume, anchor_enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, 0, ?, ?)`)
         .run(
           session.id,
           session.huddleId,
