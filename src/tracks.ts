@@ -2,8 +2,6 @@ import YTMusic from "ytmusic-api";
 import { mkdir, rm, stat } from "node:fs/promises";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
-export { assertPublicUrl } from "./public-proxy.ts";
-
 export type TrackMetadata = {
   sourceInput: string;
   canonicalUrl: string;

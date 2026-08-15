@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { assertPublicUrl, TrackCatalog } from "./tracks.ts";
+import { assertPublicUrl } from "./public-proxy.ts";
+import { TrackCatalog } from "./tracks.ts";
 
 test("rejects credentials and private destinations", async () => {
   await expect(

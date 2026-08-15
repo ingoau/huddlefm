@@ -13,6 +13,19 @@ import {
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
+import { errorMessage as message } from "./error-message.ts";
+import {
+  auditTrack,
+  confirm,
+  elapsed,
+  escape,
+  icon,
+  permissionLabels,
+  plain,
+  safeAuditError,
+  sectionBlocks,
+  songCount,
+} from "./coordinator-ui.ts";
 
 type Entry = TrackMetadata & {
   id: string;
@@ -2182,99 +2195,4 @@ export class Coordinator {
     });
     return blocks;
   }
-}
-
-const permissionLabels = {
-  add: "Add songs",
-  "add-bulk": "Add albums and playlists",
-  "remove-own": "Remove songs they added",
-  "manage-queue": "Manage queue",
-  skip: "Skip songs",
-  pause: "Pause or resume",
-  volume: "Change volume",
-  "configure-settings": "Configure settings",
-  clear: "Clear queue",
-  "end-session": "End session",
-};
-
-function auditTrack(track: Entry) {
-  return {
-    trackId: track.id,
-    sourceId: track.sourceId,
-    title: track.title,
-    artist: track.artist,
-    requesterId: track.requesterId,
-    origin: track.automatic ? "autoplay" : "manual",
-  };
-}
-
-function safeAuditError(error: unknown) {
-  return message(error).replace(
-    /(xox[acpbrs]-|token|cookie|authorization|JoinToken)[^\s,]*/gi,
-    "$1[redacted]",
-  );
-}
-
-function plain(text: string) {
-  return { type: "plain_text", text: text.slice(0, 150) };
-}
-
-function icon(text: string) {
-  return { ...plain(text), emoji: true };
-}
-
-function confirm(title: string, text: string, confirmText: string) {
-  return {
-    title: plain(title),
-    text: { type: "mrkdwn", text },
-    confirm: plain(confirmText),
-    deny: plain("Cancel"),
-  };
-}
-
-function duration(seconds?: number) {
-  if (!seconds) return "";
-  return ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function elapsed(seconds: number) {
-  const total = Math.round(seconds);
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const parts = [
-    hours && `${hours}h`,
-    minutes && `${minutes}m`,
-    `${total % 60}s`,
-  ];
-  return parts.filter(Boolean).join(" ");
-}
-
-function songCount(count: number) {
-  return `${count} ${count === 1 ? "song" : "songs"}`;
-}
-
-function sectionBlocks(title: string, lines: string[]) {
-  const sections: { type: string; text: { type: string; text: string } }[] = [];
-  let text = title;
-  for (const line of lines) {
-    const value = line.slice(0, 2800);
-    if (text.length + value.length > 2900) {
-      sections.push({ type: "section", text: { type: "mrkdwn", text } });
-      text = "";
-    }
-    text += `${text ? "\n" : ""}${value}`;
-  }
-  sections.push({ type: "section", text: { type: "mrkdwn", text } });
-  return sections;
-}
-
-function escape(text: string) {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-function message(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
 }

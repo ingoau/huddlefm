@@ -1,4 +1,5 @@
 import { WebClient } from "@slack/web-api";
+import { errorMessage } from "./error-message.ts";
 
 type Body = {
   type?: string;
@@ -271,7 +272,7 @@ export class SlackAppAdapter {
 }
 
 function safeError(error: unknown) {
-  return (error instanceof Error ? error.message : String(error)).replace(
+  return errorMessage(error).replace(
     /(xox[acpbrs]-|token|cookie|authorization)[^\s,]*/gi,
     "$1[redacted]",
   );

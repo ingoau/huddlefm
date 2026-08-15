@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { AuditLog } from "./audit-log.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
+import { errorMessage } from "./error-message.ts";
 import { controlDenied } from "./local-control.ts";
 import { LyricsCatalog } from "./lyrics.ts";
 import { MediaBrowserPool, type MediaBrowser } from "./media-browser.ts";
@@ -513,7 +514,7 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 function safeError(error: unknown) {
-  return (error instanceof Error ? error.message : String(error)).replace(
+  return errorMessage(error).replace(
     /(xox[acpbrs]-|token|cookie|authorization|JoinToken)[^\s,]*/gi,
     "$1[redacted]",
   );

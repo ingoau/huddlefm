@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Store } from "./store.ts";
+import { errorMessage } from "./error-message.ts";
 
 const lastFmEndpoint = "https://ws.audioscrobbler.com/2.0/";
 const listenBrainzEndpoint = "https://api.listenbrainz.org/1";
@@ -458,7 +459,7 @@ function trackParams(track: ScrobbleTrack, sessionKey: string) {
 }
 
 function safeError(error: unknown) {
-  return (error instanceof Error ? error.message : String(error)).replace(
+  return errorMessage(error).replace(
     /(token|authorization|sk)[^\s,]*/gi,
     "$1[redacted]",
   );
