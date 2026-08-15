@@ -182,11 +182,15 @@ export class Coordinator {
   }
 
   suggestions(interaction: Interaction) {
-    if (!this.can(interaction.userId, "add")) return Promise.resolve([]);
+    const allowed = {
+      songs: this.can(interaction.userId, "add"),
+      bulk: this.can(interaction.userId, "add-bulk"),
+    };
+    if (!allowed.songs && !allowed.bulk) return Promise.resolve([]);
     const now = Date.now();
     if (now - (this.lastSearch.get(interaction.userId) ?? 0) < 400) return Promise.resolve([]);
     this.lastSearch.set(interaction.userId, now);
-    return this.tracks.suggestions(interaction.value);
+    return this.tracks.suggestions(interaction.value, allowed);
   }
 
   handles(interaction: Interaction) {
@@ -356,23 +360,26 @@ export class Coordinator {
         await this.notice(interaction.userId, "That player is stale; use the newest one.");
         return false;
       }
-      return this.require(interaction, "add");
+      return this.require(interaction, interaction.value.startsWith("bulkref_") ? "add-bulk" : "add");
     });
     if (!accepted) return;
-    let metadata: TrackMetadata;
+    let selection: TrackMetadata | TrackMetadata[];
     try {
-      metadata = await this.tracks.resolve(interaction.value);
+      selection = await this.tracks.resolve(interaction.value);
     } catch (error) {
       return this.notice(interaction.userId, message(error));
     }
+    const tracks = Array.isArray(selection) ? selection : [selection];
+    const capability = Array.isArray(selection) ? "add-bulk" : "add";
     const pending = await this.enqueue(async () => {
-      if (this.state === "ended" || this.state === "suspended" || !(await this.require(interaction, "add"))) return;
+      if (this.state === "ended" || this.state === "suspended" || !(await this.require(interaction, capability))) return;
       await this.removeQueuedAutoplay();
-      if (this.queue.length + Number(Boolean(this.current)) >= this.config.queueLimit) {
-        await this.notice(interaction.userId, "The queue is full.");
+      const available = this.config.queueLimit - this.queue.length - Number(Boolean(this.current));
+      if (tracks.length > available) {
+        await this.notice(interaction.userId, available ? `The queue only has room for ${available} more songs.` : "The queue is full.");
         return;
       }
-      const entry: Entry = {
+      const entries: Entry[] = tracks.map(metadata => ({
         ...metadata,
         id: crypto.randomUUID(),
         requesterId: interaction.userId,
@@ -381,18 +388,23 @@ export class Coordinator {
           console.warn(`[lyrics] ${message(error)}`);
           return undefined;
         }),
-      };
-      const controller = new AbortController();
-      this.preparations.set(entry.id, controller);
-      const automatic = this.queue.findIndex(track => track.automatic);
-      this.queue.splice(automatic < 0 ? this.queue.length : automatic, 0, entry);
-      this.store.addTrack({ ...entry, sessionId: this.id, status: entry.status });
-      this.audit.record("track.added", interaction.userId, { sessionId: this.id, ...auditTrack(entry) });
+      }));
+      const pending = entries.map(entry => {
+        const controller = new AbortController();
+        this.preparations.set(entry.id, controller);
+        this.queue.push(entry);
+        this.store.addTrack({ ...entry, sessionId: this.id, status: entry.status });
+        this.audit.record("track.added", interaction.userId, { sessionId: this.id, ...auditTrack(entry) });
+        return { entry, controller };
+      });
       await this.render();
-      return { entry, controller };
+      return pending;
     });
     if (!pending) return;
-    const { entry, controller } = pending;
+    await Promise.all(pending.map(({ entry, controller }) => this.prepareManual(entry, controller)));
+  }
+
+  private async prepareManual(entry: Entry, controller: AbortController) {
     const prepared = this.preparationSerial.then(() =>
       this.tracks.prepare(entry, `data/media/${this.id}`, entry.id, controller.signal),
     );
@@ -1234,6 +1246,7 @@ export class Coordinator {
 
 const permissionLabels = {
   add: "Add songs",
+  "add-bulk": "Add albums and playlists",
   "remove-own": "Remove songs they added",
   "manage-queue": "Manage queue",
   skip: "Skip songs",

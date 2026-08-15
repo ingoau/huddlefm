@@ -15,9 +15,13 @@ export type TrackMetadata = {
   artwork?: string;
 };
 
+type CollectionReference =
+  | { type: "album"; id: string }
+  | { type: "playlist"; id: string; url: string };
+
 export class TrackCatalog {
   private music = new YTMusic();
-  private references = new Map<string, TrackMetadata | string>();
+  private references = new Map<string, TrackMetadata | CollectionReference | string>();
   private command: string[];
   private proxy?: PublicNetworkProxy;
 
@@ -42,39 +46,48 @@ export class TrackCatalog {
     this.proxy = undefined;
   }
 
-  async suggestions(query: string) {
+  async suggestions(query: string, allowed = { songs: true, bulk: false }) {
     const url = parseHttpUrl(query);
     if (url) {
       await assertPublicUrl(url);
+      const id = youtubePlaylistId(url);
+      const playlist = id && allowed.bulk
+        ? [option(`Add playlist: ${url.href}`, this.remember({ type: "playlist", id, url: url.href }))]
+        : [];
+      if (!allowed.songs || url.pathname.replace(/\/$/, "") === "/playlist") return playlist;
       const reference = this.remember(url.href);
-      return [option(`Link: ${url.href}`, reference)];
+      return [option(`Link: ${url.href}`, reference), ...playlist];
     }
-    const songs = (await this.music.searchSongs(query)).slice(0, 5);
-    return songs.map(song => {
-      const metadata = {
-        sourceInput: `https://music.youtube.com/watch?v=${song.videoId}`,
-        canonicalUrl: `https://music.youtube.com/watch?v=${song.videoId}`,
-        sourceId: song.videoId,
-        title: song.name,
-        artist: song.artist.name,
-        album: song.album?.name,
-        duration: song.duration ?? undefined,
-        artwork: song.thumbnails.at(-1)?.url,
-      };
-      return option(
+    const [songs, albums] = await Promise.all([
+      allowed.songs ? this.music.searchSongs(query) : [],
+      allowed.bulk ? this.music.searchAlbums(query) : [],
+    ]);
+    return [
+      ...songs.slice(0, 5).map(song => option(
         `${song.name} — ${song.artist.name}${song.album ? ` · ${song.album.name}` : ""}`,
-        this.remember(metadata),
-      );
-    });
+        this.remember(songMetadata(song)),
+      )),
+      ...albums.slice(0, 5).map(album => option(
+        `Add album: ${album.name} — ${album.artist.name}`,
+        this.remember({ type: "album", id: album.albumId }),
+      )),
+    ];
   }
 
-  async resolve(reference: string) {
+  async resolve(reference: string): Promise<TrackMetadata | TrackMetadata[]> {
     const stored = this.references.get(reference);
     this.references.delete(reference);
     if (!stored) throw new Error("Track selection expired; search again");
+    if (typeof stored === "object" && "type" in stored) {
+      const tracks = stored.type === "album"
+        ? (await this.music.getAlbum(stored.id)).songs.map(song => songMetadata(song))
+        : (await this.music.getPlaylistVideos(stored.id)).map(song => songMetadata(song, stored.url));
+      if (!tracks.length) throw new Error("That album or playlist has no playable songs");
+      for (const track of tracks) this.validate(track);
+      return tracks;
+    }
     if (typeof stored !== "string") {
-      if (stored.duration && stored.duration > this.limits.durationSeconds)
-        throw new Error("Track exceeds the duration limit");
+      this.validate(stored);
       return stored;
     }
     return this.resolveUrl(stored);
@@ -133,6 +146,11 @@ export class TrackCatalog {
     if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId))
       throw new Error("Invalid YouTube Music video ID");
     return this.resolveUrl(`https://music.youtube.com/watch?v=${videoId}`);
+  }
+
+  private validate(track: TrackMetadata) {
+    if (track.duration && track.duration > this.limits.durationSeconds)
+      throw new Error("Track exceeds the duration limit");
   }
 
   async prepare(track: TrackMetadata, directory: string, entryId: string, signal?: AbortSignal) {
@@ -195,12 +213,32 @@ export class TrackCatalog {
     return [...this.command, "--proxy", this.proxy.url];
   }
 
-  private remember(value: TrackMetadata | string) {
-    const reference = `trackref_${crypto.randomUUID()}`;
+  private remember(value: TrackMetadata | CollectionReference | string) {
+    const reference = `${typeof value === "object" && "type" in value ? "bulk" : "track"}ref_${crypto.randomUUID()}`;
     this.references.set(reference, value);
     setTimeout(() => this.references.delete(reference), 10 * 60_000);
     return reference;
   }
+}
+
+function songMetadata(song: {
+  videoId: string;
+  name: string;
+  artist: { name: string };
+  album?: { name: string } | null;
+  duration?: number | null;
+  thumbnails: { url: string }[];
+}, sourceInput = `https://music.youtube.com/watch?v=${song.videoId}`): TrackMetadata {
+  return {
+    sourceInput,
+    canonicalUrl: `https://music.youtube.com/watch?v=${song.videoId}`,
+    sourceId: song.videoId,
+    title: song.name,
+    artist: song.artist.name,
+    album: song.album?.name,
+    duration: song.duration ?? undefined,
+    artwork: song.thumbnails.at(-1)?.url,
+  };
 }
 
 function option(label: string, value: string) {
@@ -217,6 +255,13 @@ function parseHttpUrl(input: string) {
   } catch {
     return;
   }
+}
+
+function youtubePlaylistId(url: URL) {
+  const host = url.hostname.toLowerCase();
+  if (host !== "youtu.be" && host !== "youtube.com" && !host.endsWith(".youtube.com")) return;
+  const id = url.searchParams.get("list");
+  return id?.match(/^[a-zA-Z0-9_-]+$/)?.[0];
 }
 
 async function runJson(command: string[]) {

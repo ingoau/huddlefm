@@ -17,6 +17,8 @@ test("persists session and permission defaults", () => {
   expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({ autoplay: 1 });
   expect(store.db.query("SELECT capability FROM permissions WHERE allowed = 1 ORDER BY capability").all())
     .toEqual([{ capability: "add" }, { capability: "remove-own" }]);
+  expect(store.db.query("SELECT allowed FROM permissions WHERE capability = 'add-bulk'").get())
+    .toEqual({ allowed: 0 });
   store.db.query("DELETE FROM permissions WHERE capability = 'configure-settings'").run();
   store.setPermission("session", "configure-settings", true);
   expect(store.db.query("SELECT allowed FROM permissions WHERE capability = 'configure-settings'").get())

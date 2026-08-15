@@ -156,6 +156,44 @@ test("rejects actions and track searches from outside the huddle", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("gates album and playlist additions behind add-bulk", async () => {
+  const searches: unknown[] = [];
+  let prepared = 0;
+  const tracks = {
+    suggestions: async (_query: string, allowed: unknown) => (searches.push(allowed), []),
+    resolve: async () => ["a", "b"].map(id => ({
+      sourceInput: `https://example.com/${id}`, canonicalUrl: `https://example.com/${id}`,
+      sourceId: id, title: id, artist: "Artist",
+    })),
+    prepare: async (_track: unknown, _directory: string, id: string) => (prepared++, `${id}.opus`),
+  } as unknown as TrackCatalog;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const guest = {
+    type: "block_actions", userId: "guest", actionId: "add_track_to_queue", value: "bulkref_test",
+    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+  };
+
+  await test.coordinator.suggestions({ ...guest, value: "album" });
+  await test.coordinator.action(guest);
+  expect(searches).toEqual([{ songs: true, bulk: false }]);
+  expect(prepared).toBe(0);
+  expect(test.ephemeral).toContain("You do not have permission for that.");
+
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+    state: { permissions: { selected: { selected_options: [
+      { value: "add" }, { value: "add-bulk" }, { value: "remove-own" },
+    ] } } },
+  });
+  Reflect.get(test.coordinator, "lastSearch").clear();
+  await test.coordinator.suggestions({ ...guest, value: "album" });
+  await test.coordinator.action(guest);
+  expect(searches.at(-1)).toEqual({ songs: true, bulk: true });
+  expect(prepared).toBe(2);
+  await test.coordinator.endFromSlack();
+});
+
 test("routes message and modal interactions to their session", async () => {
   const test = setup();
   await test.coordinator.start();
@@ -456,6 +494,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
   ].map(value => modal.indexOf(value));
   expect(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1]!))).toBeTrue();
   expect(modal).toContain('"value":"configure-settings"');
+  expect(modal).toContain('"text":{"type":"plain_text","text":"Add albums and playlists"},"value":"add-bulk"');
 
   const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
   enable.state = {
