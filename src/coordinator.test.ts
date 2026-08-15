@@ -71,7 +71,7 @@ test("suspends with a restart notice and restores playback", async () => {
   const restored: SavedSession = {
     id: "saved", huddleId: "huddle", callId: "call", channelId: "channel", threadTs: "1.0",
     uiTs: "player", revision: 2, creatorId: "creator", hostId: "host", state: "paused",
-    volume: 0.4, autoplay: false, lyricsEnabled: true, anchorEnabled: true,
+    volume: 0.4, autoplay: false, displayMode: "lyrics", anchorEnabled: true,
     playbackSeconds: 42, resumeUntil: 180_000, permissions: ["add"], tracks: [{
       id: "track", requesterId: "host", sourceInput: "package.json", canonicalUrl: "package.json",
       sourceId: "source", title: "Track", artist: "Artist", status: "playing", filePath: "package.json",
@@ -83,6 +83,7 @@ test("suspends with a restart notice and restores playback", async () => {
   expect(second.media).toContainEqual(expect.objectContaining({ type: "play", entryId: "track" }));
   expect(second.media).toContainEqual({ type: "seek", seconds: 42 });
   expect(second.media).toContainEqual({ type: "pause" });
+  expect(second.media).toContainEqual({ type: "display_mode", mode: "lyrics" });
   await second.coordinator.endFromSlack();
 });
 
@@ -379,14 +380,14 @@ test("host transfers ownership and global permissions atomically", async () => {
     state: {
       volume: { percent: { value: "37.25" } },
       host: { user: { selected_user: "guest" } },
-      lyrics: { enabled: { selected_options: [] } },
+      display: { mode: { selected_option: { value: "off" } } },
       permissions: { selected: { selected_options: [{ value: "add" }, { value: "pause" }] } },
     },
   });
   expect(test.sessions).toContainEqual({ hostId: "guest" });
   expect(test.sessions).toContainEqual({ volume: 0.3725 });
   expect(test.media).toContainEqual({ type: "volume", value: 0.3725 });
-  expect(test.media).toContainEqual({ type: "lyrics_enabled", enabled: false });
+  expect(test.media).toContainEqual({ type: "display_mode", mode: "off" });
   expect(test.permissions).toContainEqual({ capability: "pause", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
   await test.coordinator.endFromSlack();
@@ -430,6 +431,28 @@ test("autoplay defaults off and host settings persist both toggle states", async
   await result.coordinator.action(disable);
   expect(result.sessions).toContainEqual({ autoplay: false });
   await result.coordinator.endFromSlack();
+});
+
+test("display mode defaults to album art and persists dropdown changes", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const modal = JSON.stringify(test.modals.at(-1));
+  expect(modal).toContain('"block_id":"display"');
+  expect(modal).toContain('"type":"static_select"');
+  expect(modal).toContain('"initial_option":{"text":{"type":"plain_text","text":"Default"},"value":"default"}');
+  for (const mode of ["default", "lyrics", "off"])
+    expect(modal).toContain(`"value":"${mode}"`);
+
+  const save = interaction(test.coordinator, "save_settings", "", "view_submission");
+  save.state = {
+    volume: { percent: { value: "60" } },
+    display: { mode: { selected_option: { value: "lyrics" } } },
+  };
+  await test.coordinator.action(save);
+  expect(test.sessions).toContainEqual({ displayMode: "lyrics" });
+  expect(test.media).toContainEqual({ type: "display_mode", mode: "lyrics" });
+  await test.coordinator.endFromSlack();
 });
 
 test("autoplay deduplicates current and recent tracks before resolving metadata", async () => {
