@@ -312,6 +312,15 @@ export class Coordinator {
       (this.participants.has(userId) && (userId === this.hostId || this.allowed.has(capability)));
   }
 
+  private settingsAdmin(userId: string) {
+    return userId === this.hostId || userId === this.config.managerUserId;
+  }
+
+  private canOpenSettings(userId: string) {
+    return this.settingsAdmin(userId) || ["volume", "configure-settings", "end-session"]
+      .some(capability => this.can(userId, capability));
+  }
+
   private async require(interaction: Interaction, capability: string) {
     if (this.can(interaction.userId, capability)) return true;
     if (!this.isParticipantOrManager(interaction.userId)) {
@@ -781,17 +790,22 @@ export class Coordinator {
   }
 
   private async settingsModal(interaction: Interaction) {
-    if (interaction.userId !== this.hostId && interaction.userId !== this.config.managerUserId)
-      return this.notice(interaction.userId, "Only the host can change settings.");
+    const admin = this.settingsAdmin(interaction.userId);
+    const canChangeVolume = this.can(interaction.userId, "volume");
+    const canConfigure = this.can(interaction.userId, "configure-settings");
+    const canEnd = this.can(interaction.userId, "end-session");
+    if (!admin && !canChangeVolume && !canConfigure && !canEnd)
+      return this.notice(interaction.userId, "You do not have permission to change settings.");
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
       callback_id: "save_settings",
       private_metadata: JSON.stringify({ sessionId: this.id, hostId: this.hostId }),
       title: plain("HuddleFM settings"),
-      submit: plain("Save"),
+      ...(admin || canChangeVolume || canConfigure ? { submit: plain("Save") } : {}),
       close: plain("Cancel"),
       blocks: [
-        {
+        { type: "header", text: plain("Session") },
+        ...(canChangeVolume ? [{
           type: "input",
           block_id: "volume",
           label: plain("Volume (%)"),
@@ -800,8 +814,8 @@ export class Coordinator {
             action_id: "percent",
             initial_value: String(Math.round(this.volume * 10_000) / 100),
           },
-        },
-        {
+        }] : []),
+        ...(canConfigure ? [{
           type: "input",
           block_id: "display",
           label: plain("Display mode"),
@@ -832,8 +846,7 @@ export class Coordinator {
               ? [{ text: plain("Enabled"), value: "enabled" }]
               : [],
           },
-        },
-        {
+        }, {
           type: "input",
           block_id: "anchor",
           optional: true,
@@ -846,7 +859,21 @@ export class Coordinator {
               ? [{ text: plain("Keep player at bottom of thread"), value: "enabled" }]
               : [],
           },
-        },
+        }] : []),
+        ...(canEnd ? [{
+          type: "actions",
+          block_id: "session_actions",
+          elements: [{
+            type: "button",
+            action_id: "end_session",
+            text: plain("End session"),
+            style: "danger",
+            value: this.id,
+            confirm: confirm("End playback?", "This stops playback and ends the session.", "End"),
+          }],
+        }] : []),
+        ...(admin ? [
+        { type: "header", text: plain("Permissions") },
         {
           type: "input",
           block_id: "host",
@@ -890,18 +917,7 @@ export class Coordinator {
               .map(value => ({ text: plain(permissionLabels[value]), value })),
           },
         },
-        {
-          type: "actions",
-          block_id: "session_actions",
-          elements: [{
-            type: "button",
-            action_id: "end_session",
-            text: plain("End"),
-            style: "danger",
-            value: this.id,
-            confirm: confirm("End playback?", "This stops playback and ends the session.", "End"),
-          }],
-        },
+        ] : []),
       ],
     });
   }
@@ -911,18 +927,15 @@ export class Coordinator {
     const metadata = JSON.parse(interaction.metadata || "{}") as { sessionId?: string; hostId?: string };
     if (
       metadata.sessionId !== this.id || metadata.hostId !== this.hostId ||
-      (interaction.userId !== this.hostId && interaction.userId !== this.config.managerUserId)
+      !this.canOpenSettings(interaction.userId)
     )
       return this.notice(interaction.userId, "Settings are stale; reopen them.");
-    const nextHost = interaction.state.host?.user?.selected_user;
+    const admin = this.settingsAdmin(interaction.userId);
+    const nextHost = admin ? interaction.state.host?.user?.selected_user : undefined;
     if (nextHost === this.botUserId)
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
       return this.notice(interaction.userId, "The selected host is not in this huddle.");
-    const value = interaction.state.volume?.percent?.value?.trim();
-    const percent = Number(value);
-    if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
-      return this.notice(interaction.userId, "Volume must be between 0 and 100.");
     const previous = {
       hostId: this.hostId,
       volume: this.volume,
@@ -930,38 +943,48 @@ export class Coordinator {
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     };
-    this.volume = Math.round(percent * 100) / 10_000;
-    this.sendMedia({ type: "volume", value: this.volume });
-    this.store.setSession(this.id, { volume: this.volume });
-    const displayMode = interaction.state.display?.mode?.selected_option?.value as DisplayMode | undefined;
-    if (displayMode && displayModes.includes(displayMode) && displayMode !== this.displayMode) {
-      this.displayMode = displayMode;
-      this.sendMedia({ type: "display_mode", mode: displayMode });
-      this.store.setSession(this.id, { displayMode });
+    const value = interaction.state.volume?.percent?.value?.trim();
+    if (value !== undefined && this.can(interaction.userId, "volume")) {
+      const percent = Number(value);
+      if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
+        return this.notice(interaction.userId, "Volume must be between 0 and 100.");
+      this.volume = Math.round(percent * 100) / 10_000;
+      this.sendMedia({ type: "volume", value: this.volume });
+      this.store.setSession(this.id, { volume: this.volume });
     }
-    const autoplayState = interaction.state.autoplay?.enabled;
-    const autoplayEnabled = autoplayState
-      ? autoplayState.selected_options?.some(option => option.value === "enabled") ?? false
-      : this.autoplayEnabled;
-    if (autoplayEnabled !== this.autoplayEnabled) {
-      this.autoplayEnabled = autoplayEnabled;
-      this.store.setSession(this.id, { autoplay: autoplayEnabled });
-      if (!autoplayEnabled) await this.removeQueuedAutoplay();
+    if (this.can(interaction.userId, "configure-settings")) {
+      const displayMode = interaction.state.display?.mode?.selected_option?.value as DisplayMode | undefined;
+      if (displayMode && displayModes.includes(displayMode) && displayMode !== this.displayMode) {
+        this.displayMode = displayMode;
+        this.sendMedia({ type: "display_mode", mode: displayMode });
+        this.store.setSession(this.id, { displayMode });
+      }
+      const autoplayState = interaction.state.autoplay?.enabled;
+      if (autoplayState) {
+        const autoplayEnabled = autoplayState.selected_options?.some(option => option.value === "enabled") ?? false;
+        if (autoplayEnabled !== this.autoplayEnabled) {
+          this.autoplayEnabled = autoplayEnabled;
+          this.store.setSession(this.id, { autoplay: autoplayEnabled });
+          if (!autoplayEnabled) await this.removeQueuedAutoplay();
+        }
+      }
+      const anchorState = interaction.state.anchor?.enabled;
+      if (anchorState) {
+        const anchorEnabled = anchorState.selected_options?.some(option => option.value === "enabled") ?? false;
+        if (!anchorEnabled) clearTimeout(this.anchorTimer);
+        this.anchorEnabled = anchorEnabled;
+        this.store.setSession(this.id, { anchorEnabled });
+      }
     }
-    const anchorState = interaction.state.anchor?.enabled;
-    const anchorEnabled = anchorState
-      ? anchorState.selected_options?.some(option => option.value === "enabled") ?? false
-      : this.anchorEnabled;
-    if (!anchorEnabled) clearTimeout(this.anchorTimer);
-    this.anchorEnabled = anchorEnabled;
-    this.store.setSession(this.id, { anchorEnabled });
-    const preset = interaction.state.permission_preset?.selected?.selected_option?.value;
-    const selected = interaction.state.permissions?.selected?.selected_options ?? [];
-    this.allowed = new Set(preset
-      ? permissionPresets[preset as keyof typeof permissionPresets]
-      : selected.map(option => option.value).filter(Boolean) as string[]);
-    for (const capability of capabilities)
-      this.store.setPermission(this.id, capability, this.allowed.has(capability));
+    const preset = admin ? interaction.state.permission_preset?.selected?.selected_option?.value : undefined;
+    const selected = admin ? interaction.state.permissions?.selected?.selected_options : undefined;
+    if (preset || selected) {
+      this.allowed = new Set(preset
+        ? permissionPresets[preset as keyof typeof permissionPresets]
+        : selected!.map(option => option.value).filter(Boolean) as string[]);
+      for (const capability of capabilities)
+        this.store.setPermission(this.id, capability, this.allowed.has(capability));
+    }
     if (nextHost) {
       this.hostId = nextHost;
       this.store.setSession(this.id, { hostId: nextHost });
@@ -1169,6 +1192,7 @@ const permissionLabels = {
   skip: "Skip songs",
   pause: "Pause or resume",
   volume: "Change volume",
+  "configure-settings": "Configure settings",
   clear: "Clear queue",
   "end-session": "End session",
 };

@@ -413,6 +413,14 @@ test("autoplay defaults off and host settings persist both toggle states", async
   const modal = JSON.stringify(result.modals.at(-1));
   expect(modal).toContain('"block_id":"autoplay"');
   expect(modal).toContain('"initial_options":[]');
+  const positions = [
+    '"text":"Session"', '"block_id":"volume"', '"block_id":"display"',
+    '"block_id":"autoplay"', '"block_id":"anchor"', '"block_id":"session_actions"',
+    '"text":"Permissions"', '"block_id":"host"', '"block_id":"permission_preset"',
+    '"block_id":"permissions"',
+  ].map(value => modal.indexOf(value));
+  expect(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1]!))).toBeTrue();
+  expect(modal).toContain('"value":"configure-settings"');
 
   const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
   enable.state = {
@@ -431,6 +439,68 @@ test("autoplay defaults off and host settings persist both toggle states", async
   await result.coordinator.action(disable);
   expect(result.sessions).toContainEqual({ autoplay: false });
   await result.coordinator.endFromSlack();
+});
+
+test("delegated users only see and save settings they can configure", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const grant = interaction(test.coordinator, "save_settings", "", "view_submission");
+  grant.state = { permissions: { selected: { selected_options: [
+    { value: "volume" }, { value: "configure-settings" },
+  ] } } };
+  await test.coordinator.action(grant);
+
+  const open = interaction(test.coordinator, "open_settings");
+  open.userId = "guest";
+  await test.coordinator.action(open);
+  const modal = JSON.stringify(test.modals.at(-1));
+  expect(modal).toContain('"text":"Session"');
+  for (const block of ["volume", "display", "autoplay", "anchor"])
+    expect(modal).toContain(`"block_id":"${block}"`);
+  for (const block of ["session_actions", "host", "permission_preset", "permissions"])
+    expect(modal).not.toContain(`"block_id":"${block}"`);
+  expect(modal).not.toContain('"text":"Permissions"');
+
+  test.permissions.length = 0;
+  const save = interaction(test.coordinator, "save_settings", "", "view_submission");
+  save.userId = "guest";
+  save.state = {
+    volume: { percent: { value: "25" } },
+    display: { mode: { selected_option: { value: "lyrics" } } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
+    host: { user: { selected_user: "guest" } },
+    permissions: { selected: { selected_options: [{ value: "end-session" }] } },
+  };
+  await test.coordinator.action(save);
+  expect(test.sessions).toContainEqual({ volume: 0.25 });
+  expect(test.sessions).toContainEqual({ displayMode: "lyrics" });
+  expect(test.sessions).toContainEqual({ autoplay: true });
+  expect(test.sessions).toContainEqual({ anchorEnabled: true });
+  expect(test.sessions).not.toContainEqual({ hostId: "guest" });
+  expect(test.permissions).toEqual([]);
+  await test.coordinator.endFromSlack();
+});
+
+test("end-session permission opens an end-only settings menu", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const open = interaction(test.coordinator, "open_settings");
+  open.userId = "guest";
+  await test.coordinator.action(open);
+  expect(test.modals).toEqual([]);
+
+  const grant = interaction(test.coordinator, "save_settings", "", "view_submission");
+  grant.state = { permissions: { selected: { selected_options: [{ value: "end-session" }] } } };
+  await test.coordinator.action(grant);
+  await test.coordinator.action(open);
+  const modal = JSON.stringify(test.modals.at(-1));
+  expect(modal).toContain('"block_id":"session_actions"');
+  expect(modal).toContain('"text":"End session"');
+  expect(modal).not.toContain('"block_id":"volume"');
+  expect(modal).not.toContain('"text":"Permissions"');
+  expect(modal).not.toContain('"submit"');
+  await test.coordinator.endFromSlack();
 });
 
 test("display mode defaults to album art and persists dropdown changes", async () => {
@@ -564,6 +634,7 @@ test("collaborative preset grants everything except destructive permissions", as
   });
   expect(test.permissions).toContainEqual({ capability: "manage-queue", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "volume", allowed: true });
+  expect(test.permissions).toContainEqual({ capability: "configure-settings", allowed: true });
   expect(test.permissions).toContainEqual({ capability: "clear", allowed: false });
   expect(test.permissions).toContainEqual({ capability: "end-session", allowed: false });
   await test.coordinator.endFromSlack();
