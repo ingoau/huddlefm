@@ -57,6 +57,7 @@ export type SavedSession = {
   displayMode: DisplayMode;
   anchorEnabled: boolean;
   playbackSeconds: number;
+  listenedSeconds: number;
   resumeUntil: number;
   permissions: string[];
   tracks: SavedTrack[];
@@ -115,6 +116,7 @@ export class Store {
         resume_state TEXT,
         resume_until INTEGER,
         playback_seconds REAL NOT NULL DEFAULT 0,
+        listened_seconds REAL NOT NULL DEFAULT 0,
         lyrics_enabled INTEGER NOT NULL DEFAULT 1,
         display_mode TEXT NOT NULL DEFAULT 'default',
         anchor_enabled INTEGER NOT NULL DEFAULT 0,
@@ -177,6 +179,7 @@ export class Store {
     this.ensureColumn("sessions", "resume_state", "TEXT");
     this.ensureColumn("sessions", "resume_until", "INTEGER");
     this.ensureColumn("sessions", "playback_seconds", "REAL NOT NULL DEFAULT 0");
+    this.ensureColumn("sessions", "listened_seconds", "REAL NOT NULL DEFAULT 0");
     this.ensureColumn("sessions", "lyrics_enabled", "INTEGER NOT NULL DEFAULT 1");
     const hadDisplayMode = this.hasColumn("sessions", "display_mode");
     this.ensureColumn("sessions", "display_mode", "TEXT NOT NULL DEFAULT 'default'");
@@ -242,6 +245,7 @@ export class Store {
     volume?: number;
     autoplay?: boolean;
     playbackSeconds?: number;
+    listenedSeconds?: number;
     displayMode?: DisplayMode;
     anchorEnabled?: boolean;
   }) {
@@ -265,6 +269,10 @@ export class Store {
       this.db
         .query("UPDATE sessions SET playback_seconds = ?, updated_at = ? WHERE id = ?")
         .run(fields.playbackSeconds, Date.now(), sessionId);
+    if (fields.listenedSeconds !== undefined)
+      this.db
+        .query("UPDATE sessions SET listened_seconds = ?, updated_at = ? WHERE id = ?")
+        .run(fields.listenedSeconds, Date.now(), sessionId);
     if (fields.displayMode !== undefined)
       this.db
         .query("UPDATE sessions SET display_mode = ?, updated_at = ? WHERE id = ?")
@@ -311,7 +319,7 @@ export class Store {
       }
       const id = String(row.id);
       const tracks = (this.db.query(`SELECT * FROM tracks
-        WHERE session_id = ? AND status IN ('playing', 'ready', 'preparing')
+        WHERE session_id = ? AND status IN ('playing', 'ready', 'preparing', 'played')
         ORDER BY CASE WHEN status = 'playing' THEN -1 ELSE COALESCE(queue_position, created_at) END`).all(id) as Record<string, unknown>[])
         .map(track => ({
           id: String(track.id),
@@ -347,6 +355,7 @@ export class Store {
           : "default",
         anchorEnabled: Boolean(row.anchor_enabled),
         playbackSeconds: Number(row.playback_seconds),
+        listenedSeconds: Number(row.listened_seconds),
         resumeUntil: deadline,
         permissions: (this.db.query("SELECT capability FROM permissions WHERE session_id = ? AND allowed = 1").all(id) as { capability: string }[])
           .map(value => value.capability),

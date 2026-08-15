@@ -75,7 +75,7 @@ test("suspends with a restart notice and restores playback", async () => {
     id: "saved", huddleId: "huddle", callId: "call", channelId: "channel", threadTs: "1.0",
     uiTs: "player", revision: 2, creatorId: "creator", hostId: "host", state: "paused",
     volume: 0.4, autoplay: false, displayMode: "lyrics", anchorEnabled: true,
-    playbackSeconds: 42, resumeUntil: 180_000, permissions: ["add"], tracks: [{
+    playbackSeconds: 42, listenedSeconds: 84, resumeUntil: 180_000, permissions: ["add"], tracks: [{
       id: "track", requesterId: "host", sourceInput: "package.json", canonicalUrl: "package.json",
       sourceId: "source", title: "Track", artist: "Artist", status: "playing", filePath: "package.json",
     }],
@@ -316,10 +316,45 @@ test("HuddleFM leaving ends playback", async () => {
   await result.coordinator.start();
   await result.coordinator.memberLeft("bot");
   expect(result.media).toContainEqual({ type: "leave" });
-  expect(result.sessions).toContainEqual({ status: "ended" });
+  expect(result.sessions).toContainEqual(expect.objectContaining({ status: "ended" }));
   expect(result.deleted).toContainEqual(["channel", "1"]);
-  expect(result.posted).toContainEqual(["channel", "1.0", "Session ended: removed from huddle"]);
+  expect(result.posted).toContainEqual([
+    "channel", "1.0", "Session ended: removed from huddle",
+    [{ type: "section", text: { type: "mrkdwn", text: "Session ended: removed from huddle" } }],
+  ]);
   expect(result.updates).toHaveLength(0);
+});
+
+test("posts a collapsed recap after songs played", async () => {
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
+      sourceId: "track", title: "Track", artist: "Artist", duration: 180,
+    }),
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "track"));
+  const play = result.media.find(value => (value as { type?: string }).type === "play") as { entryId: string };
+  result.coordinator.mediaEvent("playback_position", { entryId: play.entryId, seconds: 42 });
+  await result.coordinator.endFromSlack();
+  const [, , text, blocks] = result.posted.at(-1) as [string, string, string, { type: string; [key: string]: unknown }[]];
+  expect(text).toBe("Session ended: huddle ended");
+  expect(blocks[1]).toEqual(expect.objectContaining({
+    type: "container", title: { type: "plain_text", text: "Session recap" },
+    is_collapsible: true, default_collapsed: true,
+  }));
+  expect(JSON.stringify(blocks[1])).toContain("*Listening time:* 42s");
+  expect(JSON.stringify(blocks[1])).toContain("*Songs played:* 1");
+  expect(JSON.stringify(blocks[1])).toContain("*Autoplay percentage:* 0%");
+  expect(JSON.stringify(blocks[1])).toContain("*Unique artists:* 1");
+  expect(JSON.stringify(blocks[1])).toContain("*Most frequent requester:* <@host> (1 song)");
+  expect(JSON.stringify(blocks[1])).toContain("*Most repeated artist:* Artist (1 song)");
+  expect(JSON.stringify(blocks[1])).toContain("*Longest song:* Track · 3m 0s");
+  expect(JSON.stringify(blocks[1])).toContain("*Average song length:* 3m 0s");
+  expect(JSON.stringify(blocks[1])).toContain("*Session host:* <@host>");
+  expect(JSON.stringify(blocks[1])).toContain("*Track*");
 });
 
 test("announces and leaves two minutes after becoming the only Huddle participant", async () => {
@@ -344,7 +379,7 @@ test("warns two minutes before leaving after ten minutes with nothing playing", 
   ]);
   expect(result.media).not.toContainEqual({ type: "leave" });
   await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
-  expect(result.sessions).toContainEqual({ status: "ended" });
+  expect(result.sessions).toContainEqual(expect.objectContaining({ status: "ended" }));
 });
 
 test("warns before leaving after ten paused minutes and cancels the timer when resumed", async () => {
@@ -370,7 +405,7 @@ test("warns before leaving after ten paused minutes and cancels the timer when r
     "channel", "1.0", "Playback is paused, so I’ll leave in 2 minutes.",
   ]);
   await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
-  expect(result.sessions).toContainEqual({ status: "ended" });
+  expect(result.sessions).toContainEqual(expect.objectContaining({ status: "ended" }));
 });
 
 test("host transfers ownership and global permissions atomically", async () => {

@@ -24,6 +24,7 @@ export class Coordinator {
   private current?: Entry;
   private state = "ready";
   private playbackSeconds = 0;
+  private listenedSeconds = 0;
   private volume: number;
   private displayMode: DisplayMode = "default";
   private autoplayEnabled = false;
@@ -72,6 +73,7 @@ export class Coordinator {
     if (restored) {
       this.state = restored.state;
       this.playbackSeconds = restored.playbackSeconds;
+      this.listenedSeconds = restored.listenedSeconds ?? 0;
       this.autoplayEnabled = restored.autoplay;
       this.displayMode = restored.displayMode;
       this.anchorEnabled = restored.anchorEnabled;
@@ -83,7 +85,8 @@ export class Coordinator {
         lyrics: this.lyrics.get(track).catch(() => undefined),
       }));
       this.current = entries.find(track => track.status === "playing");
-      this.queue = entries.filter(track => track !== this.current);
+      this.history = entries.filter(track => track.status === "played");
+      this.queue = entries.filter(track => track !== this.current && track.status !== "played");
     }
   }
 
@@ -239,9 +242,10 @@ export class Coordinator {
   mediaEvent(type: string, details?: { entryId?: string; seconds?: number }) {
     if (this.state === "suspended") return;
     if (type === "playback_position" && details && details.entryId === this.current?.id && typeof details.seconds === "number" && Number.isFinite(details.seconds)) {
+      this.listenedSeconds += Math.max(0, details.seconds - this.playbackSeconds);
       this.playbackSeconds = details.seconds;
       this.playbackScrobbling?.position(details.seconds);
-      this.store.setSession(this.id, { playbackSeconds: details.seconds });
+      this.store.setSession(this.id, { playbackSeconds: details.seconds, listenedSeconds: this.listenedSeconds });
       return;
     }
     if (type === "track_ended" || type === "track_error" || type === "stalled")
@@ -581,7 +585,7 @@ export class Coordinator {
     next.status = "playing";
     this.state = "playing";
     this.store.setTrack(next.id, { status: "playing" });
-    this.store.setSession(this.id, { status: "playing" });
+    this.store.setSession(this.id, { status: "playing", playbackSeconds: 0 });
     this.audit.record("track.started", undefined, { sessionId: this.id, ...auditTrack(next) });
     this.playbackScrobbling?.start(next, this.participants);
     this.sendMedia(this.playMessage(next));
@@ -639,6 +643,8 @@ export class Coordinator {
     if (expectedId && this.current?.id !== expectedId) return;
     if (this.current) {
       this.playbackScrobbling?.finish();
+      if (reason === "track_ended" && this.current.duration)
+        this.listenedSeconds += Math.max(0, this.current.duration - this.playbackSeconds);
       this.current.status = reason === "played" || reason === "track_ended" ? "played" : "failed";
       if (reason === "played" || reason === "track_ended") this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
@@ -647,6 +653,7 @@ export class Coordinator {
       if (reason === "track_error" || reason === "stalled")
         this.audit.record("track.failed", undefined, { sessionId: this.id, ...auditTrack(this.current), reason });
     }
+    this.store.setSession(this.id, { listenedSeconds: this.listenedSeconds });
     this.current = undefined;
     await this.startNext();
   }
@@ -1320,7 +1327,7 @@ export class Coordinator {
     clearTimeout(this.pausedTimer);
     clearTimeout(this.pausedWarningTimer);
     clearTimeout(this.anchorTimer);
-    this.store.setSession(this.id, { status: "ended" });
+    this.store.setSession(this.id, { status: "ended", listenedSeconds: this.listenedSeconds });
     this.audit.record("session.ended", userId, { sessionId: this.id, reason });
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();
@@ -1329,8 +1336,48 @@ export class Coordinator {
       await this.slack.delete(this.room.uiChannelId, this.uiTs).catch(error =>
         console.error(`[ui] could not delete ended player ${this.uiTs}: ${message(error)}`),
       );
-      await this.slack.post(this.room.uiChannelId, this.room.uiThreadTs, `Session ended: ${reason}`);
+      const text = `Session ended: ${reason}`;
+      await this.slack.post(this.room.uiChannelId, this.room.uiThreadTs, text, this.recapBlocks(text));
     }
+  }
+
+  private recapBlocks(text: string) {
+    const songs = [...this.history, ...(this.current ? [this.current] : [])];
+    const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text } }];
+    if (!songs.length) return blocks;
+    const autoplay = songs.filter(song => song.automatic).length;
+    const artists = Map.groupBy(songs, song => song.artist);
+    const [topArtist, topSongs] = [...artists].sort((a, b) => b[1].length - a[1].length)[0]!;
+    const requesters = Map.groupBy(songs.filter(song => !song.automatic), song => song.requesterId);
+    const topRequester = [...requesters].sort((a, b) => b[1].length - a[1].length)[0];
+    const timed = songs.filter(song => song.duration);
+    const longest = [...timed].sort((a, b) => b.duration! - a.duration!)[0];
+    const average = timed.reduce((total, song) => total + song.duration!, 0) / timed.length;
+    blocks.push({
+      type: "container",
+      block_id: `recap_${this.id}`,
+      title: plain("Session recap"),
+      is_collapsible: true,
+      default_collapsed: true,
+      child_blocks: [
+        { type: "section", text: { type: "mrkdwn", text: [
+          `*Listening time:* ${elapsed(this.listenedSeconds)}`,
+          `*Songs played:* ${songs.length}`,
+          `*Mix:* ${songs.length - autoplay} requested · ${autoplay} autoplay`,
+          `*Autoplay percentage:* ${Math.round(autoplay / songs.length * 100)}%`,
+          `*Unique artists:* ${artists.size}`,
+          `*Most frequent requester:* ${topRequester ? `<@${topRequester[0]}> (${songCount(topRequester[1].length)})` : "None"}`,
+          `*Most repeated artist:* ${escape(topArtist)} (${songCount(topSongs.length)})`,
+          `*Longest song:* ${longest ? `${escape(longest.title)} · ${elapsed(longest.duration!)}` : "Unknown"}`,
+          `*Average song length:* ${timed.length ? elapsed(average) : "Unknown"}`,
+          `*Session host:* ${this.hostId ? `<@${this.hostId}>` : "None"}`,
+        ].join("\n") } },
+        ...sectionBlocks("*Songs*", songs.map((song, index) =>
+          `${index + 1}. *${escape(song.title)}* — ${escape(song.artist)}${song.automatic ? " · Autoplay" : ` · <@${song.requesterId}>`}`,
+        )),
+      ],
+    });
+    return blocks;
   }
 }
 
@@ -1376,6 +1423,33 @@ function confirm(title: string, text: string, confirmText: string) {
 function duration(seconds?: number) {
   if (!seconds) return "";
   return ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function elapsed(seconds: number) {
+  const total = Math.round(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total % 3600 / 60);
+  const parts = [hours && `${hours}h`, minutes && `${minutes}m`, `${total % 60}s`];
+  return parts.filter(Boolean).join(" ");
+}
+
+function songCount(count: number) {
+  return `${count} ${count === 1 ? "song" : "songs"}`;
+}
+
+function sectionBlocks(title: string, lines: string[]) {
+  const sections: { type: string; text: { type: string; text: string } }[] = [];
+  let text = title;
+  for (const line of lines) {
+    const value = line.slice(0, 2800);
+    if (text.length + value.length > 2900) {
+      sections.push({ type: "section", text: { type: "mrkdwn", text } });
+      text = "";
+    }
+    text += `${text ? "\n" : ""}${value}`;
+  }
+  sections.push({ type: "section", text: { type: "mrkdwn", text } });
+  return sections;
 }
 
 function escape(text: string) {
