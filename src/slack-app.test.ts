@@ -3,8 +3,14 @@ import { ackEnvelope, normalizeInteraction } from "./slack-app.ts";
 
 test("acknowledges on the socket that received the envelope", () => {
   const sent: string[] = [];
-  expect(ackEnvelope({ send: value => sent.push(String(value)) }, "envelope", { options: [] })).toBeTrue();
-  expect(sent).toEqual([JSON.stringify({ envelope_id: "envelope", payload: { options: [] } })]);
+  expect(
+    ackEnvelope({ send: (value) => sent.push(String(value)) }, "envelope", {
+      options: [],
+    }),
+  ).toBeTrue();
+  expect(sent).toEqual([
+    JSON.stringify({ envelope_id: "envelope", payload: { options: [] } }),
+  ]);
 });
 
 test("normalizes block actions using immutable values", () => {

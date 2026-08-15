@@ -16,12 +16,14 @@ export type TrackMetadata = {
 };
 
 type CollectionReference =
-  | { type: "album"; id: string }
-  | { type: "playlist"; id: string; url: string };
+  { type: "album"; id: string } | { type: "playlist"; id: string; url: string };
 
 export class TrackCatalog {
   private music = new YTMusic();
-  private references = new Map<string, TrackMetadata | CollectionReference | string>();
+  private references = new Map<
+    string,
+    TrackMetadata | CollectionReference | string
+  >();
   private command: string[];
   private proxy?: PublicNetworkProxy;
 
@@ -51,10 +53,17 @@ export class TrackCatalog {
     if (url) {
       await assertPublicUrl(url);
       const id = youtubePlaylistId(url);
-      const playlist = id && allowed.bulk
-        ? [option(`Add playlist: ${url.href}`, this.remember({ type: "playlist", id, url: url.href }))]
-        : [];
-      if (!allowed.songs || url.pathname.replace(/\/$/, "") === "/playlist") return playlist;
+      const playlist =
+        id && allowed.bulk
+          ? [
+              option(
+                `Add playlist: ${url.href}`,
+                this.remember({ type: "playlist", id, url: url.href }),
+              ),
+            ]
+          : [];
+      if (!allowed.songs || url.pathname.replace(/\/$/, "") === "/playlist")
+        return playlist;
       const reference = this.remember(url.href);
       return [option(`Link: ${url.href}`, reference), ...playlist];
     }
@@ -63,14 +72,22 @@ export class TrackCatalog {
       allowed.bulk ? this.music.searchAlbums(query) : [],
     ]);
     return [
-      ...songs.slice(0, 5).map(song => option(
-        `${song.name} — ${song.artist.name}${song.album ? ` · ${song.album.name}` : ""}`,
-        this.remember(songMetadata(song)),
-      )),
-      ...albums.slice(0, 5).map(album => option(
-        `Add album: ${album.name} — ${album.artist.name}`,
-        this.remember({ type: "album", id: album.albumId }),
-      )),
+      ...songs
+        .slice(0, 5)
+        .map((song) =>
+          option(
+            `${song.name} — ${song.artist.name}${song.album ? ` · ${song.album.name}` : ""}`,
+            this.remember(songMetadata(song)),
+          ),
+        ),
+      ...albums
+        .slice(0, 5)
+        .map((album) =>
+          option(
+            `Add album: ${album.name} — ${album.artist.name}`,
+            this.remember({ type: "album", id: album.albumId }),
+          ),
+        ),
     ];
   }
 
@@ -79,10 +96,16 @@ export class TrackCatalog {
     this.references.delete(reference);
     if (!stored) throw new Error("Track selection expired; search again");
     if (typeof stored === "object" && "type" in stored) {
-      const tracks = stored.type === "album"
-        ? (await this.music.getAlbum(stored.id)).songs.map(song => songMetadata(song))
-        : (await this.music.getPlaylistVideos(stored.id)).map(song => songMetadata(song, stored.url));
-      if (!tracks.length) throw new Error("That album or playlist has no playable songs");
+      const tracks =
+        stored.type === "album"
+          ? (await this.music.getAlbum(stored.id)).songs.map((song) =>
+              songMetadata(song),
+            )
+          : (await this.music.getPlaylistVideos(stored.id)).map((song) =>
+              songMetadata(song, stored.url),
+            );
+      if (!tracks.length)
+        throw new Error("That album or playlist has no playable songs");
       for (const track of tracks) this.validate(track);
       return tracks;
     }
@@ -135,10 +158,12 @@ export class TrackCatalog {
   async upNextIds(videoId: string) {
     const results: unknown = await this.music.getUpNexts(videoId);
     if (!Array.isArray(results)) return [];
-    return results.flatMap(result => {
+    return results.flatMap((result) => {
       if (!result || typeof result !== "object") return [];
       const id = (result as { videoId?: unknown }).videoId;
-      return typeof id === "string" && /^[a-zA-Z0-9_-]{11}$/.test(id) ? [id] : [];
+      return typeof id === "string" && /^[a-zA-Z0-9_-]{11}$/.test(id)
+        ? [id]
+        : [];
     });
   }
 
@@ -153,7 +178,12 @@ export class TrackCatalog {
       throw new Error("Track exceeds the duration limit");
   }
 
-  async prepare(track: TrackMetadata, directory: string, entryId: string, signal?: AbortSignal) {
+  async prepare(
+    track: TrackMetadata,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
     if (signal?.aborted) throw new Error("Track preparation cancelled");
     await mkdir(directory, { recursive: true });
     if (signal?.aborted) throw new Error("Track preparation cancelled");
@@ -178,13 +208,18 @@ export class TrackCatalog {
     try {
       result = await run([...this.extractor(), ...download], 180_000, signal);
     } catch (error) {
-      if (signal?.aborted || !String(error).includes("HTTP Error 403")) throw error;
-      result = await run([
-        ...this.extractor(),
-        "--extractor-args",
-        "youtube:player_client=web_embedded",
-        ...download,
-      ], 180_000, signal);
+      if (signal?.aborted || !String(error).includes("HTTP Error 403"))
+        throw error;
+      result = await run(
+        [
+          ...this.extractor(),
+          "--extractor-args",
+          "youtube:player_client=web_embedded",
+          ...download,
+        ],
+        180_000,
+        signal,
+      );
     }
     const filePath = result.stdout.trim().split("\n").at(-1);
     if (!filePath || !(await Bun.file(filePath).exists()))
@@ -192,10 +227,20 @@ export class TrackCatalog {
     try {
       if ((await stat(filePath)).size > this.limits.downloadBytes)
         throw new Error("Track exceeds the download limit");
-      const probe = await run([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", filePath,
-      ], 15_000, signal);
+      const probe = await run(
+        [
+          "ffprobe",
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=noprint_wrappers=1:nokey=1",
+          filePath,
+        ],
+        15_000,
+        signal,
+      );
       const duration = Number(probe.stdout.trim());
       if (!Number.isFinite(duration) || duration <= 0)
         throw new Error("Could not verify the downloaded track duration");
@@ -221,14 +266,17 @@ export class TrackCatalog {
   }
 }
 
-function songMetadata(song: {
-  videoId: string;
-  name: string;
-  artist: { name: string };
-  album?: { name: string } | null;
-  duration?: number | null;
-  thumbnails: { url: string }[];
-}, sourceInput = `https://music.youtube.com/watch?v=${song.videoId}`): TrackMetadata {
+function songMetadata(
+  song: {
+    videoId: string;
+    name: string;
+    artist: { name: string };
+    album?: { name: string } | null;
+    duration?: number | null;
+    thumbnails: { url: string }[];
+  },
+  sourceInput = `https://music.youtube.com/watch?v=${song.videoId}`,
+): TrackMetadata {
   return {
     sourceInput,
     canonicalUrl: `https://music.youtube.com/watch?v=${song.videoId}`,
@@ -251,7 +299,9 @@ function option(label: string, value: string) {
 function parseHttpUrl(input: string) {
   try {
     const url = new URL(input.trim());
-    return url.protocol === "http:" || url.protocol === "https:" ? url : undefined;
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url
+      : undefined;
   } catch {
     return;
   }
@@ -259,7 +309,12 @@ function parseHttpUrl(input: string) {
 
 function youtubePlaylistId(url: URL) {
   const host = url.hostname.toLowerCase();
-  if (host !== "youtu.be" && host !== "youtube.com" && !host.endsWith(".youtube.com")) return;
+  if (
+    host !== "youtu.be" &&
+    host !== "youtube.com" &&
+    !host.endsWith(".youtube.com")
+  )
+    return;
   const id = url.searchParams.get("list");
   return id?.match(/^[a-zA-Z0-9_-]+$/)?.[0];
 }
@@ -283,6 +338,7 @@ async function run(command: string[], timeout: number, signal?: AbortSignal) {
   clearTimeout(timer);
   signal?.removeEventListener("abort", abort);
   if (signal?.aborted) throw new Error("Track preparation cancelled");
-  if (code) throw new Error(stderr.trim().split("\n").at(-1) ?? "Extractor failed");
+  if (code)
+    throw new Error(stderr.trim().split("\n").at(-1) ?? "Extractor failed");
   return { stdout, stderr };
 }

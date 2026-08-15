@@ -6,10 +6,13 @@
   "scripts": {
     "start": "bun run index.ts",
     "check": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "bun test"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "prettier": "^3.9.6"
   },
   "peerDependencies": {
     "typescript": "^5"
