@@ -41,7 +41,12 @@ test("restores suspended sessions for three minutes", () => {
     sourceInput: "https://example.com", canonicalUrl: "https://example.com",
     sourceId: "source", title: "Track", artist: "Artist", status: "ready",
   });
-  store.setSession("session", { autoplay: true, playbackSeconds: 42, displayMode: "off", anchorEnabled: false });
+  store.addTrack({
+    id: "played", sessionId: "session", requesterId: "user",
+    sourceInput: "https://example.com/played", canonicalUrl: "https://example.com/played",
+    sourceId: "played", title: "Played", artist: "Artist", status: "played",
+  });
+  store.setSession("session", { autoplay: true, playbackSeconds: 42, listenedSeconds: 84, displayMode: "off", anchorEnabled: false });
   store.suspendSession("session", {
     state: "paused", playbackSeconds: 42, displayMode: "lyrics", anchorEnabled: false, queue: ["track"],
   }, 180_000);
@@ -50,10 +55,13 @@ test("restores suspended sessions for three minutes", () => {
   const saved = store.resumableSessions(1, 180_000);
   expect(saved.sessions).toHaveLength(1);
   expect(saved.sessions[0]).toEqual(expect.objectContaining({
-    id: "session", state: "paused", playbackSeconds: 42, autoplay: true,
+    id: "session", state: "paused", playbackSeconds: 42, listenedSeconds: 84, autoplay: true,
     displayMode: "lyrics", anchorEnabled: false, resumeUntil: 180_000,
   }));
-  expect(saved.sessions[0]?.tracks).toEqual([expect.objectContaining({ id: "track", queuePosition: 0 })]);
+  expect(saved.sessions[0]?.tracks).toEqual([
+    expect.objectContaining({ id: "track", queuePosition: 0 }),
+    expect.objectContaining({ id: "played", status: "played" }),
+  ]);
   expect(store.resumableSessions(180_000, 180_000)).toEqual({ sessions: [], expiredIds: ["session"] });
   expect(store.db.query("SELECT count(*) AS count FROM tracks").get()).toEqual({ count: 0 });
   expect(store.db.query("SELECT status FROM sessions").get()).toEqual({ status: "ended" });
