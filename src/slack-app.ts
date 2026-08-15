@@ -19,19 +19,39 @@ type Body = {
     hash?: string;
     callback_id?: string;
     private_metadata?: string;
-    state?: { values?: Record<string, Record<string, { value?: string; selected_user?: string; selected_option?: { value?: string }; selected_options?: { value?: string }[] }>> };
+    state?: {
+      values?: Record<
+        string,
+        Record<
+          string,
+          {
+            value?: string;
+            selected_user?: string;
+            selected_option?: { value?: string };
+            selected_options?: { value?: string }[];
+          }
+        >
+      >;
+    };
   };
 };
 
 export type Interaction = ReturnType<typeof normalizeInteraction>;
 
-export function ackEnvelope(socket: Pick<WebSocket, "send"> & Partial<Pick<WebSocket, "readyState">>, envelopeId: string, payload?: unknown) {
-  if (socket.readyState !== undefined && socket.readyState !== WebSocket.OPEN) return false;
+export function ackEnvelope(
+  socket: Pick<WebSocket, "send"> & Partial<Pick<WebSocket, "readyState">>,
+  envelopeId: string,
+  payload?: unknown,
+) {
+  if (socket.readyState !== undefined && socket.readyState !== WebSocket.OPEN)
+    return false;
   try {
-    socket.send(JSON.stringify({
-      envelope_id: envelopeId,
-      ...(payload === undefined ? {} : { payload }),
-    }));
+    socket.send(
+      JSON.stringify({
+        envelope_id: envelopeId,
+        ...(payload === undefined ? {} : { payload }),
+      }),
+    );
     return true;
   } catch {
     return false;
@@ -43,12 +63,18 @@ export function normalizeInteraction(body: Body) {
   return {
     type: body.type ?? "unknown",
     userId: body.user?.id ?? "unknown",
-    actionId: action?.action_id ?? body.action_id ?? body.view?.callback_id ?? "unknown",
+    actionId:
+      action?.action_id ??
+      body.action_id ??
+      body.view?.callback_id ??
+      "unknown",
     value: action?.selected_option?.value ?? action?.value ?? body.value ?? "",
     channelId: body.container?.channel_id ?? body.channel?.id ?? "",
     messageTs: body.container?.message_ts ?? body.message?.ts ?? "",
     triggerId: body.trigger_id ?? "",
-    ...(body.view?.id ? { viewId: body.view.id, viewHash: body.view.hash ?? "" } : {}),
+    ...(body.view?.id
+      ? { viewId: body.view.id, viewHash: body.view.hash ?? "" }
+      : {}),
     metadata: body.view?.private_metadata ?? "",
     state: body.view?.state?.values ?? {},
   };
@@ -79,8 +105,18 @@ export class SlackAppAdapter {
     this.socket?.close();
   }
 
-  async post(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[]) {
-    const result = await this.web.chat.postMessage({ channel, thread_ts: threadTs, text, blocks: blocks as never });
+  async post(
+    channel: string,
+    threadTs: string | undefined,
+    text: string,
+    blocks?: unknown[],
+  ) {
+    const result = await this.web.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text,
+      blocks: blocks as never,
+    });
     if (!result.ts) throw new Error("chat.postMessage returned no timestamp");
     return result.ts;
   }
@@ -93,8 +129,18 @@ export class SlackAppAdapter {
     await this.web.chat.delete({ channel, ts });
   }
 
-  async ephemeral(channel: string, user: string, text: string, threadTs?: string) {
-    await this.web.chat.postEphemeral({ channel, user, text, thread_ts: threadTs });
+  async ephemeral(
+    channel: string,
+    user: string,
+    text: string,
+    threadTs?: string,
+  ) {
+    await this.web.chat.postEphemeral({
+      channel,
+      user,
+      text,
+      thread_ts: threadTs,
+    });
   }
 
   async modal(triggerId: string, view: unknown) {
@@ -112,13 +158,20 @@ export class SlackAppAdapter {
   userName(userId: string) {
     const cached = this.names.get(userId);
     if (cached) return cached;
-    const name = this.web.users.info({ user: userId }).then(result =>
-      result.user?.profile?.real_name?.trim() || result.user?.real_name?.trim() ||
-      result.user?.profile?.display_name?.trim() || result.user?.name || userId,
-    ).catch(error => {
-      console.error(`[slack-app] user lookup failed: ${safeError(error)}`);
-      return userId;
-    });
+    const name = this.web.users
+      .info({ user: userId })
+      .then(
+        (result) =>
+          result.user?.profile?.real_name?.trim() ||
+          result.user?.real_name?.trim() ||
+          result.user?.profile?.display_name?.trim() ||
+          result.user?.name ||
+          userId,
+      )
+      .catch((error) => {
+        console.error(`[slack-app] user lookup failed: ${safeError(error)}`);
+        return userId;
+      });
     this.names.set(userId, name);
     return name;
   }
@@ -132,30 +185,42 @@ export class SlackAppAdapter {
 
   private async dm(userId: string, text: string) {
     const opened = await this.web.conversations.open({ users: userId });
-    if (!opened.channel?.id) throw new Error("conversations.open returned no channel");
+    if (!opened.channel?.id)
+      throw new Error("conversations.open returned no channel");
     await this.web.chat.postMessage({ channel: opened.channel.id, text });
   }
 
   private async connect() {
-    const response = await fetch("https://slack.com/api/apps.connections.open", {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.config.xapp}` },
-    });
-    const result = (await response.json()) as { ok?: boolean; error?: string; url?: string };
+    const response = await fetch(
+      "https://slack.com/api/apps.connections.open",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.config.xapp}` },
+      },
+    );
+    const result = (await response.json()) as {
+      ok?: boolean;
+      error?: string;
+      url?: string;
+    };
     if (!result.ok || !result.url)
-      throw new Error(`apps.connections.open failed: ${result.error ?? response.status}`);
+      throw new Error(
+        `apps.connections.open failed: ${result.error ?? response.status}`,
+      );
 
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(result.url!);
       this.socket = socket;
-      socket.addEventListener("message", event => {
+      socket.addEventListener("message", (event) => {
         const envelope = JSON.parse(String(event.data));
         if (envelope.type === "hello") {
           this.reconnectAttempts = 0;
           resolve();
         } else void this.handleEnvelope(socket, envelope);
       });
-      socket.addEventListener("error", () => reject(new Error("Socket Mode connection failed")));
+      socket.addEventListener("error", () =>
+        reject(new Error("Socket Mode connection failed")),
+      );
       socket.addEventListener("close", () => {
         if (this.socket !== socket) return;
         this.socket = undefined;
@@ -169,16 +234,20 @@ export class SlackAppAdapter {
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempts++);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
-      void this.connect().catch(error => {
+      void this.connect().catch((error) => {
         console.error(error instanceof Error ? error.message : error);
         this.scheduleReconnect();
       });
     }, delay);
   }
 
-  private async handleEnvelope(socket: WebSocket, envelope: { envelope_id?: string; type?: string; payload?: Body }) {
+  private async handleEnvelope(
+    socket: WebSocket,
+    envelope: { envelope_id?: string; type?: string; payload?: Body },
+  ) {
     if (!envelope.envelope_id) return;
-    const ack = (payload?: unknown) => ackEnvelope(socket, envelope.envelope_id!, payload);
+    const ack = (payload?: unknown) =>
+      ackEnvelope(socket, envelope.envelope_id!, payload);
     if (envelope.type !== "interactive" || !envelope.payload) return ack();
 
     const interaction = normalizeInteraction(envelope.payload);
@@ -192,8 +261,10 @@ export class SlackAppAdapter {
       return;
     }
     ack();
-    console.log(`[slack-app] ${interaction.type} ${interaction.actionId} ${interaction.userId}`);
-    void Promise.resolve(this.onAction?.(interaction)).catch(error =>
+    console.log(
+      `[slack-app] ${interaction.type} ${interaction.actionId} ${interaction.userId}`,
+    );
+    void Promise.resolve(this.onAction?.(interaction)).catch((error) =>
       console.error(`[slack-app] action failed: ${safeError(error)}`),
     );
   }

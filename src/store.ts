@@ -18,12 +18,14 @@ export const capabilities = [
 export const permissionPresets = {
   default: ["add", "remove-own"],
   "host-only": [],
-  collaborative: capabilities.filter(capability => capability !== "clear" && capability !== "end-session"),
+  collaborative: capabilities.filter(
+    (capability) => capability !== "clear" && capability !== "end-session",
+  ),
   communism: capabilities,
 };
 
 export const displayModes = ["default", "lyrics", "off"] as const;
-export type DisplayMode = typeof displayModes[number];
+export type DisplayMode = (typeof displayModes)[number];
 
 export type SavedTrack = {
   id: string;
@@ -179,14 +181,36 @@ export class Store {
     this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("sessions", "resume_state", "TEXT");
     this.ensureColumn("sessions", "resume_until", "INTEGER");
-    this.ensureColumn("sessions", "playback_seconds", "REAL NOT NULL DEFAULT 0");
-    this.ensureColumn("sessions", "listened_seconds", "REAL NOT NULL DEFAULT 0");
-    this.ensureColumn("sessions", "lyrics_enabled", "INTEGER NOT NULL DEFAULT 1");
+    this.ensureColumn(
+      "sessions",
+      "playback_seconds",
+      "REAL NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "sessions",
+      "listened_seconds",
+      "REAL NOT NULL DEFAULT 0",
+    );
+    this.ensureColumn(
+      "sessions",
+      "lyrics_enabled",
+      "INTEGER NOT NULL DEFAULT 1",
+    );
     const hadDisplayMode = this.hasColumn("sessions", "display_mode");
-    this.ensureColumn("sessions", "display_mode", "TEXT NOT NULL DEFAULT 'default'");
+    this.ensureColumn(
+      "sessions",
+      "display_mode",
+      "TEXT NOT NULL DEFAULT 'default'",
+    );
     if (!hadDisplayMode)
-      this.db.run("UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END");
-    this.ensureColumn("sessions", "anchor_enabled", "INTEGER NOT NULL DEFAULT 0");
+      this.db.run(
+        "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
+      );
+    this.ensureColumn(
+      "sessions",
+      "anchor_enabled",
+      "INTEGER NOT NULL DEFAULT 0",
+    );
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
   }
@@ -204,9 +228,11 @@ export class Store {
     const now = Date.now();
     const transaction = this.db.transaction(() => {
       this.db
-        .query(`INSERT INTO sessions
+        .query(
+          `INSERT INTO sessions
           (id, huddle_id, call_id, channel_id, thread_ts, creator_id, host_id, status, volume, anchor_enabled, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, 0, ?, ?)`)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, 0, ?, ?)`,
+        )
         .run(
           session.id,
           session.huddleId,
@@ -240,16 +266,19 @@ export class Store {
       .run(timestamp, revision, Date.now(), sessionId);
   }
 
-  setSession(sessionId: string, fields: {
-    status?: string;
-    hostId?: string | null;
-    volume?: number;
-    autoplay?: boolean;
-    playbackSeconds?: number;
-    listenedSeconds?: number;
-    displayMode?: DisplayMode;
-    anchorEnabled?: boolean;
-  }) {
+  setSession(
+    sessionId: string,
+    fields: {
+      status?: string;
+      hostId?: string | null;
+      volume?: number;
+      autoplay?: boolean;
+      playbackSeconds?: number;
+      listenedSeconds?: number;
+      displayMode?: DisplayMode;
+      anchorEnabled?: boolean;
+    },
+  ) {
     if (fields.status !== undefined)
       this.db
         .query("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?")
@@ -268,116 +297,175 @@ export class Store {
         .run(fields.autoplay ? 1 : 0, Date.now(), sessionId);
     if (fields.playbackSeconds !== undefined)
       this.db
-        .query("UPDATE sessions SET playback_seconds = ?, updated_at = ? WHERE id = ?")
+        .query(
+          "UPDATE sessions SET playback_seconds = ?, updated_at = ? WHERE id = ?",
+        )
         .run(fields.playbackSeconds, Date.now(), sessionId);
     if (fields.listenedSeconds !== undefined)
       this.db
-        .query("UPDATE sessions SET listened_seconds = ?, updated_at = ? WHERE id = ?")
+        .query(
+          "UPDATE sessions SET listened_seconds = ?, updated_at = ? WHERE id = ?",
+        )
         .run(fields.listenedSeconds, Date.now(), sessionId);
     if (fields.displayMode !== undefined)
       this.db
-        .query("UPDATE sessions SET display_mode = ?, updated_at = ? WHERE id = ?")
+        .query(
+          "UPDATE sessions SET display_mode = ?, updated_at = ? WHERE id = ?",
+        )
         .run(fields.displayMode, Date.now(), sessionId);
     if (fields.anchorEnabled !== undefined)
       this.db
-        .query("UPDATE sessions SET anchor_enabled = ?, updated_at = ? WHERE id = ?")
+        .query(
+          "UPDATE sessions SET anchor_enabled = ?, updated_at = ? WHERE id = ?",
+        )
         .run(fields.anchorEnabled ? 1 : 0, Date.now(), sessionId);
   }
 
-  suspendSession(sessionId: string, state: {
-    state: string;
-    playbackSeconds: number;
-    displayMode: DisplayMode;
-    anchorEnabled: boolean;
-    queue: string[];
-  }, resumeUntil: number) {
+  suspendSession(
+    sessionId: string,
+    state: {
+      state: string;
+      playbackSeconds: number;
+      displayMode: DisplayMode;
+      anchorEnabled: boolean;
+      queue: string[];
+    },
+    resumeUntil: number,
+  ) {
     this.db.transaction(() => {
-      this.db.query(`UPDATE sessions SET
+      this.db
+        .query(
+          `UPDATE sessions SET
         status = 'suspended', resume_state = ?, resume_until = ?, playback_seconds = ?,
-        display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`)
-        .run(state.state, resumeUntil, state.playbackSeconds, state.displayMode,
-          state.anchorEnabled ? 1 : 0, Date.now(), sessionId);
-      this.db.query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?").run(sessionId);
-      const position = this.db.query("UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?");
+        display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(
+          state.state,
+          resumeUntil,
+          state.playbackSeconds,
+          state.displayMode,
+          state.anchorEnabled ? 1 : 0,
+          Date.now(),
+          sessionId,
+        );
+      this.db
+        .query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?")
+        .run(sessionId);
+      const position = this.db.query(
+        "UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?",
+      );
       state.queue.forEach((id, index) => position.run(index, id, sessionId));
     })();
   }
 
   activateSession(sessionId: string, status: string) {
-    this.db.query(`UPDATE sessions SET
-      status = ?, resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?`)
+    this.db
+      .query(
+        `UPDATE sessions SET
+      status = ?, resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?`,
+      )
       .run(status, Date.now(), sessionId);
   }
 
   resumableSessions(now: number, ttlMs: number) {
-    const rows = this.db.query(`SELECT * FROM sessions WHERE status != 'ended'`).all() as Record<string, unknown>[];
+    const rows = this.db
+      .query(`SELECT * FROM sessions WHERE status != 'ended'`)
+      .all() as Record<string, unknown>[];
     const expiredIds: string[] = [];
-    const sessions = rows.flatMap(row => {
-      const deadline = Number(row.resume_until ?? Number(row.updated_at) + ttlMs);
+    const sessions = rows.flatMap((row) => {
+      const deadline = Number(
+        row.resume_until ?? Number(row.updated_at) + ttlMs,
+      );
       if (deadline <= now) {
         expiredIds.push(String(row.id));
         return [];
       }
       const id = String(row.id);
-      const tracks = (this.db.query(`SELECT * FROM tracks
+      const tracks = (
+        this.db
+          .query(
+            `SELECT * FROM tracks
         WHERE session_id = ? AND status IN ('playing', 'ready', 'preparing', 'played')
-        ORDER BY CASE WHEN status = 'playing' THEN -1 ELSE COALESCE(queue_position, created_at) END`).all(id) as Record<string, unknown>[])
-        .map(track => ({
-          id: String(track.id),
-          requesterId: String(track.requester_id),
-          sourceInput: String(track.source_input),
-          canonicalUrl: String(track.canonical_url),
-          sourceId: String(track.source_id),
-          title: String(track.title),
-          artist: String(track.artist),
-          ...(track.album ? { album: String(track.album) } : {}),
-          ...(track.duration === null ? {} : { duration: Number(track.duration) }),
-          ...(track.artwork ? { artwork: String(track.artwork) } : {}),
-          ...(track.automatic ? { automatic: true } : {}),
-          status: String(track.status),
-          ...(track.file_path ? { filePath: String(track.file_path) } : {}),
-          ...(track.queue_position === null ? {} : { queuePosition: Number(track.queue_position) }),
-        }));
-      return [{
-        id,
-        huddleId: String(row.huddle_id),
-        callId: String(row.call_id),
-        channelId: String(row.channel_id),
-        threadTs: String(row.thread_ts),
-        uiTs: String(row.ui_ts ?? ""),
-        revision: Number(row.revision),
-        creatorId: String(row.creator_id),
-        ...(row.host_id ? { hostId: String(row.host_id) } : {}),
-        state: String(row.status === "suspended" ? row.resume_state ?? "ready" : row.status),
-        volume: Number(row.volume),
-        autoplay: Boolean(row.autoplay),
-        displayMode: displayModes.includes(row.display_mode as DisplayMode)
-          ? row.display_mode as DisplayMode
-          : "default",
-        anchorEnabled: Boolean(row.anchor_enabled),
-        playbackSeconds: Number(row.playback_seconds),
-        listenedSeconds: Number(row.listened_seconds),
-        resumeUntil: deadline,
-        permissions: (this.db.query("SELECT capability FROM permissions WHERE session_id = ? AND allowed = 1").all(id) as { capability: string }[])
-          .map(value => value.capability),
-        tracks,
-      } satisfies SavedSession];
+        ORDER BY CASE WHEN status = 'playing' THEN -1 ELSE COALESCE(queue_position, created_at) END`,
+          )
+          .all(id) as Record<string, unknown>[]
+      ).map((track) => ({
+        id: String(track.id),
+        requesterId: String(track.requester_id),
+        sourceInput: String(track.source_input),
+        canonicalUrl: String(track.canonical_url),
+        sourceId: String(track.source_id),
+        title: String(track.title),
+        artist: String(track.artist),
+        ...(track.album ? { album: String(track.album) } : {}),
+        ...(track.duration === null
+          ? {}
+          : { duration: Number(track.duration) }),
+        ...(track.artwork ? { artwork: String(track.artwork) } : {}),
+        ...(track.automatic ? { automatic: true } : {}),
+        status: String(track.status),
+        ...(track.file_path ? { filePath: String(track.file_path) } : {}),
+        ...(track.queue_position === null
+          ? {}
+          : { queuePosition: Number(track.queue_position) }),
+      }));
+      return [
+        {
+          id,
+          huddleId: String(row.huddle_id),
+          callId: String(row.call_id),
+          channelId: String(row.channel_id),
+          threadTs: String(row.thread_ts),
+          uiTs: String(row.ui_ts ?? ""),
+          revision: Number(row.revision),
+          creatorId: String(row.creator_id),
+          ...(row.host_id ? { hostId: String(row.host_id) } : {}),
+          state: String(
+            row.status === "suspended"
+              ? (row.resume_state ?? "ready")
+              : row.status,
+          ),
+          volume: Number(row.volume),
+          autoplay: Boolean(row.autoplay),
+          displayMode: displayModes.includes(row.display_mode as DisplayMode)
+            ? (row.display_mode as DisplayMode)
+            : "default",
+          anchorEnabled: Boolean(row.anchor_enabled),
+          playbackSeconds: Number(row.playback_seconds),
+          listenedSeconds: Number(row.listened_seconds),
+          resumeUntil: deadline,
+          permissions: (
+            this.db
+              .query(
+                "SELECT capability FROM permissions WHERE session_id = ? AND allowed = 1",
+              )
+              .all(id) as { capability: string }[]
+          ).map((value) => value.capability),
+          tracks,
+        } satisfies SavedSession,
+      ];
     });
-    if (expiredIds.length) this.db.transaction(() => {
-      const end = this.db.query("UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?");
-      const clear = this.db.query("DELETE FROM tracks WHERE session_id = ?");
-      for (const id of expiredIds) {
-        clear.run(id);
-        end.run(now, id);
-      }
-    })();
+    if (expiredIds.length)
+      this.db.transaction(() => {
+        const end = this.db.query(
+          "UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?",
+        );
+        const clear = this.db.query("DELETE FROM tracks WHERE session_id = ?");
+        for (const id of expiredIds) {
+          clear.run(id);
+          end.run(now, id);
+        }
+      })();
     return { sessions, expiredIds };
   }
 
   expireSession(sessionId: string) {
     this.db.transaction(() => {
       this.db.query("DELETE FROM tracks WHERE session_id = ?").run(sessionId);
-      this.db.query("UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?")
+      this.db
+        .query(
+          "UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?",
+        )
         .run(Date.now(), sessionId);
     })();
   }
@@ -398,9 +486,11 @@ export class Store {
     status: string;
   }) {
     this.db
-      .query(`INSERT INTO tracks
+      .query(
+        `INSERT INTO tracks
         (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, automatic, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(
         track.id,
         track.sessionId,
@@ -421,9 +511,13 @@ export class Store {
 
   setTrack(id: string, fields: { status?: string; filePath?: string | null }) {
     if (fields.status !== undefined)
-      this.db.query("UPDATE tracks SET status = ? WHERE id = ?").run(fields.status, id);
+      this.db
+        .query("UPDATE tracks SET status = ? WHERE id = ?")
+        .run(fields.status, id);
     if (fields.filePath !== undefined)
-      this.db.query("UPDATE tracks SET file_path = ? WHERE id = ?").run(fields.filePath, id);
+      this.db
+        .query("UPDATE tracks SET file_path = ? WHERE id = ?")
+        .run(fields.filePath, id);
   }
 
   removeTrack(id: string) {
@@ -432,96 +526,167 @@ export class Store {
 
   setPermission(sessionId: string, capability: string, allowed: boolean) {
     this.db
-      .query(`INSERT INTO permissions (session_id, capability, allowed) VALUES (?, ?, ?)
-        ON CONFLICT (session_id, capability) DO UPDATE SET allowed = excluded.allowed`)
+      .query(
+        `INSERT INTO permissions (session_id, capability, allowed) VALUES (?, ?, ?)
+        ON CONFLICT (session_id, capability) DO UPDATE SET allowed = excluded.allowed`,
+      )
       .run(sessionId, capability, allowed ? 1 : 0);
   }
 
   getUserScrobbling(userId: string): UserScrobbling {
-    const row = this.db.query("SELECT * FROM user_scrobbling WHERE user_id = ?").get(userId) as Record<string, unknown> | null;
+    const row = this.db
+      .query("SELECT * FROM user_scrobbling WHERE user_id = ?")
+      .get(userId) as Record<string, unknown> | null;
     if (!row) return { lastFmEnabled: false, listenBrainzEnabled: false };
     return {
-      ...(row.lastfm_username ? { lastFmUsername: String(row.lastfm_username) } : {}),
-      ...(row.lastfm_session_key ? { lastFmSessionKey: String(row.lastfm_session_key) } : {}),
+      ...(row.lastfm_username
+        ? { lastFmUsername: String(row.lastfm_username) }
+        : {}),
+      ...(row.lastfm_session_key
+        ? { lastFmSessionKey: String(row.lastfm_session_key) }
+        : {}),
       lastFmEnabled: Boolean(row.lastfm_enabled),
-      ...(row.lastfm_pending_token ? { lastFmPendingToken: String(row.lastfm_pending_token) } : {}),
-      ...(row.lastfm_pending_at ? { lastFmPendingAt: Number(row.lastfm_pending_at) } : {}),
-      ...(row.listenbrainz_username ? { listenBrainzUsername: String(row.listenbrainz_username) } : {}),
-      ...(row.listenbrainz_token ? { listenBrainzToken: String(row.listenbrainz_token) } : {}),
+      ...(row.lastfm_pending_token
+        ? { lastFmPendingToken: String(row.lastfm_pending_token) }
+        : {}),
+      ...(row.lastfm_pending_at
+        ? { lastFmPendingAt: Number(row.lastfm_pending_at) }
+        : {}),
+      ...(row.listenbrainz_username
+        ? { listenBrainzUsername: String(row.listenbrainz_username) }
+        : {}),
+      ...(row.listenbrainz_token
+        ? { listenBrainzToken: String(row.listenbrainz_token) }
+        : {}),
       listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
     };
   }
 
   setLastFmPending(userId: string, token: string, startedAt: number) {
     this.ensureUserScrobbling(userId);
-    this.db.query("UPDATE user_scrobbling SET lastfm_pending_token = ?, lastfm_pending_at = ?, updated_at = ? WHERE user_id = ?")
+    this.db
+      .query(
+        "UPDATE user_scrobbling SET lastfm_pending_token = ?, lastfm_pending_at = ?, updated_at = ? WHERE user_id = ?",
+      )
       .run(token, startedAt, Date.now(), userId);
   }
 
   connectLastFm(userId: string, username: string, sessionKey: string) {
     this.ensureUserScrobbling(userId);
-    this.db.query(`UPDATE user_scrobbling SET lastfm_username = ?, lastfm_session_key = ?, lastfm_enabled = 1,
-      lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`)
+    this.db
+      .query(
+        `UPDATE user_scrobbling SET lastfm_username = ?, lastfm_session_key = ?, lastfm_enabled = 1,
+      lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`,
+      )
       .run(username, sessionKey, Date.now(), userId);
   }
 
   disconnectLastFm(userId: string) {
     this.ensureUserScrobbling(userId);
-    this.db.query(`UPDATE user_scrobbling SET lastfm_username = NULL, lastfm_session_key = NULL,
-      lastfm_enabled = 0, lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`)
+    this.db
+      .query(
+        `UPDATE user_scrobbling SET lastfm_username = NULL, lastfm_session_key = NULL,
+      lastfm_enabled = 0, lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`,
+      )
       .run(Date.now(), userId);
   }
 
   setLastFmEnabled(userId: string, enabled: boolean) {
     this.ensureUserScrobbling(userId);
-    this.db.query("UPDATE user_scrobbling SET lastfm_enabled = ?, updated_at = ? WHERE user_id = ?")
+    this.db
+      .query(
+        "UPDATE user_scrobbling SET lastfm_enabled = ?, updated_at = ? WHERE user_id = ?",
+      )
       .run(enabled ? 1 : 0, Date.now(), userId);
   }
 
   setListenBrainzToken(userId: string, token: string, username: string) {
     this.ensureUserScrobbling(userId);
-    this.db.query("UPDATE user_scrobbling SET listenbrainz_token = ?, listenbrainz_username = ?, updated_at = ? WHERE user_id = ?")
+    this.db
+      .query(
+        "UPDATE user_scrobbling SET listenbrainz_token = ?, listenbrainz_username = ?, updated_at = ? WHERE user_id = ?",
+      )
       .run(token, username, Date.now(), userId);
   }
 
   setListenBrainzEnabled(userId: string, enabled: boolean) {
     this.ensureUserScrobbling(userId);
-    this.db.query("UPDATE user_scrobbling SET listenbrainz_enabled = ?, updated_at = ? WHERE user_id = ?")
+    this.db
+      .query(
+        "UPDATE user_scrobbling SET listenbrainz_enabled = ?, updated_at = ? WHERE user_id = ?",
+      )
       .run(enabled ? 1 : 0, Date.now(), userId);
   }
 
-  queueScrobble(sessionId: string, trackId: string, userId: string, service: string, listenedAt: number, track: unknown) {
+  queueScrobble(
+    sessionId: string,
+    trackId: string,
+    userId: string,
+    service: string,
+    listenedAt: number,
+    track: unknown,
+  ) {
     const now = Date.now();
-    this.db.query(`INSERT OR IGNORE INTO scrobbles
+    this.db
+      .query(
+        `INSERT OR IGNORE INTO scrobbles
       (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(crypto.randomUUID(), sessionId, trackId, userId, service, listenedAt, JSON.stringify(track), now, now);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        sessionId,
+        trackId,
+        userId,
+        service,
+        listenedAt,
+        JSON.stringify(track),
+        now,
+        now,
+      );
   }
 
   pendingScrobbles(now: number) {
-    return (this.db.query(`SELECT id, user_id, service, listened_at, attempts, track FROM scrobbles
-      WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY listened_at, created_at`).all(now) as Record<string, unknown>[])
-      .map(row => ({
-        id: String(row.id),
-        userId: String(row.user_id),
-        service: String(row.service),
-        listenedAt: Number(row.listened_at),
-        attempts: Number(row.attempts),
-        track: JSON.parse(String(row.track)),
-      }) satisfies PendingScrobble);
+    return (
+      this.db
+        .query(
+          `SELECT id, user_id, service, listened_at, attempts, track FROM scrobbles
+      WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY listened_at, created_at`,
+        )
+        .all(now) as Record<string, unknown>[]
+    ).map(
+      (row) =>
+        ({
+          id: String(row.id),
+          userId: String(row.user_id),
+          service: String(row.service),
+          listenedAt: Number(row.listened_at),
+          attempts: Number(row.attempts),
+          track: JSON.parse(String(row.track)),
+        }) satisfies PendingScrobble,
+    );
   }
 
   retryScrobble(id: string, attempts: number, nextAttemptAt: number) {
-    this.db.query("UPDATE scrobbles SET attempts = ?, next_attempt_at = ? WHERE id = ?")
+    this.db
+      .query(
+        "UPDATE scrobbles SET attempts = ?, next_attempt_at = ? WHERE id = ?",
+      )
       .run(attempts, nextAttemptAt, id);
   }
 
   finishScrobble(id: string, status: "sent" | "failed") {
-    this.db.query("UPDATE scrobbles SET status = ? WHERE id = ?").run(status, id);
+    this.db
+      .query("UPDATE scrobbles SET status = ? WHERE id = ?")
+      .run(status, id);
   }
 
   clearPendingScrobbles(userId: string, service: string) {
-    this.db.query("DELETE FROM scrobbles WHERE user_id = ? AND service = ? AND status = 'pending'").run(userId, service);
+    this.db
+      .query(
+        "DELETE FROM scrobbles WHERE user_id = ? AND service = ? AND status = 'pending'",
+      )
+      .run(userId, service);
   }
 
   close() {
@@ -534,12 +699,16 @@ export class Store {
   }
 
   private hasColumn(table: string, column: string) {
-    return (this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[])
-      .some(value => value.name === column);
+    return (
+      this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    ).some((value) => value.name === column);
   }
 
   private ensureUserScrobbling(userId: string) {
-    this.db.query("INSERT OR IGNORE INTO user_scrobbling (user_id, updated_at) VALUES (?, ?)")
+    this.db
+      .query(
+        "INSERT OR IGNORE INTO user_scrobbling (user_id, updated_at) VALUES (?, ?)",
+      )
       .run(userId, Date.now());
   }
 }

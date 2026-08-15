@@ -8,25 +8,66 @@ import { Store } from "./store.ts";
 test("persists session and permission defaults", () => {
   const store = new Store(":memory:");
   store.createSession({
-    id: "session", huddleId: "huddle", callId: "call", channelId: "channel",
-    threadTs: "1.0", creatorId: "creator", hostId: "host", volume: 0.6,
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
   });
-  expect(store.db.query("SELECT status, autoplay, display_mode, anchor_enabled FROM sessions").get())
-    .toEqual({ status: "ready", autoplay: 0, display_mode: "default", anchor_enabled: 0 });
+  expect(
+    store.db
+      .query(
+        "SELECT status, autoplay, display_mode, anchor_enabled FROM sessions",
+      )
+      .get(),
+  ).toEqual({
+    status: "ready",
+    autoplay: 0,
+    display_mode: "default",
+    anchor_enabled: 0,
+  });
   store.setSession("session", { autoplay: true });
-  expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({ autoplay: 1 });
-  expect(store.db.query("SELECT capability FROM permissions WHERE allowed = 1 ORDER BY capability").all())
-    .toEqual([{ capability: "add" }, { capability: "remove-own" }]);
-  expect(store.db.query("SELECT allowed FROM permissions WHERE capability = 'add-bulk'").get())
-    .toEqual({ allowed: 0 });
-  store.db.query("DELETE FROM permissions WHERE capability = 'configure-settings'").run();
+  expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({
+    autoplay: 1,
+  });
+  expect(
+    store.db
+      .query(
+        "SELECT capability FROM permissions WHERE allowed = 1 ORDER BY capability",
+      )
+      .all(),
+  ).toEqual([{ capability: "add" }, { capability: "remove-own" }]);
+  expect(
+    store.db
+      .query("SELECT allowed FROM permissions WHERE capability = 'add-bulk'")
+      .get(),
+  ).toEqual({ allowed: 0 });
+  store.db
+    .query("DELETE FROM permissions WHERE capability = 'configure-settings'")
+    .run();
   store.setPermission("session", "configure-settings", true);
-  expect(store.db.query("SELECT allowed FROM permissions WHERE capability = 'configure-settings'").get())
-    .toEqual({ allowed: 1 });
-  expect(store.db.query("PRAGMA table_info(tracks)").all().map(row => (row as { name: string }).name))
-    .not.toContain("position");
-  expect(store.db.query("PRAGMA table_info(tracks)").all().map(row => (row as { name: string }).name))
-    .toContain("automatic");
+  expect(
+    store.db
+      .query(
+        "SELECT allowed FROM permissions WHERE capability = 'configure-settings'",
+      )
+      .get(),
+  ).toEqual({ allowed: 1 });
+  expect(
+    store.db
+      .query("PRAGMA table_info(tracks)")
+      .all()
+      .map((row) => (row as { name: string }).name),
+  ).not.toContain("position");
+  expect(
+    store.db
+      .query("PRAGMA table_info(tracks)")
+      .all()
+      .map((row) => (row as { name: string }).name),
+  ).toContain("automatic");
   store.close();
 });
 
@@ -35,38 +76,85 @@ test("restores suspended sessions for three minutes", () => {
   const path = join(directory, "store.sqlite");
   let store = new Store(path);
   store.createSession({
-    id: "session", huddleId: "huddle", callId: "call", channelId: "channel",
-    threadTs: "1.0", creatorId: "creator", hostId: "host", volume: 0.6,
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
   });
   store.addTrack({
-    id: "track", sessionId: "session", requesterId: "user",
-    sourceInput: "https://example.com", canonicalUrl: "https://example.com",
-    sourceId: "source", title: "Track", artist: "Artist", status: "ready",
+    id: "track",
+    sessionId: "session",
+    requesterId: "user",
+    sourceInput: "https://example.com",
+    canonicalUrl: "https://example.com",
+    sourceId: "source",
+    title: "Track",
+    artist: "Artist",
+    status: "ready",
   });
   store.addTrack({
-    id: "played", sessionId: "session", requesterId: "user",
-    sourceInput: "https://example.com/played", canonicalUrl: "https://example.com/played",
-    sourceId: "played", title: "Played", artist: "Artist", status: "played",
+    id: "played",
+    sessionId: "session",
+    requesterId: "user",
+    sourceInput: "https://example.com/played",
+    canonicalUrl: "https://example.com/played",
+    sourceId: "played",
+    title: "Played",
+    artist: "Artist",
+    status: "played",
   });
-  store.setSession("session", { autoplay: true, playbackSeconds: 42, listenedSeconds: 84, displayMode: "off", anchorEnabled: false });
-  store.suspendSession("session", {
-    state: "paused", playbackSeconds: 42, displayMode: "lyrics", anchorEnabled: false, queue: ["track"],
-  }, 180_000);
+  store.setSession("session", {
+    autoplay: true,
+    playbackSeconds: 42,
+    listenedSeconds: 84,
+    displayMode: "off",
+    anchorEnabled: false,
+  });
+  store.suspendSession(
+    "session",
+    {
+      state: "paused",
+      playbackSeconds: 42,
+      displayMode: "lyrics",
+      anchorEnabled: false,
+      queue: ["track"],
+    },
+    180_000,
+  );
   store.close();
   store = new Store(path);
   const saved = store.resumableSessions(1, 180_000);
   expect(saved.sessions).toHaveLength(1);
-  expect(saved.sessions[0]).toEqual(expect.objectContaining({
-    id: "session", state: "paused", playbackSeconds: 42, listenedSeconds: 84, autoplay: true,
-    displayMode: "lyrics", anchorEnabled: false, resumeUntil: 180_000,
-  }));
+  expect(saved.sessions[0]).toEqual(
+    expect.objectContaining({
+      id: "session",
+      state: "paused",
+      playbackSeconds: 42,
+      listenedSeconds: 84,
+      autoplay: true,
+      displayMode: "lyrics",
+      anchorEnabled: false,
+      resumeUntil: 180_000,
+    }),
+  );
   expect(saved.sessions[0]?.tracks).toEqual([
     expect.objectContaining({ id: "track", queuePosition: 0 }),
     expect.objectContaining({ id: "played", status: "played" }),
   ]);
-  expect(store.resumableSessions(180_000, 180_000)).toEqual({ sessions: [], expiredIds: ["session"] });
-  expect(store.db.query("SELECT count(*) AS count FROM tracks").get()).toEqual({ count: 0 });
-  expect(store.db.query("SELECT status FROM sessions").get()).toEqual({ status: "ended" });
+  expect(store.resumableSessions(180_000, 180_000)).toEqual({
+    sessions: [],
+    expiredIds: ["session"],
+  });
+  expect(store.db.query("SELECT count(*) AS count FROM tracks").get()).toEqual({
+    count: 0,
+  });
+  expect(store.db.query("SELECT status FROM sessions").get()).toEqual({
+    status: "ended",
+  });
   store.close();
   rmSync(directory, { recursive: true });
 });
@@ -76,8 +164,14 @@ test("migrates the old lyrics toggle to display mode", () => {
   const path = join(directory, "store.sqlite");
   let store = new Store(path);
   store.createSession({
-    id: "session", huddleId: "huddle", callId: "call", channelId: "channel",
-    threadTs: "1.0", creatorId: "creator", hostId: "host", volume: 0.6,
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
   });
   store.close();
 
@@ -87,27 +181,47 @@ test("migrates the old lyrics toggle to display mode", () => {
   legacy.close();
 
   store = new Store(path);
-  expect(store.db.query("SELECT display_mode FROM sessions").get()).toEqual({ display_mode: "off" });
+  expect(store.db.query("SELECT display_mode FROM sessions").get()).toEqual({
+    display_mode: "off",
+  });
   store.close();
   rmSync(directory, { recursive: true });
 });
 
 test("persists global user scrobbling settings and deduplicates queued submissions", () => {
   const store = new Store(":memory:");
-  expect(store.getUserScrobbling("user")).toEqual({ lastFmEnabled: false, listenBrainzEnabled: false });
+  expect(store.getUserScrobbling("user")).toEqual({
+    lastFmEnabled: false,
+    listenBrainzEnabled: false,
+  });
   store.setLastFmPending("user", "pending", 10);
   store.connectLastFm("user", "last-user", "session-key");
   store.setListenBrainzToken("user", "lb-token", "musicbrainz-user");
   store.setListenBrainzEnabled("user", true);
   expect(store.getUserScrobbling("user")).toEqual({
-    lastFmUsername: "last-user", lastFmSessionKey: "session-key", lastFmEnabled: true,
-    listenBrainzUsername: "musicbrainz-user", listenBrainzToken: "lb-token", listenBrainzEnabled: true,
+    lastFmUsername: "last-user",
+    lastFmSessionKey: "session-key",
+    lastFmEnabled: true,
+    listenBrainzUsername: "musicbrainz-user",
+    listenBrainzToken: "lb-token",
+    listenBrainzEnabled: true,
   });
-  const track = { id: "track", requesterId: "requester", title: "Title", artist: "Artist", duration: 120 };
+  const track = {
+    id: "track",
+    requesterId: "requester",
+    title: "Title",
+    artist: "Artist",
+    duration: 120,
+  };
   store.queueScrobble("session", "track", "user", "lastfm", 100, track);
   store.queueScrobble("session", "track", "user", "lastfm", 100, track);
-  expect(store.pendingScrobbles(Date.now())).toEqual([expect.objectContaining({
-    userId: "user", service: "lastfm", listenedAt: 100, track,
-  })]);
+  expect(store.pendingScrobbles(Date.now())).toEqual([
+    expect.objectContaining({
+      userId: "user",
+      service: "lastfm",
+      listenedAt: 100,
+      track,
+    }),
+  ]);
   store.close();
 });

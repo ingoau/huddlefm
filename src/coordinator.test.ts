@@ -7,7 +7,17 @@ import { Store, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 
-function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs: 600_000, pausedMs: 600_000, warningMs: 120_000 }, restored?: SavedSession, scrobbling?: ScrobbleDispatcher) {
+function setup(
+  tracks = {} as TrackCatalog,
+  timeouts = {
+    aloneMs: 60_000,
+    idleMs: 600_000,
+    pausedMs: 600_000,
+    warningMs: 120_000,
+  },
+  restored?: SavedSession,
+  scrobbling?: ScrobbleDispatcher,
+) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
   const deleted: unknown[] = [];
@@ -22,36 +32,111 @@ function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
-    update: async (...args: unknown[]) => { updates.push(args); },
-    delete: async (...args: unknown[]) => { deleted.push(args); },
-    ephemeral: async (_channel: string, _user: string, text: string) => { ephemeral.push(text); },
-    modal: async (...args: unknown[]) => { modals.push(args); },
-    pushModal: async (...args: unknown[]) => { pushedModals.push(args); },
+    update: async (...args: unknown[]) => {
+      updates.push(args);
+    },
+    delete: async (...args: unknown[]) => {
+      deleted.push(args);
+    },
+    ephemeral: async (_channel: string, _user: string, text: string) => {
+      ephemeral.push(text);
+    },
+    modal: async (...args: unknown[]) => {
+      modals.push(args);
+    },
+    pushModal: async (...args: unknown[]) => {
+      pushedModals.push(args);
+    },
     updateModal: async () => {},
   } as unknown as SlackAppAdapter;
   const store = {
-    createSession: () => {}, setUi: () => {}, setTrack: () => {}, removeTrack: () => {},
+    createSession: () => {},
+    setUi: () => {},
+    setTrack: () => {},
+    removeTrack: () => {},
     addTrack: () => {},
-    setSession: (_id: string, value: unknown) => { sessions.push(value); },
-    activateSession: (_id: string, status: string) => { sessions.push({ activated: status }); },
-    suspendSession: (...args: unknown[]) => { suspensions.push(args); },
-    setPermission: (_id: string, capability: string, allowed: boolean) => { permissions.push({ capability, allowed }); },
+    setSession: (_id: string, value: unknown) => {
+      sessions.push(value);
+    },
+    activateSession: (_id: string, status: string) => {
+      sessions.push({ activated: status });
+    },
+    suspendSession: (...args: unknown[]) => {
+      suspensions.push(args);
+    },
+    setPermission: (_id: string, capability: string, allowed: boolean) => {
+      permissions.push({ capability, allowed });
+    },
   } as unknown as Store;
   const lyrics = { get: async () => undefined } as unknown as LyricsCatalog;
-  const coordinator = new Coordinator({
-    huddleCallId: "call", huddleId: "huddle", huddleCreatorId: "creator",
-    participantIds: ["host", "guest"], uiChannelId: "channel", uiThreadTs: "1.0",
-    chimeMeeting: {}, chimeAttendee: {},
-  }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
-    queueLimit: 50, initialVolume: 0.6, ...timeouts, port: 3210, managerUserId: "manager",
-  }, "token", message => media.push(message), async () => {}, restored, scrobbling);
-  return { coordinator, posted, updates, deleted, modals, pushedModals, ephemeral, sessions, permissions, suspensions, media, audit };
+  const coordinator = new Coordinator(
+    {
+      huddleCallId: "call",
+      huddleId: "huddle",
+      huddleCreatorId: "creator",
+      participantIds: ["host", "guest"],
+      uiChannelId: "channel",
+      uiThreadTs: "1.0",
+      chimeMeeting: {},
+      chimeAttendee: {},
+    },
+    "host",
+    "bot",
+    slack,
+    store,
+    tracks,
+    lyrics,
+    {
+      record: (...args: unknown[]) => {
+        audit.push(args);
+      },
+    } as AuditLog,
+    {
+      queueLimit: 50,
+      initialVolume: 0.6,
+      ...timeouts,
+      port: 3210,
+      managerUserId: "manager",
+    },
+    "token",
+    (message) => media.push(message),
+    async () => {},
+    restored,
+    scrobbling,
+  );
+  return {
+    coordinator,
+    posted,
+    updates,
+    deleted,
+    modals,
+    pushedModals,
+    ephemeral,
+    sessions,
+    permissions,
+    suspensions,
+    media,
+    audit,
+  };
 }
 
-const interaction = (coordinator: Coordinator, actionId: string, value = "", type = "block_actions") => ({
-  type, userId: "host", actionId, value, channelId: "channel",
-  messageTs: type === "view_submission" ? "" : "1", triggerId: "trigger",
-  metadata: type === "view_submission" ? JSON.stringify({ sessionId: coordinator.id, hostId: "host" }) : "",
+const interaction = (
+  coordinator: Coordinator,
+  actionId: string,
+  value = "",
+  type = "block_actions",
+) => ({
+  type,
+  userId: "host",
+  actionId,
+  value,
+  channelId: "channel",
+  messageTs: type === "view_submission" ? "" : "1",
+  triggerId: "trigger",
+  metadata:
+    type === "view_submission"
+      ? JSON.stringify({ sessionId: coordinator.id, hostId: "host" })
+      : "",
   state: {},
 });
 
@@ -66,24 +151,58 @@ test("suspends with a restart notice and restores playback", async () => {
   first.coordinator.mediaEvent("playback_position", { seconds: 42 });
   await first.coordinator.suspendForRestart(180_000);
   expect(first.posted.at(-1)).toEqual([
-    "channel", "1.0", "HuddleFM is restarting. Playback should resume shortly.",
+    "channel",
+    "1.0",
+    "HuddleFM is restarting. Playback should resume shortly.",
   ]);
-  expect(first.suspensions).toEqual([[first.coordinator.id, expect.objectContaining({ state: "ready" }), 180_000]]);
+  expect(first.suspensions).toEqual([
+    [
+      first.coordinator.id,
+      expect.objectContaining({ state: "ready" }),
+      180_000,
+    ],
+  ]);
   expect(first.media).toContainEqual({ type: "leave" });
 
   const restored: SavedSession = {
-    id: "saved", huddleId: "huddle", callId: "call", channelId: "channel", threadTs: "1.0",
-    uiTs: "player", revision: 2, creatorId: "creator", hostId: "host", state: "paused",
-    volume: 0.4, autoplay: false, displayMode: "lyrics", anchorEnabled: true,
-    playbackSeconds: 42, listenedSeconds: 84, resumeUntil: 180_000, permissions: ["add"], tracks: [{
-      id: "track", requesterId: "host", sourceInput: "package.json", canonicalUrl: "package.json",
-      sourceId: "source", title: "Track", artist: "Artist", status: "playing", filePath: "package.json",
-    }],
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    uiTs: "player",
+    revision: 2,
+    creatorId: "creator",
+    hostId: "host",
+    state: "paused",
+    volume: 0.4,
+    autoplay: false,
+    displayMode: "lyrics",
+    anchorEnabled: true,
+    playbackSeconds: 42,
+    listenedSeconds: 84,
+    resumeUntil: 180_000,
+    permissions: ["add"],
+    tracks: [
+      {
+        id: "track",
+        requesterId: "host",
+        sourceInput: "package.json",
+        canonicalUrl: "package.json",
+        sourceId: "source",
+        title: "Track",
+        artist: "Artist",
+        status: "playing",
+        filePath: "package.json",
+      },
+    ],
   };
   const second = setup(undefined, undefined, restored);
   await second.coordinator.resume();
   expect(second.coordinator.id).toBe("saved");
-  expect(second.media).toContainEqual(expect.objectContaining({ type: "play", entryId: "track" }));
+  expect(second.media).toContainEqual(
+    expect.objectContaining({ type: "play", entryId: "track" }),
+  );
   expect(second.media).toContainEqual({ type: "seek", seconds: 42 });
   expect(second.media).toContainEqual({ type: "pause" });
   expect(second.media).toContainEqual({ type: "display_mode", mode: "lyrics" });
@@ -92,31 +211,56 @@ test("suspends with a restart notice and restores playback", async () => {
 
 test("a Next click during first-track preparation does not skip it", async () => {
   let finish!: (path: string) => void;
-  const prepared = new Promise<string>(resolve => { finish = resolve; });
+  const prepared = new Promise<string>((resolve) => {
+    finish = resolve;
+  });
   const tracks = {
     resolve: async () => ({
-      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
-      sourceId: "track", title: "Track", artist: "Artist",
+      sourceInput: "https://example.com/track",
+      canonicalUrl: "https://example.com/track",
+      sourceId: "track",
+      title: "Track",
+      artist: "Artist",
     }),
     prepare: () => prepared,
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
   const add = result.coordinator.action({
-    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value: "ref",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "host",
+    actionId: "add_track_to_queue",
+    value: "ref",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   await Bun.sleep(0);
   const next = result.coordinator.action({
-    type: "block_actions", userId: "host", actionId: "next_track", value: "",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "host",
+    actionId: "next_track",
+    value: "",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   finish("track.opus");
   await Promise.all([add, next]);
-  expect(result.media).toContainEqual(expect.objectContaining({ type: "play" }));
-  expect(result.media).toContainEqual(expect.objectContaining({ type: "lyrics_unavailable" }));
+  expect(result.media).toContainEqual(
+    expect.objectContaining({ type: "play" }),
+  );
+  expect(result.media).toContainEqual(
+    expect.objectContaining({ type: "lyrics_unavailable" }),
+  );
   expect(result.media).not.toContainEqual({ type: "stop" });
-  expect(result.ephemeral).toContain("Nothing was playing when you pressed Next.");
+  expect(result.ephemeral).toContain(
+    "Nothing was playing when you pressed Next.",
+  );
   await result.coordinator.endFromSlack();
 });
 
@@ -124,8 +268,15 @@ test("rejects stale player actions", async () => {
   const test = setup();
   await test.coordinator.start();
   await test.coordinator.action({
-    type: "block_actions", userId: "host", actionId: "volume_up", value: "",
-    channelId: "channel", messageTs: "stale", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "host",
+    actionId: "volume_up",
+    value: "",
+    channelId: "channel",
+    messageTs: "stale",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   expect(test.ephemeral).toEqual(["That player is stale; use the newest one."]);
   expect(test.media).toEqual([]);
@@ -141,8 +292,15 @@ test("rejects actions and track searches from outside the huddle", async () => {
   } as unknown as TrackCatalog);
   await test.coordinator.start();
   const outside = {
-    type: "block_actions", userId: "outside", actionId: "add_track_to_queue", value: "track",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "outside",
+    actionId: "add_track_to_queue",
+    value: "track",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   };
 
   expect(await test.coordinator.suggestions(outside)).toEqual([]);
@@ -163,18 +321,35 @@ test("gates album and playlist additions behind add-bulk", async () => {
   const searches: unknown[] = [];
   let prepared = 0;
   const tracks = {
-    suggestions: async (_query: string, allowed: unknown) => (searches.push(allowed), []),
-    resolve: async () => ["a", "b"].map(id => ({
-      sourceInput: `https://example.com/${id}`, canonicalUrl: `https://example.com/${id}`,
-      sourceId: id, title: id, artist: "Artist",
-    })),
-    prepare: async (_track: unknown, _directory: string, id: string) => (prepared++, `${id}.opus`),
+    suggestions: async (_query: string, allowed: unknown) => (
+      searches.push(allowed),
+      []
+    ),
+    resolve: async () =>
+      ["a", "b"].map((id) => ({
+        sourceInput: `https://example.com/${id}`,
+        canonicalUrl: `https://example.com/${id}`,
+        sourceId: id,
+        title: id,
+        artist: "Artist",
+      })),
+    prepare: async (_track: unknown, _directory: string, id: string) => (
+      prepared++,
+      `${id}.opus`
+    ),
   } as unknown as TrackCatalog;
   const test = setup(tracks);
   await test.coordinator.start();
   const guest = {
-    type: "block_actions", userId: "guest", actionId: "add_track_to_queue", value: "bulkref_test",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "guest",
+    actionId: "add_track_to_queue",
+    value: "bulkref_test",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   };
 
   await test.coordinator.suggestions({ ...guest, value: "album" });
@@ -185,9 +360,17 @@ test("gates album and playlist additions behind add-bulk", async () => {
 
   await test.coordinator.action({
     ...interaction(test.coordinator, "save_settings", "", "view_submission"),
-    state: { permissions: { selected: { selected_options: [
-      { value: "add" }, { value: "add-bulk" }, { value: "remove-own" },
-    ] } } },
+    state: {
+      permissions: {
+        selected: {
+          selected_options: [
+            { value: "add" },
+            { value: "add-bulk" },
+            { value: "remove-own" },
+          ],
+        },
+      },
+    },
   });
   Reflect.get(test.coordinator, "lastSearch").clear();
   await test.coordinator.suggestions({ ...guest, value: "album" });
@@ -201,15 +384,36 @@ test("routes message and modal interactions to their session", async () => {
   const test = setup();
   await test.coordinator.start();
   const interaction = {
-    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value: "ref",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "host",
+    actionId: "add_track_to_queue",
+    value: "ref",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   };
   expect(test.coordinator.handles(interaction)).toBeTrue();
-  expect(test.coordinator.handles({ ...interaction, messageTs: "other" })).toBeFalse();
-  expect(test.coordinator.handles({
-    ...interaction, channelId: "", messageTs: "", metadata: JSON.stringify({ sessionId: test.coordinator.id }),
-  })).toBeTrue();
-  expect(test.coordinator.handles({ ...interaction, value: test.coordinator.id, channelId: "", messageTs: "" })).toBeTrue();
+  expect(
+    test.coordinator.handles({ ...interaction, messageTs: "other" }),
+  ).toBeFalse();
+  expect(
+    test.coordinator.handles({
+      ...interaction,
+      channelId: "",
+      messageTs: "",
+      metadata: JSON.stringify({ sessionId: test.coordinator.id }),
+    }),
+  ).toBeTrue();
+  expect(
+    test.coordinator.handles({
+      ...interaction,
+      value: test.coordinator.id,
+      channelId: "",
+      messageTs: "",
+    }),
+  ).toBeTrue();
   await test.coordinator.endFromSlack();
 });
 
@@ -219,13 +423,27 @@ test("first current participant claims a vacant host role", async () => {
   await test.coordinator.memberLeft("host");
   expect(test.posted).toHaveLength(1);
   await test.coordinator.action({
-    type: "block_actions", userId: "guest", actionId: "claim_host", value: "old-session",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "guest",
+    actionId: "claim_host",
+    value: "old-session",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   expect(test.ephemeral).toContain("That takeover request is stale.");
   await test.coordinator.action({
-    type: "block_actions", userId: "guest", actionId: "claim_host", value: test.coordinator.id,
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "guest",
+    actionId: "claim_host",
+    value: test.coordinator.id,
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   expect(test.sessions).toContainEqual({ hostId: null });
   expect(test.sessions).toContainEqual({ hostId: "guest" });
@@ -236,26 +454,50 @@ test("downloads do not block End and are cancelled", async () => {
   let signal: AbortSignal | undefined;
   const tracks = {
     resolve: async () => ({
-      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
-      sourceId: "track", title: "Track", artist: "Artist",
+      sourceInput: "https://example.com/track",
+      canonicalUrl: "https://example.com/track",
+      sourceId: "track",
+      title: "Track",
+      artist: "Artist",
     }),
-    prepare: (_track: unknown, _directory: string, _id: string, value: AbortSignal) => {
+    prepare: (
+      _track: unknown,
+      _directory: string,
+      _id: string,
+      value: AbortSignal,
+    ) => {
       signal = value;
       return new Promise<string>((_resolve, reject) =>
-        value.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }),
+        value.addEventListener("abort", () => reject(new Error("cancelled")), {
+          once: true,
+        }),
       );
     },
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
   const add = result.coordinator.action({
-    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value: "ref",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "host",
+    actionId: "add_track_to_queue",
+    value: "ref",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   while (!signal) await Bun.sleep(0);
   await result.coordinator.action({
-    type: "block_actions", userId: "host", actionId: "end_session", value: result.coordinator.id,
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "host",
+    actionId: "end_session",
+    value: result.coordinator.id,
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   await add;
   expect(signal.aborted).toBeTrue();
@@ -265,20 +507,38 @@ test("downloads do not block End and are cancelled", async () => {
 test("late media events cannot advance a newer track", async () => {
   const tracks = {
     resolve: async (value: string) => ({
-      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
-      sourceId: value, title: value, artist: "Artist",
+      sourceInput: `https://example.com/${value}`,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: value,
+      title: value,
+      artist: "Artist",
     }),
-    prepare: async (_track: unknown, _directory: string, id: string) => `${id}.opus`,
+    prepare: async (_track: unknown, _directory: string, id: string) =>
+      `${id}.opus`,
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
-  for (const value of ["a", "b"]) await result.coordinator.action({
-    type: "block_actions", userId: "host", actionId: "add_track_to_queue", value,
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
-  });
-  const plays = () => result.media.filter((message): message is { type: string; entryId: string } =>
-    Boolean(message && typeof message === "object" && (message as { type?: string }).type === "play"),
-  );
+  for (const value of ["a", "b"])
+    await result.coordinator.action({
+      type: "block_actions",
+      userId: "host",
+      actionId: "add_track_to_queue",
+      value,
+      channelId: "channel",
+      messageTs: "1",
+      triggerId: "",
+      metadata: "",
+      state: {},
+    });
+  const plays = () =>
+    result.media.filter(
+      (message): message is { type: string; entryId: string } =>
+        Boolean(
+          message &&
+          typeof message === "object" &&
+          (message as { type?: string }).type === "play",
+        ),
+    );
   const first = plays()[0]!.entryId;
   await result.coordinator.mediaEvent("track_ended", { entryId: first });
   const second = plays()[1]!.entryId;
@@ -291,24 +551,44 @@ test("late media events cannot advance a newer track", async () => {
 test("Previous restarts after five seconds and seek controls move ten seconds", async () => {
   const tracks = {
     resolve: async (value: string) => ({
-      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
-      sourceId: value, title: value, artist: "Artist",
+      sourceInput: `https://example.com/${value}`,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: value,
+      title: value,
+      artist: "Artist",
     }),
-    prepare: async (_track: unknown, _directory: string, id: string) => `${id}.opus`,
+    prepare: async (_track: unknown, _directory: string, id: string) =>
+      `${id}.opus`,
   } as unknown as TrackCatalog;
   const result = setup(tracks);
-  const action = (actionId: string, value = "") => result.coordinator.action({
-    type: "block_actions", userId: "host", actionId, value,
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
-  });
-  const plays = () => result.media.filter((message): message is { type: string; entryId: string } =>
-    Boolean(message && typeof message === "object" && (message as { type?: string }).type === "play"),
-  );
+  const action = (actionId: string, value = "") =>
+    result.coordinator.action({
+      type: "block_actions",
+      userId: "host",
+      actionId,
+      value,
+      channelId: "channel",
+      messageTs: "1",
+      triggerId: "",
+      metadata: "",
+      state: {},
+    });
+  const plays = () =>
+    result.media.filter(
+      (message): message is { type: string; entryId: string } =>
+        Boolean(
+          message &&
+          typeof message === "object" &&
+          (message as { type?: string }).type === "play",
+        ),
+    );
 
   await result.coordinator.start();
   expect(JSON.stringify(result.posted[0])).toContain('"block_id":"seek_');
   expect(JSON.stringify(result.posted[0])).toContain('"action_id":"seek_back"');
-  expect(JSON.stringify(result.posted[0])).toContain('"action_id":"seek_forward"');
+  expect(JSON.stringify(result.posted[0])).toContain(
+    '"action_id":"seek_forward"',
+  );
   await action("add_track_to_queue", "a");
   expect(JSON.stringify(result.updates)).toContain("Added by <@host>");
   await action("add_track_to_queue", "b");
@@ -316,12 +596,18 @@ test("Previous restarts after five seconds and seek controls move ten seconds", 
   await result.coordinator.mediaEvent("track_ended", { entryId: first });
   const second = plays()[1]!.entryId;
 
-  result.coordinator.mediaEvent("playback_position", { entryId: second, seconds: 6 });
+  result.coordinator.mediaEvent("playback_position", {
+    entryId: second,
+    seconds: 6,
+  });
   await action("previous_track");
   expect(result.media).toContainEqual({ type: "seek", seconds: 0 });
   expect(plays()).toHaveLength(2);
 
-  result.coordinator.mediaEvent("playback_position", { entryId: second, seconds: 5 });
+  result.coordinator.mediaEvent("playback_position", {
+    entryId: second,
+    seconds: 5,
+  });
   await action("previous_track");
   expect(plays().at(-1)?.entryId).toBe(first);
   await action("seek_back");
@@ -335,13 +621,28 @@ test("manager overrides permissions and HuddleFM cannot become host", async () =
   const result = setup();
   await result.coordinator.start();
   await result.coordinator.action({
-    type: "block_actions", userId: "manager", actionId: "volume_up", value: "",
-    channelId: "channel", messageTs: "1", triggerId: "", metadata: "", state: {},
+    type: "block_actions",
+    userId: "manager",
+    actionId: "volume_up",
+    value: "",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
   });
   await result.coordinator.action({
-    type: "view_submission", userId: "manager", actionId: "save_settings", value: "",
-    channelId: "channel", messageTs: "", triggerId: "",
-    metadata: JSON.stringify({ sessionId: result.coordinator.id, hostId: "host" }),
+    type: "view_submission",
+    userId: "manager",
+    actionId: "save_settings",
+    value: "",
+    channelId: "channel",
+    messageTs: "",
+    triggerId: "",
+    metadata: JSON.stringify({
+      sessionId: result.coordinator.id,
+      hostId: "host",
+    }),
     state: { host: { user: { selected_user: "bot" } } },
   });
   expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
@@ -354,11 +655,20 @@ test("HuddleFM leaving ends playback", async () => {
   await result.coordinator.start();
   await result.coordinator.memberLeft("bot");
   expect(result.media).toContainEqual({ type: "leave" });
-  expect(result.sessions).toContainEqual(expect.objectContaining({ status: "ended" }));
+  expect(result.sessions).toContainEqual(
+    expect.objectContaining({ status: "ended" }),
+  );
   expect(result.deleted).toContainEqual(["channel", "1"]);
   expect(result.posted).toContainEqual([
-    "channel", "1.0", "Session ended: removed from huddle",
-    [{ type: "section", text: { type: "mrkdwn", text: "Session ended: removed from huddle" } }],
+    "channel",
+    "1.0",
+    "Session ended: removed from huddle",
+    [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "Session ended: removed from huddle" },
+      },
+    ],
   ]);
   expect(result.updates).toHaveLength(0);
 });
@@ -366,29 +676,53 @@ test("HuddleFM leaving ends playback", async () => {
 test("posts a collapsed recap after songs played", async () => {
   const tracks = {
     resolve: async () => ({
-      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
-      sourceId: "track", title: "Track", artist: "Artist", duration: 180,
+      sourceInput: "https://example.com/track",
+      canonicalUrl: "https://example.com/track",
+      sourceId: "track",
+      title: "Track",
+      artist: "Artist",
+      duration: 180,
     }),
     prepare: async () => "track.opus",
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "track"));
-  const play = result.media.find(value => (value as { type?: string }).type === "play") as { entryId: string };
-  result.coordinator.mediaEvent("playback_position", { entryId: play.entryId, seconds: 42 });
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "track"),
+  );
+  const play = result.media.find(
+    (value) => (value as { type?: string }).type === "play",
+  ) as { entryId: string };
+  result.coordinator.mediaEvent("playback_position", {
+    entryId: play.entryId,
+    seconds: 42,
+  });
   await result.coordinator.endFromSlack();
-  const [, , text, blocks] = result.posted.at(-1) as [string, string, string, { type: string; [key: string]: unknown }[]];
+  const [, , text, blocks] = result.posted.at(-1) as [
+    string,
+    string,
+    string,
+    { type: string; [key: string]: unknown }[],
+  ];
   expect(text).toBe("Session ended: huddle ended");
-  expect(blocks[1]).toEqual(expect.objectContaining({
-    type: "container", title: { type: "plain_text", text: "Session recap" },
-    is_collapsible: true, default_collapsed: true,
-  }));
+  expect(blocks[1]).toEqual(
+    expect.objectContaining({
+      type: "container",
+      title: { type: "plain_text", text: "Session recap" },
+      is_collapsible: true,
+      default_collapsed: true,
+    }),
+  );
   expect(JSON.stringify(blocks[1])).toContain("*Listening time:* 42s");
   expect(JSON.stringify(blocks[1])).toContain("*Songs played:* 1");
   expect(JSON.stringify(blocks[1])).toContain("*Autoplay percentage:* 0%");
   expect(JSON.stringify(blocks[1])).toContain("*Unique artists:* 1");
-  expect(JSON.stringify(blocks[1])).toContain("*Most frequent requester:* <@host> (1 song)");
-  expect(JSON.stringify(blocks[1])).toContain("*Most repeated artist:* Artist (1 song)");
+  expect(JSON.stringify(blocks[1])).toContain(
+    "*Most frequent requester:* <@host> (1 song)",
+  );
+  expect(JSON.stringify(blocks[1])).toContain(
+    "*Most repeated artist:* Artist (1 song)",
+  );
   expect(JSON.stringify(blocks[1])).toContain("*Longest song:* Track · 3m 0s");
   expect(JSON.stringify(blocks[1])).toContain("*Average song length:* 3m 0s");
   expect(JSON.stringify(blocks[1])).toContain("*Session host:* <@host>");
@@ -396,76 +730,134 @@ test("posts a collapsed recap after songs played", async () => {
 });
 
 test("announces and leaves two minutes after becoming the only Huddle participant", async () => {
-  const result = setup(undefined, { aloneMs: 10, idleMs: 100, pausedMs: 100, warningMs: 20 });
+  const result = setup(undefined, {
+    aloneMs: 10,
+    idleMs: 100,
+    pausedMs: 100,
+    warningMs: 20,
+  });
   await result.coordinator.start();
   await result.coordinator.memberLeft("host");
   await result.coordinator.memberLeft("guest");
   await until(() => result.posted.length === 2);
   expect(result.posted[1]).toEqual([
-    "channel", "1.0", "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
+    "channel",
+    "1.0",
+    "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
   ]);
-  await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
+  await until(() =>
+    result.media.some((value) => (value as { type?: string }).type === "leave"),
+  );
   expect(result.media).toContainEqual({ type: "leave" });
 });
 
 test("warns two minutes before leaving after ten minutes with nothing playing", async () => {
-  const result = setup(undefined, { aloneMs: 100, idleMs: 50, pausedMs: 100, warningMs: 30 });
+  const result = setup(undefined, {
+    aloneMs: 100,
+    idleMs: 50,
+    pausedMs: 100,
+    warningMs: 30,
+  });
   await result.coordinator.start();
   await until(() => result.posted.length === 2);
   expect(result.posted[1]).toEqual([
-    "channel", "1.0", "Nothing is playing, so I’ll leave in 2 minutes.",
+    "channel",
+    "1.0",
+    "Nothing is playing, so I’ll leave in 2 minutes.",
   ]);
   expect(result.media).not.toContainEqual({ type: "leave" });
-  await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
-  expect(result.sessions).toContainEqual(expect.objectContaining({ status: "ended" }));
+  await until(() =>
+    result.media.some((value) => (value as { type?: string }).type === "leave"),
+  );
+  expect(result.sessions).toContainEqual(
+    expect.objectContaining({ status: "ended" }),
+  );
 });
 
 test("warns before leaving after ten paused minutes and cancels the timer when resumed", async () => {
   const tracks = {
     resolve: async () => ({
-      sourceInput: "https://example.com/track", canonicalUrl: "https://example.com/track",
-      sourceId: "track", title: "Track", artist: "Artist",
+      sourceInput: "https://example.com/track",
+      canonicalUrl: "https://example.com/track",
+      sourceId: "track",
+      title: "Track",
+      artist: "Artist",
     }),
     prepare: async () => "track.opus",
   } as unknown as TrackCatalog;
-  const result = setup(tracks, { aloneMs: 100, idleMs: 100, pausedMs: 50, warningMs: 20 });
+  const result = setup(tracks, {
+    aloneMs: 100,
+    idleMs: 100,
+    pausedMs: 50,
+    warningMs: 20,
+  });
   await result.coordinator.start();
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "track"));
-  await result.coordinator.action(interaction(result.coordinator, "toggle_playback"));
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "track"),
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "toggle_playback"),
+  );
   await Bun.sleep(25);
   expect(result.media).not.toContainEqual({ type: "leave" });
-  await result.coordinator.action(interaction(result.coordinator, "toggle_playback"));
+  await result.coordinator.action(
+    interaction(result.coordinator, "toggle_playback"),
+  );
   await Bun.sleep(30);
   expect(result.media).not.toContainEqual({ type: "leave" });
-  await result.coordinator.action(interaction(result.coordinator, "toggle_playback"));
+  await result.coordinator.action(
+    interaction(result.coordinator, "toggle_playback"),
+  );
   await until(() => result.posted.length === 2);
   expect(result.posted[1]).toEqual([
-    "channel", "1.0", "Playback is paused, so I’ll leave in 2 minutes.",
+    "channel",
+    "1.0",
+    "Playback is paused, so I’ll leave in 2 minutes.",
   ]);
-  await until(() => result.media.some(value => (value as { type?: string }).type === "leave"));
-  expect(result.sessions).toContainEqual(expect.objectContaining({ status: "ended" }));
+  await until(() =>
+    result.media.some((value) => (value as { type?: string }).type === "leave"),
+  );
+  expect(result.sessions).toContainEqual(
+    expect.objectContaining({ status: "ended" }),
+  );
 });
 
 test("host transfers ownership and global permissions atomically", async () => {
   const test = setup();
   await test.coordinator.start();
   await test.coordinator.action({
-    type: "view_submission", userId: "host", actionId: "save_settings", value: "",
-    channelId: "channel", messageTs: "", triggerId: "",
-    metadata: JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }),
+    type: "view_submission",
+    userId: "host",
+    actionId: "save_settings",
+    value: "",
+    channelId: "channel",
+    messageTs: "",
+    triggerId: "",
+    metadata: JSON.stringify({
+      sessionId: test.coordinator.id,
+      hostId: "host",
+    }),
     state: {
       volume: { percent: { value: "37.25" } },
       host: { user: { selected_user: "guest" } },
       display: { mode: { selected_option: { value: "off" } } },
-      permissions: { selected: { selected_options: [{ value: "add" }, { value: "pause" }] } },
+      permissions: {
+        selected: { selected_options: [{ value: "add" }, { value: "pause" }] },
+      },
     },
   });
   expect(test.sessions).toContainEqual({ hostId: "guest" });
   expect(test.sessions).toContainEqual({ volume: 0.3725 });
   expect(test.media).toContainEqual({ type: "volume", value: 0.3725 });
   expect(test.media).toContainEqual({ type: "display_mode", mode: "off" });
-  expect(test.permissions).toContainEqual({ capability: "pause", allowed: true });
-  expect(test.permissions).toContainEqual({ capability: "skip", allowed: false });
+  expect(test.permissions).toContainEqual({
+    capability: "pause",
+    allowed: true,
+  });
+  expect(test.permissions).toContainEqual({
+    capability: "skip",
+    allowed: false,
+  });
   await test.coordinator.endFromSlack();
 });
 
@@ -473,33 +865,58 @@ test("autoplay defaults off and host settings persist both toggle states", async
   let recommendations = 0;
   const tracks = {
     resolve: async () => ({
-      sourceInput: "https://example.com/a", canonicalUrl: "https://example.com/a",
-      sourceId: "aaaaaaaaaaa", title: "A", artist: "Artist",
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: "aaaaaaaaaaa",
+      title: "A",
+      artist: "Artist",
     }),
     prepare: async () => "a.opus",
     upNextIds: async () => (recommendations++, []),
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
   await Bun.sleep(0);
   expect(recommendations).toBe(0);
 
-  await result.coordinator.action(interaction(result.coordinator, "open_settings"));
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings"),
+  );
   const modal = JSON.stringify(result.modals.at(-1));
   expect(modal).toContain('"block_id":"autoplay"');
   expect(modal).toContain('"initial_options":[]');
   const positions = [
-    '"text":"Session"', '"block_id":"volume"', '"block_id":"display"',
-    '"block_id":"autoplay"', '"block_id":"anchor"', '"block_id":"session_actions"',
-    '"text":"Permissions"', '"block_id":"host"', '"block_id":"permission_preset"',
+    '"text":"Session"',
+    '"block_id":"volume"',
+    '"block_id":"display"',
+    '"block_id":"autoplay"',
+    '"block_id":"anchor"',
+    '"block_id":"session_actions"',
+    '"text":"Permissions"',
+    '"block_id":"host"',
+    '"block_id":"permission_preset"',
     '"block_id":"permissions"',
-  ].map(value => modal.indexOf(value));
-  expect(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1]!))).toBeTrue();
+  ].map((value) => modal.indexOf(value));
+  expect(
+    positions.every(
+      (position, index) =>
+        position >= 0 && (!index || position > positions[index - 1]!),
+    ),
+  ).toBeTrue();
   expect(modal).toContain('"value":"configure-settings"');
-  expect(modal).toContain('"text":{"type":"plain_text","text":"Add albums and playlists"},"value":"add-bulk"');
+  expect(modal).toContain(
+    '"text":{"type":"plain_text","text":"Add albums and playlists"},"value":"add-bulk"',
+  );
 
-  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
   enable.state = {
     volume: { percent: { value: "60" } },
     autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
@@ -508,7 +925,12 @@ test("autoplay defaults off and host settings persist both toggle states", async
   await until(() => recommendations === 1);
   expect(result.sessions).toContainEqual({ autoplay: true });
 
-  const disable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  const disable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
   disable.state = {
     volume: { percent: { value: "60" } },
     autoplay: { enabled: { selected_options: [] } },
@@ -521,10 +943,22 @@ test("autoplay defaults off and host settings persist both toggle states", async
 test("delegated users only see and save settings they can configure", async () => {
   const test = setup();
   await test.coordinator.start();
-  const grant = interaction(test.coordinator, "save_settings", "", "view_submission");
-  grant.state = { permissions: { selected: { selected_options: [
-    { value: "volume" }, { value: "configure-settings" },
-  ] } } };
+  const grant = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  grant.state = {
+    permissions: {
+      selected: {
+        selected_options: [
+          { value: "volume" },
+          { value: "configure-settings" },
+        ],
+      },
+    },
+  };
   await test.coordinator.action(grant);
 
   const open = interaction(test.coordinator, "open_settings");
@@ -534,12 +968,22 @@ test("delegated users only see and save settings they can configure", async () =
   expect(modal).toContain('"text":"Session"');
   for (const block of ["volume", "display", "autoplay", "anchor"])
     expect(modal).toContain(`"block_id":"${block}"`);
-  for (const block of ["session_actions", "host", "permission_preset", "permissions"])
+  for (const block of [
+    "session_actions",
+    "host",
+    "permission_preset",
+    "permissions",
+  ])
     expect(modal).not.toContain(`"block_id":"${block}"`);
   expect(modal).not.toContain('"text":"Permissions"');
 
   test.permissions.length = 0;
-  const save = interaction(test.coordinator, "save_settings", "", "view_submission");
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
   save.userId = "guest";
   save.state = {
     volume: { percent: { value: "25" } },
@@ -565,11 +1009,22 @@ test("all participants can open user settings and end-session permission adds th
   const open = interaction(test.coordinator, "open_settings");
   open.userId = "guest";
   await test.coordinator.action(open);
-  expect(JSON.stringify(test.modals.at(-1))).toContain('"text":"User settings"');
-  expect(JSON.stringify(test.modals.at(-1))).not.toContain('"block_id":"session_actions"');
+  expect(JSON.stringify(test.modals.at(-1))).toContain(
+    '"text":"User settings"',
+  );
+  expect(JSON.stringify(test.modals.at(-1))).not.toContain(
+    '"block_id":"session_actions"',
+  );
 
-  const grant = interaction(test.coordinator, "save_settings", "", "view_submission");
-  grant.state = { permissions: { selected: { selected_options: [{ value: "end-session" }] } } };
+  const grant = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  grant.state = {
+    permissions: { selected: { selected_options: [{ value: "end-session" }] } },
+  };
   await test.coordinator.action(grant);
   await test.coordinator.action(open);
   const modal = JSON.stringify(test.modals.at(-1));
@@ -583,25 +1038,36 @@ test("all participants can open user settings and end-session permission adds th
 
 test("Last.fm login uses the desktop authorization dialog and saves the user connection globally", async () => {
   const userStore = new Store(":memory:");
-  const scrobbling = new ScrobbleDispatcher(userStore, {
-    lastFmApiKey: "api-key", lastFmSharedSecret: "secret",
-  }, (async (_input, init) => {
-    const method = new URLSearchParams(String(init?.body)).get("method");
-    return Response.json(method === "auth.getToken"
-      ? { token: "request-token" }
-      : { session: { name: "last-user", key: "session-key" } });
-  }) as typeof fetch);
+  const scrobbling = new ScrobbleDispatcher(
+    userStore,
+    {
+      lastFmApiKey: "api-key",
+      lastFmSharedSecret: "secret",
+    },
+    (async (_input, init) => {
+      const method = new URLSearchParams(String(init?.body)).get("method");
+      return Response.json(
+        method === "auth.getToken"
+          ? { token: "request-token" }
+          : { session: { name: "last-user", key: "session-key" } },
+      );
+    }) as typeof fetch,
+  );
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  expect(JSON.stringify(test.modals.at(-1))).toContain('"action_id":"connect_lastfm"');
+  expect(JSON.stringify(test.modals.at(-1))).toContain(
+    '"action_id":"connect_lastfm"',
+  );
 
   const connect = interaction(test.coordinator, "connect_lastfm");
   connect.messageTs = "";
   connect.metadata = JSON.stringify({ sessionId: test.coordinator.id });
   await test.coordinator.action(connect);
   const login = JSON.stringify(test.pushedModals.at(-1));
-  expect(login).toContain("https://www.last.fm/api/auth/?api_key=api-key&token=request-token");
+  expect(login).toContain(
+    "https://www.last.fm/api/auth/?api_key=api-key&token=request-token",
+  );
   expect(login).toContain('"action_id":"continue_lastfm"');
 
   const finish = interaction(test.coordinator, "continue_lastfm");
@@ -609,9 +1075,13 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
   finish.metadata = JSON.stringify({ sessionId: test.coordinator.id });
   Object.assign(finish, { viewId: "view", viewHash: "hash" });
   await test.coordinator.action(finish);
-  expect(userStore.getUserScrobbling("host")).toEqual(expect.objectContaining({
-    lastFmUsername: "last-user", lastFmSessionKey: "session-key", lastFmEnabled: true,
-  }));
+  expect(userStore.getUserScrobbling("host")).toEqual(
+    expect.objectContaining({
+      lastFmUsername: "last-user",
+      lastFmSessionKey: "session-key",
+      lastFmEnabled: true,
+    }),
+  );
   await test.coordinator.endFromSlack();
   userStore.close();
 });
@@ -623,11 +1093,18 @@ test("display mode defaults to album art and persists dropdown changes", async (
   const modal = JSON.stringify(test.modals.at(-1));
   expect(modal).toContain('"block_id":"display"');
   expect(modal).toContain('"type":"static_select"');
-  expect(modal).toContain('"initial_option":{"text":{"type":"plain_text","text":"Default"},"value":"default"}');
+  expect(modal).toContain(
+    '"initial_option":{"text":{"type":"plain_text","text":"Default"},"value":"default"}',
+  );
   for (const mode of ["default", "lyrics", "off"])
     expect(modal).toContain(`"value":"${mode}"`);
 
-  const save = interaction(test.coordinator, "save_settings", "", "view_submission");
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
   save.state = {
     volume: { percent: { value: "60" } },
     display: { mode: { selected_option: { value: "lyrics" } } },
@@ -644,30 +1121,58 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
   const resolved: string[] = [];
   const tracks = {
     resolve: async (value: keyof typeof ids) => ({
-      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
-      sourceId: ids[value], title: value.toUpperCase(), artist: "Artist",
+      sourceInput: `https://example.com/${value}`,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: ids[value],
+      title: value.toUpperCase(),
+      artist: "Artist",
     }),
-    upNextIds: async (seed: string) => (seeds.push(seed), [ids.b, ids.a, ids.c, ids.c]),
-    resolveVideoId: async (id: string) => (resolved.push(id), {
-      sourceInput: `https://music.youtube.com/watch?v=${id}`,
-      canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
-      sourceId: id, title: "C", artist: "Radio",
-    }),
+    upNextIds: async (seed: string) => (
+      seeds.push(seed),
+      [ids.b, ids.a, ids.c, ids.c]
+    ),
+    resolveVideoId: async (id: string) => (
+      resolved.push(id),
+      {
+        sourceInput: `https://music.youtube.com/watch?v=${id}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+        sourceId: id,
+        title: "C",
+        artist: "Radio",
+      }
+    ),
     prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "b"));
-  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "b"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
   enable.state = {
     volume: { percent: { value: "60" } },
     autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
   };
   await result.coordinator.action(enable);
-  const first = (result.media.find(value => (value as { type?: string }).type === "play") as { entryId: string }).entryId;
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
   await result.coordinator.mediaEvent("track_ended", { entryId: first });
-  await until(() => result.audit.some(value => (value as unknown[])[0] === "track.autoplay_added"));
+  await until(() =>
+    result.audit.some(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  );
   expect(seeds).toEqual([ids.b]);
   expect(resolved).toEqual([ids.c]);
   expect(JSON.stringify(result.updates)).toContain("Autoplay recommendation");
@@ -678,22 +1183,38 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
 test("failed recommendation lookup leaves the session running", async () => {
   const tracks = {
     resolve: async () => ({
-      sourceInput: "https://example.com/a", canonicalUrl: "https://example.com/a",
-      sourceId: "aaaaaaaaaaa", title: "A", artist: "Artist",
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: "aaaaaaaaaaa",
+      title: "A",
+      artist: "Artist",
     }),
     prepare: async () => "a.opus",
-    upNextIds: async () => { throw new Error("unavailable"); },
+    upNextIds: async () => {
+      throw new Error("unavailable");
+    },
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
-  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
   enable.state = {
     volume: { percent: { value: "60" } },
     autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
   };
   await result.coordinator.action(enable);
-  await until(() => result.audit.some(value => (value as unknown[])[0] === "autoplay.recommendation_failed"));
+  await until(() =>
+    result.audit.some(
+      (value) => (value as unknown[])[0] === "autoplay.recommendation_failed",
+    ),
+  );
   expect(result.media).not.toContainEqual({ type: "leave" });
   expect(result.sessions).not.toContainEqual({ status: "ended" });
   await result.coordinator.endFromSlack();
@@ -703,31 +1224,53 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
   const ids = { a: "aaaaaaaaaaa", b: "bbbbbbbbbbb", c: "ccccccccccc" };
   const tracks = {
     resolve: async (value: keyof typeof ids) => ({
-      sourceInput: `https://example.com/${value}`, canonicalUrl: `https://example.com/${value}`,
-      sourceId: ids[value], title: value.toUpperCase(), artist: "Artist",
+      sourceInput: `https://example.com/${value}`,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: ids[value],
+      title: value.toUpperCase(),
+      artist: "Artist",
     }),
     upNextIds: async () => [ids.c],
     resolveVideoId: async (id: string) => ({
       sourceInput: `https://music.youtube.com/watch?v=${id}`,
       canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
-      sourceId: id, title: "C", artist: "Radio",
+      sourceId: id,
+      title: "C",
+      artist: "Radio",
     }),
     prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "a"));
-  const enable = interaction(result.coordinator, "save_settings", "", "view_submission");
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
   enable.state = {
     volume: { percent: { value: "60" } },
     autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
   };
   await result.coordinator.action(enable);
-  await until(() => JSON.stringify(result.updates).includes("Autoplay recommendation"));
-  await result.coordinator.action(interaction(result.coordinator, "add_track_to_queue", "b"));
-  const plays = result.media.filter(value => (value as { type?: string }).type === "play") as { entryId: string; sourceId: string }[];
-  await result.coordinator.mediaEvent("track_ended", { entryId: plays[0]!.entryId });
-  const finalPlays = result.media.filter(value => (value as { type?: string }).type === "play") as { sourceId: string }[];
+  await until(() =>
+    JSON.stringify(result.updates).includes("Autoplay recommendation"),
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "b"),
+  );
+  const plays = result.media.filter(
+    (value) => (value as { type?: string }).type === "play",
+  ) as { entryId: string; sourceId: string }[];
+  await result.coordinator.mediaEvent("track_ended", {
+    entryId: plays[0]!.entryId,
+  });
+  const finalPlays = result.media.filter(
+    (value) => (value as { type?: string }).type === "play",
+  ) as { sourceId: string }[];
   expect(finalPlays[1]?.sourceId).toBe(ids.b);
   await result.coordinator.endFromSlack();
 });
@@ -736,47 +1279,98 @@ test("collaborative preset grants everything except destructive permissions", as
   const test = setup();
   await test.coordinator.start();
   await test.coordinator.action({
-    type: "view_submission", userId: "host", actionId: "save_settings", value: "",
-    channelId: "channel", messageTs: "", triggerId: "",
-    metadata: JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }),
+    type: "view_submission",
+    userId: "host",
+    actionId: "save_settings",
+    value: "",
+    channelId: "channel",
+    messageTs: "",
+    triggerId: "",
+    metadata: JSON.stringify({
+      sessionId: test.coordinator.id,
+      hostId: "host",
+    }),
     state: {
       volume: { percent: { value: "60" } },
-      permission_preset: { selected: { selected_option: { value: "collaborative" } } },
+      permission_preset: {
+        selected: { selected_option: { value: "collaborative" } },
+      },
       permissions: { selected: { selected_options: [] } },
     },
   });
-  expect(test.permissions).toContainEqual({ capability: "manage-queue", allowed: true });
-  expect(test.permissions).toContainEqual({ capability: "volume", allowed: true });
-  expect(test.permissions).toContainEqual({ capability: "configure-settings", allowed: true });
-  expect(test.permissions).toContainEqual({ capability: "clear", allowed: false });
-  expect(test.permissions).toContainEqual({ capability: "end-session", allowed: false });
+  expect(test.permissions).toContainEqual({
+    capability: "manage-queue",
+    allowed: true,
+  });
+  expect(test.permissions).toContainEqual({
+    capability: "volume",
+    allowed: true,
+  });
+  expect(test.permissions).toContainEqual({
+    capability: "configure-settings",
+    allowed: true,
+  });
+  expect(test.permissions).toContainEqual({
+    capability: "clear",
+    allowed: false,
+  });
+  expect(test.permissions).toContainEqual({
+    capability: "end-session",
+    allowed: false,
+  });
   await test.coordinator.endFromSlack();
 });
 
 test("thread anchoring is disabled by default and can be enabled", async () => {
   const test = setup();
   await test.coordinator.start();
-  const action = (type: string, state = {}) => test.coordinator.action({
-    type, userId: "host", actionId: type === "view_submission" ? "save_settings" : "open_settings", value: "",
-    channelId: "channel", messageTs: type === "view_submission" ? "" : "1", triggerId: "trigger",
-    metadata: type === "view_submission" ? JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" }) : "",
-    state,
-  });
+  const action = (type: string, state = {}) =>
+    test.coordinator.action({
+      type,
+      userId: "host",
+      actionId: type === "view_submission" ? "save_settings" : "open_settings",
+      value: "",
+      channelId: "channel",
+      messageTs: type === "view_submission" ? "" : "1",
+      triggerId: "trigger",
+      metadata:
+        type === "view_submission"
+          ? JSON.stringify({ sessionId: test.coordinator.id, hostId: "host" })
+          : "",
+      state,
+    });
 
   await action("block_actions");
-  expect(JSON.stringify(test.modals[0])).toContain('"block_id":"anchor","optional":true');
-  const initialAnchor = (test.modals[0] as [string, { blocks: { block_id: string; element: { initial_options: unknown[] } }[] }])[1]
-    .blocks.find(block => block.block_id === "anchor");
+  expect(JSON.stringify(test.modals[0])).toContain(
+    '"block_id":"anchor","optional":true',
+  );
+  const initialAnchor = (
+    test.modals[0] as [
+      string,
+      {
+        blocks: { block_id: string; element: { initial_options: unknown[] } }[];
+      },
+    ]
+  )[1].blocks.find((block) => block.block_id === "anchor");
   expect(initialAnchor?.element.initial_options).toEqual([]);
   await action("view_submission", {
     volume: { percent: { value: "60" } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
   });
   await action("block_actions");
-  const anchor = (test.modals[1] as [string, { blocks: { block_id: string; element: { initial_options: unknown[] } }[] }])[1]
-    .blocks.find(block => block.block_id === "anchor");
+  const anchor = (
+    test.modals[1] as [
+      string,
+      {
+        blocks: { block_id: string; element: { initial_options: unknown[] } }[];
+      },
+    ]
+  )[1].blocks.find((block) => block.block_id === "anchor");
   expect(anchor?.element.initial_options).toEqual([
-    { text: { type: "plain_text", text: "Keep player at bottom of thread" }, value: "enabled" },
+    {
+      text: { type: "plain_text", text: "Keep player at bottom of thread" },
+      value: "enabled",
+    },
   ]);
   await test.coordinator.endFromSlack();
 });

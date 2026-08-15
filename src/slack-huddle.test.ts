@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { activeHuddleCallId, channelAccess, normalizeJoinResponse, normalizeRealtimeEvent } from "./slack-huddle.ts";
+import {
+  activeHuddleCallId,
+  channelAccess,
+  normalizeJoinResponse,
+  normalizeRealtimeEvent,
+} from "./slack-huddle.ts";
 
 test("classifies channel access", () => {
   expect(channelAccess({ is_member: true, is_private: true })).toBe("ready");
@@ -36,7 +41,11 @@ test("normalizes the private join response without nullable MeetingFeatures", ()
 
 test("does not leak a failed response", () => {
   expect(() =>
-    normalizeJoinResponse({ ok: false, error: "invalid_auth", token: "secret" }),
+    normalizeJoinResponse({
+      ok: false,
+      error: "invalid_auth",
+      token: "secret",
+    }),
   ).toThrow("rooms.join failed: invalid_auth");
 });
 
@@ -71,14 +80,16 @@ test("ignores edits when normalizing thread activity", () => {
 });
 
 test("normalizes thread text for private websocket mentions", () => {
-  expect(normalizeRealtimeEvent({
-    type: "message",
-    channel: "C123",
-    thread_ts: "1.0",
-    ts: "2.0",
-    user: "U123",
-    text: "<@U999> join",
-  })).toEqual({
+  expect(
+    normalizeRealtimeEvent({
+      type: "message",
+      channel: "C123",
+      thread_ts: "1.0",
+      ts: "2.0",
+      user: "U123",
+      text: "<@U999> join",
+    }),
+  ).toEqual({
     type: "ThreadActivity",
     channelId: "C123",
     threadTs: "1.0",
@@ -89,19 +100,39 @@ test("normalizes thread text for private websocket mentions", () => {
 });
 
 test("only accepts active Huddle thread roots", () => {
-  const active = { ok: true, messages: [{
-    ts: "1.0",
-    subtype: "huddle_thread",
-    room: { id: "R123", has_ended: false, date_end: 0 },
-  }] };
+  const active = {
+    ok: true,
+    messages: [
+      {
+        ts: "1.0",
+        subtype: "huddle_thread",
+        room: { id: "R123", has_ended: false, date_end: 0 },
+      },
+    ],
+  };
   expect(activeHuddleCallId(active, "1.0")).toBe("R123");
   expect(activeHuddleCallId(active, "2.0")).toBeUndefined();
-  expect(activeHuddleCallId({ ok: true, messages: [{ ts: "1.0", room: { id: "R123" } }] }, "1.0")).toBeUndefined();
-  expect(activeHuddleCallId({ ok: true, messages: [{
-    ts: "1.0",
-    subtype: "huddle_thread",
-    room: { id: "R123", has_ended: true },
-  }] }, "1.0")).toBeUndefined();
+  expect(
+    activeHuddleCallId(
+      { ok: true, messages: [{ ts: "1.0", room: { id: "R123" } }] },
+      "1.0",
+    ),
+  ).toBeUndefined();
+  expect(
+    activeHuddleCallId(
+      {
+        ok: true,
+        messages: [
+          {
+            ts: "1.0",
+            subtype: "huddle_thread",
+            room: { id: "R123", has_ended: true },
+          },
+        ],
+      },
+      "1.0",
+    ),
+  ).toBeUndefined();
 });
 
 test("ignores partial lifecycle events", () => {
@@ -115,14 +146,18 @@ test("ignores partial lifecycle events", () => {
 });
 
 test("normalizes membership lifecycle events", () => {
-  expect(normalizeRealtimeEvent({
-    type: "sh_room_join",
-    room: { call_id: "R123" },
-    user: "U123",
-  })).toEqual({ type: "MemberJoined", callId: "R123", userId: "U123" });
-  expect(normalizeRealtimeEvent({
-    type: "sh_room_leave",
-    room: { id: "R123" },
-    user: "U123",
-  })).toEqual({ type: "MemberLeft", callId: "R123", userId: "U123" });
+  expect(
+    normalizeRealtimeEvent({
+      type: "sh_room_join",
+      room: { call_id: "R123" },
+      user: "U123",
+    }),
+  ).toEqual({ type: "MemberJoined", callId: "R123", userId: "U123" });
+  expect(
+    normalizeRealtimeEvent({
+      type: "sh_room_leave",
+      room: { id: "R123" },
+      user: "U123",
+    }),
+  ).toEqual({ type: "MemberLeft", callId: "R123", userId: "U123" });
 });

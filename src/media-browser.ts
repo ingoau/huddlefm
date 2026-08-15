@@ -1,4 +1,9 @@
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Page,
+} from "playwright-core";
 import type { ChimeBootstrap } from "./slack-huddle.ts";
 
 export class MediaBrowserPool {
@@ -17,7 +22,8 @@ export class MediaBrowserPool {
   }
 
   async close() {
-    const browser = this.browser ?? await this.launching?.catch(() => undefined);
+    const browser =
+      this.browser ?? (await this.launching?.catch(() => undefined));
     this.browser = undefined;
     await browser?.close();
   }
@@ -61,9 +67,17 @@ export class MediaBrowser {
     await this.close();
     this.context = await this.pool.context();
     this.page = await this.context.newPage();
-    this.page.on("console", message => console.log(`[media:${bootstrap.sessionId}:${message.type()}] ${message.text()}`));
-    this.page.on("pageerror", error => console.error(`[media:${bootstrap.sessionId}:error] ${error.message}`));
-    await this.page.goto(`${this.baseUrl}/media?token=${encodeURIComponent(bootstrap.bridgeToken)}`);
+    this.page.on("console", (message) =>
+      console.log(
+        `[media:${bootstrap.sessionId}:${message.type()}] ${message.text()}`,
+      ),
+    );
+    this.page.on("pageerror", (error) =>
+      console.error(`[media:${bootstrap.sessionId}:error] ${error.message}`),
+    );
+    await this.page.goto(
+      `${this.baseUrl}/media?token=${encodeURIComponent(bootstrap.bridgeToken)}`,
+    );
     await this.page.click("#capture");
   }
 
