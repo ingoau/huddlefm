@@ -63,6 +63,34 @@ export type SavedSession = {
   tracks: SavedTrack[];
 };
 
+export type UserScrobbling = {
+  lastFmUsername?: string;
+  lastFmSessionKey?: string;
+  lastFmEnabled: boolean;
+  lastFmPendingToken?: string;
+  lastFmPendingAt?: number;
+  listenBrainzUsername?: string;
+  listenBrainzToken?: string;
+  listenBrainzEnabled: boolean;
+};
+
+export type PendingScrobble = {
+  id: string;
+  userId: string;
+  service: string;
+  listenedAt: number;
+  attempts: number;
+  track: {
+    id: string;
+    requesterId: string;
+    title: string;
+    artist: string;
+    album?: string;
+    duration?: number;
+    automatic?: boolean;
+  };
+};
+
 export class Store {
   db: Database;
 
@@ -119,6 +147,32 @@ export class Store {
         capability TEXT NOT NULL,
         allowed INTEGER NOT NULL,
         PRIMARY KEY (session_id, capability)
+      );
+      CREATE TABLE IF NOT EXISTS user_scrobbling (
+        user_id TEXT PRIMARY KEY,
+        lastfm_username TEXT,
+        lastfm_session_key TEXT,
+        lastfm_enabled INTEGER NOT NULL DEFAULT 0,
+        lastfm_pending_token TEXT,
+        lastfm_pending_at INTEGER,
+        listenbrainz_username TEXT,
+        listenbrainz_token TEXT,
+        listenbrainz_enabled INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS scrobbles (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        service TEXT NOT NULL,
+        listened_at INTEGER NOT NULL,
+        track TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE (session_id, track_id, user_id, service)
       );
     `);
     this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
@@ -382,6 +436,93 @@ export class Store {
       .run(sessionId, capability, allowed ? 1 : 0);
   }
 
+  getUserScrobbling(userId: string): UserScrobbling {
+    const row = this.db.query("SELECT * FROM user_scrobbling WHERE user_id = ?").get(userId) as Record<string, unknown> | null;
+    if (!row) return { lastFmEnabled: false, listenBrainzEnabled: false };
+    return {
+      ...(row.lastfm_username ? { lastFmUsername: String(row.lastfm_username) } : {}),
+      ...(row.lastfm_session_key ? { lastFmSessionKey: String(row.lastfm_session_key) } : {}),
+      lastFmEnabled: Boolean(row.lastfm_enabled),
+      ...(row.lastfm_pending_token ? { lastFmPendingToken: String(row.lastfm_pending_token) } : {}),
+      ...(row.lastfm_pending_at ? { lastFmPendingAt: Number(row.lastfm_pending_at) } : {}),
+      ...(row.listenbrainz_username ? { listenBrainzUsername: String(row.listenbrainz_username) } : {}),
+      ...(row.listenbrainz_token ? { listenBrainzToken: String(row.listenbrainz_token) } : {}),
+      listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
+    };
+  }
+
+  setLastFmPending(userId: string, token: string, startedAt: number) {
+    this.ensureUserScrobbling(userId);
+    this.db.query("UPDATE user_scrobbling SET lastfm_pending_token = ?, lastfm_pending_at = ?, updated_at = ? WHERE user_id = ?")
+      .run(token, startedAt, Date.now(), userId);
+  }
+
+  connectLastFm(userId: string, username: string, sessionKey: string) {
+    this.ensureUserScrobbling(userId);
+    this.db.query(`UPDATE user_scrobbling SET lastfm_username = ?, lastfm_session_key = ?, lastfm_enabled = 1,
+      lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`)
+      .run(username, sessionKey, Date.now(), userId);
+  }
+
+  disconnectLastFm(userId: string) {
+    this.ensureUserScrobbling(userId);
+    this.db.query(`UPDATE user_scrobbling SET lastfm_username = NULL, lastfm_session_key = NULL,
+      lastfm_enabled = 0, lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`)
+      .run(Date.now(), userId);
+  }
+
+  setLastFmEnabled(userId: string, enabled: boolean) {
+    this.ensureUserScrobbling(userId);
+    this.db.query("UPDATE user_scrobbling SET lastfm_enabled = ?, updated_at = ? WHERE user_id = ?")
+      .run(enabled ? 1 : 0, Date.now(), userId);
+  }
+
+  setListenBrainzToken(userId: string, token: string, username: string) {
+    this.ensureUserScrobbling(userId);
+    this.db.query("UPDATE user_scrobbling SET listenbrainz_token = ?, listenbrainz_username = ?, updated_at = ? WHERE user_id = ?")
+      .run(token, username, Date.now(), userId);
+  }
+
+  setListenBrainzEnabled(userId: string, enabled: boolean) {
+    this.ensureUserScrobbling(userId);
+    this.db.query("UPDATE user_scrobbling SET listenbrainz_enabled = ?, updated_at = ? WHERE user_id = ?")
+      .run(enabled ? 1 : 0, Date.now(), userId);
+  }
+
+  queueScrobble(sessionId: string, trackId: string, userId: string, service: string, listenedAt: number, track: unknown) {
+    const now = Date.now();
+    this.db.query(`INSERT OR IGNORE INTO scrobbles
+      (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(crypto.randomUUID(), sessionId, trackId, userId, service, listenedAt, JSON.stringify(track), now, now);
+  }
+
+  pendingScrobbles(now: number) {
+    return (this.db.query(`SELECT id, user_id, service, listened_at, attempts, track FROM scrobbles
+      WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY listened_at, created_at`).all(now) as Record<string, unknown>[])
+      .map(row => ({
+        id: String(row.id),
+        userId: String(row.user_id),
+        service: String(row.service),
+        listenedAt: Number(row.listened_at),
+        attempts: Number(row.attempts),
+        track: JSON.parse(String(row.track)),
+      }) satisfies PendingScrobble);
+  }
+
+  retryScrobble(id: string, attempts: number, nextAttemptAt: number) {
+    this.db.query("UPDATE scrobbles SET attempts = ?, next_attempt_at = ? WHERE id = ?")
+      .run(attempts, nextAttemptAt, id);
+  }
+
+  finishScrobble(id: string, status: "sent" | "failed") {
+    this.db.query("UPDATE scrobbles SET status = ? WHERE id = ?").run(status, id);
+  }
+
+  clearPendingScrobbles(userId: string, service: string) {
+    this.db.query("DELETE FROM scrobbles WHERE user_id = ? AND service = ? AND status = 'pending'").run(userId, service);
+  }
+
   close() {
     this.db.close();
   }
@@ -394,5 +535,10 @@ export class Store {
   private hasColumn(table: string, column: string) {
     return (this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[])
       .some(value => value.name === column);
+  }
+
+  private ensureUserScrobbling(userId: string) {
+    this.db.query("INSERT OR IGNORE INTO user_scrobbling (user_id, updated_at) VALUES (?, ?)")
+      .run(userId, Date.now());
   }
 }
