@@ -569,7 +569,7 @@ test("collaborative preset grants everything except destructive permissions", as
   await test.coordinator.endFromSlack();
 });
 
-test("thread anchoring is enabled by default and can be disabled", async () => {
+test("thread anchoring is disabled by default and can be enabled", async () => {
   const test = setup();
   await test.coordinator.start();
   const action = (type: string, state = {}) => test.coordinator.action({
@@ -581,14 +581,18 @@ test("thread anchoring is enabled by default and can be disabled", async () => {
 
   await action("block_actions");
   expect(JSON.stringify(test.modals[0])).toContain('"block_id":"anchor","optional":true');
-  expect(JSON.stringify(test.modals[0])).toContain('"initial_options":[{"text":{"type":"plain_text","text":"Keep player at bottom of thread"}');
+  const initialAnchor = (test.modals[0] as [string, { blocks: { block_id: string; element: { initial_options: unknown[] } }[] }])[1]
+    .blocks.find(block => block.block_id === "anchor");
+  expect(initialAnchor?.element.initial_options).toEqual([]);
   await action("view_submission", {
     volume: { percent: { value: "60" } },
-    anchor: { enabled: { selected_options: [] } },
+    anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
   });
   await action("block_actions");
   const anchor = (test.modals[1] as [string, { blocks: { block_id: string; element: { initial_options: unknown[] } }[] }])[1]
     .blocks.find(block => block.block_id === "anchor");
-  expect(anchor?.element.initial_options).toEqual([]);
+  expect(anchor?.element.initial_options).toEqual([
+    { text: { type: "plain_text", text: "Keep player at bottom of thread" }, value: "enabled" },
+  ]);
   await test.coordinator.endFromSlack();
 });
