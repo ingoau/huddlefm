@@ -81,3 +81,23 @@ test("migrates the old lyrics toggle to display mode", () => {
   store.close();
   rmSync(directory, { recursive: true });
 });
+
+test("persists global user scrobbling settings and deduplicates queued submissions", () => {
+  const store = new Store(":memory:");
+  expect(store.getUserScrobbling("user")).toEqual({ lastFmEnabled: false, listenBrainzEnabled: false });
+  store.setLastFmPending("user", "pending", 10);
+  store.connectLastFm("user", "last-user", "session-key");
+  store.setListenBrainzToken("user", "lb-token", "musicbrainz-user");
+  store.setListenBrainzEnabled("user", true);
+  expect(store.getUserScrobbling("user")).toEqual({
+    lastFmUsername: "last-user", lastFmSessionKey: "session-key", lastFmEnabled: true,
+    listenBrainzUsername: "musicbrainz-user", listenBrainzToken: "lb-token", listenBrainzEnabled: true,
+  });
+  const track = { id: "track", requesterId: "requester", title: "Title", artist: "Artist", duration: 120 };
+  store.queueScrobble("session", "track", "user", "lastfm", 100, track);
+  store.queueScrobble("session", "track", "user", "lastfm", 100, track);
+  expect(store.pendingScrobbles(Date.now())).toEqual([expect.objectContaining({
+    userId: "user", service: "lastfm", listenedAt: 100, track,
+  })]);
+  store.close();
+});

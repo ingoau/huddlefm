@@ -6,6 +6,7 @@ import { Coordinator } from "./coordinator.ts";
 import { controlDenied } from "./local-control.ts";
 import { LyricsCatalog } from "./lyrics.ts";
 import { MediaBrowserPool, type MediaBrowser } from "./media-browser.ts";
+import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import { SlackHuddleAdapter, verifySlackIdentity, type ChimeBootstrap } from "./slack-huddle.ts";
 import { Store, type SavedSession } from "./store.ts";
@@ -23,6 +24,8 @@ const build = await Bun.build({
 if (!build.success) throw new AggregateError(build.logs, "Media page build failed");
 
 const store = new Store();
+const scrobbling = new ScrobbleDispatcher(store, config);
+scrobbling.start();
 const saved = store.resumableSessions(Date.now(), resumeTtlMs);
 await Promise.all(saved.expiredIds.map(id => rm(`data/media/${id}`, { recursive: true, force: true })));
 const catalog = new TrackCatalog(config);
@@ -135,6 +138,7 @@ async function joinHuddle(channelId: string, inviterUserId: string, callId?: str
         runtimes.delete(bootstrap.sessionId);
       },
       restored,
+      scrobbling,
     );
     try {
       if (restored) await coordinator.resume();
@@ -362,6 +366,7 @@ const shutdown = async () => {
   await slackApp.stop();
   slackHuddle.stop();
   await catalog.close();
+  await scrobbling.stop();
   store.close();
   await audit.flush();
   process.exit(0);

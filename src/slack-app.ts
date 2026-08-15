@@ -101,6 +101,10 @@ export class SlackAppAdapter {
     await this.web.views.open({ trigger_id: triggerId, view: view as never });
   }
 
+  async pushModal(triggerId: string, view: unknown) {
+    await this.web.views.push({ trigger_id: triggerId, view: view as never });
+  }
+
   async updateModal(viewId: string, hash: string, view: unknown) {
     await this.web.views.update({ view_id: viewId, hash, view: view as never });
   }

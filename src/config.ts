@@ -28,6 +28,8 @@ export function loadConfig() {
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID ?? "U0923H02Y3B",
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,
+    lastFmApiKey: process.env.LASTFM_API_KEY,
+    lastFmSharedSecret: process.env.LASTFM_SHARED_SECRET,
     chromePath:
       process.env.CHROME_PATH ??
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

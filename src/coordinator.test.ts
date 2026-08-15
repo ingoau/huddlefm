@@ -3,14 +3,16 @@ import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { LyricsCatalog } from "./lyrics.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
-import type { SavedSession, Store } from "./store.ts";
+import { Store, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
+import { ScrobbleDispatcher } from "./scrobbling.ts";
 
-function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs: 600_000, pausedMs: 600_000, warningMs: 120_000 }, restored?: SavedSession) {
+function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs: 600_000, pausedMs: 600_000, warningMs: 120_000 }, restored?: SavedSession, scrobbling?: ScrobbleDispatcher) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
   const deleted: unknown[] = [];
   const modals: unknown[] = [];
+  const pushedModals: unknown[] = [];
   const ephemeral: string[] = [];
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
@@ -24,6 +26,7 @@ function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs
     delete: async (...args: unknown[]) => { deleted.push(args); },
     ephemeral: async (_channel: string, _user: string, text: string) => { ephemeral.push(text); },
     modal: async (...args: unknown[]) => { modals.push(args); },
+    pushModal: async (...args: unknown[]) => { pushedModals.push(args); },
     updateModal: async () => {},
   } as unknown as SlackAppAdapter;
   const store = {
@@ -41,8 +44,8 @@ function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs
     chimeMeeting: {}, chimeAttendee: {},
   }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, ...timeouts, port: 3210, managerUserId: "manager",
-  }, "token", message => media.push(message), async () => {}, restored);
-  return { coordinator, posted, updates, deleted, modals, ephemeral, sessions, permissions, suspensions, media, audit };
+  }, "token", message => media.push(message), async () => {}, restored, scrobbling);
+  return { coordinator, posted, updates, deleted, modals, pushedModals, ephemeral, sessions, permissions, suspensions, media, audit };
 }
 
 const interaction = (coordinator: Coordinator, actionId: string, value = "", type = "block_actions") => ({
@@ -482,13 +485,14 @@ test("delegated users only see and save settings they can configure", async () =
   await test.coordinator.endFromSlack();
 });
 
-test("end-session permission opens an end-only settings menu", async () => {
+test("all participants can open user settings and end-session permission adds the session action", async () => {
   const test = setup();
   await test.coordinator.start();
   const open = interaction(test.coordinator, "open_settings");
   open.userId = "guest";
   await test.coordinator.action(open);
-  expect(test.modals).toEqual([]);
+  expect(JSON.stringify(test.modals.at(-1))).toContain('"text":"User settings"');
+  expect(JSON.stringify(test.modals.at(-1))).not.toContain('"block_id":"session_actions"');
 
   const grant = interaction(test.coordinator, "save_settings", "", "view_submission");
   grant.state = { permissions: { selected: { selected_options: [{ value: "end-session" }] } } };
@@ -499,8 +503,43 @@ test("end-session permission opens an end-only settings menu", async () => {
   expect(modal).toContain('"text":"End session"');
   expect(modal).not.toContain('"block_id":"volume"');
   expect(modal).not.toContain('"text":"Permissions"');
-  expect(modal).not.toContain('"submit"');
+  expect(modal).toContain('"submit"');
   await test.coordinator.endFromSlack();
+});
+
+test("Last.fm login uses the desktop authorization dialog and saves the user connection globally", async () => {
+  const userStore = new Store(":memory:");
+  const scrobbling = new ScrobbleDispatcher(userStore, {
+    lastFmApiKey: "api-key", lastFmSharedSecret: "secret",
+  }, (async (_input, init) => {
+    const method = new URLSearchParams(String(init?.body)).get("method");
+    return Response.json(method === "auth.getToken"
+      ? { token: "request-token" }
+      : { session: { name: "last-user", key: "session-key" } });
+  }) as typeof fetch);
+  const test = setup(undefined, undefined, undefined, scrobbling);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  expect(JSON.stringify(test.modals.at(-1))).toContain('"action_id":"connect_lastfm"');
+
+  const connect = interaction(test.coordinator, "connect_lastfm");
+  connect.messageTs = "";
+  connect.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  await test.coordinator.action(connect);
+  const login = JSON.stringify(test.pushedModals.at(-1));
+  expect(login).toContain("https://www.last.fm/api/auth/?api_key=api-key&token=request-token");
+  expect(login).toContain('"action_id":"continue_lastfm"');
+
+  const finish = interaction(test.coordinator, "continue_lastfm");
+  finish.messageTs = "";
+  finish.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  Object.assign(finish, { viewId: "view", viewHash: "hash" });
+  await test.coordinator.action(finish);
+  expect(userStore.getUserScrobbling("host")).toEqual(expect.objectContaining({
+    lastFmUsername: "last-user", lastFmSessionKey: "session-key", lastFmEnabled: true,
+  }));
+  await test.coordinator.endFromSlack();
+  userStore.close();
 });
 
 test("display mode defaults to album art and persists dropdown changes", async () => {

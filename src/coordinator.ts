@@ -4,6 +4,7 @@ import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
 import { capabilities, displayModes, permissionPresets, Store, type DisplayMode, type SavedSession } from "./store.ts";
+import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 
 type Entry = TrackMetadata & {
@@ -43,6 +44,7 @@ export class Coordinator {
   private pausedTimer?: ReturnType<typeof setTimeout>;
   private pausedWarningTimer?: ReturnType<typeof setTimeout>;
   private lastSearch = new Map<string, number>();
+  private playbackScrobbling?: PlaybackScrobbler;
 
   constructor(
     readonly room: JoinedHuddle,
@@ -58,8 +60,10 @@ export class Coordinator {
     private sendMedia: (message: unknown) => void,
     private leaveMedia: () => Promise<void>,
     restored?: SavedSession,
+    private scrobbling?: ScrobbleDispatcher,
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
+    this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
     this.hostId = restored?.hostId ?? hostId;
     this.volume = restored?.volume ?? config.initialVolume;
     this.participants.add(hostId);
@@ -130,6 +134,7 @@ export class Coordinator {
     this.sendMedia({ type: "display_mode", mode: this.displayMode });
     if (!this.current) await this.startNext();
     else {
+      this.playbackScrobbling?.start(this.current, this.participants, this.state === "playing", this.playbackSeconds);
       this.sendMedia(this.playMessage(this.current));
       if (this.playbackSeconds) this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
       if (this.state === "paused") this.sendMedia({ type: "pause" });
@@ -223,6 +228,9 @@ export class Coordinator {
         open_settings: () => this.settingsModal(interaction),
         end_session: () => this.end(interaction.userId, "ended by host"),
         claim_host: () => this.claimHost(interaction),
+        connect_lastfm: () => this.lastFmModal(interaction),
+        continue_lastfm: () => this.continueLastFm(interaction),
+        disconnect_lastfm: () => this.disconnectLastFm(interaction),
       };
       await handlers[interaction.actionId]?.();
     });
@@ -232,6 +240,7 @@ export class Coordinator {
     if (this.state === "suspended") return;
     if (type === "playback_position" && details && details.entryId === this.current?.id && typeof details.seconds === "number" && Number.isFinite(details.seconds)) {
       this.playbackSeconds = details.seconds;
+      this.playbackScrobbling?.position(details.seconds);
       this.store.setSession(this.id, { playbackSeconds: details.seconds });
       return;
     }
@@ -249,11 +258,13 @@ export class Coordinator {
 
   memberJoined(userId: string) {
     this.participants.add(userId);
+    this.playbackScrobbling?.memberJoined(userId);
     this.refreshIdle();
   }
 
   memberLeft(userId: string) {
     this.participants.delete(userId);
+    this.playbackScrobbling?.memberLeft(userId);
     if (this.state === "suspended") return;
     const changed = userId === this.botUserId
       ? this.enqueue(() => this.end(undefined, "removed from huddle"))
@@ -273,6 +284,7 @@ export class Coordinator {
       if (this.state === "ended" || this.state === "suspended") return;
       const state = this.state;
       this.state = "suspended";
+      this.playbackScrobbling?.pause();
       this.autoplayGeneration++;
       this.autoplayPending = false;
       for (const controller of this.preparations.values()) controller.abort();
@@ -317,7 +329,7 @@ export class Coordinator {
   }
 
   private canOpenSettings(userId: string) {
-    return this.settingsAdmin(userId) || ["volume", "configure-settings", "end-session"]
+    return this.isParticipantOrManager(userId) || this.settingsAdmin(userId) || ["volume", "configure-settings", "end-session"]
       .some(capability => this.can(userId, capability));
   }
 
@@ -556,6 +568,7 @@ export class Coordinator {
     const next = this.queue.find(track => !track.automatic && track.status === "ready") ??
       (!manual ? this.queue.find(track => track.status === "ready") : undefined);
     if (!next) {
+      this.playbackScrobbling?.finish();
       this.current = undefined;
       this.state = "ready";
       this.sendMedia({ type: "stop" });
@@ -570,6 +583,7 @@ export class Coordinator {
     this.store.setTrack(next.id, { status: "playing" });
     this.store.setSession(this.id, { status: "playing" });
     this.audit.record("track.started", undefined, { sessionId: this.id, ...auditTrack(next) });
+    this.playbackScrobbling?.start(next, this.participants);
     this.sendMedia(this.playMessage(next));
     void next.lyrics?.then(lyrics => {
       if (this.current !== next) return;
@@ -624,6 +638,7 @@ export class Coordinator {
   private async advance(reason = "played", expectedId?: string) {
     if (expectedId && this.current?.id !== expectedId) return;
     if (this.current) {
+      this.playbackScrobbling?.finish();
       this.current.status = reason === "played" || reason === "track_ended" ? "played" : "failed";
       if (reason === "played" || reason === "track_ended") this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
@@ -678,6 +693,8 @@ export class Coordinator {
   private async toggle(interaction: Interaction) {
     if (!(await this.require(interaction, "pause")) || !this.current) return;
     this.state = this.state === "paused" ? "playing" : "paused";
+    if (this.state === "paused") this.playbackScrobbling?.pause();
+    else this.playbackScrobbling?.resume();
     this.sendMedia({ type: this.state === "paused" ? "pause" : "resume" });
     this.store.setSession(this.id, { status: this.state });
     this.audit.record(`playback.${this.state === "paused" ? "paused" : "resumed"}`, interaction.userId, { sessionId: this.id, trackId: this.current.id });
@@ -790,18 +807,26 @@ export class Coordinator {
   }
 
   private async settingsModal(interaction: Interaction) {
-    const admin = this.settingsAdmin(interaction.userId);
-    const canChangeVolume = this.can(interaction.userId, "volume");
-    const canConfigure = this.can(interaction.userId, "configure-settings");
-    const canEnd = this.can(interaction.userId, "end-session");
-    if (!admin && !canChangeVolume && !canConfigure && !canEnd)
+    if (!this.canOpenSettings(interaction.userId))
       return this.notice(interaction.userId, "You do not have permission to change settings.");
-    await this.slack.modal(interaction.triggerId, {
+    await this.slack.modal(interaction.triggerId, this.settingsView(interaction.userId));
+  }
+
+  private settingsView(userId: string) {
+    const settings = this.scrobbling?.settings(userId) ?? {
+      lastFmAvailable: false, lastFmConnected: false, lastFmEnabled: false,
+      listenBrainzConnected: false, listenBrainzEnabled: false,
+    };
+    const admin = this.settingsAdmin(userId);
+    const canChangeVolume = this.can(userId, "volume");
+    const canConfigure = this.can(userId, "configure-settings");
+    const canEnd = this.can(userId, "end-session");
+    return {
       type: "modal",
       callback_id: "save_settings",
       private_metadata: JSON.stringify({ sessionId: this.id, hostId: this.hostId }),
       title: plain("HuddleFM settings"),
-      ...(admin || canChangeVolume || canConfigure ? { submit: plain("Save") } : {}),
+      submit: plain("Save"),
       close: plain("Cancel"),
       blocks: [
         { type: "header", text: plain("Session") },
@@ -918,8 +943,109 @@ export class Coordinator {
           },
         },
         ] : []),
+        { type: "header", text: plain("User settings") },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: settings.lastFmConnected
+            ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
+            : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}` },
+        },
+        ...(settings.lastFmConnected ? [{
+          type: "input",
+          block_id: "lastfm_scrobbling",
+          optional: true,
+          label: plain("Last.fm scrobbling"),
+          element: {
+            type: "checkboxes",
+            action_id: "enabled",
+            options: [{ text: plain("Enabled"), value: "enabled" }],
+            initial_options: settings.lastFmEnabled ? [{ text: plain("Enabled"), value: "enabled" }] : [],
+          },
+        }, {
+          type: "actions",
+          block_id: "lastfm_actions",
+          elements: [{ type: "button", action_id: "disconnect_lastfm", text: plain("Disconnect"), style: "danger", value: this.id }],
+        }] : settings.lastFmAvailable ? [{
+          type: "actions",
+          block_id: "lastfm_actions",
+          elements: [{ type: "button", action_id: "connect_lastfm", text: plain("Log in to Last.fm"), value: this.id }],
+        }] : []),
+        {
+          type: "input",
+          block_id: "listenbrainz_scrobbling",
+          optional: true,
+          label: plain("ListenBrainz scrobbling"),
+          hint: plain(settings.listenBrainzConnected
+            ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
+            : "Uses your ListenBrainz user token"),
+          element: {
+            type: "checkboxes",
+            action_id: "enabled",
+            options: [{ text: plain("Enabled"), value: "enabled" }],
+            initial_options: settings.listenBrainzEnabled ? [{ text: plain("Enabled"), value: "enabled" }] : [],
+          },
+        },
+        {
+          type: "input",
+          block_id: "listenbrainz_token",
+          optional: true,
+          label: plain("ListenBrainz API key / user token"),
+          hint: plain(settings.listenBrainzConnected ? "Leave blank to keep the saved token" : "Find it in ListenBrainz settings"),
+          element: {
+            type: "plain_text_input",
+            action_id: "value",
+            placeholder: plain(settings.listenBrainzConnected ? "Saved" : "Paste token"),
+          },
+        },
       ],
-    });
+    };
+  }
+
+  private async lastFmModal(interaction: Interaction) {
+    if (!this.scrobbling || !interaction.triggerId) return;
+    try {
+      const url = await this.scrobbling.beginLastFm(interaction.userId);
+      await this.slack.pushModal(interaction.triggerId, {
+        type: "modal",
+        callback_id: "lastfm_login",
+        private_metadata: JSON.stringify({ sessionId: this.id }),
+        title: plain("Connect Last.fm"),
+        close: plain("Cancel"),
+        blocks: [
+          { type: "section", text: { type: "mrkdwn", text: "Authorize HuddleFM in Last.fm, return here, then press Continue." } },
+          { type: "actions", block_id: "lastfm_login_actions", elements: [
+            { type: "button", action_id: "open_lastfm_authorization", text: plain("Authorize Last.fm"), url },
+            { type: "button", action_id: "continue_lastfm", text: plain("Continue"), style: "primary", value: this.id },
+          ] },
+        ],
+      });
+    } catch (error) {
+      await this.notice(interaction.userId, `Could not start Last.fm login: ${message(error)}`);
+    }
+  }
+
+  private async continueLastFm(interaction: Interaction) {
+    if (!this.scrobbling) return;
+    try {
+      const username = await this.scrobbling.finishLastFm(interaction.userId);
+      if (interaction.viewId && interaction.viewHash)
+        await this.slack.updateModal(interaction.viewId, interaction.viewHash, {
+          type: "modal",
+          title: plain("Connect Last.fm"),
+          close: plain("Done"),
+          blocks: [{ type: "section", text: { type: "mrkdwn", text: `Connected as *${escape(username)}*.` } }],
+        });
+      this.playbackScrobbling?.settingsEnabled(interaction.userId);
+    } catch (error) {
+      await this.notice(interaction.userId, `Last.fm login is not complete: ${message(error)}`);
+    }
+  }
+
+  private async disconnectLastFm(interaction: Interaction) {
+    if (!this.scrobbling) return;
+    this.scrobbling.disconnectLastFm(interaction.userId);
+    if (interaction.viewId && interaction.viewHash)
+      await this.slack.updateModal(interaction.viewId, interaction.viewHash, this.settingsView(interaction.userId));
   }
 
   private async settingsSubmission(interaction: Interaction) {
@@ -988,6 +1114,28 @@ export class Coordinator {
     if (nextHost) {
       this.hostId = nextHost;
       this.store.setSession(this.id, { hostId: nextHost });
+    }
+    if (this.scrobbling) {
+      try {
+        const userSettings = this.scrobbling.settings(interaction.userId);
+        let newlyEnabled = false;
+        const lastFmState = interaction.state.lastfm_scrobbling?.enabled;
+        if (lastFmState) {
+          const enabled = lastFmState.selected_options?.some(option => option.value === "enabled") ?? false;
+          newlyEnabled ||= enabled && !userSettings.lastFmEnabled;
+          this.scrobbling.setLastFmEnabled(interaction.userId, enabled);
+        }
+        const listenBrainzState = interaction.state.listenbrainz_scrobbling?.enabled;
+        const listenBrainzToken = interaction.state.listenbrainz_token?.value?.value?.trim();
+        if (listenBrainzState) {
+          const enabled = listenBrainzState.selected_options?.some(option => option.value === "enabled") ?? false;
+          newlyEnabled ||= enabled && (!userSettings.listenBrainzEnabled || Boolean(listenBrainzToken));
+          await this.scrobbling.setListenBrainz(interaction.userId, listenBrainzToken || undefined, enabled);
+        }
+        if (newlyEnabled) this.playbackScrobbling?.settingsEnabled(interaction.userId);
+      } catch (error) {
+        await this.notice(interaction.userId, message(error));
+      }
     }
     this.audit.record("settings.changed", interaction.userId, {
       sessionId: this.id,
@@ -1161,6 +1309,7 @@ export class Coordinator {
       return this.notice(userId, "Only the host can end this session.");
     }
     this.state = "ended";
+    this.playbackScrobbling?.finish();
     this.autoplayGeneration++;
     this.autoplayPending = false;
     for (const controller of this.preparations.values()) controller.abort();
