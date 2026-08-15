@@ -1152,8 +1152,12 @@ export class Coordinator {
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();
     await rm(`data/media/${this.id}`, { recursive: true, force: true });
-    if (this.uiTs)
-      await this.slack.update(this.room.uiChannelId, this.uiTs, `Session ended: ${reason}`, [{ type: "section", text: { type: "mrkdwn", text: `*Session ended: ${reason}*` } }]);
+    if (this.uiTs) {
+      await this.slack.delete(this.room.uiChannelId, this.uiTs).catch(error =>
+        console.error(`[ui] could not delete ended player ${this.uiTs}: ${message(error)}`),
+      );
+      await this.slack.post(this.room.uiChannelId, this.room.uiThreadTs, `Session ended: ${reason}`);
+    }
   }
 }
 

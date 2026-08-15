@@ -9,6 +9,7 @@ import type { TrackCatalog } from "./tracks.ts";
 function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs: 600_000, pausedMs: 600_000, warningMs: 120_000 }, restored?: SavedSession) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
+  const deleted: unknown[] = [];
   const modals: unknown[] = [];
   const ephemeral: string[] = [];
   const sessions: unknown[] = [];
@@ -20,7 +21,7 @@ function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
     update: async (...args: unknown[]) => { updates.push(args); },
-    delete: async () => {},
+    delete: async (...args: unknown[]) => { deleted.push(args); },
     ephemeral: async (_channel: string, _user: string, text: string) => { ephemeral.push(text); },
     modal: async (...args: unknown[]) => { modals.push(args); },
     updateModal: async () => {},
@@ -41,7 +42,7 @@ function setup(tracks = {} as TrackCatalog, timeouts = { aloneMs: 60_000, idleMs
   }, "host", "bot", slack, store, tracks, lyrics, { record: (...args: unknown[]) => { audit.push(args); } } as AuditLog, {
     queueLimit: 50, initialVolume: 0.6, ...timeouts, port: 3210, managerUserId: "manager",
   }, "token", message => media.push(message), async () => {}, restored);
-  return { coordinator, posted, updates, modals, ephemeral, sessions, permissions, suspensions, media, audit };
+  return { coordinator, posted, updates, deleted, modals, ephemeral, sessions, permissions, suspensions, media, audit };
 }
 
 const interaction = (coordinator: Coordinator, actionId: string, value = "", type = "block_actions") => ({
@@ -312,6 +313,9 @@ test("HuddleFM leaving ends playback", async () => {
   await result.coordinator.memberLeft("bot");
   expect(result.media).toContainEqual({ type: "leave" });
   expect(result.sessions).toContainEqual({ status: "ended" });
+  expect(result.deleted).toContainEqual(["channel", "1"]);
+  expect(result.posted).toContainEqual(["channel", "1.0", "Session ended: removed from huddle"]);
+  expect(result.updates).toHaveLength(0);
 });
 
 test("announces and leaves two minutes after becoming the only Huddle participant", async () => {
