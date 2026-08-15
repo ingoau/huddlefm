@@ -38,8 +38,10 @@ export class Coordinator {
   private preparations = new Map<string, AbortController>();
   private anchorTimer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setTimeout>;
+  private idleWarningTimer?: ReturnType<typeof setTimeout>;
   private aloneTimer?: ReturnType<typeof setTimeout>;
   private pausedTimer?: ReturnType<typeof setTimeout>;
+  private pausedWarningTimer?: ReturnType<typeof setTimeout>;
   private lastSearch = new Map<string, number>();
 
   constructor(
@@ -51,7 +53,7 @@ export class Coordinator {
     private tracks: TrackCatalog,
     private lyrics: LyricsCatalog,
     private audit: AuditLog,
-    private config: { queueLimit: number; initialVolume: number; idleMs: number; pausedMs: number; port: number; managerUserId: string },
+    private config: { queueLimit: number; initialVolume: number; aloneMs: number; idleMs: number; pausedMs: number; warningMs: number; port: number; managerUserId: string },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
     private leaveMedia: () => Promise<void>,
@@ -276,8 +278,10 @@ export class Coordinator {
       for (const controller of this.preparations.values()) controller.abort();
       this.preparations.clear();
       clearTimeout(this.idleTimer);
+      clearTimeout(this.idleWarningTimer);
       clearTimeout(this.aloneTimer);
       clearTimeout(this.pausedTimer);
+      clearTimeout(this.pausedWarningTimer);
       clearTimeout(this.anchorTimer);
       this.store.suspendSession(this.id, {
         state,
@@ -1083,13 +1087,19 @@ export class Coordinator {
         this.aloneTimer = undefined;
         if (![...this.participants].some(id => id !== this.botUserId))
           await this.end(undefined, "alone timeout");
-      }), this.config.idleMs);
+      }), this.config.aloneMs);
     } else if (!alone) {
       clearTimeout(this.aloneTimer);
       this.aloneTimer = undefined;
     }
 
     if (!this.current && !this.idleTimer) {
+      this.idleWarningTimer = setTimeout(() => {
+        this.idleWarningTimer = undefined;
+        if (!this.current)
+          void this.slack.post(this.room.uiChannelId, this.room.uiThreadTs, "Nothing is playing, so I’ll leave in 2 minutes.")
+            .catch(error => console.error(`[idle] could not post leave notice: ${message(error)}`));
+      }, Math.max(0, this.config.idleMs - this.config.warningMs));
       this.idleTimer = setTimeout(() => void this.enqueue(async () => {
         this.idleTimer = undefined;
         if (!this.current) await this.end(undefined, "idle timeout");
@@ -1097,9 +1107,17 @@ export class Coordinator {
     } else if (this.current) {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
+      clearTimeout(this.idleWarningTimer);
+      this.idleWarningTimer = undefined;
     }
 
     if (this.state === "paused" && !this.pausedTimer) {
+      this.pausedWarningTimer = setTimeout(() => {
+        this.pausedWarningTimer = undefined;
+        if (this.state === "paused")
+          void this.slack.post(this.room.uiChannelId, this.room.uiThreadTs, "Playback is paused, so I’ll leave in 2 minutes.")
+            .catch(error => console.error(`[paused] could not post leave notice: ${message(error)}`));
+      }, Math.max(0, this.config.pausedMs - this.config.warningMs));
       this.pausedTimer = setTimeout(() => void this.enqueue(async () => {
         this.pausedTimer = undefined;
         if (this.state === "paused") await this.end(undefined, "paused timeout");
@@ -1107,6 +1125,8 @@ export class Coordinator {
     } else if (this.state !== "paused") {
       clearTimeout(this.pausedTimer);
       this.pausedTimer = undefined;
+      clearTimeout(this.pausedWarningTimer);
+      this.pausedWarningTimer = undefined;
     }
   }
 
@@ -1122,8 +1142,10 @@ export class Coordinator {
     for (const controller of this.preparations.values()) controller.abort();
     this.preparations.clear();
     clearTimeout(this.idleTimer);
+    clearTimeout(this.idleWarningTimer);
     clearTimeout(this.aloneTimer);
     clearTimeout(this.pausedTimer);
+    clearTimeout(this.pausedWarningTimer);
     clearTimeout(this.anchorTimer);
     this.store.setSession(this.id, { status: "ended" });
     this.audit.record("session.ended", userId, { sessionId: this.id, reason });
