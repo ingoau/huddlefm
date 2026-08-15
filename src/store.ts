@@ -27,7 +27,7 @@ export const permissionPresets = {
 export const displayModes = ["default", "lyrics", "off"] as const;
 export type DisplayMode = (typeof displayModes)[number];
 
-export type SavedTrack = {
+type SavedTrack = {
   id: string;
   requesterId: string;
   sourceInput: string;
@@ -77,7 +77,7 @@ export type UserScrobbling = {
   listenBrainzEnabled: boolean;
 };
 
-export type PendingScrobble = {
+type PendingScrobble = {
   id: string;
   userId: string;
   service: string;
