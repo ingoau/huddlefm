@@ -52,7 +52,9 @@ function text(value: unknown, name: string) {
 export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
   const root = object(raw, "response");
   if (root.ok !== true)
-    throw new Error(`rooms.join failed: ${String(root.error ?? "unknown_error")}`);
+    throw new Error(
+      `rooms.join failed: ${String(root.error ?? "unknown_error")}`,
+    );
 
   const call = object(root.call, "call");
   const freeWilly = object(call.free_willy, "call.free_willy");
@@ -66,9 +68,13 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
     huddleId: text(huddle.id, "huddle.id"),
     huddleCreatorId: text(huddle.created_by, "huddle.created_by"),
     participantIds: Array.isArray(huddle.participants)
-      ? huddle.participants.flatMap(value => {
+      ? huddle.participants.flatMap((value) => {
           if (typeof value === "string") return [value];
-          if (value && typeof value === "object" && typeof (value as { user_id?: unknown }).user_id === "string")
+          if (
+            value &&
+            typeof value === "object" &&
+            typeof (value as { user_id?: unknown }).user_id === "string"
+          )
             return [(value as { user_id: string }).user_id];
           return [];
         })
@@ -80,7 +86,10 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
   };
 }
 
-export function channelAccess(channel?: { is_member?: boolean; is_private?: boolean }) {
+export function channelAccess(channel?: {
+  is_member?: boolean;
+  is_private?: boolean;
+}) {
   if (channel?.is_member) return "ready";
   return !channel || channel.is_private ? "decline" : "join";
 }
@@ -142,7 +151,7 @@ export class SlackHuddleAdapter {
       } as never);
       this.socket = socket;
       let ready = false;
-      socket.addEventListener("message", event => {
+      socket.addEventListener("message", (event) => {
         const message = JSON.parse(String(event.data));
         if (message.type === "hello") {
           ready = true;
@@ -161,11 +170,14 @@ export class SlackHuddleAdapter {
           const normalized = normalizeRealtimeEvent(message);
           if (normalized) this.onEvent?.(normalized);
         } catch {
-          console.warn(`[slack-huddle] ignored invalid ${String(message.type)} event`);
+          console.warn(
+            `[slack-huddle] ignored invalid ${String(message.type)} event`,
+          );
         }
       });
       socket.addEventListener("error", () => {
-        if (!ready) reject(new Error("Private Slack realtime connection failed"));
+        if (!ready)
+          reject(new Error("Private Slack realtime connection failed"));
       });
       socket.addEventListener("close", () => this.scheduleReconnect());
     });
@@ -197,7 +209,7 @@ export class SlackHuddleAdapter {
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempts++);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
-      void this.connect().catch(error => {
+      void this.connect().catch((error) => {
         console.error(error instanceof Error ? error.message : error);
         this.scheduleReconnect();
       });
@@ -208,14 +220,18 @@ export class SlackHuddleAdapter {
     const info = await this.api("conversations.info", { channel: channelId });
     if (info.ok !== true) {
       if (info.error === "channel_not_found") return false;
-      throw new Error(`conversations.info failed: ${String(info.error ?? "unknown_error")}`);
+      throw new Error(
+        `conversations.info failed: ${String(info.error ?? "unknown_error")}`,
+      );
     }
     const access = channelAccess(object(info.channel, "channel"));
     if (access === "ready") return true;
     if (access === "decline") return false;
     const joined = await this.api("conversations.join", { channel: channelId });
     if (joined.ok !== true)
-      throw new Error(`conversations.join failed: ${String(joined.error ?? "unknown_error")}`);
+      throw new Error(
+        `conversations.join failed: ${String(joined.error ?? "unknown_error")}`,
+      );
     return true;
   }
 
@@ -227,7 +243,9 @@ export class SlackHuddleAdapter {
       inclusive: "true",
     });
     if (replies.ok !== true)
-      throw new Error(`conversations.replies failed: ${String(replies.error ?? "unknown_error")}`);
+      throw new Error(
+        `conversations.replies failed: ${String(replies.error ?? "unknown_error")}`,
+      );
     return activeHuddleCallId(replies, threadTs);
   }
 
@@ -238,15 +256,20 @@ export class SlackHuddleAdapter {
       name: "thumbup",
     });
     if (result.ok !== true && result.error !== "already_reacted")
-      throw new Error(`reactions.add failed: ${String(result.error ?? "unknown_error")}`);
+      throw new Error(
+        `reactions.add failed: ${String(result.error ?? "unknown_error")}`,
+      );
   }
 
   private async api(method: string, fields: Record<string, string>) {
-    const response = await fetch(new URL(`/api/${method}`, this.config.workspaceUrl), {
-      method: "POST",
-      headers: { cookie: `d=${this.config.xoxd}` },
-      body: new URLSearchParams({ token: this.config.xoxc, ...fields }),
-    });
+    const response = await fetch(
+      new URL(`/api/${method}`, this.config.workspaceUrl),
+      {
+        method: "POST",
+        headers: { cookie: `d=${this.config.xoxd}` },
+        body: new URLSearchParams({ token: this.config.xoxc, ...fields }),
+      },
+    );
     if (!response.ok) throw new Error(`${method} HTTP ${response.status}`);
     return object(await response.json(), method);
   }
@@ -288,7 +311,9 @@ export class SlackHuddleAdapter {
     );
     const result = object(await response.json(), "invite response");
     if (!response.ok || result.ok !== true)
-      throw new Error(`rooms.inviteResponse failed: ${String(result.error ?? response.status)}`);
+      throw new Error(
+        `rooms.inviteResponse failed: ${String(result.error ?? response.status)}`,
+      );
   }
 }
 
@@ -339,10 +364,7 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
     const huddle = event.huddle as Record<string, unknown> | undefined;
     const room = event.room as Record<string, unknown> | undefined;
     const callId = room?.call_id ?? huddle?.id;
-    if (
-      (huddle?.has_ended || huddle?.date_end) &&
-      typeof callId === "string"
-    )
+    if ((huddle?.has_ended || huddle?.date_end) && typeof callId === "string")
       return {
         type: "HuddleEnded",
         callId,
@@ -353,13 +375,22 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
 export function activeHuddleCallId(raw: unknown, threadTs: string) {
   const messages = object(raw, "replies").messages;
   if (!Array.isArray(messages)) return;
-  const root = messages.find(message =>
-    message && typeof message === "object" && (message as { ts?: unknown }).ts === threadTs
+  const root = messages.find(
+    (message) =>
+      message &&
+      typeof message === "object" &&
+      (message as { ts?: unknown }).ts === threadTs,
   ) as Record<string, unknown> | undefined;
-  if (root?.subtype !== "huddle_thread" || !root.room || typeof root.room !== "object") return;
+  if (
+    root?.subtype !== "huddle_thread" ||
+    !root.room ||
+    typeof root.room !== "object"
+  )
+    return;
   const room = root.room as Record<string, unknown>;
   const endedAt = Number(room.date_end ?? 0);
-  if (room.has_ended === true || Number.isFinite(endedAt) && endedAt > 0) return;
+  if (room.has_ended === true || (Number.isFinite(endedAt) && endedAt > 0))
+    return;
   return typeof room.id === "string" && room.id ? room.id : undefined;
 }
 
@@ -370,12 +401,19 @@ export async function verifySlackIdentity(config: {
   xoxd: string;
 }) {
   const auth = async (token: string, cookie?: string) => {
-    const response = await fetch(new URL("/api/auth.test", config.workspaceUrl), {
-      method: "POST",
-      headers: cookie ? { cookie: `d=${cookie}` } : undefined,
-      body: new URLSearchParams({ token }),
-    });
-    const result = (await response.json()) as { ok?: boolean; error?: string; user_id?: string };
+    const response = await fetch(
+      new URL("/api/auth.test", config.workspaceUrl),
+      {
+        method: "POST",
+        headers: cookie ? { cookie: `d=${cookie}` } : undefined,
+        body: new URLSearchParams({ token }),
+      },
+    );
+    const result = (await response.json()) as {
+      ok?: boolean;
+      error?: string;
+      user_id?: string;
+    };
     if (!result.ok || !result.user_id)
       throw new Error(`auth.test failed: ${result.error ?? response.status}`);
     return result.user_id;
@@ -386,6 +424,8 @@ export async function verifySlackIdentity(config: {
     auth(config.xoxc, config.xoxd),
   ]);
   if (appUserId !== huddleUserId)
-    throw new Error("Slack app and Huddle credentials belong to different users");
+    throw new Error(
+      "Slack app and Huddle credentials belong to different users",
+    );
   return appUserId;
 }

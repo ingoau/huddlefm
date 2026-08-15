@@ -7,7 +7,8 @@ const required = [
 ] as const;
 
 export function loadConfig() {
-  for (const name of required) if (!process.env[name]) throw new Error(`Missing ${name}`);
+  for (const name of required)
+    if (!process.env[name]) throw new Error(`Missing ${name}`);
 
   return {
     workspaceUrl: process.env.SLACK_WORKSPACE_URL!,
@@ -20,7 +21,9 @@ export function loadConfig() {
     mediaRegion: process.env.CHIME_MEDIA_REGION ?? "ap-southeast-2",
     queueLimit: Number(process.env.QUEUE_LIMIT ?? 50),
     durationSeconds: Number(process.env.TRACK_DURATION_LIMIT_SECONDS ?? 1_200),
-    downloadBytes: Number(process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000),
+    downloadBytes: Number(
+      process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000,
+    ),
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.5),
     aloneMs: Number(process.env.ALONE_TIMEOUT_MS ?? 120_000),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
