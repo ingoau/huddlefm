@@ -13,7 +13,7 @@ bun test
 bun run start
 ```
 
-Configure `.env` with `SLACK_WORKSPACE_URL`, `SLACK_XOXP`, `SLACK_XAPP`, `SLACK_XOXC`, and `SLACK_XOXD`. Set `LASTFM_API_KEY` and `LASTFM_SHARED_SECRET` to enable Last.fm account linking. Optional settings are `MANAGER_USER_ID`, `LOCAL_CONTROL_TOKEN`, `QUEUE_LIMIT`, `TRACK_DURATION_LIMIT_SECONDS`, `TRACK_DOWNLOAD_LIMIT_BYTES`, `INITIAL_VOLUME`, `ALONE_TIMEOUT_MS`, `IDLE_TIMEOUT_MS`, `PAUSED_TIMEOUT_MS`, `CHIME_MEDIA_REGION`, `CHROME_PATH`, `BIND_ADDRESS`, and `PORT`. The local `/join`, `/leave`, and `/tone` development routes require `Authorization: Bearer $LOCAL_CONTROL_TOKEN` and remain disabled when it is unset.
+Configure `.env` with `SLACK_WORKSPACE_URL`, `SLACK_XOXP`, `SLACK_XAPP`, `SLACK_XOXC`, `SLACK_XOXD`, and `MANAGER_USER_ID`. Set `LASTFM_API_KEY` and `LASTFM_SHARED_SECRET` to enable Last.fm account linking. Optional settings are `LOCAL_CONTROL_TOKEN`, `QUEUE_LIMIT`, `TRACK_DURATION_LIMIT_SECONDS`, `TRACK_DOWNLOAD_LIMIT_BYTES`, `INITIAL_VOLUME`, `ALONE_TIMEOUT_MS`, `IDLE_TIMEOUT_MS`, `PAUSED_TIMEOUT_MS`, `CHIME_MEDIA_REGION`, `CHROME_PATH`, `BIND_ADDRESS`, and `PORT`. The local `/join`, `/leave`, and `/tone` development routes require `Authorization: Bearer $LOCAL_CONTROL_TOKEN` and remain disabled when it is unset.
 
 Last.fm and ListenBrainz connections are saved per Slack user and apply in every Huddle that user joins.
 

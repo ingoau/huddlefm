@@ -4,6 +4,7 @@ const required = [
   "SLACK_XAPP",
   "SLACK_XOXC",
   "SLACK_XOXD",
+  "MANAGER_USER_ID",
 ] as const;
 
 export function loadConfig() {
@@ -26,7 +27,7 @@ export function loadConfig() {
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     warningMs: 120_000,
-    managerUserId: process.env.MANAGER_USER_ID ?? "U0923H02Y3B",
+    managerUserId: process.env.MANAGER_USER_ID!,
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,
     lastFmApiKey: process.env.LASTFM_API_KEY,
     lastFmSharedSecret: process.env.LASTFM_SHARED_SECRET,
