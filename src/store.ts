@@ -9,6 +9,7 @@ export const capabilities = [
   "skip",
   "pause",
   "volume",
+  "configure-settings",
   "clear",
   "end-session",
 ] as const;
@@ -367,8 +368,9 @@ export class Store {
 
   setPermission(sessionId: string, capability: string, allowed: boolean) {
     this.db
-      .query("UPDATE permissions SET allowed = ? WHERE session_id = ? AND capability = ?")
-      .run(allowed ? 1 : 0, sessionId, capability);
+      .query(`INSERT INTO permissions (session_id, capability, allowed) VALUES (?, ?, ?)
+        ON CONFLICT (session_id, capability) DO UPDATE SET allowed = excluded.allowed`)
+      .run(sessionId, capability, allowed ? 1 : 0);
   }
 
   close() {
