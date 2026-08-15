@@ -38,3 +38,40 @@ test("only accepts video IDs from getUpNexts runtime data", async () => {
   });
   expect(await catalog.upNextIds("seedseedsee")).toEqual(["abcdefghijk", "ZYXWVUTSRQ-"]);
 });
+
+test("offers and expands albums only for bulk searches", async () => {
+  const catalog = new TrackCatalog({ durationSeconds: 1_200, downloadBytes: 100_000_000 });
+  Reflect.set(catalog, "music", {
+    searchAlbums: async () => [{
+      albumId: "album", name: "Album", artist: { name: "Artist" },
+    }],
+    getAlbum: async () => ({ songs: [{
+      videoId: "abcdefghijk", name: "Song", artist: { name: "Artist" },
+      album: { name: "Album" }, duration: 60, thumbnails: [{ url: "art" }],
+    }] }),
+  });
+
+  const options = await catalog.suggestions("Album", { songs: false, bulk: true });
+  expect(options[0]?.text.text).toBe("Add album: Album — Artist");
+  expect(await catalog.resolve(options[0]!.value)).toEqual([expect.objectContaining({
+    sourceId: "abcdefghijk", title: "Song", album: "Album",
+  })]);
+});
+
+test("expands remembered YouTube playlists", async () => {
+  const catalog = new TrackCatalog({ durationSeconds: 1_200, downloadBytes: 100_000_000 });
+  Reflect.set(catalog, "music", {
+    getPlaylistVideos: async () => [{
+      videoId: "abcdefghijk", name: "Song", artist: { name: "Artist" },
+      duration: 60, thumbnails: [],
+    }],
+  });
+  Reflect.get(catalog, "references").set("playlist", {
+    type: "playlist", id: "PL123", url: "https://youtube.com/playlist?list=PL123",
+  });
+
+  expect(await catalog.resolve("playlist")).toEqual([expect.objectContaining({
+    sourceInput: "https://youtube.com/playlist?list=PL123",
+    canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
+  })]);
+});

@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 
 export const capabilities = [
   "add",
+  "add-bulk",
   "remove-own",
   "manage-queue",
   "skip",
