@@ -41,44 +41,53 @@ html, body {
   background: linear-gradient(115deg, rgb(0 0 0 / .22), rgb(5 5 8 / .5) 48%, rgb(0 0 0 / .66));
 }
 
-#cover, #lyrics-frame, #progress, header { position: absolute; z-index: 1; }
+#stage::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 38%, rgb(0 0 0 / .14) 55%, rgb(0 0 0 / .82));
+  opacity: 1;
+  pointer-events: none;
+  transition: opacity .35s ease;
+}
+
+#cover, #lyrics-frame, #progress, header { position: absolute; }
+#cover { z-index: 1; }
+#lyrics-frame, #progress, header { z-index: 3; }
 
 #cover {
-  top: 10%;
-  left: 22%;
-  width: 56%;
-  aspect-ratio: 1;
-  border-radius: 24px;
+  inset: 0;
+  border-radius: 0;
   background: rgb(255 255 255 / .06) center / cover;
-  box-shadow: 0 20px 60px rgb(0 0 0 / .32);
-  transition: top .65s cubic-bezier(.2, .8, .2, 1), left .65s cubic-bezier(.2, .8, .2, 1),
-    width .65s cubic-bezier(.2, .8, .2, 1), border-radius .65s ease,
-    opacity .32s ease, transform .65s cubic-bezier(.2, .8, .2, 1);
+  box-shadow: 0 40px 120px rgb(0 0 0 / .32);
+  transform: translateZ(0);
+  transform-origin: top left;
+  transition: border-radius .7s ease, opacity .25s ease,
+    transform .7s cubic-bezier(.22, 1, .36, 1);
+  will-change: transform;
 }
 
 #lyrics-frame, header {
   opacity: 1;
-  transition: inset .65s cubic-bezier(.2, .8, .2, 1), opacity .35s ease,
-    transform .55s cubic-bezier(.2, .8, .2, 1);
+  transition: opacity .25s ease, transform .7s cubic-bezier(.22, 1, .36, 1);
+  will-change: transform;
 }
 
 #stage.changing #artwork { opacity: 0; transform: scale(1.16); }
 
-#stage.changing #cover,
-#stage.changing header,
-#stage.changing #lyrics-frame { opacity: 0; transform: translateY(-10px); }
-
 header {
-  top: 69%;
-  right: 8%;
-  left: 8%;
+  top: 80%;
+  left: 7%;
+  width: 66%;
   min-width: 0;
+  transform: translateZ(0);
 }
 
 h1 {
   margin: 0 0 4px;
   overflow: hidden;
-  font-size: 28px;
+  font-size: 34px;
   font-weight: 700;
   line-height: 1.15;
   text-overflow: ellipsis;
@@ -89,17 +98,17 @@ h1 {
   margin: 0;
   overflow: hidden;
   color: rgb(255 255 255 / .58);
-  font-size: 17px;
+  font-size: 20px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 #lyrics-frame {
-  top: 31%;
-  right: 6%;
+  top: 29%;
+  right: 7%;
   bottom: 34px;
-  left: 6%;
+  left: 7%;
   overflow: hidden;
   mask-image: linear-gradient(to bottom, transparent, #000 12%, #000 78%, transparent);
   opacity: 0;
@@ -108,22 +117,30 @@ h1 {
 }
 
 #stage[data-display-mode="lyrics"] #cover {
-  top: 6%;
-  left: 6%;
-  width: 16%;
-  border-radius: 16px;
+  border-radius: 106px;
+  transform: translate3d(6vw, 6.7vh, 0) scale(.15);
 }
 
 #stage[data-display-mode="lyrics"] header {
-  top: 8%;
-  right: 6%;
-  left: 26%;
+  transform: translate3d(19vw, -70.5vh, 0);
 }
+
+#stage[data-display-mode="lyrics"]::after { opacity: 0; }
+
+#stage:not([data-display-mode="lyrics"]) #artist { color: rgb(255 255 255 / .76); }
 
 #stage[data-display-mode="lyrics"] #lyrics-frame {
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
+  transition-delay: .18s, 0s;
+}
+
+#stage.changing #cover,
+#stage.changing header,
+#stage.changing #lyrics-frame {
+  opacity: 0;
+  transition-delay: 0s;
 }
 
 braccato-lyrics {
@@ -134,7 +151,7 @@ braccato-lyrics {
 
 .blyrics-container {
   --blyrics-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
-  --blyrics-font-size: 2.9rem;
+  --blyrics-font-size: 2.6rem;
   --blyrics-font-weight: 700;
   --blyrics-line-height: 1.16;
   --blyrics-padding: 1.5rem;
@@ -258,7 +275,7 @@ braccato-lyrics {
 #progress {
   position: absolute;
   right: 48px;
-  bottom: 20px;
+  bottom: 32px;
   left: 48px;
   height: 3px;
   overflow: hidden;
