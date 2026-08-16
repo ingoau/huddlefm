@@ -70,7 +70,7 @@ function updateCanvas() {
   }
   canvasUpdate = Promise.resolve()
     .then(() =>
-      slackHuddle.updateCanvas(
+      slackApp.updateCanvas(
         canvasId,
         canvasMarkdown(store.canvasStats(), store.usageStats()),
       ),
