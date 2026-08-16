@@ -491,7 +491,15 @@ export class Store {
         GROUP BY source_id, title, artist ORDER BY count DESC, title COLLATE NOCASE LIMIT 5`,
       )
       .all() as { title: string; artist: string; count: number }[];
-    return { sessions, tracks, topArtists, topTracks };
+    const topChannels = this.db
+      .query(
+        `SELECT sessions.channel_id AS channelId, COUNT(*) AS count
+        FROM tracks JOIN sessions ON sessions.id = tracks.session_id
+        WHERE tracks.status = 'played' GROUP BY sessions.channel_id
+        ORDER BY count DESC, channelId LIMIT 5`,
+      )
+      .all() as { channelId: string; count: number }[];
+    return { sessions, tracks, topArtists, topTracks, topChannels };
   }
 
   incrementUsage(event: UsageKey) {

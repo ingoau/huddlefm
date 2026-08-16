@@ -15,7 +15,6 @@ export function canvasMarkdown(
     line: (entry: T, index: number) => string,
   ) => entries.map(line).join("\n") || "Nothing yet.";
   return [
-    "# HuddleFM stats",
     "All-time listening across every HuddleFM session.",
     "",
     "| Metric | Total |",
@@ -43,6 +42,13 @@ export function canvasMarkdown(
       stats.topTracks,
       ({ title, artist, count }, index) =>
         `${index + 1}. **${escapeMarkdown(title)}** — ${escapeMarkdown(artist)} · ${count} ${count === 1 ? "play" : "plays"}`,
+    ),
+    "",
+    "## Most active channels",
+    ranking(
+      stats.topChannels,
+      ({ channelId, count }, index) =>
+        `${index + 1}. ![](#${channelId}) — ${count} ${count === 1 ? "song" : "songs"}`,
     ),
     "",
     "## Controls used",
