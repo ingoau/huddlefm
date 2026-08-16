@@ -69,12 +69,19 @@ function updateCanvas() {
     return canvasUpdate;
   }
   canvasUpdate = Promise.resolve()
-    .then(() =>
-      slackApp.updateCanvas(
+    .then(async () => {
+      const stats = store.canvasStats();
+      const topChannels = await Promise.all(
+        stats.topChannels.map(async (channel) => ({
+          ...channel,
+          name: await slackApp.channelName(channel.channelId),
+        })),
+      );
+      return slackApp.updateCanvas(
         canvasId,
-        canvasMarkdown(store.canvasStats(), store.usageStats()),
-      ),
-    )
+        canvasMarkdown({ ...stats, topChannels }, store.usageStats()),
+      );
+    })
     .catch((error) =>
       console.error(`[canvas] update failed: ${safeError(error)}`),
     )
