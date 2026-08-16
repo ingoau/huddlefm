@@ -294,8 +294,11 @@ export class Coordinator {
     return this.enqueue(async () => {
       if (!this.isParticipantOrManager(interaction.userId))
         return this.rejectNonParticipant(interaction);
-      if (interaction.type === "view_submission")
+      if (interaction.type === "view_submission") {
+        if (interaction.actionId === "move_queue_track")
+          return this.queuePositionSubmission(interaction);
         return this.settingsSubmission(interaction);
+      }
       if (interaction.messageTs && interaction.messageTs !== this.uiTs)
         return this.notice(
           interaction.userId,
@@ -312,6 +315,7 @@ export class Coordinator {
         volume_up: () => this.changeVolume(interaction, 0.05),
         queue_move_up: () => this.reorder(interaction, -1),
         queue_move_down: () => this.reorder(interaction, 1),
+        queue_move_to_position: () => this.queuePositionModal(interaction),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
         open_settings: () => this.settingsModal(interaction),
@@ -1123,6 +1127,90 @@ export class Coordinator {
     );
   }
 
+  private async queuePositionModal(interaction: Interaction) {
+    if (!this.validQueueView(interaction))
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
+    if (!(await this.require(interaction, "manage-queue"))) return;
+    const entry = this.queue.find((track) => track.id === interaction.value);
+    if (!entry || !interaction.triggerId) return;
+    const position = this.queue.indexOf(entry) + 1;
+    await this.slack.pushModal(interaction.triggerId, {
+      type: "modal",
+      callback_id: "move_queue_track",
+      private_metadata: JSON.stringify({
+        sessionId: this.id,
+        trackId: entry.id,
+      }),
+      title: plain("Move queue item"),
+      submit: plain("Move"),
+      close: plain("Cancel"),
+      blocks: [
+        {
+          type: "input",
+          block_id: "position",
+          label: plain(`Position (1–${this.queue.length})`),
+          element: {
+            type: "plain_text_input",
+            action_id: "value",
+            initial_value: String(position),
+            placeholder: plain("For example, 3"),
+          },
+        },
+      ],
+    });
+  }
+
+  private async queuePositionSubmission(interaction: Interaction) {
+    const metadata = JSON.parse(interaction.metadata || "{}") as {
+      sessionId?: string;
+      trackId?: string;
+    };
+    if (metadata.sessionId !== this.id || !metadata.trackId)
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
+    if (!(await this.require(interaction, "manage-queue"))) return;
+    const entry = this.queue.find((track) => track.id === metadata.trackId);
+    const raw = interaction.state.position?.value?.value?.trim() ?? "";
+    const position = Number(raw);
+    if (
+      !entry ||
+      !/^\d+$/.test(raw) ||
+      !Number.isSafeInteger(position) ||
+      position < 1 ||
+      position > this.queue.length
+    )
+      return this.notice(
+        interaction.userId,
+        `Position must be a whole number between 1 and ${this.queue.length}.`,
+      );
+    const from = this.queue.indexOf(entry);
+    const to = position - 1;
+    if (from !== to) {
+      this.queue.splice(from, 1);
+      this.queue.splice(to, 0, entry);
+      this.audit.record("queue.reordered", interaction.userId, {
+        sessionId: this.id,
+        trackId: entry.id,
+        from,
+        to,
+      });
+      this.store.incrementUsage("reordered");
+      this.syncPreloads();
+      await this.render();
+    }
+    if (interaction.previousViewId)
+      await this.slack.updateModal(
+        interaction.previousViewId,
+        undefined,
+        this.queueView(interaction.userId),
+      );
+  }
+
   private queueView(userId: string) {
     return {
       type: "modal",
@@ -1150,6 +1238,16 @@ export class Coordinator {
                       type: "button",
                       action_id: "queue_move_down",
                       text: plain("Down"),
+                      value: track.id,
+                    },
+                  ]
+                : []),
+              ...(manages
+                ? [
+                    {
+                      type: "button",
+                      action_id: "queue_move_to_position",
+                      text: plain("Move to…"),
                       value: track.id,
                     },
                   ]
