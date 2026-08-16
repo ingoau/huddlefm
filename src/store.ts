@@ -79,6 +79,8 @@ export type SavedSession = {
   playbackSeconds: number;
   listenedSeconds: number;
   resumeUntil: number;
+  endText?: string;
+  endBlocks?: unknown[];
   permissions: string[];
   tracks: SavedTrack[];
 };
@@ -238,6 +240,8 @@ export class Store {
       "anchor_enabled",
       "INTEGER NOT NULL DEFAULT 0",
     );
+    this.ensureColumn("sessions", "end_text", "TEXT");
+    this.ensureColumn("sessions", "end_blocks", "TEXT");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
   }
@@ -385,11 +389,65 @@ export class Store {
     })();
   }
 
+  endSession(
+    sessionId: string,
+    state: {
+      state: string;
+      playbackSeconds: number;
+      listenedSeconds: number;
+      displayMode: DisplayMode;
+      anchorEnabled: boolean;
+      queue: string[];
+    },
+    resumeUntil: number,
+  ) {
+    this.db.transaction(() => {
+      this.db
+        .query(
+          `UPDATE sessions SET
+        status = 'ended', resume_state = ?, resume_until = ?, playback_seconds = ?,
+        listened_seconds = ?, display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(
+          state.state,
+          resumeUntil,
+          state.playbackSeconds,
+          state.listenedSeconds,
+          state.displayMode,
+          state.anchorEnabled ? 1 : 0,
+          Date.now(),
+          sessionId,
+        );
+      this.db
+        .query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?")
+        .run(sessionId);
+      const position = this.db.query(
+        "UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?",
+      );
+      state.queue.forEach((id, index) => position.run(index, id, sessionId));
+    })();
+  }
+
+  setEndMessage(
+    sessionId: string,
+    timestamp: string,
+    text: string,
+    blocks: unknown[],
+  ) {
+    this.db
+      .query(
+        `UPDATE sessions SET ui_ts = ?, end_text = ?, end_blocks = ?, updated_at = ?
+        WHERE id = ?`,
+      )
+      .run(timestamp, text, JSON.stringify(blocks), Date.now(), sessionId);
+  }
+
   activateSession(sessionId: string, status: string) {
     this.db
       .query(
         `UPDATE sessions SET
-      status = ?, resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?`,
+      status = ?, resume_state = NULL, resume_until = NULL, end_text = NULL,
+      end_blocks = NULL, updated_at = ? WHERE id = ?`,
       )
       .run(status, Date.now(), sessionId);
   }
@@ -485,12 +543,31 @@ export class Store {
     const rows = this.db
       .query(`SELECT * FROM sessions WHERE status != 'ended'`)
       .all() as Record<string, unknown>[];
+    return this.savedSessions(rows, now, ttlMs, true);
+  }
+
+  restorableSessions() {
+    const rows = this.db
+      .query(
+        `SELECT * FROM sessions WHERE status = 'ended' AND resume_until IS NOT NULL`,
+      )
+      .all() as Record<string, unknown>[];
+    return this.savedSessions(rows, Number.NEGATIVE_INFINITY, 0, false)
+      .sessions;
+  }
+
+  private savedSessions(
+    rows: Record<string, unknown>[],
+    now: number,
+    ttlMs: number,
+    expire: boolean,
+  ) {
     const expiredIds: string[] = [];
     const sessions = rows.flatMap((row) => {
       const deadline = Number(
         row.resume_until ?? Number(row.updated_at) + ttlMs,
       );
-      if (deadline <= now) {
+      if (expire && deadline <= now) {
         expiredIds.push(String(row.id));
         return [];
       }
@@ -534,11 +611,7 @@ export class Store {
           revision: Number(row.revision),
           creatorId: String(row.creator_id),
           ...(row.host_id ? { hostId: String(row.host_id) } : {}),
-          state: String(
-            row.status === "suspended"
-              ? (row.resume_state ?? "ready")
-              : row.status,
-          ),
+          state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
           autoplay: Boolean(row.autoplay),
           displayMode: displayModes.includes(row.display_mode as DisplayMode)
@@ -548,6 +621,10 @@ export class Store {
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
           resumeUntil: deadline,
+          ...(row.end_text ? { endText: String(row.end_text) } : {}),
+          ...(row.end_blocks
+            ? { endBlocks: JSON.parse(String(row.end_blocks)) as unknown[] }
+            : {}),
           permissions: (
             this.db
               .query(
@@ -584,7 +661,8 @@ export class Store {
         .run(sessionId);
       this.db
         .query(
-          "UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?",
+          `UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL,
+          end_text = NULL, end_blocks = NULL, updated_at = ? WHERE id = ?`,
         )
         .run(Date.now(), sessionId);
     })();

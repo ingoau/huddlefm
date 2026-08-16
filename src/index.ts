@@ -53,6 +53,7 @@ const joiningCalls = new Set<string>();
 const pendingRestores = new Map<string, SavedSession>();
 const restoring = new Set<string>();
 const restoreWork = new Set<Promise<void>>();
+const endCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let botUserId = "";
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
 let canvasTimer: ReturnType<typeof setInterval> | undefined;
@@ -200,6 +201,7 @@ async function joinHuddle(
       restored,
       scrobbling,
       () => void updateCanvas(),
+      scheduleEndCleanup,
     ));
     try {
       if (restored) await coordinator.resume();
@@ -264,6 +266,115 @@ async function retryRestores() {
   if (!pendingRestores.size && restoreTimer) {
     clearInterval(restoreTimer);
     restoreTimer = undefined;
+  }
+}
+
+function restorableSession(sessionId: string) {
+  return store.restorableSessions().find((session) => session.id === sessionId);
+}
+
+function scheduleEndCleanup(sessionId: string) {
+  clearTimeout(endCleanupTimers.get(sessionId));
+  const session = restorableSession(sessionId);
+  if (!session) return;
+  endCleanupTimers.set(
+    sessionId,
+    setTimeout(
+      () => void cleanupEndedSession(sessionId),
+      Math.max(0, session.resumeUntil - Date.now()),
+    ),
+  );
+}
+
+async function cleanupEndedSession(sessionId: string) {
+  endCleanupTimers.delete(sessionId);
+  const session = restorableSession(sessionId);
+  if (!session) return;
+  if (restoring.has(sessionId)) {
+    endCleanupTimers.set(
+      sessionId,
+      setTimeout(() => void cleanupEndedSession(sessionId), 1_000),
+    );
+    return;
+  }
+  if (Date.now() < session.resumeUntil) return scheduleEndCleanup(sessionId);
+  try {
+    if (session.endText && session.endBlocks && session.uiTs)
+      await slackApp.update(
+        session.channelId,
+        session.uiTs,
+        session.endText,
+        session.endBlocks.filter(
+          (block) =>
+            !(
+              block &&
+              typeof block === "object" &&
+              "elements" in block &&
+              Array.isArray(block.elements) &&
+              block.elements.some(
+                (element) =>
+                  element &&
+                  typeof element === "object" &&
+                  "action_id" in element &&
+                  element.action_id === "restore_session",
+              )
+            ),
+        ),
+      );
+  } catch (error) {
+    console.error(`[restore] could not remove button: ${safeError(error)}`);
+  } finally {
+    store.expireSession(sessionId);
+    await rm(`data/media/${sessionId}`, { recursive: true, force: true });
+  }
+}
+
+async function restoreEndedSession(interaction: Interaction) {
+  const session = restorableSession(interaction.value);
+  if (
+    !session ||
+    interaction.channelId !== session.channelId ||
+    interaction.messageTs !== session.uiTs
+  )
+    return;
+  if (Date.now() >= session.resumeUntil) {
+    await cleanupEndedSession(session.id);
+    await slackApp.ephemeral(
+      session.channelId,
+      interaction.userId,
+      "That session can no longer be restored.",
+      session.threadTs,
+    );
+    return;
+  }
+  if (restoring.has(session.id)) return;
+  restoring.add(session.id);
+  try {
+    const callId = await slackHuddle.activeHuddleCall(
+      session.channelId,
+      session.threadTs,
+    );
+    if (!callId) {
+      await slackApp.ephemeral(
+        session.channelId,
+        interaction.userId,
+        "That Huddle is no longer active.",
+        session.threadTs,
+      );
+      return;
+    }
+    await joinHuddle(session.channelId, interaction.userId, callId, session);
+    clearTimeout(endCleanupTimers.get(session.id));
+    endCleanupTimers.delete(session.id);
+  } catch (error) {
+    await slackApp.ephemeral(
+      session.channelId,
+      interaction.userId,
+      `I couldn’t restore that session: ${safeError(error)}`,
+      session.threadTs,
+    );
+  } finally {
+    restoring.delete(session.id);
   }
 }
 
@@ -479,7 +590,9 @@ await catalog.initialize();
 slackApp.onSuggestion = (interaction) =>
   coordinatorFor(interaction)?.suggestions(interaction) ?? Promise.resolve([]);
 slackApp.onAction = (interaction) =>
-  coordinatorFor(interaction)?.action(interaction);
+  interaction.actionId === "restore_session"
+    ? restoreEndedSession(interaction)
+    : coordinatorFor(interaction)?.action(interaction);
 await slackApp.start();
 await slackHuddle.start((event) => {
   if (event.type === "HuddleInvited") {
@@ -521,6 +634,8 @@ if (config.canvasId) {
   void updateCanvas();
   canvasTimer = setInterval(() => void updateCanvas(), 15 * 60_000);
 }
+for (const session of store.restorableSessions())
+  scheduleEndCleanup(session.id);
 for (const session of saved.sessions) pendingRestores.set(session.id, session);
 await retryRestores();
 if (pendingRestores.size)
@@ -533,6 +648,7 @@ const shutdown = async () => {
   canvasPending = false;
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
+  for (const timer of endCleanupTimers.values()) clearTimeout(timer);
   await canvasUpdate;
   await Promise.allSettled([...restoreWork]);
   const resumeUntil = Date.now() + resumeTtlMs;

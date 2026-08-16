@@ -69,6 +69,10 @@ function setup(
     suspendSession: (...args: unknown[]) => {
       suspensions.push(args);
     },
+    endSession: (...args: unknown[]) => {
+      sessions.push({ status: "ended", args });
+    },
+    setEndMessage: () => {},
     setPermission: (_id: string, capability: string, allowed: boolean) => {
       permissions.push({ capability, allowed });
     },
@@ -669,13 +673,21 @@ test("manager overrides permissions and HuddleFM cannot become host", async () =
 test("HuddleFM leaving ends playback", async () => {
   const result = setup();
   await result.coordinator.start();
+  const endedAt = Date.now();
   await result.coordinator.memberLeft("bot");
   expect(result.media).toContainEqual({ type: "leave" });
   expect(result.sessions).toContainEqual(
     expect.objectContaining({ status: "ended" }),
   );
+  const deadline = (
+    result.sessions.find(
+      (session) => (session as { status?: string }).status === "ended",
+    ) as { args: [unknown, unknown, number] }
+  ).args[2];
+  expect(deadline).toBeGreaterThanOrEqual(endedAt + 120_000);
+  expect(deadline).toBeLessThanOrEqual(Date.now() + 120_000);
   expect(result.deleted).toContainEqual(["channel", "1"]);
-  expect(result.posted).toContainEqual([
+  expect(result.posted[1]).toEqual([
     "channel",
     "1.0",
     "Session ended: removed from huddle",
@@ -684,6 +696,10 @@ test("HuddleFM leaving ends playback", async () => {
         type: "section",
         text: { type: "mrkdwn", text: "Session ended: removed from huddle" },
       },
+      expect.objectContaining({
+        type: "actions",
+        elements: [expect.objectContaining({ action_id: "restore_session" })],
+      }),
     ],
   ]);
   expect(result.updates).toHaveLength(0);
