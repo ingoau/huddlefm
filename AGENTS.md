@@ -90,10 +90,8 @@ When communicating, use this language:
 
 ## Contributing
 
-
 ### Testing and formatting
 
 Before committing/pushing changes, run tests and format the code.
 
 If any code that you haven't touched changes after a format, flag it with me, and don't add it to the commit or push it.
-
