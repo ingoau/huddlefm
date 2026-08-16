@@ -88,7 +88,6 @@ function setup(
       uiThreadTs: "1.0",
       chimeMeeting: {},
       chimeAttendee: {},
-      attendeeId: "attendee",
     },
     "host",
     "bot",
