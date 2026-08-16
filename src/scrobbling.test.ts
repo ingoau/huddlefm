@@ -90,7 +90,7 @@ test("sends now playing immediately and queues scrobbles at the listening thresh
       id: "track",
       requesterId: "user",
       title: "Title",
-      artist: "Artist",
+      artist: "Artist, Featured Artist",
       album: "Album",
       duration: 40,
     },
@@ -117,6 +117,18 @@ test("sends now playing immediately and queues scrobbles at the listening thresh
     .map((call) => JSON.parse(call.body).listen_type);
   expect(lastFmMethods).toEqual(["track.updateNowPlaying", "track.scrobble"]);
   expect(listenBrainzTypes).toEqual(["playing_now", "single"]);
+  expect(
+    calls
+      .filter((call) => call.url.includes("audioscrobbler"))
+      .map((call) => new URLSearchParams(call.body).get("artist")),
+  ).toEqual(["Artist", "Artist"]);
+  expect(
+    calls
+      .filter((call) => call.url.includes("listenbrainz"))
+      .map(
+        (call) => JSON.parse(call.body).payload[0].track_metadata.artist_name,
+      ),
+  ).toEqual(["Artist", "Artist"]);
   store.close();
 });
 

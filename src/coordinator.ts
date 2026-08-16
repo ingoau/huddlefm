@@ -14,6 +14,7 @@ import {
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 import { errorMessage as message } from "./error-message.ts";
+import { firstArtist } from "./artist.ts";
 import {
   auditTrack,
   confirm,
@@ -2183,7 +2184,7 @@ export class Coordinator {
     ];
     if (!songs.length) return blocks;
     const autoplay = songs.filter((song) => song.automatic).length;
-    const artists = Map.groupBy(songs, (song) => song.artist);
+    const artists = Map.groupBy(songs, (song) => firstArtist(song.artist));
     const [topArtist, topSongs] = [...artists].sort(
       (a, b) => b[1].length - a[1].length,
     )[0]!;
