@@ -149,7 +149,7 @@ export class TrackCatalog {
       artist: String(metadata.artist ?? metadata.uploader ?? "Unknown artist"),
       album: metadata.album ? String(metadata.album) : undefined,
       duration: metadata.duration ? Number(metadata.duration) : undefined,
-      artwork: metadata.thumbnail ? String(metadata.thumbnail) : undefined,
+      artwork: artworkUrl(metadata.thumbnail),
     };
   }
 
@@ -283,8 +283,24 @@ function songMetadata(
     artist: song.artist.name,
     album: song.album?.name,
     duration: song.duration ?? undefined,
-    artwork: song.thumbnails.at(-1)?.url,
+    artwork: artworkUrl(song.thumbnails.at(-1)?.url),
   };
+}
+
+function artworkUrl(value: unknown) {
+  if (!value) return;
+  const artwork = String(value);
+  try {
+    const url = new URL(artwork);
+    if (
+      url.hostname === "googleusercontent.com" ||
+      url.hostname.endsWith(".googleusercontent.com")
+    )
+      url.pathname = url.pathname.replace(/=w\d+-h\d+(?=-|$)/, "=w1200-h1200");
+    return url.href;
+  } catch {
+    return artwork;
+  }
 }
 
 function option(label: string, value: string) {

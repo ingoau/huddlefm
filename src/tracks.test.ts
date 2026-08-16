@@ -31,6 +31,34 @@ test("uses search metadata without extracting it again", async () => {
   expect(await catalog.resolve("reference")).toBe(track);
 });
 
+test("requests high-resolution YouTube Music artwork", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  Reflect.set(catalog, "music", {
+    searchSongs: async () => [
+      {
+        videoId: "abcdefghijk",
+        name: "Song",
+        artist: { name: "Artist" },
+        thumbnails: [
+          {
+            url: "https://yt3.googleusercontent.com/cover=w120-h120-l90-rj",
+          },
+        ],
+      },
+    ],
+  });
+
+  const [suggestion] = await catalog.suggestions("Song");
+  expect(await catalog.resolve(suggestion!.value)).toEqual(
+    expect.objectContaining({
+      artwork: "https://yt3.googleusercontent.com/cover=w1200-h1200-l90-rj",
+    }),
+  );
+});
+
 test("only accepts video IDs from getUpNexts runtime data", async () => {
   const catalog = new TrackCatalog({
     durationSeconds: 1_200,
