@@ -130,6 +130,18 @@ export class SlackAppAdapter {
     await this.web.chat.update({ channel, ts, text, blocks: blocks as never });
   }
 
+  async updateCanvas(canvasId: string, markdown: string) {
+    await this.web.apiCall("canvases.edit", {
+      canvas_id: canvasId,
+      changes: [
+        {
+          operation: "replace",
+          document_content: { type: "markdown", markdown },
+        },
+      ],
+    });
+  }
+
   async delete(channel: string, ts: string) {
     await this.web.chat.delete({ channel, ts });
   }
