@@ -2,7 +2,6 @@ export type ChimeBootstrap = {
   sessionId: string;
   meeting: Record<string, unknown>;
   attendee: Record<string, unknown>;
-  attendeeId: string;
   initialVolume: number;
   bridgeToken: string;
 };
@@ -16,7 +15,6 @@ export type JoinedHuddle = {
   uiThreadTs: string;
   chimeMeeting: Record<string, unknown>;
   chimeAttendee: Record<string, unknown>;
-  attendeeId: string;
 };
 
 export type HuddleEvent =
@@ -63,7 +61,6 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
   const canvas = object(root.canvas, "canvas");
   const huddle = object(root.huddle, "huddle");
   const meeting = { ...object(freeWilly.meeting, "call.free_willy.meeting") };
-  const attendee = object(freeWilly.attendee, "call.free_willy.attendee");
   if (meeting.MeetingFeatures === null) delete meeting.MeetingFeatures;
 
   return {
@@ -85,11 +82,7 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
     uiChannelId: text(canvas.thread_channel_id, "canvas.thread_channel_id"),
     uiThreadTs: text(canvas.root_thread_ts, "canvas.root_thread_ts"),
     chimeMeeting: meeting,
-    chimeAttendee: attendee,
-    attendeeId: text(
-      attendee.AttendeeId,
-      "call.free_willy.attendee.AttendeeId",
-    ),
+    chimeAttendee: object(freeWilly.attendee, "call.free_willy.attendee"),
   };
 }
 
@@ -314,18 +307,6 @@ export class SlackHuddleAdapter {
     );
     if (!response.ok) throw new Error(`rooms.join HTTP ${response.status}`);
     return normalizeJoinResponse(await response.json());
-  }
-
-  async leave(channelId: string, callId: string, attendeeId: string) {
-    const result = await this.api("rooms.leave", {
-      channel_id: channelId,
-      call_id: callId,
-      attendee_id: attendeeId,
-    });
-    if (result.ok !== true)
-      throw new Error(
-        `rooms.leave failed: ${String(result.error ?? "unknown_error")}`,
-      );
   }
 
   async decline(channelId: string, callId: string) {
