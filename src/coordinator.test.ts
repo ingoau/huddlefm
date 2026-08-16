@@ -30,6 +30,7 @@ function setup(
   const suspensions: unknown[] = [];
   const media: unknown[] = [];
   const audit: unknown[] = [];
+  const sessionChanges: unknown[] = [];
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
@@ -107,6 +108,7 @@ function setup(
     async () => {},
     restored,
     scrobbling,
+    () => sessionChanges.push({}),
   );
   return {
     coordinator,
@@ -122,8 +124,17 @@ function setup(
     suspensions,
     media,
     audit,
+    sessionChanges,
   };
 }
+
+test("announces session lifecycle changes without waiting", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  expect(result.sessionChanges).toHaveLength(1);
+  await result.coordinator.endFromSlack();
+  expect(result.sessionChanges).toHaveLength(2);
+});
 
 const interaction = (
   coordinator: Coordinator,

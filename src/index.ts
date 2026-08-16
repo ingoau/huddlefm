@@ -57,21 +57,32 @@ let botUserId = "";
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
 let canvasTimer: ReturnType<typeof setInterval> | undefined;
 let canvasUpdate: Promise<void> | undefined;
+let canvasPending = false;
 let shuttingDown = false;
 
 function updateCanvas() {
   const canvasId = config.canvasId;
-  if (!canvasId || canvasUpdate) return canvasUpdate;
-  canvasUpdate = slackHuddle
-    .updateCanvas(
-      canvasId,
-      canvasMarkdown(store.canvasStats(), store.usageStats()),
+  if (!canvasId || shuttingDown) return;
+  if (canvasUpdate) {
+    canvasPending = true;
+    return canvasUpdate;
+  }
+  canvasUpdate = Promise.resolve()
+    .then(() =>
+      slackHuddle.updateCanvas(
+        canvasId,
+        canvasMarkdown(store.canvasStats(), store.usageStats()),
+      ),
     )
     .catch((error) =>
       console.error(`[canvas] update failed: ${safeError(error)}`),
     )
     .finally(() => {
       canvasUpdate = undefined;
+      if (canvasPending && !shuttingDown) {
+        canvasPending = false;
+        void updateCanvas();
+      }
     });
   return canvasUpdate;
 }
@@ -188,6 +199,7 @@ async function joinHuddle(
       },
       restored,
       scrobbling,
+      () => void updateCanvas(),
     ));
     try {
       if (restored) await coordinator.resume();
@@ -516,6 +528,7 @@ console.log(`HuddleFM ready as ${botUserId} on ${server.url}`);
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  canvasPending = false;
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
   await canvasUpdate;

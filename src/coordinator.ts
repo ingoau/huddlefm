@@ -91,6 +91,7 @@ export class Coordinator {
     private leaveMedia: () => Promise<void>,
     restored?: SavedSession,
     private scrobbling?: ScrobbleDispatcher,
+    private sessionChanged: () => void = () => {},
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
@@ -145,6 +146,7 @@ export class Coordinator {
       channelId: this.room.uiChannelId,
     });
     this.refreshIdle();
+    this.sessionChanged();
   }
 
   async resume() {
@@ -173,6 +175,7 @@ export class Coordinator {
       sessionId: this.id,
       huddleId: this.room.huddleId,
     });
+    this.sessionChanged();
     this.sendMedia({ type: "volume", value: this.volume });
     this.sendMedia({ type: "display_mode", mode: this.displayMode });
     if (!this.current) await this.startNext();
@@ -2171,6 +2174,7 @@ export class Coordinator {
       listenedSeconds: this.listenedSeconds,
     });
     this.audit.record("session.ended", userId, { sessionId: this.id, reason });
+    this.sessionChanged();
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();
     await rm(`data/media/${this.id}`, { recursive: true, force: true });
