@@ -195,12 +195,6 @@ async function joinHuddle(
           clearTimeout(timer);
           runtime!.leaveGate = undefined;
         }
-        await slackHuddle
-          .leave(runtime!.sourceChannelId, runtime!.callId)
-          .catch((error) =>
-            console.error(`[huddle] leave failed: ${safeError(error)}`),
-          );
-        await Bun.sleep(2_000);
         await runtime!.browser.close();
         runtimes.delete(bootstrap.sessionId);
       },
@@ -665,6 +659,7 @@ const shutdown = async () => {
         runtime.browser.close(),
     ),
   );
+  await Bun.sleep(2_000);
   await mediaBrowsers.close();
   server.stop();
   await slackApp.stop();
