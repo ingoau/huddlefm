@@ -398,7 +398,7 @@ export class Coordinator {
     return this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return;
       console.log(`[shutdown:${this.id}] posting restart notice`);
-      await this.slack
+      const notice = this.slack
         .post(
           this.room.uiChannelId,
           this.room.uiThreadTs,
@@ -437,7 +437,7 @@ export class Coordinator {
       });
       console.log(`[shutdown:${this.id}] leaving media`);
       this.sendMedia({ type: "leave" });
-      await this.leaveMedia();
+      await Promise.all([this.leaveMedia(), notice]);
       console.log(`[shutdown:${this.id}] suspended`);
     });
   }
