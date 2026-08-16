@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Store } from "./store.ts";
 import { errorMessage } from "./error-message.ts";
+import { firstArtist } from "./artist.ts";
 
 const lastFmEndpoint = "https://ws.audioscrobbler.com/2.0/";
 const listenBrainzEndpoint = "https://api.listenbrainz.org/1";
@@ -335,7 +336,7 @@ export class ScrobbleDispatcher {
             {
               ...(listenedAt === undefined ? {} : { listened_at: listenedAt }),
               track_metadata: {
-                artist_name: track.artist,
+                artist_name: firstArtist(track.artist),
                 track_name: track.title,
                 ...(track.album ? { release_name: track.album } : {}),
                 additional_info: {
@@ -455,7 +456,7 @@ export class PlaybackScrobbler {
 
 function trackParams(track: ScrobbleTrack, sessionKey: string) {
   return {
-    artist: track.artist,
+    artist: firstArtist(track.artist),
     track: track.title,
     ...(track.album ? { album: track.album } : {}),
     ...(track.duration ? { duration: String(Math.round(track.duration)) } : {}),

@@ -684,7 +684,7 @@ test("posts a collapsed recap after songs played", async () => {
       canonicalUrl: "https://example.com/track",
       sourceId: "track",
       title: "Track",
-      artist: "Artist",
+      artist: "Artist, Featured Artist",
       duration: 180,
     }),
     prepare: async () => "track.opus",
