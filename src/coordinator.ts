@@ -425,6 +425,8 @@ export class Coordinator {
         sessionId: this.id,
         resumeUntil,
       });
+      this.sendMedia({ type: "leave" });
+      await this.leaveMedia();
       await this.slack
         .post(
           this.room.uiChannelId,
@@ -434,8 +436,6 @@ export class Coordinator {
         .catch((error) =>
           console.error(`[restart] could not post notice: ${message(error)}`),
         );
-      this.sendMedia({ type: "leave" });
-      await this.leaveMedia();
     });
   }
 
