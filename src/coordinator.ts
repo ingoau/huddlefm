@@ -28,6 +28,8 @@ import {
   songCount,
 } from "./coordinator-ui.ts";
 
+const endRestoreMs = 2 * 60_000;
+
 type Entry = TrackMetadata & {
   id: string;
   requesterId: string;
@@ -93,6 +95,7 @@ export class Coordinator {
     restored?: SavedSession,
     private scrobbling?: ScrobbleDispatcher,
     private sessionChanged = () => {},
+    private sessionEnded = (_sessionId: string) => {},
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
@@ -2163,6 +2166,7 @@ export class Coordinator {
       });
       return this.notice(userId, "Only the host can end this session.");
     }
+    const state = this.state;
     this.state = "ended";
     this.playbackScrobbling?.finish();
     this.autoplayGeneration++;
@@ -2175,30 +2179,44 @@ export class Coordinator {
     clearTimeout(this.pausedTimer);
     clearTimeout(this.pausedWarningTimer);
     clearTimeout(this.anchorTimer);
-    this.store.setSession(this.id, {
-      status: "ended",
-      listenedSeconds: this.listenedSeconds,
-    });
+    this.store.endSession(
+      this.id,
+      {
+        state,
+        playbackSeconds: this.playbackSeconds,
+        listenedSeconds: this.listenedSeconds,
+        displayMode: this.displayMode,
+        anchorEnabled: this.anchorEnabled,
+        queue: this.queue.map((entry) => entry.id),
+      },
+      Date.now() + endRestoreMs,
+    );
     this.audit.record("session.ended", userId, { sessionId: this.id, reason });
     this.sessionChanged();
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();
-    await rm(`data/media/${this.id}`, { recursive: true, force: true });
-    if (this.uiTs) {
-      await this.slack
-        .delete(this.room.uiChannelId, this.uiTs)
-        .catch((error) =>
-          console.error(
-            `[ui] could not delete ended player ${this.uiTs}: ${message(error)}`,
-          ),
+    try {
+      if (this.uiTs) {
+        await this.slack
+          .delete(this.room.uiChannelId, this.uiTs)
+          .catch((error) =>
+            console.error(
+              `[ui] could not delete ended player ${this.uiTs}: ${message(error)}`,
+            ),
+          );
+        const text = `Session ended: ${reason}`;
+        const blocks = this.recapBlocks(text);
+        const timestamp = await this.slack.post(
+          this.room.uiChannelId,
+          this.room.uiThreadTs,
+          text,
+          blocks,
         );
-      const text = `Session ended: ${reason}`;
-      await this.slack.post(
-        this.room.uiChannelId,
-        this.room.uiThreadTs,
-        text,
-        this.recapBlocks(text),
-      );
+        this.uiTs = timestamp;
+        this.store.setEndMessage(this.id, timestamp, text, blocks);
+      }
+    } finally {
+      this.sessionEnded(this.id);
     }
   }
 
@@ -2207,7 +2225,7 @@ export class Coordinator {
     const blocks: unknown[] = [
       { type: "section", text: { type: "mrkdwn", text } },
     ];
-    if (!songs.length) return blocks;
+    if (!songs.length) return [...blocks, this.restoreBlock()];
     const autoplay = songs.filter((song) => song.automatic).length;
     const artists = Map.groupBy(songs, (song) => firstArtist(song.artist));
     const [topArtist, topSongs] = [...artists].sort(
@@ -2258,6 +2276,23 @@ export class Coordinator {
         ),
       ],
     });
+    blocks.push(this.restoreBlock());
     return blocks;
+  }
+
+  private restoreBlock() {
+    return {
+      type: "actions",
+      block_id: `restore_${this.id}`,
+      elements: [
+        {
+          type: "button",
+          action_id: "restore_session",
+          text: plain("Restore session"),
+          style: "primary",
+          value: this.id,
+        },
+      ],
+    };
   }
 }

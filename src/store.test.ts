@@ -164,6 +164,52 @@ test("restores suspended sessions for three minutes", () => {
   rmSync(directory, { recursive: true });
 });
 
+test("retains ended sessions until their restore window expires", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.endSession(
+    "session",
+    {
+      state: "paused",
+      playbackSeconds: 42,
+      listenedSeconds: 84,
+      displayMode: "lyrics",
+      anchorEnabled: true,
+      queue: [],
+    },
+    120_000,
+  );
+  const blocks = [{ type: "actions" }];
+  store.setEndMessage("session", "2.0", "Session ended", blocks);
+
+  expect(store.resumableSessions(1, 180_000).sessions).toEqual([]);
+  expect(store.restorableSessions()).toEqual([
+    expect.objectContaining({
+      id: "session",
+      state: "paused",
+      playbackSeconds: 42,
+      listenedSeconds: 84,
+      resumeUntil: 120_000,
+      uiTs: "2.0",
+      endText: "Session ended",
+      endBlocks: blocks,
+    }),
+  ]);
+
+  store.expireSession("session");
+  expect(store.restorableSessions()).toEqual([]);
+  store.close();
+});
+
 test("aggregates all-time canvas stats", () => {
   const store = new Store(":memory:");
   for (const [id, listenedSeconds] of [
