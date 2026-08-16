@@ -670,39 +670,16 @@ test("manager overrides permissions and HuddleFM cannot become host", async () =
   await result.coordinator.endFromSlack();
 });
 
-test("HuddleFM leaving ends playback", async () => {
+test("HuddleFM membership leave does not end active media", async () => {
   const result = setup();
   await result.coordinator.start();
-  const endedAt = Date.now();
   await result.coordinator.memberLeft("bot");
-  expect(result.media).toContainEqual({ type: "leave" });
-  expect(result.sessions).toContainEqual(
+  expect(result.media).not.toContainEqual({ type: "leave" });
+  expect(result.sessions).not.toContainEqual(
     expect.objectContaining({ status: "ended" }),
   );
-  const deadline = (
-    result.sessions.find(
-      (session) => (session as { status?: string }).status === "ended",
-    ) as { args: [unknown, unknown, number] }
-  ).args[2];
-  expect(deadline).toBeGreaterThanOrEqual(endedAt + 120_000);
-  expect(deadline).toBeLessThanOrEqual(Date.now() + 120_000);
-  expect(result.deleted).toContainEqual(["channel", "1"]);
-  expect(result.posted[1]).toEqual([
-    "channel",
-    "1.0",
-    "Session ended: removed from huddle",
-    [
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "Session ended: removed from huddle" },
-      },
-      expect.objectContaining({
-        type: "actions",
-        elements: [expect.objectContaining({ action_id: "restore_session" })],
-      }),
-    ],
-  ]);
-  expect(result.updates).toHaveLength(0);
+  expect(result.deleted).toHaveLength(0);
+  await result.coordinator.endFromSlack();
 });
 
 test("posts a collapsed recap after songs played", async () => {
