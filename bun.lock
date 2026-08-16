@@ -7,6 +7,7 @@
       "dependencies": {
         "@braccato/core": "1.1.0",
         "@braccato/parsers": "0.2.0",
+        "@fontsource/inter": "^5.3.0",
         "@slack/web-api": "8",
         "amazon-chime-sdk-js": "3.31.0",
         "playwright-core": "1.55.0",
@@ -85,6 +86,8 @@
     "@braccato/parsers": ["@braccato/parsers@0.2.0", "", { "dependencies": { "@braccato/types": "^1.0.0", "fast-xml-parser": "^5.10.1" } }, "sha512-vHdNv7t1DQnKw7tWTc/AfrGsK/nHLiihqM/xLm0gbTE+iN9WNKsupQ/jAeheQHaQQzZNCYnZicnXb5cxiXjqwg=="],
 
     "@braccato/types": ["@braccato/types@1.0.0", "", {}, "sha512-BHrCdJ5Uuc8IYJJqKT/4ULHkkbL8lk6KtAhfrx8bh3gC/huYwLDTBtOQAQSMriu3yMhV7TSvDd8L0loB5b1oeA=="],
+
+    "@fontsource/inter": ["@fontsource/inter@5.3.0", "", {}, "sha512-RofMylZmjlJEfELXeNHFWBRcSs75rGU/6bV2S2jfnvv/3rPXPGe0LgUJTklcHZ9lM4OZmAVFhcJPnACfb91A3g=="],
 
     "@nodable/entities": ["@nodable/entities@3.0.0", "", {}, "sha512-8L9xFeTYKhm49xfIypoe2W5wV1m/3Z58kT+7kR9A8OyFxcPduI4VmxaUMQyKYrRjUoLLSXv6EKKID5Tvj9cUVw=="],
 
