@@ -7,9 +7,11 @@ import {
   capabilities,
   displayModes,
   permissionPresets,
+  scrobblingModes,
   Store,
   type DisplayMode,
   type SavedSession,
+  type ScrobblingMode,
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
@@ -144,6 +146,9 @@ export class Coordinator {
       this.blocks(),
     );
     this.store.setUi(this.id, this.uiTs, this.revision);
+    await Promise.all(
+      [...this.participants].map((userId) => this.promptScrobbling(userId)),
+    );
     this.audit.record("session.started", this.hostId, {
       sessionId: this.id,
       huddleId: this.room.huddleId,
@@ -299,7 +304,11 @@ export class Coordinator {
           return this.queuePositionSubmission(interaction);
         return this.settingsSubmission(interaction);
       }
-      if (interaction.messageTs && interaction.messageTs !== this.uiTs)
+      if (
+        interaction.messageTs &&
+        interaction.messageTs !== this.uiTs &&
+        interaction.actionId !== "toggle_session_scrobbling"
+      )
         return this.notice(
           interaction.userId,
           "That player is stale; use the newest one.",
@@ -325,6 +334,8 @@ export class Coordinator {
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
+        toggle_session_scrobbling: () =>
+          this.toggleSessionScrobbling(interaction),
       };
       await handlers[interaction.actionId]?.();
     });
@@ -379,6 +390,7 @@ export class Coordinator {
   memberJoined(userId: string) {
     this.participants.add(userId);
     this.playbackScrobbling?.memberJoined(userId);
+    void this.promptScrobbling(userId);
     this.refreshIdle();
   }
 
@@ -1327,12 +1339,16 @@ export class Coordinator {
   }
 
   private settingsView(userId: string) {
-    const settings = this.scrobbling?.settings(userId) ?? {
+    const settings = this.scrobbling?.settings(userId, this.id) ?? {
       lastFmAvailable: false,
       lastFmConnected: false,
       lastFmEnabled: false,
       listenBrainzConnected: false,
       listenBrainzEnabled: false,
+      mode: "always" as const,
+      configured: false,
+      enabledIntegration: false,
+      sessionEnabled: false,
     };
     const admin = this.settingsAdmin(userId);
     const canChangeVolume = this.can(userId, "volume");
@@ -1506,6 +1522,51 @@ export class Coordinator {
             ]
           : []),
         { type: "header", text: plain("User settings") },
+        ...(settings.configured
+          ? [
+              {
+                type: "input",
+                block_id: "scrobbling_mode",
+                label: plain("Scrobbling mode"),
+                hint: plain("Sets the default for each Huddle"),
+                element: {
+                  type: "static_select",
+                  action_id: "mode",
+                  options: scrobblingModes.map((mode) => ({
+                    text: plain(
+                      mode === "ask"
+                        ? "Ask every time"
+                        : mode[0]!.toUpperCase() + mode.slice(1),
+                    ),
+                    value: mode,
+                  })),
+                  initial_option: {
+                    text: plain(
+                      settings.mode === "ask"
+                        ? "Ask every time"
+                        : settings.mode[0]!.toUpperCase() +
+                            settings.mode.slice(1),
+                    ),
+                    value: settings.mode,
+                  },
+                },
+              },
+              {
+                type: "actions",
+                block_id: "session_scrobbling",
+                elements: [
+                  {
+                    type: "button",
+                    action_id: "toggle_session_scrobbling",
+                    text: plain(
+                      `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
+                    ),
+                    value: this.id,
+                  },
+                ],
+              },
+            ]
+          : []),
         {
           type: "section",
           text: {
@@ -1732,6 +1793,26 @@ export class Coordinator {
       );
   }
 
+  private async toggleSessionScrobbling(interaction: Interaction) {
+    if (!this.scrobbling) return;
+    const settings = this.scrobbling.settings(interaction.userId, this.id);
+    if (!settings.configured) return;
+    const enabled = !settings.sessionEnabled;
+    this.scrobbling.setSessionEnabled(this.id, interaction.userId, enabled);
+    if (enabled) this.playbackScrobbling?.sessionEnabled(interaction.userId);
+    if (interaction.viewId)
+      await this.slack.updateModal(
+        interaction.viewId,
+        interaction.viewHash,
+        this.settingsView(interaction.userId),
+      );
+    else
+      await this.notice(
+        interaction.userId,
+        `Scrobbling ${enabled ? "enabled" : "disabled"} for this session.`,
+      );
+  }
+
   private async settingsSubmission(interaction: Interaction) {
     if (interaction.actionId !== "save_settings") return;
     const metadata = JSON.parse(interaction.metadata || "{}") as {
@@ -1839,8 +1920,15 @@ export class Coordinator {
     }
     if (this.scrobbling) {
       try {
-        const userSettings = this.scrobbling.settings(interaction.userId);
+        const userSettings = this.scrobbling.settings(
+          interaction.userId,
+          this.id,
+        );
         let newlyEnabled = false;
+        const mode = interaction.state.scrobbling_mode?.mode?.selected_option
+          ?.value as ScrobblingMode | undefined;
+        if (mode && scrobblingModes.includes(mode))
+          this.scrobbling.setMode(interaction.userId, mode);
         const lastFmState = interaction.state.lastfm_scrobbling?.enabled;
         if (lastFmState) {
           const enabled =
@@ -1868,7 +1956,13 @@ export class Coordinator {
             enabled,
           );
         }
-        if (newlyEnabled)
+        const sessionEnabled = this.scrobbling.sessionEnabled(
+          this.id,
+          interaction.userId,
+        );
+        if (!userSettings.sessionEnabled && sessionEnabled)
+          this.playbackScrobbling?.sessionEnabled(interaction.userId);
+        else if (newlyEnabled && sessionEnabled)
           this.playbackScrobbling?.settingsEnabled(interaction.userId);
       } catch (error) {
         await this.notice(interaction.userId, message(error));
@@ -2155,6 +2249,48 @@ export class Coordinator {
       text,
       this.room.uiThreadTs,
     );
+  }
+
+  private async promptScrobbling(userId: string) {
+    if (
+      userId === this.botUserId ||
+      !this.scrobbling?.shouldPrompt(this.id, userId)
+    )
+      return;
+    await this.slack
+      .ephemeral(
+        this.room.uiChannelId,
+        userId,
+        "Do you want to scrobble your listening in this Huddle?",
+        this.room.uiThreadTs,
+        [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "Do you want to scrobble your listening in this Huddle?",
+            },
+          },
+          {
+            type: "actions",
+            block_id: "session_scrobbling_prompt",
+            elements: [
+              {
+                type: "button",
+                action_id: "toggle_session_scrobbling",
+                text: plain("Enable scrobbling for this session"),
+                style: "primary",
+                value: this.id,
+              },
+            ],
+          },
+        ],
+      )
+      .catch((error) =>
+        console.error(
+          `[scrobbling] could not prompt ${userId}: ${message(error)}`,
+        ),
+      );
   }
 
   private refreshIdle() {

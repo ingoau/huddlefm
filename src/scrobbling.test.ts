@@ -57,6 +57,9 @@ test("disconnects saved scrobbling credentials", () => {
     listenBrainzConnected: false,
     listenBrainzUsername: undefined,
     listenBrainzEnabled: false,
+    mode: "always",
+    configured: false,
+    enabledIntegration: false,
   });
   store.close();
 });
@@ -182,6 +185,117 @@ test("one user connection applies to every Huddle playback", async () => {
   dispatcher.playback("huddle-one", "bot").start(track, ["user"]);
   dispatcher.playback("huddle-two", "bot").start(track, ["user"]);
   await until(() => playingNow === 2);
+  store.close();
+});
+
+test("shared modes and session overrides gate every configured service", () => {
+  const store = new Store(":memory:");
+  for (const id of ["ask-session", "other-session"])
+    store.createSession({
+      id,
+      huddleId: id,
+      callId: id,
+      channelId: "channel",
+      threadTs: "1.0",
+      creatorId: "user",
+      hostId: "user",
+      volume: 0.6,
+    });
+  store.connectLastFm("user", "last-user", "session-key");
+  store.setListenBrainzToken("user", "lb-token", "lb-user");
+  store.setListenBrainzEnabled("user", true);
+  const dispatcher = new ScrobbleDispatcher(store, {});
+
+  dispatcher.setMode("user", "ask");
+  expect(dispatcher.shouldPrompt("ask-session", "user")).toBe(true);
+  expect(dispatcher.sessionEnabled("ask-session", "user")).toBe(false);
+  dispatcher.setSessionEnabled("ask-session", "user", true);
+  expect(dispatcher.shouldPrompt("ask-session", "user")).toBe(false);
+  expect(dispatcher.sessionEnabled("ask-session", "user")).toBe(true);
+
+  dispatcher.setMode("user", "always");
+  expect(dispatcher.sessionEnabled("other-session", "user")).toBe(true);
+  dispatcher.setMode("user", "disabled");
+  expect(dispatcher.sessionEnabled("other-session", "user")).toBe(false);
+  expect(dispatcher.sessionEnabled("ask-session", "user")).toBe(true);
+  store.close();
+});
+
+test("ask mode does not prompt users without an enabled integration", () => {
+  const store = new Store(":memory:");
+  const dispatcher = new ScrobbleDispatcher(store, {});
+  dispatcher.setMode("user", "ask");
+  expect(dispatcher.shouldPrompt("session", "user")).toBe(false);
+  store.setListenBrainzToken("user", "token", "user");
+  expect(dispatcher.shouldPrompt("session", "user")).toBe(false);
+  store.setListenBrainzEnabled("user", true);
+  expect(dispatcher.shouldPrompt("session", "user")).toBe(true);
+  store.close();
+});
+
+test("ask mode gates playback for every service until the session is enabled", async () => {
+  const calls: string[] = [];
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "user",
+    hostId: "user",
+    volume: 0.6,
+  });
+  store.connectLastFm("user", "last-user", "session-key");
+  store.setListenBrainzToken("user", "lb-token", "lb-user");
+  store.setListenBrainzEnabled("user", true);
+  store.setScrobblingMode("user", "ask");
+  const dispatcher = new ScrobbleDispatcher(
+    store,
+    { lastFmApiKey: "api-key", lastFmSharedSecret: "secret" },
+    (async (input, init) => {
+      calls.push(String(input));
+      if (String(input).includes("audioscrobbler")) {
+        const method = new URLSearchParams(String(init?.body)).get("method");
+        return Response.json(
+          method === "track.scrobble"
+            ? { scrobbles: { "@attr": { ignored: "0" } } }
+            : {},
+        );
+      }
+      return Response.json({ status: "ok" });
+    }) as typeof fetch,
+  );
+  const playback = dispatcher.playback("session", "bot");
+  playback.start(
+    {
+      id: "track",
+      requesterId: "user",
+      title: "Title",
+      artist: "Artist",
+      duration: 40,
+    },
+    ["user"],
+  );
+  playback.position(5);
+  await Bun.sleep(0);
+  expect(calls).toHaveLength(0);
+
+  dispatcher.setSessionEnabled("session", "user", true);
+  playback.sessionEnabled("user");
+  await until(() => calls.length === 2);
+  for (const seconds of [10, 15, 20, 25]) playback.position(seconds);
+  await until(
+    () =>
+      (
+        store.db
+          .query(
+            "SELECT count(*) AS count FROM scrobbles WHERE status = 'sent'",
+          )
+          .get() as { count: number }
+      ).count === 2,
+  );
+  expect(calls).toHaveLength(4);
   store.close();
 });
 

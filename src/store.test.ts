@@ -336,6 +336,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
   expect(store.getUserScrobbling("user")).toEqual({
     lastFmEnabled: false,
     listenBrainzEnabled: false,
+    mode: "always",
   });
   store.setLastFmPending("user", "pending", 10);
   store.connectLastFm("user", "last-user", "session-key");
@@ -348,6 +349,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     listenBrainzUsername: "musicbrainz-user",
     listenBrainzToken: "lb-token",
     listenBrainzEnabled: true,
+    mode: "always",
   });
   store.disconnectListenBrainz("user");
   expect(store.getUserScrobbling("user")).toEqual({
@@ -355,6 +357,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     lastFmSessionKey: "session-key",
     lastFmEnabled: true,
     listenBrainzEnabled: false,
+    mode: "always",
   });
   const track = {
     id: "track",
@@ -373,5 +376,27 @@ test("persists global user scrobbling settings and deduplicates queued submissio
       track,
     }),
   ]);
+  store.close();
+});
+
+test("persists scrobbling mode and per-session overrides", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.setScrobblingMode("user", "ask");
+  expect(store.getUserScrobbling("user").mode).toBe("ask");
+  expect(store.getSessionScrobbling("session", "user")).toBeUndefined();
+  store.setSessionScrobbling("session", "user", true);
+  expect(store.getSessionScrobbling("session", "user")).toBe(true);
+  store.setSessionScrobbling("session", "user", false);
+  expect(store.getSessionScrobbling("session", "user")).toBe(false);
   store.close();
 });
