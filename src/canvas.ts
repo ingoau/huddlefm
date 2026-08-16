@@ -48,7 +48,7 @@ export function canvasMarkdown(
     ranking(
       stats.topChannels,
       ({ channelId, count }, index) =>
-        `${index + 1}. <#${channelId}> — ${count} ${count === 1 ? "song" : "songs"}`,
+        `${index + 1}. ![](#${channelId}) — ${count} ${count === 1 ? "song" : "songs"}`,
     ),
     "",
     "## Controls used",
