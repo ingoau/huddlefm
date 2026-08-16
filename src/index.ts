@@ -490,22 +490,24 @@ await slackHuddle.start((event) => {
     return;
   }
   if (event.type === "ThreadActivity") {
-    if (event.userId !== botUserId && event.text.includes(`<@${botUserId}>`)) {
-      void slackHuddle
-        .react(event.channelId, event.messageTs)
-        .catch((error) =>
-          console.error(`[huddle] reaction failed: ${safeError(error)}`),
-        );
-      void joinMentionedHuddle(event).catch((error) =>
-        console.error(safeError(error)),
-      );
-    }
     const runtime = [...runtimes.values()].find(
       (runtime) =>
         event.channelId === runtime.coordinator?.room.uiChannelId &&
         event.threadTs === runtime.coordinator.room.uiThreadTs,
     );
-    runtime?.coordinator?.threadActivity(event.userId);
+    const mentioned =
+      event.userId !== botUserId && event.text.includes(`<@${botUserId}>`);
+    if (mentioned) {
+      void slackHuddle
+        .react(event.channelId, event.messageTs)
+        .catch((error) =>
+          console.error(`[huddle] reaction failed: ${safeError(error)}`),
+        );
+      void (runtime?.coordinator?.repost() ?? joinMentionedHuddle(event)).catch(
+        (error) => console.error(safeError(error)),
+      );
+    }
+    if (!mentioned) runtime?.coordinator?.threadActivity(event.userId);
     return;
   }
   const runtime = runtimeForCall(event.callId);

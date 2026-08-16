@@ -1430,3 +1430,12 @@ test("thread anchoring is disabled by default and can be enabled", async () => {
   ]);
   await test.coordinator.endFromSlack();
 });
+
+test("reposts the player on demand when thread anchoring is disabled", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.repost();
+  expect(test.posted).toHaveLength(2);
+  expect(test.deleted).toEqual([["channel", "1"]]);
+  await test.coordinator.endFromSlack();
+});
