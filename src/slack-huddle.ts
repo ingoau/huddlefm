@@ -261,6 +261,22 @@ export class SlackHuddleAdapter {
       );
   }
 
+  async updateCanvas(canvasId: string, markdown: string) {
+    const result = await this.api("canvases.edit", {
+      canvas_id: canvasId,
+      changes: JSON.stringify([
+        {
+          operation: "replace",
+          document_content: { type: "markdown", markdown },
+        },
+      ]),
+    });
+    if (result.ok !== true)
+      throw new Error(
+        `canvases.edit failed: ${String(result.error ?? "unknown_error")}`,
+      );
+  }
+
   private async api(method: string, fields: Record<string, string>) {
     const response = await fetch(
       new URL(`/api/${method}`, this.config.workspaceUrl),

@@ -149,14 +149,107 @@ test("restores suspended sessions for three minutes", () => {
     sessions: [],
     expiredIds: ["session"],
   });
-  expect(store.db.query("SELECT count(*) AS count FROM tracks").get()).toEqual({
-    count: 0,
-  });
+  expect(
+    store.db
+      .query("SELECT id, file_path, queue_position FROM tracks ORDER BY id")
+      .all(),
+  ).toEqual([
+    { id: "played", file_path: null, queue_position: null },
+    { id: "track", file_path: null, queue_position: null },
+  ]);
   expect(store.db.query("SELECT status FROM sessions").get()).toEqual({
     status: "ended",
   });
   store.close();
   rmSync(directory, { recursive: true });
+});
+
+test("aggregates all-time canvas stats", () => {
+  const store = new Store(":memory:");
+  for (const [id, listenedSeconds] of [
+    ["one", 120],
+    ["two", 360],
+  ] as const) {
+    store.createSession({
+      id,
+      huddleId: id,
+      callId: id,
+      channelId: "channel",
+      threadTs: "1.0",
+      creatorId: "creator",
+      hostId: "host",
+      volume: 0.6,
+    });
+    store.setSession(id, { status: "ended", listenedSeconds });
+  }
+  const add = (
+    id: string,
+    sessionId: string,
+    title: string,
+    artist: string,
+    requesterId: string,
+    automatic = false,
+    status = "played",
+  ) =>
+    store.addTrack({
+      id,
+      sessionId,
+      requesterId,
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: title,
+      title,
+      artist,
+      automatic,
+      status,
+    });
+  add("1", "one", "Song", "Artist", "U1");
+  add("2", "two", "Song", "Artist", "U1", true);
+  add("3", "two", "Other", "Another", "U2");
+  add("4", "two", "Queued", "Ignored", "U2", false, "ready");
+
+  expect(store.canvasStats()).toEqual({
+    sessions: { count: 2, listened: 480, longest: 360, active: 0 },
+    tracks: { count: 3, uniqueTracks: 2, artists: 2, autoplay: 1 },
+    topArtists: [
+      { artist: "Artist", count: 2 },
+      { artist: "Another", count: 1 },
+    ],
+    topTracks: [
+      { title: "Song", artist: "Artist", count: 2 },
+      { title: "Other", artist: "Another", count: 1 },
+    ],
+  });
+  store.close();
+});
+
+test("stores usage counters and imports audit history once", () => {
+  const store = new Store(":memory:");
+  const history = {
+    added: 3,
+    removed: 2,
+    next: 4,
+    previous: 1,
+    forward: 5,
+    back: 6,
+    paused: 7,
+    resumed: 8,
+    volume: 9,
+    reordered: 10,
+    cleared: 11,
+    settings: 12,
+  };
+  expect(store.needsUsageBackfill()).toBeTrue();
+  store.importUsage(history);
+  store.incrementUsage("next");
+  store.importUsage(history);
+  expect(store.needsUsageBackfill()).toBeFalse();
+  expect(store.usageStats()).toContainEqual({ label: "Next", count: 5 });
+  expect(store.usageStats()).toContainEqual({
+    label: "Settings changes",
+    count: 12,
+  });
+  store.close();
 });
 
 test("migrates the old lyrics toggle to display mode", () => {

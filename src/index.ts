@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from "bun";
 import { rm } from "node:fs/promises";
 import { AuditLog } from "./audit-log.ts";
+import { canvasMarkdown } from "./canvas.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { errorMessage } from "./error-message.ts";
@@ -42,6 +43,8 @@ const catalog = new TrackCatalog(config);
 const lyrics = new LyricsCatalog();
 const slackApp = new SlackAppAdapter(config);
 const audit = new AuditLog("data/audit.jsonl", (id) => slackApp.userName(id));
+if (store.needsUsageBackfill())
+  store.importUsage(await audit.historicalUsage());
 const slackHuddle = new SlackHuddleAdapter(config);
 const mediaBrowsers = new MediaBrowserPool(config.chromePath);
 const runtimes = new Map<string, Runtime>();
@@ -52,7 +55,37 @@ const restoring = new Set<string>();
 const restoreWork = new Set<Promise<void>>();
 let botUserId = "";
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
+let canvasTimer: ReturnType<typeof setInterval> | undefined;
+let canvasUpdate: Promise<void> | undefined;
+let canvasPending = false;
 let shuttingDown = false;
+
+function updateCanvas() {
+  const canvasId = config.canvasId;
+  if (!canvasId || shuttingDown) return;
+  if (canvasUpdate) {
+    canvasPending = true;
+    return canvasUpdate;
+  }
+  canvasUpdate = Promise.resolve()
+    .then(() =>
+      slackHuddle.updateCanvas(
+        canvasId,
+        canvasMarkdown(store.canvasStats(), store.usageStats()),
+      ),
+    )
+    .catch((error) =>
+      console.error(`[canvas] update failed: ${safeError(error)}`),
+    )
+    .finally(() => {
+      canvasUpdate = undefined;
+      if (canvasPending && !shuttingDown) {
+        canvasPending = false;
+        void updateCanvas();
+      }
+    });
+  return canvasUpdate;
+}
 
 type SocketData = { sessionId: string };
 type Gate = ReturnType<typeof Promise.withResolvers<void>>;
@@ -166,6 +199,7 @@ async function joinHuddle(
       },
       restored,
       scrobbling,
+      () => void updateCanvas(),
     ));
     try {
       if (restored) await coordinator.resume();
@@ -481,6 +515,10 @@ await slackHuddle.start((event) => {
   if (event.type === "MemberLeft") runtime.coordinator.memberLeft(event.userId);
   if (event.type === "HuddleEnded") void runtime.coordinator.endFromSlack();
 });
+if (config.canvasId) {
+  void updateCanvas();
+  canvasTimer = setInterval(() => void updateCanvas(), 15 * 60_000);
+}
 for (const session of saved.sessions) pendingRestores.set(session.id, session);
 await retryRestores();
 if (pendingRestores.size)
@@ -490,7 +528,10 @@ console.log(`HuddleFM ready as ${botUserId} on ${server.url}`);
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  canvasPending = false;
   clearInterval(restoreTimer);
+  clearInterval(canvasTimer);
+  await canvasUpdate;
   await Promise.allSettled([...restoreWork]);
   const resumeUntil = Date.now() + resumeTtlMs;
   await Promise.allSettled(

@@ -92,6 +92,7 @@ export class Coordinator {
     private leaveMedia: () => Promise<void>,
     restored?: SavedSession,
     private scrobbling?: ScrobbleDispatcher,
+    private sessionChanged: () => void = () => {},
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
@@ -146,6 +147,7 @@ export class Coordinator {
       channelId: this.room.uiChannelId,
     });
     this.refreshIdle();
+    this.sessionChanged();
   }
 
   async resume() {
@@ -174,6 +176,7 @@ export class Coordinator {
       sessionId: this.id,
       huddleId: this.room.huddleId,
     });
+    this.sessionChanged();
     this.sendMedia({ type: "volume", value: this.volume });
     this.sendMedia({ type: "display_mode", mode: this.displayMode });
     if (!this.current) await this.startNext();
@@ -564,6 +567,7 @@ export class Coordinator {
           sessionId: this.id,
           ...auditTrack(entry),
         });
+        this.store.incrementUsage("added");
         return { entry, controller };
       });
       await this.render();
@@ -932,18 +936,19 @@ export class Coordinator {
       sessionId: this.id,
       ...auditTrack(this.current),
     });
+    this.store.incrementUsage("next");
     await this.advance();
   }
 
   private async previous(interaction: Interaction) {
     if (!(await this.require(interaction, "skip"))) return;
     if (this.current && this.playbackSeconds > 5) {
-      this.audit.record("playback.seeked", interaction.userId, {
+      this.audit.record("track.previous", interaction.userId, {
         sessionId: this.id,
-        trackId: this.current.id,
-        previous: this.playbackSeconds,
-        seconds: 0,
+        ...auditTrack(this.current),
+        restarted: true,
       });
+      this.store.incrementUsage("previous");
       this.playbackSeconds = 0;
       this.sendMedia({ type: "seek", seconds: 0 });
       return;
@@ -954,6 +959,7 @@ export class Coordinator {
       sessionId: this.id,
       ...auditTrack(prior),
     });
+    this.store.incrementUsage("previous");
     if (this.current) {
       this.current.status = "ready";
       this.queue.unshift(this.current);
@@ -977,6 +983,7 @@ export class Coordinator {
       previous,
       seconds: this.playbackSeconds,
     });
+    this.store.incrementUsage(offset > 0 ? "forward" : "back");
   }
 
   private async toggle(interaction: Interaction) {
@@ -991,6 +998,7 @@ export class Coordinator {
       interaction.userId,
       { sessionId: this.id, trackId: this.current.id },
     );
+    this.store.incrementUsage(this.state === "paused" ? "paused" : "resumed");
     await this.render();
     this.refreshIdle();
   }
@@ -1009,6 +1017,7 @@ export class Coordinator {
       previous,
       volume: this.volume,
     });
+    this.store.incrementUsage("volume");
     await this.render();
   }
 
@@ -1038,6 +1047,7 @@ export class Coordinator {
       sessionId: this.id,
       ...auditTrack(entry),
     });
+    this.store.incrementUsage("removed");
     if (entry.filePath) await rm(entry.filePath, { force: true });
     await this.render();
     this.syncPreloads();
@@ -1068,6 +1078,7 @@ export class Coordinator {
       from: index,
       to: target,
     });
+    this.store.incrementUsage("reordered");
     await this.render();
     this.syncPreloads();
     await this.updateQueueModal(interaction);
@@ -1088,6 +1099,7 @@ export class Coordinator {
       sessionId: this.id,
       count,
     });
+    this.store.incrementUsage("cleared");
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
@@ -1765,6 +1777,7 @@ export class Coordinator {
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     });
+    this.store.incrementUsage("settings");
     await this.render();
     this.scheduleAutoplay();
   }
@@ -2162,6 +2175,7 @@ export class Coordinator {
       listenedSeconds: this.listenedSeconds,
     });
     this.audit.record("session.ended", userId, { sessionId: this.id, reason });
+    this.sessionChanged();
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();
     await rm(`data/media/${this.id}`, { recursive: true, force: true });
