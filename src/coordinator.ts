@@ -313,8 +313,7 @@ export class Coordinator {
         connect_lastfm: () => this.lastFmModal(interaction),
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
-        disconnect_listenbrainz: () =>
-          this.disconnectListenBrainz(interaction),
+        disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
       };
       await handlers[interaction.actionId]?.();
     });
