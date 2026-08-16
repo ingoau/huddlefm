@@ -309,17 +309,6 @@ export class SlackHuddleAdapter {
     return normalizeJoinResponse(await response.json());
   }
 
-  async leave(channelId: string, callId: string) {
-    const result = await this.api("rooms.leave", {
-      channel_id: channelId,
-      room_id: callId,
-    });
-    if (result.ok !== true)
-      throw new Error(
-        `rooms.leave failed: ${String(result.error ?? "unknown_error")}`,
-      );
-  }
-
   async decline(channelId: string, callId: string) {
     const form = new FormData();
     form.set("token", this.config.xoxc);
