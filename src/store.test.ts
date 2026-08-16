@@ -206,6 +206,13 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     listenBrainzToken: "lb-token",
     listenBrainzEnabled: true,
   });
+  store.disconnectListenBrainz("user");
+  expect(store.getUserScrobbling("user")).toEqual({
+    lastFmUsername: "last-user",
+    lastFmSessionKey: "session-key",
+    lastFmEnabled: true,
+    listenBrainzEnabled: false,
+  });
   const track = {
     id: "track",
     requesterId: "requester",

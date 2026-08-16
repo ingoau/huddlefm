@@ -140,6 +140,11 @@ export class ScrobbleDispatcher {
     return username;
   }
 
+  disconnectListenBrainz(userId: string) {
+    this.store.disconnectListenBrainz(userId);
+    this.store.clearPendingScrobbles(userId, "listenbrainz");
+  }
+
   nowPlaying(userIds: Iterable<string>, track: ScrobbleTrack) {
     for (const userId of userIds)
       void this.sendNowPlaying(userId, track).catch((error) =>

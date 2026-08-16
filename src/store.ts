@@ -609,6 +609,16 @@ export class Store {
       .run(token, username, Date.now(), userId);
   }
 
+  disconnectListenBrainz(userId: string) {
+    this.ensureUserScrobbling(userId);
+    this.db
+      .query(
+        `UPDATE user_scrobbling SET listenbrainz_username = NULL, listenbrainz_token = NULL,
+      listenbrainz_enabled = 0, updated_at = ? WHERE user_id = ?`,
+      )
+      .run(Date.now(), userId);
+  }
+
   setListenBrainzEnabled(userId: string, enabled: boolean) {
     this.ensureUserScrobbling(userId);
     this.db

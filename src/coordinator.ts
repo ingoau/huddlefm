@@ -313,6 +313,7 @@ export class Coordinator {
         connect_lastfm: () => this.lastFmModal(interaction),
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
+        disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
       };
       await handlers[interaction.actionId]?.();
     });
@@ -1420,6 +1421,11 @@ export class Coordinator {
                     text: plain("Disconnect"),
                     style: "danger",
                     value: this.id,
+                    confirm: confirm(
+                      "Disconnect Last.fm?",
+                      "This removes your saved Last.fm login.",
+                      "Disconnect",
+                    ),
                   },
                 ],
               },
@@ -1477,6 +1483,28 @@ export class Coordinator {
             ),
           },
         },
+        ...(settings.listenBrainzConnected
+          ? [
+              {
+                type: "actions",
+                block_id: "listenbrainz_actions",
+                elements: [
+                  {
+                    type: "button",
+                    action_id: "disconnect_listenbrainz",
+                    text: plain("Remove token"),
+                    style: "danger",
+                    value: this.id,
+                    confirm: confirm(
+                      "Remove ListenBrainz token?",
+                      "This disables ListenBrainz scrobbling and removes your saved token.",
+                      "Remove",
+                    ),
+                  },
+                ],
+              },
+            ]
+          : []),
       ],
     };
   }
@@ -1559,6 +1587,17 @@ export class Coordinator {
   private async disconnectLastFm(interaction: Interaction) {
     if (!this.scrobbling) return;
     this.scrobbling.disconnectLastFm(interaction.userId);
+    if (interaction.viewId && interaction.viewHash)
+      await this.slack.updateModal(
+        interaction.viewId,
+        interaction.viewHash,
+        this.settingsView(interaction.userId),
+      );
+  }
+
+  private async disconnectListenBrainz(interaction: Interaction) {
+    if (!this.scrobbling) return;
+    this.scrobbling.disconnectListenBrainz(interaction.userId);
     if (interaction.viewId && interaction.viewHash)
       await this.slack.updateModal(
         interaction.viewId,
