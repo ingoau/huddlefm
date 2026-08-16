@@ -90,7 +90,6 @@ function updateCanvas() {
 
 type SocketData = { sessionId: string };
 type Gate = ReturnType<typeof Promise.withResolvers<void>>;
-const huddleLeaveGates = new Map<string, Gate>();
 type Runtime = {
   sourceChannelId: string;
   callId: string;
@@ -624,8 +623,6 @@ await slackHuddle.start((event) => {
     if (!mentioned) runtime?.coordinator?.threadActivity(event.userId);
     return;
   }
-  if (event.type === "MemberLeft" && event.userId === botUserId)
-    huddleLeaveGates.get(event.callId)?.resolve();
   const runtime = runtimeForCall(event.callId);
   if (!runtime?.coordinator) return;
   if (event.type === "MemberJoined")
@@ -656,26 +653,13 @@ const shutdown = async () => {
   await Promise.allSettled([...restoreWork]);
   const resumeUntil = Date.now() + resumeTtlMs;
   await Promise.allSettled(
-    [...runtimes.values()].map(async (runtime) => {
-      if (!runtime.coordinator) return runtime.browser.close();
-      const gate = Promise.withResolvers<void>();
-      const callIds = [runtime.callId, runtime.coordinator.room.huddleId];
-      for (const callId of callIds) huddleLeaveGates.set(callId, gate);
-      try {
-        await runtime.coordinator.suspendForRestart(resumeUntil);
-        const confirmed = await Promise.race([
-          gate.promise.then(() => true),
-          Bun.sleep(10_000).then(() => false),
-        ]);
-        if (!confirmed)
-          console.warn(`[huddle] leave not confirmed for ${runtime.callId}`);
-      } finally {
-        for (const callId of callIds)
-          if (huddleLeaveGates.get(callId) === gate)
-            huddleLeaveGates.delete(callId);
-      }
-    }),
+    [...runtimes.values()].map(
+      (runtime) =>
+        runtime.coordinator?.suspendForRestart(resumeUntil) ??
+        runtime.browser.close(),
+    ),
   );
+  await Bun.sleep(2_000);
   await mediaBrowsers.close();
   server.stop();
   await slackApp.stop();
