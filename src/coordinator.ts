@@ -92,7 +92,7 @@ export class Coordinator {
     private leaveMedia: () => Promise<void>,
     restored?: SavedSession,
     private scrobbling?: ScrobbleDispatcher,
-    private sessionChanged: () => void = () => {},
+    private sessionChanged = () => {},
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
@@ -544,7 +544,7 @@ export class Coordinator {
         );
         return;
       }
-      const entries: Entry[] = tracks.map((metadata) => ({
+      const entries = tracks.map((metadata) => ({
         ...metadata,
         id: crypto.randomUUID(),
         requesterId: interaction.userId,
@@ -686,7 +686,7 @@ export class Coordinator {
             ...this.history.slice(-20).map((track) => track.sourceId),
           ]);
           if (currentIds.has(metadata.sourceId)) return false;
-          const entry: Entry = {
+          const entry = {
             ...metadata,
             id: crypto.randomUUID(),
             requesterId: this.botUserId,
