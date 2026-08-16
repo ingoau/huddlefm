@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Store } from "./store.ts";
+import { scrobblingModes, type ScrobblingMode, type Store } from "./store.ts";
 import { errorMessage } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
 
@@ -55,19 +55,54 @@ export class ScrobbleDispatcher {
     return new PlaybackScrobbler(this, sessionId, botUserId);
   }
 
-  settings(userId: string) {
+  settings(userId: string, sessionId?: string) {
     const value = this.store.getUserScrobbling(userId);
+    const lastFmConnected = Boolean(value.lastFmSessionKey);
+    const listenBrainzConnected = Boolean(value.listenBrainzToken);
     return {
       lastFmAvailable: Boolean(
         this.config.lastFmApiKey && this.config.lastFmSharedSecret,
       ),
-      lastFmConnected: Boolean(value.lastFmSessionKey),
+      lastFmConnected,
       lastFmUsername: value.lastFmUsername,
       lastFmEnabled: value.lastFmEnabled,
-      listenBrainzConnected: Boolean(value.listenBrainzToken),
+      listenBrainzConnected,
       listenBrainzUsername: value.listenBrainzUsername,
       listenBrainzEnabled: value.listenBrainzEnabled,
+      mode: value.mode,
+      configured: lastFmConnected || listenBrainzConnected,
+      enabledIntegration:
+        (lastFmConnected && value.lastFmEnabled) ||
+        (listenBrainzConnected && value.listenBrainzEnabled),
+      ...(sessionId
+        ? { sessionEnabled: this.sessionEnabled(sessionId, userId) }
+        : {}),
     };
+  }
+
+  setMode(userId: string, mode: ScrobblingMode) {
+    if (!scrobblingModes.includes(mode)) throw new Error("Invalid mode");
+    this.store.setScrobblingMode(userId, mode);
+    if (mode !== "always") this.store.clearPendingUserScrobbles(userId);
+  }
+
+  sessionEnabled(sessionId: string, userId: string) {
+    const override = this.store.getSessionScrobbling(sessionId, userId);
+    return override ?? this.store.getUserScrobbling(userId).mode === "always";
+  }
+
+  shouldPrompt(sessionId: string, userId: string) {
+    const settings = this.settings(userId);
+    return (
+      settings.mode === "ask" &&
+      settings.enabledIntegration &&
+      this.store.getSessionScrobbling(sessionId, userId) === undefined
+    );
+  }
+
+  setSessionEnabled(sessionId: string, userId: string, enabled: boolean) {
+    this.store.setSessionScrobbling(sessionId, userId, enabled);
+    if (!enabled) this.store.clearPendingSessionScrobbles(sessionId, userId);
   }
 
   async beginLastFm(userId: string) {
@@ -162,6 +197,7 @@ export class ScrobbleDispatcher {
     listenedAt: number,
     listenedSeconds: number,
   ) {
+    if (!this.sessionEnabled(sessionId, userId)) return;
     const settings = this.store.getUserScrobbling(userId);
     const threshold = track.duration ? Math.min(track.duration / 2, 240) : 240;
     if (listenedSeconds < threshold) return;
@@ -232,6 +268,7 @@ export class ScrobbleDispatcher {
     for (const item of this.store.pendingScrobbles(Date.now())) {
       const settings = this.store.getUserScrobbling(item.userId);
       try {
+        if (!this.sessionEnabled(item.sessionId, item.userId)) continue;
         if (item.service === "lastfm") {
           if (!settings.lastFmEnabled || !settings.lastFmSessionKey) continue;
           const result = await this.lastFm("track.scrobble", {
@@ -390,7 +427,11 @@ export class PlaybackScrobbler {
           active: true,
         });
     this.current = { track, playing, lastPosition: position, listeners };
-    if (playing) this.dispatcher.nowPlaying(listeners.keys(), track);
+    if (playing)
+      this.dispatcher.nowPlaying(
+        this.enabledListeners(listeners.keys()),
+        track,
+      );
   }
 
   memberJoined(userId: string) {
@@ -404,7 +445,10 @@ export class PlaybackScrobbler {
         seconds: 0,
         active: true,
       });
-    if (this.current.playing)
+    if (
+      this.current.playing &&
+      this.dispatcher.sessionEnabled(this.sessionId, userId)
+    )
       this.dispatcher.nowPlaying([userId], this.current.track);
   }
 
@@ -421,13 +465,25 @@ export class PlaybackScrobbler {
     if (!this.current) return;
     this.current.playing = true;
     this.dispatcher.nowPlaying(
-      this.current.listeners.keys(),
+      this.enabledListeners(this.current.listeners.keys()),
       this.current.track,
     );
   }
 
+  sessionEnabled(userId: string) {
+    const listener = this.current?.listeners.get(userId);
+    if (listener) {
+      listener.listenedAt = Math.floor(Date.now() / 1000);
+      listener.seconds = 0;
+    }
+    this.settingsEnabled(userId);
+  }
+
   settingsEnabled(userId: string) {
-    if (this.current?.playing)
+    if (
+      this.current?.playing &&
+      this.dispatcher.sessionEnabled(this.sessionId, userId)
+    )
       this.dispatcher.nowPlaying([userId], this.current.track);
   }
 
@@ -451,6 +507,11 @@ export class PlaybackScrobbler {
 
   finish() {
     this.current = undefined;
+  }
+
+  private *enabledListeners(userIds: Iterable<string>) {
+    for (const userId of userIds)
+      if (this.dispatcher.sessionEnabled(this.sessionId, userId)) yield userId;
   }
 }
 

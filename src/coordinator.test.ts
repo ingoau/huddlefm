@@ -17,6 +17,7 @@ function setup(
   },
   restored?: SavedSession,
   scrobbling?: ScrobbleDispatcher,
+  storeOverride?: Store,
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -25,6 +26,7 @@ function setup(
   const pushedModals: unknown[] = [];
   const updatedModals: [unknown, unknown, unknown][] = [];
   const ephemeral: string[] = [];
+  const ephemeralCalls: unknown[][] = [];
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
   const suspensions: unknown[] = [];
@@ -40,7 +42,9 @@ function setup(
     delete: async (...args: unknown[]) => {
       deleted.push(args);
     },
-    ephemeral: async (_channel: string, _user: string, text: string) => {
+    ephemeral: async (...args: unknown[]) => {
+      ephemeralCalls.push(args);
+      const text = args[2] as string;
       ephemeral.push(text);
     },
     modal: async (...args: unknown[]) => {
@@ -53,30 +57,32 @@ function setup(
       updatedModals.push(args);
     },
   } as unknown as SlackAppAdapter;
-  const store = {
-    createSession: () => {},
-    setUi: () => {},
-    setTrack: () => {},
-    removeTrack: () => {},
-    addTrack: () => {},
-    incrementUsage: () => {},
-    setSession: (_id: string, value: unknown) => {
-      sessions.push(value);
-    },
-    activateSession: (_id: string, status: string) => {
-      sessions.push({ activated: status });
-    },
-    suspendSession: (...args: unknown[]) => {
-      suspensions.push(args);
-    },
-    endSession: (...args: unknown[]) => {
-      sessions.push({ status: "ended", args });
-    },
-    setEndMessage: () => {},
-    setPermission: (_id: string, capability: string, allowed: boolean) => {
-      permissions.push({ capability, allowed });
-    },
-  } as unknown as Store;
+  const store =
+    storeOverride ??
+    ({
+      createSession: () => {},
+      setUi: () => {},
+      setTrack: () => {},
+      removeTrack: () => {},
+      addTrack: () => {},
+      incrementUsage: () => {},
+      setSession: (_id: string, value: unknown) => {
+        sessions.push(value);
+      },
+      activateSession: (_id: string, status: string) => {
+        sessions.push({ activated: status });
+      },
+      suspendSession: (...args: unknown[]) => {
+        suspensions.push(args);
+      },
+      endSession: (...args: unknown[]) => {
+        sessions.push({ status: "ended", args });
+      },
+      setEndMessage: () => {},
+      setPermission: (_id: string, capability: string, allowed: boolean) => {
+        permissions.push({ capability, allowed });
+      },
+    } as unknown as Store);
   const lyrics = { get: async () => undefined } as unknown as LyricsCatalog;
   const coordinator = new Coordinator(
     {
@@ -123,6 +129,7 @@ function setup(
     pushedModals,
     updatedModals,
     ephemeral,
+    ephemeralCalls,
     sessions,
     permissions,
     suspensions,
@@ -1065,9 +1072,10 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  expect(JSON.stringify(test.modals.at(-1))).toContain(
-    '"action_id":"connect_lastfm"',
-  );
+  const settings = JSON.stringify(test.modals.at(-1));
+  expect(settings).toContain('"action_id":"connect_lastfm"');
+  expect(settings).not.toContain('"block_id":"scrobbling_mode"');
+  expect(settings).not.toContain('"action_id":"toggle_session_scrobbling"');
 
   const connect = interaction(test.coordinator, "connect_lastfm");
   connect.messageTs = "";
@@ -1100,6 +1108,61 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
   expect(JSON.stringify(test.updatedModals[1]?.[2])).toContain(
     '"action_id":"disconnect_lastfm"',
   );
+  expect(JSON.stringify(test.updatedModals[1]?.[2])).toContain(
+    '"block_id":"scrobbling_mode"',
+  );
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("ask mode prompts configured users and the shared session toggle overrides it", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setListenBrainzToken("host", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("host", true);
+  userStore.setScrobblingMode("host", "ask");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  expect(test.ephemeralCalls).toContainEqual([
+    "channel",
+    "host",
+    "Do you want to scrobble your listening in this Huddle?",
+    "1.0",
+    expect.arrayContaining([
+      expect.objectContaining({ block_id: "session_scrobbling_prompt" }),
+    ]),
+  ]);
+
+  await test.coordinator.action(
+    interaction(
+      test.coordinator,
+      "toggle_session_scrobbling",
+      test.coordinator.id,
+    ),
+  );
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    true,
+  );
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const modal = JSON.stringify(test.modals.at(-1));
+  expect(modal).toContain('"block_id":"scrobbling_mode"');
+  for (const mode of ["always", "ask", "disabled"])
+    expect(modal).toContain(`"value":"${mode}"`);
+  expect(modal).toContain("Disable scrobbling for this session");
+
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    scrobbling_mode: {
+      mode: { selected_option: { value: "disabled" } },
+    },
+  };
+  await test.coordinator.action(save);
+  expect(userStore.getUserScrobbling("host").mode).toBe("disabled");
   await test.coordinator.endFromSlack();
   userStore.close();
 });
@@ -1130,6 +1193,7 @@ test("user settings remove saved scrobbling credentials", async () => {
   expect(userStore.getUserScrobbling("host")).toEqual({
     lastFmEnabled: false,
     listenBrainzEnabled: false,
+    mode: "always",
   });
   await test.coordinator.endFromSlack();
   userStore.close();

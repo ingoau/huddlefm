@@ -27,6 +27,9 @@ export const permissionPresets = {
 export const displayModes = ["default", "lyrics", "off"] as const;
 export type DisplayMode = (typeof displayModes)[number];
 
+export const scrobblingModes = ["always", "ask", "disabled"] as const;
+export type ScrobblingMode = (typeof scrobblingModes)[number];
+
 export const usageLabels = {
   added: "Songs added",
   removed: "Songs removed",
@@ -94,12 +97,14 @@ export type UserScrobbling = {
   listenBrainzUsername?: string;
   listenBrainzToken?: string;
   listenBrainzEnabled: boolean;
+  mode: ScrobblingMode;
 };
 
 export type CanvasStats = ReturnType<Store["canvasStats"]>;
 
 type PendingScrobble = {
   id: string;
+  sessionId: string;
   userId: string;
   service: string;
   listenedAt: number;
@@ -182,7 +187,14 @@ export class Store {
         listenbrainz_username TEXT,
         listenbrainz_token TEXT,
         listenbrainz_enabled INTEGER NOT NULL DEFAULT 0,
+        mode TEXT NOT NULL DEFAULT 'always',
         updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS session_scrobbling (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        PRIMARY KEY (session_id, user_id)
       );
       CREATE TABLE IF NOT EXISTS scrobbles (
         id TEXT PRIMARY KEY,
@@ -244,6 +256,11 @@ export class Store {
     this.ensureColumn("sessions", "end_blocks", "TEXT");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
+    this.ensureColumn(
+      "user_scrobbling",
+      "mode",
+      "TEXT NOT NULL DEFAULT 'always'",
+    );
   }
 
   createSession(session: {
@@ -743,7 +760,12 @@ export class Store {
     const row = this.db
       .query("SELECT * FROM user_scrobbling WHERE user_id = ?")
       .get(userId) as Record<string, unknown> | null;
-    if (!row) return { lastFmEnabled: false, listenBrainzEnabled: false };
+    if (!row)
+      return {
+        lastFmEnabled: false,
+        listenBrainzEnabled: false,
+        mode: "always",
+      };
     return {
       ...(row.lastfm_username
         ? { lastFmUsername: String(row.lastfm_username) }
@@ -765,7 +787,37 @@ export class Store {
         ? { listenBrainzToken: String(row.listenbrainz_token) }
         : {}),
       listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
+      mode: scrobblingModes.includes(row.mode as ScrobblingMode)
+        ? (row.mode as ScrobblingMode)
+        : "always",
     };
+  }
+
+  setScrobblingMode(userId: string, mode: ScrobblingMode) {
+    this.ensureUserScrobbling(userId);
+    this.db
+      .query(
+        "UPDATE user_scrobbling SET mode = ?, updated_at = ? WHERE user_id = ?",
+      )
+      .run(mode, Date.now(), userId);
+  }
+
+  getSessionScrobbling(sessionId: string, userId: string) {
+    const row = this.db
+      .query(
+        "SELECT enabled FROM session_scrobbling WHERE session_id = ? AND user_id = ?",
+      )
+      .get(sessionId, userId) as { enabled: number } | null;
+    return row ? Boolean(row.enabled) : undefined;
+  }
+
+  setSessionScrobbling(sessionId: string, userId: string, enabled: boolean) {
+    this.db
+      .query(
+        `INSERT INTO session_scrobbling (session_id, user_id, enabled) VALUES (?, ?, ?)
+        ON CONFLICT (session_id, user_id) DO UPDATE SET enabled = excluded.enabled`,
+      )
+      .run(sessionId, userId, enabled ? 1 : 0);
   }
 
   setLastFmPending(userId: string, token: string, startedAt: number) {
@@ -866,7 +918,7 @@ export class Store {
     return (
       this.db
         .query(
-          `SELECT id, user_id, service, listened_at, attempts, track FROM scrobbles
+          `SELECT id, session_id, user_id, service, listened_at, attempts, track FROM scrobbles
       WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY listened_at, created_at`,
         )
         .all(now) as Record<string, unknown>[]
@@ -874,6 +926,7 @@ export class Store {
       (row) =>
         ({
           id: String(row.id),
+          sessionId: String(row.session_id),
           userId: String(row.user_id),
           service: String(row.service),
           listenedAt: Number(row.listened_at),
@@ -903,6 +956,20 @@ export class Store {
         "DELETE FROM scrobbles WHERE user_id = ? AND service = ? AND status = 'pending'",
       )
       .run(userId, service);
+  }
+
+  clearPendingSessionScrobbles(sessionId: string, userId: string) {
+    this.db
+      .query(
+        "DELETE FROM scrobbles WHERE session_id = ? AND user_id = ? AND status = 'pending'",
+      )
+      .run(sessionId, userId);
+  }
+
+  clearPendingUserScrobbles(userId: string) {
+    this.db
+      .query("DELETE FROM scrobbles WHERE user_id = ? AND status = 'pending'")
+      .run(userId);
   }
 
   close() {

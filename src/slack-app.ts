@@ -151,12 +151,14 @@ export class SlackAppAdapter {
     user: string,
     text: string,
     threadTs?: string,
+    blocks?: unknown[],
   ) {
     await this.web.chat.postEphemeral({
       channel,
       user,
       text,
       thread_ts: threadTs,
+      blocks: blocks as never,
     });
   }
 
