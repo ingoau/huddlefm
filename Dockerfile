@@ -9,7 +9,7 @@ RUN python3 -m venv /opt/yt-dlp \
 
 COPY --from=deno /deno /usr/local/bin/deno
 ENV PATH="/opt/yt-dlp/bin:${PATH}" \
-    BIND_ADDRESS=0.0.0.0 \
+    BIND_ADDRESS=127.0.0.1 \
     CHROME_PATH=/usr/bin/chromium \
     PORT=3210
 
