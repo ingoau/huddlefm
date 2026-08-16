@@ -38,7 +38,7 @@ export class ScrobbleDispatcher {
   constructor(
     private store: Store,
     private config: { lastFmApiKey?: string; lastFmSharedSecret?: string },
-    private request: typeof fetch = fetch,
+    private request = fetch,
   ) {}
 
   start() {
