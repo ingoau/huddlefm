@@ -2,9 +2,7 @@ import { elapsed } from "./coordinator-ui.ts";
 import type { CanvasStats } from "./store.ts";
 
 export function canvasMarkdown(
-  stats: Omit<CanvasStats, "topChannels"> & {
-    topChannels: (CanvasStats["topChannels"][number] & { name?: string })[];
-  },
+  stats: CanvasStats,
   controls: { label: string; count: number }[],
   updatedAt = Date.now(),
 ) {
@@ -49,8 +47,8 @@ export function canvasMarkdown(
     "## Most active channels",
     ranking(
       stats.topChannels,
-      ({ channelId, name, count }, index) =>
-        `${index + 1}. **#${escapeMarkdown(name ?? channelId)}** — ${count} ${count === 1 ? "song" : "songs"}`,
+      ({ channelId, count }, index) =>
+        `${index + 1}. ![](#${channelId}) — ${count} ${count === 1 ? "song" : "songs"}`,
     ),
     "",
     "## Controls used",

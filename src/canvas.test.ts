@@ -8,7 +8,7 @@ test("formats canvas stats as Slack canvas markdown", () => {
       tracks: { count: 3, uniqueTracks: 2, artists: 2, autoplay: 1 },
       topArtists: [{ artist: "Artist", count: 2 }],
       topTracks: [{ title: "Song", artist: "Artist", count: 2 }],
-      topChannels: [{ channelId: "C123", name: "music", count: 3 }],
+      topChannels: [{ channelId: "C123", count: 3 }],
     },
     [{ label: "Next", count: 4 }],
     0,
@@ -21,6 +21,6 @@ test("formats canvas stats as Slack canvas markdown", () => {
   expect(markdown).toContain("| Unique tracks | 2 |");
   expect(markdown).toContain("| Average songs per session | 1.5 |");
   expect(markdown).toContain("| Next | 4 |");
-  expect(markdown).toContain("1. **#music** — 3 songs");
+  expect(markdown).toContain("1. ![](#C123) — 3 songs");
   expect(markdown).not.toContain("# HuddleFM stats");
 });

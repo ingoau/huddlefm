@@ -89,7 +89,6 @@ export class SlackAppAdapter {
   private socket?: WebSocket;
   private web: WebClient;
   private names = new Map<string, Promise<string>>();
-  private channelNames = new Map<string, Promise<string>>();
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
   private stopping = false;
@@ -195,23 +194,6 @@ export class SlackAppAdapter {
         return userId;
       });
     this.names.set(userId, name);
-    return name;
-  }
-
-  channelName(channelId: string) {
-    const cached = this.channelNames.get(channelId);
-    if (cached) return cached;
-    const name = this.web.conversations
-      .info({ channel: channelId })
-      .then(
-        (result) =>
-          (result.channel as { name?: string } | undefined)?.name || channelId,
-      )
-      .catch((error) => {
-        console.error(`[slack-app] channel lookup failed: ${safeError(error)}`);
-        return channelId;
-      });
-    this.channelNames.set(channelId, name);
     return name;
   }
 
