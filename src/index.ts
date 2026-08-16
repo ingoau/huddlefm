@@ -645,13 +645,17 @@ console.log(`HuddleFM ready as ${botUserId} on ${server.url}`);
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
+  console.log("[shutdown] started");
   canvasPending = false;
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
   for (const timer of endCleanupTimers.values()) clearTimeout(timer);
+  console.log("[shutdown] waiting for canvas update");
   await canvasUpdate;
+  console.log("[shutdown] waiting for session restores");
   await Promise.allSettled([...restoreWork]);
   const resumeUntil = Date.now() + resumeTtlMs;
+  console.log(`[shutdown] suspending ${runtimes.size} session(s)`);
   await Promise.allSettled(
     [...runtimes.values()].map(
       (runtime) =>
@@ -659,14 +663,23 @@ const shutdown = async () => {
         runtime.browser.close(),
     ),
   );
+  console.log("[shutdown] closing media browsers");
   await mediaBrowsers.close();
+  console.log("[shutdown] stopping server");
   server.stop();
+  console.log("[shutdown] stopping Slack app");
   await slackApp.stop();
+  console.log("[shutdown] stopping Huddle connection");
   slackHuddle.stop();
+  console.log("[shutdown] closing media catalog");
   await catalog.close();
+  console.log("[shutdown] stopping scrobbling");
   await scrobbling.stop();
+  console.log("[shutdown] closing store");
   store.close();
+  console.log("[shutdown] flushing audit log");
   await audit.flush();
+  console.log("[shutdown] complete");
   process.exit(0);
 };
 process.on("SIGINT", shutdown);

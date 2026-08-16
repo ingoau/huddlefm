@@ -425,8 +425,10 @@ export class Coordinator {
         sessionId: this.id,
         resumeUntil,
       });
+      console.log(`[shutdown:${this.id}] leaving media`);
       this.sendMedia({ type: "leave" });
       await this.leaveMedia();
+      console.log(`[shutdown:${this.id}] posting restart notice`);
       await this.slack
         .post(
           this.room.uiChannelId,
@@ -436,6 +438,7 @@ export class Coordinator {
         .catch((error) =>
           console.error(`[restart] could not post notice: ${message(error)}`),
         );
+      console.log(`[shutdown:${this.id}] suspended`);
     });
   }
 
