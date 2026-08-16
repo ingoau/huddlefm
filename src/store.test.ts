@@ -220,7 +220,7 @@ test("aggregates all-time canvas stats", () => {
       id,
       huddleId: id,
       callId: id,
-      channelId: "channel",
+      channelId: id,
       threadTs: "1.0",
       creatorId: "creator",
       hostId: "host",
@@ -264,6 +264,10 @@ test("aggregates all-time canvas stats", () => {
     topTracks: [
       { title: "Song", artist: "Artist", count: 2 },
       { title: "Other", artist: "Another", count: 1 },
+    ],
+    topChannels: [
+      { channelId: "two", count: 2 },
+      { channelId: "one", count: 1 },
     ],
   });
   store.close();

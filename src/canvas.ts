@@ -45,6 +45,13 @@ export function canvasMarkdown(
         `${index + 1}. **${escapeMarkdown(title)}** — ${escapeMarkdown(artist)} · ${count} ${count === 1 ? "play" : "plays"}`,
     ),
     "",
+    "## Most active channels",
+    ranking(
+      stats.topChannels,
+      ({ channelId, count }, index) =>
+        `${index + 1}. <#${channelId}> — ${count} ${count === 1 ? "song" : "songs"}`,
+    ),
+    "",
     "## Controls used",
     "| Control | Uses |",
     "| --- | ---: |",
