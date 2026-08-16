@@ -188,7 +188,7 @@ async function joinHuddle(
       (message) => runtime?.socket?.send(JSON.stringify(message)),
       async () => {
         const gate = (runtime!.leaveGate = Promise.withResolvers<void>());
-        const timer = setTimeout(gate.resolve, shuttingDown ? 20_000 : 5_000);
+        const timer = setTimeout(gate.resolve, shuttingDown ? 2_000 : 5_000);
         try {
           await gate.promise;
         } finally {

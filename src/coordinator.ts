@@ -397,6 +397,16 @@ export class Coordinator {
   suspendForRestart(resumeUntil: number) {
     return this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return;
+      console.log(`[shutdown:${this.id}] posting restart notice`);
+      await this.slack
+        .post(
+          this.room.uiChannelId,
+          this.room.uiThreadTs,
+          "HuddleFM is restarting. Playback should resume shortly.",
+        )
+        .catch((error) =>
+          console.error(`[restart] could not post notice: ${message(error)}`),
+        );
       const state = this.state;
       this.state = "suspended";
       this.playbackScrobbling?.pause();
@@ -428,16 +438,6 @@ export class Coordinator {
       console.log(`[shutdown:${this.id}] leaving media`);
       this.sendMedia({ type: "leave" });
       await this.leaveMedia();
-      console.log(`[shutdown:${this.id}] posting restart notice`);
-      await this.slack
-        .post(
-          this.room.uiChannelId,
-          this.room.uiThreadTs,
-          "HuddleFM is restarting. Playback should resume shortly.",
-        )
-        .catch((error) =>
-          console.error(`[restart] could not post notice: ${message(error)}`),
-        );
       console.log(`[shutdown:${this.id}] suspended`);
     });
   }
