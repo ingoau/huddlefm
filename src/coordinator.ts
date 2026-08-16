@@ -381,13 +381,11 @@ export class Coordinator {
   memberLeft(userId: string) {
     this.participants.delete(userId);
     this.playbackScrobbling?.memberLeft(userId);
-    if (this.state === "suspended") return;
+    if (this.state === "suspended" || userId === this.botUserId) return;
     const changed =
-      userId === this.botUserId
-        ? this.enqueue(() => this.end(undefined, "removed from huddle"))
-        : userId === this.hostId
-          ? this.enqueue(() => this.hostLeft())
-          : Promise.resolve();
+      userId === this.hostId
+        ? this.enqueue(() => this.hostLeft())
+        : Promise.resolve();
     this.refreshIdle();
     return changed;
   }
