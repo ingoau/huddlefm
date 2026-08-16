@@ -1,6 +1,7 @@
 @import "@braccato/core/styles/variables.css";
 @import "@braccato/core/styles/lyrics.css";
 @import "@braccato/core/styles/instrumental.css";
+@import "@fontsource/inter/700.css";
 
 * {
   box-sizing: border-box;
@@ -196,9 +197,7 @@ braccato-lyrics {
 }
 
 .blyrics-container {
-  --blyrics-font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue",
-    sans-serif;
+  --blyrics-font-family: "Inter", sans-serif;
   --blyrics-font-size: 2.6rem;
   --blyrics-font-weight: 700;
   --blyrics-line-height: 1.16;
