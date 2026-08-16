@@ -392,12 +392,12 @@ socket.addEventListener("message", async (event) => {
       send("leaving");
       tone?.stop();
       stop();
+      session?.audioVideo.stop();
       await session?.audioVideo.stopAudioInput();
       session?.audioVideo.stopLocalVideoTile();
       await session?.audioVideo.stopVideoInput();
       cameraRunning = false;
       cameraInputReady = false;
-      session?.audioVideo.stop();
     }
   } catch (error) {
     status.textContent = "error";
