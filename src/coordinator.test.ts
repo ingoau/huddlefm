@@ -1086,6 +1086,37 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
   userStore.close();
 });
 
+test("user settings remove saved scrobbling credentials", async () => {
+  const userStore = new Store(":memory:");
+  userStore.connectLastFm("host", "last-user", "session-key");
+  userStore.setListenBrainzToken("host", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("host", true);
+  const scrobbling = new ScrobbleDispatcher(userStore, {
+    lastFmApiKey: "api-key",
+    lastFmSharedSecret: "secret",
+  });
+  const test = setup(undefined, undefined, undefined, scrobbling);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const modal = JSON.stringify(test.modals.at(-1));
+  expect(modal).toContain('"action_id":"disconnect_lastfm"');
+  expect(modal).toContain('"action_id":"disconnect_listenbrainz"');
+
+  for (const actionId of ["disconnect_lastfm", "disconnect_listenbrainz"]) {
+    const disconnect = interaction(test.coordinator, actionId);
+    disconnect.messageTs = "";
+    disconnect.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+    Object.assign(disconnect, { viewId: "view", viewHash: "hash" });
+    await test.coordinator.action(disconnect);
+  }
+  expect(userStore.getUserScrobbling("host")).toEqual({
+    lastFmEnabled: false,
+    listenBrainzEnabled: false,
+  });
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
 test("display mode defaults to album art and persists dropdown changes", async () => {
   const test = setup();
   await test.coordinator.start();

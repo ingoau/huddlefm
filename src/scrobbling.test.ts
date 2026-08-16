@@ -41,6 +41,26 @@ test("links Last.fm once as a global Slack user setting", async () => {
   store.close();
 });
 
+test("disconnects saved scrobbling credentials", () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("user", "last-user", "session-key");
+  store.setListenBrainzToken("user", "lb-token", "lb-user");
+  store.setListenBrainzEnabled("user", true);
+  const dispatcher = new ScrobbleDispatcher(store, {});
+  dispatcher.disconnectLastFm("user");
+  dispatcher.disconnectListenBrainz("user");
+  expect(dispatcher.settings("user")).toEqual({
+    lastFmAvailable: false,
+    lastFmConnected: false,
+    lastFmUsername: undefined,
+    lastFmEnabled: false,
+    listenBrainzConnected: false,
+    listenBrainzUsername: undefined,
+    listenBrainzEnabled: false,
+  });
+  store.close();
+});
+
 test("sends now playing immediately and queues scrobbles at the listening threshold", async () => {
   const calls: { url: string; body: string }[] = [];
   const request = (async (input, init) => {
