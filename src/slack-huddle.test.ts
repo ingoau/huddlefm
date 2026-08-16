@@ -36,6 +36,7 @@ test("normalizes the private join response without nullable MeetingFeatures", ()
     uiThreadTs: "123.456",
     chimeMeeting: { MeetingId: "meeting" },
     chimeAttendee: { AttendeeId: "attendee", JoinToken: "secret" },
+    attendeeId: "attendee",
   });
 });
 
