@@ -23,6 +23,7 @@ function setup(
   const deleted: unknown[] = [];
   const modals: unknown[] = [];
   const pushedModals: unknown[] = [];
+  const updatedModals: [unknown, unknown, unknown][] = [];
   const ephemeral: string[] = [];
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
@@ -47,7 +48,9 @@ function setup(
     pushModal: async (...args: unknown[]) => {
       pushedModals.push(args);
     },
-    updateModal: async () => {},
+    updateModal: async (...args: [unknown, unknown, unknown]) => {
+      updatedModals.push(args);
+    },
   } as unknown as SlackAppAdapter;
   const store = {
     createSession: () => {},
@@ -111,6 +114,7 @@ function setup(
     deleted,
     modals,
     pushedModals,
+    updatedModals,
     ephemeral,
     sessions,
     permissions,
@@ -1073,7 +1077,11 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
   const finish = interaction(test.coordinator, "continue_lastfm");
   finish.messageTs = "";
   finish.metadata = JSON.stringify({ sessionId: test.coordinator.id });
-  Object.assign(finish, { viewId: "view", viewHash: "hash" });
+  Object.assign(finish, {
+    viewId: "view",
+    viewHash: "hash",
+    previousViewId: "settings-view",
+  });
   await test.coordinator.action(finish);
   expect(userStore.getUserScrobbling("host")).toEqual(
     expect.objectContaining({
@@ -1081,6 +1089,11 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
       lastFmSessionKey: "session-key",
       lastFmEnabled: true,
     }),
+  );
+  expect(test.updatedModals).toHaveLength(2);
+  expect(test.updatedModals[1]?.[0]).toBe("settings-view");
+  expect(JSON.stringify(test.updatedModals[1]?.[2])).toContain(
+    '"action_id":"disconnect_lastfm"',
   );
   await test.coordinator.endFromSlack();
   userStore.close();

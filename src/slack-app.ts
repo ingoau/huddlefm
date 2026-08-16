@@ -18,6 +18,7 @@ type Body = {
   view?: {
     id?: string;
     hash?: string;
+    previous_view_id?: string;
     callback_id?: string;
     private_metadata?: string;
     state?: {
@@ -75,6 +76,9 @@ export function normalizeInteraction(body: Body) {
     triggerId: body.trigger_id ?? "",
     ...(body.view?.id
       ? { viewId: body.view.id, viewHash: body.view.hash ?? "" }
+      : {}),
+    ...(body.view?.previous_view_id
+      ? { previousViewId: body.view.previous_view_id }
       : {}),
     metadata: body.view?.private_metadata ?? "",
     state: body.view?.state?.values ?? {},
@@ -152,8 +156,12 @@ export class SlackAppAdapter {
     await this.web.views.push({ trigger_id: triggerId, view: view as never });
   }
 
-  async updateModal(viewId: string, hash: string, view: unknown) {
-    await this.web.views.update({ view_id: viewId, hash, view: view as never });
+  async updateModal(viewId: string, hash: string | undefined, view: unknown) {
+    await this.web.views.update({
+      view_id: viewId,
+      ...(hash ? { hash } : {}),
+      view: view as never,
+    });
   }
 
   userName(userId: string) {
