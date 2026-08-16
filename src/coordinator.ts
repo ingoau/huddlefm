@@ -1575,6 +1575,12 @@ export class Coordinator {
             },
           ],
         });
+      if (interaction.previousViewId)
+        await this.slack.updateModal(
+          interaction.previousViewId,
+          undefined,
+          this.settingsView(interaction.userId),
+        );
       this.playbackScrobbling?.settingsEnabled(interaction.userId);
     } catch (error) {
       await this.notice(

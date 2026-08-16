@@ -19,7 +19,7 @@ test("normalizes block actions using immutable values", () => {
       type: "block_actions",
       user: { id: "U123" },
       actions: [{ action_id: "next_track", value: "queue_123" }],
-      view: { id: "V123", hash: "hash" },
+      view: { id: "V123", hash: "hash", previous_view_id: "V122" },
     }),
   ).toEqual({
     type: "block_actions",
@@ -31,6 +31,7 @@ test("normalizes block actions using immutable values", () => {
     triggerId: "",
     viewId: "V123",
     viewHash: "hash",
+    previousViewId: "V122",
     metadata: "",
     state: {},
   });
