@@ -364,6 +364,11 @@ export class Coordinator {
     );
   }
 
+  repost() {
+    clearTimeout(this.anchorTimer);
+    return this.enqueue(() => this.reanchor());
+  }
+
   memberJoined(userId: string) {
     this.participants.add(userId);
     this.playbackScrobbling?.memberJoined(userId);
