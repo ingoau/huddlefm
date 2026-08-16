@@ -22,4 +22,5 @@ test("formats canvas stats as Slack canvas markdown", () => {
   expect(markdown).toContain("| Average songs per session | 1.5 |");
   expect(markdown).toContain("| Next | 4 |");
   expect(markdown).toContain("1. <#C123> — 3 songs");
+  expect(markdown).not.toContain("# HuddleFM stats");
 });

@@ -15,7 +15,6 @@ export function canvasMarkdown(
     line: (entry: T, index: number) => string,
   ) => entries.map(line).join("\n") || "Nothing yet.";
   return [
-    "# HuddleFM stats",
     "All-time listening across every HuddleFM session.",
     "",
     "| Metric | Total |",
