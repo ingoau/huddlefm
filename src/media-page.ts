@@ -389,6 +389,7 @@ socket.addEventListener("message", async (event) => {
     if (message.type === "volume") gain.gain.value = volumeGain(message.value);
     if (message.type === "display_mode") await setDisplayMode(message.mode);
     if (message.type === "leave") {
+      send("leaving");
       tone?.stop();
       stop();
       await session?.audioVideo.stopAudioInput();
