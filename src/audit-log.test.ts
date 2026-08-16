@@ -36,3 +36,25 @@ test("appends JSONL records with resolved actors", async () => {
   ]);
   rmSync(directory, { recursive: true });
 });
+
+test("counts successful control usage", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "huddlefm-audit-"));
+  const audit = new AuditLog(join(directory, "audit.jsonl"));
+  audit.record("track.added", "U1");
+  audit.record("track.skipped", "U1");
+  audit.record("track.previous", "U1");
+  audit.record("playback.seeked", "U1", { previous: 10, seconds: 20 });
+  audit.record("playback.seeked", "U1", { previous: 20, seconds: 10 });
+  audit.record("action.denied", "U1");
+
+  expect(await audit.historicalUsage()).toEqual(
+    expect.objectContaining({
+      added: 1,
+      next: 1,
+      previous: 1,
+      forward: 1,
+      back: 1,
+    }),
+  );
+  rmSync(directory, { recursive: true });
+});

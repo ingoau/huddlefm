@@ -27,6 +27,23 @@ export const permissionPresets = {
 export const displayModes = ["default", "lyrics", "off"] as const;
 export type DisplayMode = (typeof displayModes)[number];
 
+export const usageLabels = {
+  added: "Songs added",
+  removed: "Songs removed",
+  next: "Next",
+  previous: "Previous",
+  forward: "Fast-forward",
+  back: "Rewind",
+  paused: "Pause",
+  resumed: "Resume",
+  volume: "Volume changes",
+  reordered: "Queue moves",
+  cleared: "Queue clears",
+  settings: "Settings changes",
+} as const;
+export type UsageKey = keyof typeof usageLabels;
+export type UsageCounts = { [key in UsageKey]: number };
+
 type SavedTrack = {
   id: string;
   requesterId: string;
@@ -76,6 +93,8 @@ export type UserScrobbling = {
   listenBrainzToken?: string;
   listenBrainzEnabled: boolean;
 };
+
+export type CanvasStats = ReturnType<Store["canvasStats"]>;
 
 type PendingScrobble = {
   id: string;
@@ -176,6 +195,14 @@ export class Store {
         next_attempt_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
         UNIQUE (session_id, track_id, user_id, service)
+      );
+      CREATE TABLE IF NOT EXISTS usage_counters (
+        event TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS data_migrations (
+        name TEXT PRIMARY KEY,
+        completed_at INTEGER NOT NULL
       );
     `);
     this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
@@ -367,6 +394,93 @@ export class Store {
       .run(status, Date.now(), sessionId);
   }
 
+  canvasStats() {
+    const sessions = this.db
+      .query(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(listened_seconds), 0) AS listened,
+        COALESCE(MAX(listened_seconds), 0) AS longest,
+        COALESCE(SUM(CASE WHEN status != 'ended' THEN 1 ELSE 0 END), 0) AS active
+        FROM sessions`,
+      )
+      .get() as {
+      count: number;
+      listened: number;
+      longest: number;
+      active: number;
+    };
+    const tracks = this.db
+      .query(
+        `SELECT COUNT(*) AS count, COUNT(DISTINCT source_id) AS uniqueTracks,
+        COUNT(DISTINCT artist) AS artists,
+        COALESCE(SUM(CASE WHEN automatic = 1 THEN 1 ELSE 0 END), 0) AS autoplay
+        FROM tracks WHERE status = 'played'`,
+      )
+      .get() as {
+      count: number;
+      uniqueTracks: number;
+      artists: number;
+      autoplay: number;
+    };
+    const topArtists = this.db
+      .query(
+        `SELECT artist, COUNT(*) AS count FROM tracks WHERE status = 'played'
+        GROUP BY artist COLLATE NOCASE ORDER BY count DESC, artist COLLATE NOCASE LIMIT 5`,
+      )
+      .all() as { artist: string; count: number }[];
+    const topTracks = this.db
+      .query(
+        `SELECT title, artist, COUNT(*) AS count FROM tracks WHERE status = 'played'
+        GROUP BY source_id, title, artist ORDER BY count DESC, title COLLATE NOCASE LIMIT 5`,
+      )
+      .all() as { title: string; artist: string; count: number }[];
+    return { sessions, tracks, topArtists, topTracks };
+  }
+
+  incrementUsage(event: UsageKey) {
+    this.db
+      .query(
+        `INSERT INTO usage_counters (event, count) VALUES (?, 1)
+        ON CONFLICT (event) DO UPDATE SET count = count + 1`,
+      )
+      .run(event);
+  }
+
+  usageStats() {
+    const counts = new Map(
+      (
+        this.db.query("SELECT event, count FROM usage_counters").all() as {
+          event: UsageKey;
+          count: number;
+        }[]
+      ).map(({ event, count }) => [event, count]),
+    );
+    return Object.entries(usageLabels).map(([event, label]) => ({
+      label,
+      count: counts.get(event as UsageKey) ?? 0,
+    }));
+  }
+
+  needsUsageBackfill() {
+    return !this.db
+      .query("SELECT 1 FROM data_migrations WHERE name = ?")
+      .get("audit-usage-v1");
+  }
+
+  importUsage(counts: UsageCounts) {
+    this.db.transaction(() => {
+      if (!this.needsUsageBackfill()) return;
+      const insert = this.db.query(
+        `INSERT INTO usage_counters (event, count) VALUES (?, ?)
+        ON CONFLICT (event) DO UPDATE SET count = count + excluded.count`,
+      );
+      for (const [event, count] of Object.entries(counts))
+        insert.run(event, count);
+      this.db
+        .query("INSERT INTO data_migrations (name, completed_at) VALUES (?, ?)")
+        .run("audit-usage-v1", Date.now());
+    })();
+  }
+
   resumableSessions(now: number, ttlMs: number) {
     const rows = this.db
       .query(`SELECT * FROM sessions WHERE status != 'ended'`)
@@ -450,7 +564,9 @@ export class Store {
         const end = this.db.query(
           "UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?",
         );
-        const clear = this.db.query("DELETE FROM tracks WHERE session_id = ?");
+        const clear = this.db.query(
+          "UPDATE tracks SET file_path = NULL, queue_position = NULL WHERE session_id = ?",
+        );
         for (const id of expiredIds) {
           clear.run(id);
           end.run(now, id);
@@ -461,7 +577,11 @@ export class Store {
 
   expireSession(sessionId: string) {
     this.db.transaction(() => {
-      this.db.query("DELETE FROM tracks WHERE session_id = ?").run(sessionId);
+      this.db
+        .query(
+          "UPDATE tracks SET file_path = NULL, queue_position = NULL WHERE session_id = ?",
+        )
+        .run(sessionId);
       this.db
         .query(
           "UPDATE sessions SET status = 'ended', resume_state = NULL, resume_until = NULL, updated_at = ? WHERE id = ?",

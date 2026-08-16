@@ -58,6 +58,7 @@ function setup(
     setTrack: () => {},
     removeTrack: () => {},
     addTrack: () => {},
+    incrementUsage: () => {},
     setSession: (_id: string, value: unknown) => {
       sessions.push(value);
     },
