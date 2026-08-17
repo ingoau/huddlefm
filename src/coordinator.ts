@@ -90,6 +90,7 @@ export class Coordinator {
       warningMs: number;
       port: number;
       managerUserId?: string;
+      excludedUserIds: Set<string>;
     },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
@@ -101,11 +102,17 @@ export class Coordinator {
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
-    this.hostId = restored?.hostId ?? hostId;
+    const requestedHost = restored?.hostId ?? hostId;
+    this.hostId = this.isExcluded(requestedHost)
+      ? room.participantIds.find(
+          (id) => id !== botUserId && !this.isExcluded(id),
+        )
+      : requestedHost;
     this.volume = restored?.volume ?? config.initialVolume;
-    this.participants.add(hostId);
+    if (!this.isExcluded(hostId)) this.participants.add(hostId);
     this.participants.add(botUserId);
-    for (const id of room.participantIds) this.participants.add(id);
+    for (const id of room.participantIds)
+      if (!this.isExcluded(id)) this.participants.add(id);
     if (restored) {
       this.state = restored.state;
       this.playbackSeconds = restored.playbackSeconds;
@@ -136,7 +143,7 @@ export class Coordinator {
       channelId: this.room.uiChannelId,
       threadTs: this.room.uiThreadTs,
       creatorId: this.room.huddleCreatorId,
-      hostId: this.hostId!,
+      hostId: this.hostId,
       volume: this.volume,
     });
     this.uiTs = await this.slack.post(
@@ -371,6 +378,7 @@ export class Coordinator {
   threadActivity(userId: string) {
     if (
       userId === this.botUserId ||
+      this.isExcluded(userId) ||
       this.state === "ended" ||
       !this.anchorEnabled
     )
@@ -388,6 +396,7 @@ export class Coordinator {
   }
 
   memberJoined(userId: string) {
+    if (this.isExcluded(userId)) return;
     this.participants.add(userId);
     this.playbackScrobbling?.memberJoined(userId);
     void this.promptScrobbling(userId);
@@ -395,6 +404,7 @@ export class Coordinator {
   }
 
   memberLeft(userId: string) {
+    if (this.isExcluded(userId)) return;
     this.participants.delete(userId);
     this.playbackScrobbling?.memberLeft(userId);
     if (this.state === "suspended" || userId === this.botUserId) return;
@@ -468,6 +478,7 @@ export class Coordinator {
   }
 
   private can(userId: string, capability: string) {
+    if (this.isExcluded(userId)) return false;
     return (
       userId === this.config.managerUserId ||
       (this.participants.has(userId) &&
@@ -476,7 +487,10 @@ export class Coordinator {
   }
 
   private settingsAdmin(userId: string) {
-    return userId === this.hostId || userId === this.config.managerUserId;
+    return (
+      !this.isExcluded(userId) &&
+      (userId === this.hostId || userId === this.config.managerUserId)
+    );
   }
 
   private canOpenSettings(userId: string) {
@@ -508,8 +522,13 @@ export class Coordinator {
 
   private isParticipantOrManager(userId: string) {
     return (
-      userId === this.config.managerUserId || this.participants.has(userId)
+      !this.isExcluded(userId) &&
+      (userId === this.config.managerUserId || this.participants.has(userId))
     );
+  }
+
+  private isExcluded(userId: string) {
+    return this.config.excludedUserIds.has(userId);
   }
 
   private rejectNonParticipant(interaction: Interaction) {

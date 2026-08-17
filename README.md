@@ -40,6 +40,7 @@ SLACK_XOXC=xoxc-...
 SLACK_XOXD=xoxd-...
 # Optional
 MANAGER_USER_ID=U0123456789 # This user is always treated as a host
+EXCLUDED_USER_IDS=U0123456789,U9876543210 # Users ignored for participation, hosting, permissions, and scrobbling
 SLACK_CANVAS_ID=F0123456789 # Canvas used to display all-time listening stats
 LOCAL_CONTROL_TOKEN=replace-me # You shouldn't have to add this if the endpoints aren't exposed (ie. in a docker setup)
 LASTFM_API_KEY=replace-me # Last.fm API key for account linking for scrobbling
