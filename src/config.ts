@@ -30,6 +30,9 @@ export function loadConfig() {
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID,
+    excludedUserIds: new Set(
+      (process.env.EXCLUDED_USER_IDS ?? "").split(/[\s,]+/).filter(Boolean),
+    ),
     canvasId: process.env.SLACK_CANVAS_ID,
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,
     lastFmApiKey: process.env.LASTFM_API_KEY,

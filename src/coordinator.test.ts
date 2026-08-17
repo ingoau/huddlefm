@@ -18,6 +18,7 @@ function setup(
   restored?: SavedSession,
   scrobbling?: ScrobbleDispatcher,
   storeOverride?: Store,
+  excludedUserIds = new Set<string>(),
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -112,6 +113,7 @@ function setup(
       ...timeouts,
       port: 3210,
       managerUserId: "manager",
+      excludedUserIds,
     },
     "token",
     (message) => media.push(message),
@@ -765,6 +767,46 @@ test("announces and leaves two minutes after becoming the only Huddle participan
     result.media.some((value) => (value as { type?: string }).type === "leave"),
   );
   expect(result.media).toContainEqual({ type: "leave" });
+});
+
+test("excluded users cannot participate, host, or scrobble", async () => {
+  const store = new Store(":memory:");
+  store.setListenBrainzToken("host", "token", "host");
+  store.setListenBrainzEnabled("host", true);
+  store.setScrobblingMode("host", "ask");
+  const result = setup(
+    undefined,
+    {
+      aloneMs: 10,
+      idleMs: 100,
+      pausedMs: 100,
+      warningMs: 20,
+    },
+    undefined,
+    new ScrobbleDispatcher(store, {}),
+    store,
+    new Set(["host"]),
+  );
+
+  await result.coordinator.start();
+  expect([...result.coordinator.participants]).toEqual(["bot", "guest"]);
+  expect(store.db.query("SELECT host_id FROM sessions").get()).toEqual({
+    host_id: "guest",
+  });
+  expect(result.ephemeralCalls.some((call) => call[1] === "host")).toBeFalse();
+
+  result.coordinator.memberJoined("host");
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings"),
+  );
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  await result.coordinator.memberLeft("guest");
+  await until(() =>
+    result.media.some((value) => (value as { type?: string }).type === "leave"),
+  );
+  store.close();
 });
 
 test("warns two minutes before leaving after ten minutes with nothing playing", async () => {

@@ -270,7 +270,7 @@ export class Store {
     channelId: string;
     threadTs: string;
     creatorId: string;
-    hostId: string;
+    hostId?: string;
     volume: number;
   }) {
     const now = Date.now();
@@ -288,7 +288,7 @@ export class Store {
           session.channelId,
           session.threadTs,
           session.creatorId,
-          session.hostId,
+          session.hostId ?? null,
           session.volume,
           now,
           now,
