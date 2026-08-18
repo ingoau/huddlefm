@@ -68,6 +68,7 @@ export class Coordinator {
   private aloneTimer?: ReturnType<typeof setTimeout>;
   private pausedTimer?: ReturnType<typeof setTimeout>;
   private pausedWarningTimer?: ReturnType<typeof setTimeout>;
+  private renderTimer?: ReturnType<typeof setTimeout>;
   private lastSearch = new Map<string, number>();
   private playbackScrobbling?: PlaybackScrobbler;
 
@@ -243,7 +244,7 @@ export class Coordinator {
         this.store.setTrack(entry.id, { status: "ready", filePath });
         if (!this.current) await this.startNext();
         else {
-          await this.render();
+          this.queueRender();
           this.syncPreloads();
         }
       });
@@ -437,6 +438,7 @@ export class Coordinator {
       clearTimeout(this.pausedTimer);
       clearTimeout(this.pausedWarningTimer);
       clearTimeout(this.anchorTimer);
+      clearTimeout(this.renderTimer);
       this.store.suspendSession(
         this.id,
         {
@@ -632,7 +634,7 @@ export class Coordinator {
         this.store.setTrack(entry.id, { status: "ready", filePath });
         if (!this.current) await this.startNext();
         else {
-          await this.render();
+          this.queueRender();
           this.syncPreloads();
         }
       });
@@ -2033,6 +2035,14 @@ export class Coordinator {
     this.store.setUi(this.id, this.uiTs, this.revision);
   }
 
+  private queueRender() {
+    clearTimeout(this.renderTimer);
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = undefined;
+      void this.enqueue(() => this.render());
+    }, 100);
+  }
+
   private async reanchor() {
     if (this.state === "ended" || this.state === "suspended") return;
     const revision = ++this.revision;
@@ -2422,6 +2432,7 @@ export class Coordinator {
     clearTimeout(this.pausedTimer);
     clearTimeout(this.pausedWarningTimer);
     clearTimeout(this.anchorTimer);
+    clearTimeout(this.renderTimer);
     this.store.endSession(
       this.id,
       {

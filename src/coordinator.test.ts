@@ -152,6 +152,21 @@ test("announces session lifecycle changes without waiting", async () => {
   expect(result.sessionChanges).toHaveLength(2);
 });
 
+test("coalesces queued player renders", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const queueRender = Reflect.get(result.coordinator, "queueRender").bind(
+    result.coordinator,
+  );
+  queueRender();
+  queueRender();
+  queueRender();
+  await Bun.sleep(110);
+
+  expect(result.updates).toHaveLength(1);
+  await result.coordinator.endFromSlack();
+});
+
 const interaction = (
   coordinator: Coordinator,
   actionId: string,
