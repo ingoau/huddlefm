@@ -61,7 +61,6 @@ export class Coordinator {
   private hostId: string | undefined;
   private allowed = new Set<string>(permissionPresets.default);
   private serial = Promise.resolve();
-  private preparationSerial = Promise.resolve();
   private preparations = new Map<string, AbortController>();
   private anchorTimer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setTimeout>;
@@ -223,17 +222,12 @@ export class Coordinator {
     const controller = new AbortController();
     this.preparations.set(entry.id, controller);
     try {
-      const prepared = this.preparationSerial.then(() =>
-        this.tracks.prepare(
-          entry,
-          `data/media/${this.id}`,
-          entry.id,
-          controller.signal,
-        ),
-      );
-      this.preparationSerial = prepared.then(
-        () => undefined,
-        () => undefined,
+      const prepared = this.tracks.prepare(
+        entry,
+        `data/media/${this.id}`,
+        entry.id,
+        controller.signal,
+        this.preparationPriority(entry),
       );
       const filePath = await prepared;
       await this.enqueue(async () => {
@@ -619,17 +613,12 @@ export class Coordinator {
   }
 
   private async prepareManual(entry: Entry, controller: AbortController) {
-    const prepared = this.preparationSerial.then(() =>
-      this.tracks.prepare(
-        entry,
-        `data/media/${this.id}`,
-        entry.id,
-        controller.signal,
-      ),
-    );
-    this.preparationSerial = prepared.then(
-      () => undefined,
-      () => undefined,
+    const prepared = this.tracks.prepare(
+      entry,
+      `data/media/${this.id}`,
+      entry.id,
+      controller.signal,
+      this.preparationPriority(entry),
     );
     try {
       const filePath = await prepared;
@@ -780,17 +769,12 @@ export class Coordinator {
   }
 
   private async prepareAutoplay(entry: Entry, controller: AbortController) {
-    const prepared = this.preparationSerial.then(() =>
-      this.tracks.prepare(
-        entry,
-        `data/media/${this.id}`,
-        entry.id,
-        controller.signal,
-      ),
-    );
-    this.preparationSerial = prepared.then(
-      () => undefined,
-      () => undefined,
+    const prepared = this.tracks.prepare(
+      entry,
+      `data/media/${this.id}`,
+      entry.id,
+      controller.signal,
+      this.preparationPriority(entry),
     );
     try {
       const filePath = await prepared;
@@ -937,6 +921,10 @@ export class Coordinator {
       console.warn(`[lyrics] ${message(error)}`);
       return undefined;
     }));
+  }
+
+  private preparationPriority(entry: Entry) {
+    return entry.automatic ? -1_000_000 : -this.queue.indexOf(entry);
   }
 
   private async advance(reason = "played", expectedId?: string) {

@@ -24,6 +24,13 @@ export class TrackCatalog {
   >();
   private command: string[];
   private proxy?: PublicNetworkProxy;
+  private activePreparations = 0;
+  private preparationQueue: {
+    priority: number;
+    run: () => Promise<string>;
+    resolve: (path: string) => void;
+    reject: (error: unknown) => void;
+  }[] = [];
 
   constructor(
     private limits: { durationSeconds: number; downloadBytes: number },
@@ -181,6 +188,25 @@ export class TrackCatalog {
     directory: string,
     entryId: string,
     signal?: AbortSignal,
+    priority = 0,
+  ) {
+    return new Promise<string>((resolve, reject) => {
+      this.preparationQueue.push({
+        priority,
+        run: () => this.download(track, directory, entryId, signal),
+        resolve,
+        reject,
+      });
+      this.preparationQueue.sort((a, b) => b.priority - a.priority);
+      this.startPreparations();
+    });
+  }
+
+  private async download(
+    track: TrackMetadata,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
   ) {
     if (signal?.aborted) throw new Error("Track preparation cancelled");
     await mkdir(directory, { recursive: true });
@@ -248,6 +274,21 @@ export class TrackCatalog {
     } catch (error) {
       await rm(filePath, { force: true });
       throw error;
+    }
+  }
+
+  private startPreparations() {
+    while (this.activePreparations < 2) {
+      const preparation = this.preparationQueue.shift();
+      if (!preparation) return;
+      this.activePreparations++;
+      void preparation
+        .run()
+        .then(preparation.resolve, preparation.reject)
+        .finally(() => {
+          this.activePreparations--;
+          this.startPreparations();
+        });
     }
   }
 
