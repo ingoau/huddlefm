@@ -19,6 +19,7 @@ function setup(
   scrobbling?: ScrobbleDispatcher,
   storeOverride?: Store,
   excludedUserIds = new Set<string>(),
+  lyricsOverride?: LyricsCatalog,
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -84,7 +85,9 @@ function setup(
         permissions.push({ capability, allowed });
       },
     } as unknown as Store);
-  const lyrics = { get: async () => undefined } as unknown as LyricsCatalog;
+  const lyrics =
+    lyricsOverride ??
+    ({ get: async () => undefined } as unknown as LyricsCatalog);
   const coordinator = new Coordinator(
     {
       huddleCallId: "call",
@@ -147,6 +150,21 @@ test("announces session lifecycle changes without waiting", async () => {
   expect(result.sessionChanges).toHaveLength(1);
   await result.coordinator.endFromSlack();
   expect(result.sessionChanges).toHaveLength(2);
+});
+
+test("coalesces queued player renders", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const queueRender = Reflect.get(result.coordinator, "queueRender").bind(
+    result.coordinator,
+  );
+  queueRender();
+  queueRender();
+  queueRender();
+  await Bun.sleep(110);
+
+  expect(result.updates).toHaveLength(1);
+  await result.coordinator.endFromSlack();
 });
 
 const interaction = (
@@ -290,6 +308,52 @@ test("a Next click during first-track preparation does not skip it", async () =>
   expect(result.ephemeral).toContain(
     "Nothing was playing when you pressed Next.",
   );
+  await result.coordinator.endFromSlack();
+});
+
+test("loads lyrics only for the current and next tracks", async () => {
+  const requested: string[] = [];
+  const tracks = {
+    resolve: async () =>
+      ["a", "b", "c"].map((id) => ({
+        sourceInput: `https://example.com/${id}`,
+        canonicalUrl: `https://example.com/${id}`,
+        sourceId: id,
+        title: id,
+        artist: "Artist",
+      })),
+    prepare: async (_track: unknown, _directory: string, id: string) =>
+      `${id}.opus`,
+  } as unknown as TrackCatalog;
+  const lyrics = {
+    get: async (track: { sourceId: string }) => {
+      requested.push(track.sourceId);
+      return undefined;
+    },
+  } as unknown as LyricsCatalog;
+  const result = setup(
+    tracks,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    lyrics,
+  );
+  await result.coordinator.start();
+  await result.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "add_track_to_queue",
+    value: "bulkref_test",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+
+  expect(requested).toEqual(["a", "b"]);
   await result.coordinator.endFromSlack();
 });
 

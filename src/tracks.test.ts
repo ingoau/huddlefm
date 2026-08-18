@@ -31,6 +31,51 @@ test("uses search metadata without extracting it again", async () => {
   expect(await catalog.resolve("reference")).toBe(track);
 });
 
+test("limits track preparation globally and prioritizes queued work", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  const gates = new Map(
+    ["a", "b", "c", "d"].map((id) => [id, Promise.withResolvers<void>()]),
+  );
+  const started: string[] = [];
+  let active = 0;
+  let maximum = 0;
+  Reflect.set(
+    catalog,
+    "download",
+    async (_track: unknown, _dir: string, id: string) => {
+      started.push(id);
+      maximum = Math.max(maximum, ++active);
+      await gates.get(id)!.promise;
+      active--;
+      return id;
+    },
+  );
+  const track = {
+    sourceInput: "https://example.com",
+    canonicalUrl: "https://example.com",
+    sourceId: "test",
+    title: "Test",
+    artist: "Artist",
+  };
+  const work = [
+    catalog.prepare(track, "data", "a"),
+    catalog.prepare(track, "data", "b"),
+    catalog.prepare(track, "data", "c"),
+    catalog.prepare(track, "data", "d", undefined, 1),
+  ];
+
+  expect(started).toEqual(["a", "b"]);
+  gates.get("a")!.resolve();
+  await Bun.sleep(0);
+  expect(started).toEqual(["a", "b", "d"]);
+  expect(maximum).toBe(2);
+  for (const id of ["b", "c", "d"]) gates.get(id)!.resolve();
+  await Promise.all(work);
+});
+
 test("requests high-resolution YouTube Music artwork", async () => {
   const catalog = new TrackCatalog({
     durationSeconds: 1_200,

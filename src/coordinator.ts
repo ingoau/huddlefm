@@ -61,7 +61,6 @@ export class Coordinator {
   private hostId: string | undefined;
   private allowed = new Set<string>(permissionPresets.default);
   private serial = Promise.resolve();
-  private preparationSerial = Promise.resolve();
   private preparations = new Map<string, AbortController>();
   private anchorTimer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setTimeout>;
@@ -69,6 +68,7 @@ export class Coordinator {
   private aloneTimer?: ReturnType<typeof setTimeout>;
   private pausedTimer?: ReturnType<typeof setTimeout>;
   private pausedWarningTimer?: ReturnType<typeof setTimeout>;
+  private renderTimer?: ReturnType<typeof setTimeout>;
   private lastSearch = new Map<string, number>();
   private playbackScrobbling?: PlaybackScrobbler;
 
@@ -123,10 +123,7 @@ export class Coordinator {
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
       this.allowed = new Set(restored.permissions);
-      const entries = restored.tracks.map((track) => ({
-        ...track,
-        lyrics: this.lyrics.get(track).catch(() => undefined),
-      }));
+      const entries = restored.tracks.map((track) => ({ ...track }));
       this.current = entries.find((track) => track.status === "playing");
       this.history = entries.filter((track) => track.status === "played");
       this.queue = entries.filter(
@@ -206,7 +203,7 @@ export class Coordinator {
       if (this.playbackSeconds)
         this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
       if (this.state === "paused") this.sendMedia({ type: "pause" });
-      void this.current.lyrics?.then((lyrics) => {
+      void this.loadLyrics(this.current).then((lyrics) => {
         if (this.current && lyrics)
           this.sendMedia({
             type: "lyrics",
@@ -226,17 +223,12 @@ export class Coordinator {
     const controller = new AbortController();
     this.preparations.set(entry.id, controller);
     try {
-      const prepared = this.preparationSerial.then(() =>
-        this.tracks.prepare(
-          entry,
-          `data/media/${this.id}`,
-          entry.id,
-          controller.signal,
-        ),
-      );
-      this.preparationSerial = prepared.then(
-        () => undefined,
-        () => undefined,
+      const prepared = this.tracks.prepare(
+        entry,
+        `data/media/${this.id}`,
+        entry.id,
+        controller.signal,
+        this.preparationPriority(entry),
       );
       const filePath = await prepared;
       await this.enqueue(async () => {
@@ -252,7 +244,7 @@ export class Coordinator {
         this.store.setTrack(entry.id, { status: "ready", filePath });
         if (!this.current) await this.startNext();
         else {
-          await this.render();
+          this.queueRender();
           this.syncPreloads();
         }
       });
@@ -446,6 +438,7 @@ export class Coordinator {
       clearTimeout(this.pausedTimer);
       clearTimeout(this.pausedWarningTimer);
       clearTimeout(this.anchorTimer);
+      clearTimeout(this.renderTimer);
       this.store.suspendSession(
         this.id,
         {
@@ -593,10 +586,6 @@ export class Coordinator {
         id: crypto.randomUUID(),
         requesterId: interaction.userId,
         status: "preparing",
-        lyrics: this.lyrics.get(metadata).catch((error) => {
-          console.warn(`[lyrics] ${message(error)}`);
-          return undefined;
-        }),
       }));
       const pending = entries.map((entry) => {
         const controller = new AbortController();
@@ -626,17 +615,12 @@ export class Coordinator {
   }
 
   private async prepareManual(entry: Entry, controller: AbortController) {
-    const prepared = this.preparationSerial.then(() =>
-      this.tracks.prepare(
-        entry,
-        `data/media/${this.id}`,
-        entry.id,
-        controller.signal,
-      ),
-    );
-    this.preparationSerial = prepared.then(
-      () => undefined,
-      () => undefined,
+    const prepared = this.tracks.prepare(
+      entry,
+      `data/media/${this.id}`,
+      entry.id,
+      controller.signal,
+      this.preparationPriority(entry),
     );
     try {
       const filePath = await prepared;
@@ -650,7 +634,7 @@ export class Coordinator {
         this.store.setTrack(entry.id, { status: "ready", filePath });
         if (!this.current) await this.startNext();
         else {
-          await this.render();
+          this.queueRender();
           this.syncPreloads();
         }
       });
@@ -736,7 +720,6 @@ export class Coordinator {
             requesterId: this.botUserId,
             automatic: true,
             status: "preparing",
-            lyrics: this.lyrics.get(metadata).catch(() => undefined),
           };
           const controller = new AbortController();
           this.preparations.set(entry.id, controller);
@@ -788,17 +771,12 @@ export class Coordinator {
   }
 
   private async prepareAutoplay(entry: Entry, controller: AbortController) {
-    const prepared = this.preparationSerial.then(() =>
-      this.tracks.prepare(
-        entry,
-        `data/media/${this.id}`,
-        entry.id,
-        controller.signal,
-      ),
-    );
-    this.preparationSerial = prepared.then(
-      () => undefined,
-      () => undefined,
+    const prepared = this.tracks.prepare(
+      entry,
+      `data/media/${this.id}`,
+      entry.id,
+      controller.signal,
+      this.preparationPriority(entry),
     );
     try {
       const filePath = await prepared;
@@ -880,7 +858,7 @@ export class Coordinator {
     });
     this.playbackScrobbling?.start(next, this.participants);
     this.sendMedia(this.playMessage(next));
-    void next.lyrics?.then((lyrics) => {
+    void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
       if (lyrics) {
         console.log(
@@ -929,6 +907,8 @@ export class Coordinator {
         Boolean(entry?.filePath) &&
         all.findIndex((other) => other?.id === entry?.id) === index,
     );
+    const next = entries[0];
+    if (next) void this.loadLyrics(next);
     this.sendMedia({
       type: "preload",
       entries: entries.map((entry) => ({
@@ -936,6 +916,17 @@ export class Coordinator {
         url: this.mediaUrl(entry),
       })),
     });
+  }
+
+  private loadLyrics(entry: Entry) {
+    return (entry.lyrics ??= this.lyrics.get(entry).catch((error) => {
+      console.warn(`[lyrics] ${message(error)}`);
+      return undefined;
+    }));
+  }
+
+  private preparationPriority(entry: Entry) {
+    return entry.automatic ? -1_000_000 : -this.queue.indexOf(entry);
   }
 
   private async advance(reason = "played", expectedId?: string) {
@@ -2044,6 +2035,14 @@ export class Coordinator {
     this.store.setUi(this.id, this.uiTs, this.revision);
   }
 
+  private queueRender() {
+    clearTimeout(this.renderTimer);
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = undefined;
+      void this.enqueue(() => this.render());
+    }, 100);
+  }
+
   private async reanchor() {
     if (this.state === "ended" || this.state === "suspended") return;
     const revision = ++this.revision;
@@ -2433,6 +2432,7 @@ export class Coordinator {
     clearTimeout(this.pausedTimer);
     clearTimeout(this.pausedWarningTimer);
     clearTimeout(this.anchorTimer);
+    clearTimeout(this.renderTimer);
     this.store.endSession(
       this.id,
       {

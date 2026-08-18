@@ -218,6 +218,14 @@ export class Store {
         name TEXT PRIMARY KEY,
         completed_at INTEGER NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS sessions_status_resume
+        ON sessions(status, resume_until);
+      CREATE INDEX IF NOT EXISTS tracks_session_status
+        ON tracks(session_id, status);
+      CREATE INDEX IF NOT EXISTS tracks_status_source
+        ON tracks(status, source_id);
+      CREATE INDEX IF NOT EXISTS scrobbles_pending
+        ON scrobbles(status, next_attempt_at, listened_at, created_at);
     `);
     this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("sessions", "resume_state", "TEXT");

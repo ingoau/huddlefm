@@ -71,6 +71,21 @@ test("persists session and permission defaults", () => {
   store.close();
 });
 
+test("creates indexes for recurring session, track, and scrobble queries", () => {
+  const store = new Store(":memory:");
+  const indexes = ["sessions", "tracks", "scrobbles"].flatMap((table) =>
+    (
+      store.db.query(`PRAGMA index_list(${table})`).all() as { name: string }[]
+    ).map(({ name }) => name),
+  );
+
+  expect(indexes).toContain("sessions_status_resume");
+  expect(indexes).toContain("tracks_session_status");
+  expect(indexes).toContain("tracks_status_source");
+  expect(indexes).toContain("scrobbles_pending");
+  store.close();
+});
+
 test("restores suspended sessions for three minutes", () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
   const path = join(directory, "store.sqlite");
