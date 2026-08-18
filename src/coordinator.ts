@@ -123,10 +123,7 @@ export class Coordinator {
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
       this.allowed = new Set(restored.permissions);
-      const entries = restored.tracks.map((track) => ({
-        ...track,
-        lyrics: this.lyrics.get(track).catch(() => undefined),
-      }));
+      const entries = restored.tracks.map((track) => ({ ...track }));
       this.current = entries.find((track) => track.status === "playing");
       this.history = entries.filter((track) => track.status === "played");
       this.queue = entries.filter(
@@ -206,7 +203,7 @@ export class Coordinator {
       if (this.playbackSeconds)
         this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
       if (this.state === "paused") this.sendMedia({ type: "pause" });
-      void this.current.lyrics?.then((lyrics) => {
+      void this.loadLyrics(this.current).then((lyrics) => {
         if (this.current && lyrics)
           this.sendMedia({
             type: "lyrics",
@@ -593,10 +590,6 @@ export class Coordinator {
         id: crypto.randomUUID(),
         requesterId: interaction.userId,
         status: "preparing",
-        lyrics: this.lyrics.get(metadata).catch((error) => {
-          console.warn(`[lyrics] ${message(error)}`);
-          return undefined;
-        }),
       }));
       const pending = entries.map((entry) => {
         const controller = new AbortController();
@@ -736,7 +729,6 @@ export class Coordinator {
             requesterId: this.botUserId,
             automatic: true,
             status: "preparing",
-            lyrics: this.lyrics.get(metadata).catch(() => undefined),
           };
           const controller = new AbortController();
           this.preparations.set(entry.id, controller);
@@ -880,7 +872,7 @@ export class Coordinator {
     });
     this.playbackScrobbling?.start(next, this.participants);
     this.sendMedia(this.playMessage(next));
-    void next.lyrics?.then((lyrics) => {
+    void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
       if (lyrics) {
         console.log(
@@ -929,6 +921,8 @@ export class Coordinator {
         Boolean(entry?.filePath) &&
         all.findIndex((other) => other?.id === entry?.id) === index,
     );
+    const next = entries[0];
+    if (next) void this.loadLyrics(next);
     this.sendMedia({
       type: "preload",
       entries: entries.map((entry) => ({
@@ -936,6 +930,13 @@ export class Coordinator {
         url: this.mediaUrl(entry),
       })),
     });
+  }
+
+  private loadLyrics(entry: Entry) {
+    return (entry.lyrics ??= this.lyrics.get(entry).catch((error) => {
+      console.warn(`[lyrics] ${message(error)}`);
+      return undefined;
+    }));
   }
 
   private async advance(reason = "played", expectedId?: string) {
