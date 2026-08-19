@@ -563,6 +563,49 @@ test("routes message and modal interactions to their session", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("adds tracks through a full-width search modal", async () => {
+  let resolved = "";
+  const test = setup({
+    resolve: async (value: string) => {
+      resolved = value;
+      return {
+        sourceInput: "https://example.com/track",
+        canonicalUrl: "https://example.com/track",
+        sourceId: "track",
+        title: "Track",
+        artist: "Artist",
+      };
+    },
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await test.coordinator.start();
+
+  expect(JSON.stringify(test.posted[0])).toContain(
+    '"action_id":"open_add_to_queue"',
+  );
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  const modal = JSON.stringify(test.modals[0]);
+  expect(modal).toContain('"type":"input","block_id":"track"');
+  expect(modal).toContain('"type":"external_select"');
+  expect(modal).toContain('"focus_on_load":true');
+
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "add_track_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: {
+      track: { selection: { selected_option: { value: "track-reference" } } },
+    },
+  });
+  expect(resolved).toBe("track-reference");
+  await test.coordinator.endFromSlack();
+});
+
 test("first current participant claims a vacant host role", async () => {
   const test = setup();
   await test.coordinator.start();

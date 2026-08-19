@@ -42,13 +42,13 @@ test("normalizes suggestion queries", () => {
     normalizeInteraction({
       type: "block_suggestion",
       user: { id: "U123" },
-      action_id: "add_track_to_queue",
+      action_id: "selection",
       value: "midnight city",
     }),
   ).toEqual({
     type: "block_suggestion",
     userId: "U123",
-    actionId: "add_track_to_queue",
+    actionId: "selection",
     value: "midnight city",
     channelId: "",
     messageTs: "",
