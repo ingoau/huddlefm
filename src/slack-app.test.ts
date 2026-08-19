@@ -18,6 +18,7 @@ test("normalizes block actions using immutable values", () => {
     normalizeInteraction({
       type: "block_actions",
       user: { id: "U123" },
+      response_url: "https://hooks.slack.com/actions/test",
       actions: [{ action_id: "next_track", value: "queue_123" }],
       view: { id: "V123", hash: "hash", previous_view_id: "V122" },
     }),
@@ -29,6 +30,7 @@ test("normalizes block actions using immutable values", () => {
     channelId: "",
     messageTs: "",
     triggerId: "",
+    responseUrl: "https://hooks.slack.com/actions/test",
     viewId: "V123",
     viewHash: "hash",
     previousViewId: "V122",

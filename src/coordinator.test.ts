@@ -24,6 +24,7 @@ function setup(
   const posted: unknown[] = [];
   const updates: unknown[] = [];
   const deleted: unknown[] = [];
+  const deletedOriginals: unknown[] = [];
   const modals: unknown[] = [];
   const pushedModals: unknown[] = [];
   const updatedModals: [unknown, unknown, unknown][] = [];
@@ -44,6 +45,9 @@ function setup(
     },
     delete: async (...args: unknown[]) => {
       deleted.push(args);
+    },
+    deleteOriginal: async (...args: unknown[]) => {
+      deletedOriginals.push(args);
     },
     ephemeral: async (...args: unknown[]) => {
       ephemeralCalls.push(args);
@@ -137,6 +141,7 @@ function setup(
     posted,
     updates,
     deleted,
+    deletedOriginals,
     modals,
     pushedModals,
     updatedModals,
@@ -1292,13 +1297,17 @@ test("ask mode prompts configured users and the shared session toggle overrides 
     ]),
   ]);
 
-  await test.coordinator.action(
-    interaction(
+  await test.coordinator.action({
+    ...interaction(
       test.coordinator,
       "toggle_session_scrobbling",
       test.coordinator.id,
     ),
-  );
+    responseUrl: "https://hooks.slack.com/actions/test",
+  });
+  expect(test.deletedOriginals).toEqual([
+    ["https://hooks.slack.com/actions/test"],
+  ]);
   expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
     true,
   );
