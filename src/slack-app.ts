@@ -163,7 +163,11 @@ export class SlackAppAdapter {
   }
 
   async modal(triggerId: string, view: unknown) {
-    await this.web.views.open({ trigger_id: triggerId, view: view as never });
+    const result = await this.web.views.open({
+      trigger_id: triggerId,
+      view: view as never,
+    });
+    return result.view;
   }
 
   async pushModal(triggerId: string, view: unknown) {
@@ -171,11 +175,12 @@ export class SlackAppAdapter {
   }
 
   async updateModal(viewId: string, hash: string | undefined, view: unknown) {
-    await this.web.views.update({
+    const result = await this.web.views.update({
       view_id: viewId,
       ...(hash ? { hash } : {}),
       view: view as never,
     });
+    return result.view;
   }
 
   userName(userId: string) {

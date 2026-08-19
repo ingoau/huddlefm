@@ -69,6 +69,11 @@ export class Coordinator {
   private pausedTimer?: ReturnType<typeof setTimeout>;
   private pausedWarningTimer?: ReturnType<typeof setTimeout>;
   private renderTimer?: ReturnType<typeof setTimeout>;
+  private queueModalTimer?: ReturnType<typeof setTimeout>;
+  private queueViews = new Map<
+    string,
+    { userId: string; hash: string | undefined }
+  >();
   private lastSearch = new Map<string, number>();
   private playbackScrobbling?: PlaybackScrobbler;
 
@@ -253,6 +258,7 @@ export class Coordinator {
         this.preparations.delete(entry.id);
         if (this.state === "suspended" || !this.queue.includes(entry)) return;
         this.queue = this.queue.filter((track) => track !== entry);
+        this.queueChanged();
         this.store.setTrack(entry.id, { status: "failed" });
         this.audit.record("track.failed", undefined, {
           sessionId: this.id,
@@ -296,6 +302,14 @@ export class Coordinator {
       return this.add(interaction);
     const currentId = this.current?.id;
     return this.enqueue(async () => {
+      if (interaction.type === "view_closed") {
+        if (interaction.viewId) this.queueViews.delete(interaction.viewId);
+        if (!this.queueViews.size) {
+          clearTimeout(this.queueModalTimer);
+          this.queueModalTimer = undefined;
+        }
+        return;
+      }
       if (!this.isParticipantOrManager(interaction.userId))
         return this.rejectNonParticipant(interaction);
       if (interaction.type === "view_submission") {
@@ -604,6 +618,7 @@ export class Coordinator {
         return { entry, controller };
       });
       await this.render();
+      this.queueChanged();
       return pending;
     });
     if (!pending) return;
@@ -649,6 +664,7 @@ export class Coordinator {
           return;
         entry.status = "failed";
         this.queue = this.queue.filter((item) => item !== entry);
+        this.queueChanged();
         this.store.setTrack(entry.id, { status: "failed" });
         this.audit.record("track.failed", undefined, {
           sessionId: this.id,
@@ -735,6 +751,7 @@ export class Coordinator {
             ...auditTrack(entry),
           });
           await this.render();
+          this.queueChanged();
           return { entry, controller };
         });
         if (pending === undefined) return;
@@ -803,6 +820,7 @@ export class Coordinator {
         if (!this.queue.includes(entry)) return false;
         entry.status = "failed";
         this.queue = this.queue.filter((track) => track !== entry);
+        this.queueChanged();
         this.store.setTrack(entry.id, { status: "failed" });
         this.audit.record("track.failed", undefined, {
           sessionId: this.id,
@@ -821,6 +839,7 @@ export class Coordinator {
     this.autoplayPending = false;
     const automatic = this.queue.filter((track) => track.automatic);
     this.queue = this.queue.filter((track) => !track.automatic);
+    if (automatic.length) this.queueChanged();
     for (const entry of automatic) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
@@ -846,6 +865,7 @@ export class Coordinator {
       return this.refreshIdle();
     }
     this.queue.splice(this.queue.indexOf(next), 1);
+    this.queueChanged();
     this.current = next;
     this.playbackSeconds = 0;
     next.status = "playing";
@@ -1083,12 +1103,12 @@ export class Coordinator {
       ...auditTrack(entry),
     });
     this.store.incrementUsage("removed");
+    this.queueChanged(interaction);
     if (entry.filePath) await rm(entry.filePath, { force: true });
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
     this.scheduleAutoplay();
-    await this.updateQueueModal(interaction);
   }
 
   private async reorder(interaction: Interaction, direction: number) {
@@ -1114,9 +1134,9 @@ export class Coordinator {
       to: target,
     });
     this.store.incrementUsage("reordered");
+    this.queueChanged(interaction);
     await this.render();
     this.syncPreloads();
-    await this.updateQueueModal(interaction);
   }
 
   private async clear(interaction: Interaction) {
@@ -1130,6 +1150,7 @@ export class Coordinator {
       if (entry.filePath) await rm(entry.filePath, { force: true });
     }
     this.queue = [];
+    this.queueChanged();
     this.audit.record("queue.cleared", interaction.userId, {
       sessionId: this.id,
       count,
@@ -1143,10 +1164,15 @@ export class Coordinator {
 
   private async queueModal(interaction: Interaction) {
     if (!interaction.triggerId) return;
-    await this.slack.modal(
+    const view = await this.slack.modal(
       interaction.triggerId,
       this.queueView(interaction.userId),
     );
+    if (view?.id)
+      this.queueViews.set(view.id, {
+        userId: interaction.userId,
+        hash: view.hash,
+      });
   }
 
   private async queuePositionModal(interaction: Interaction) {
@@ -1158,6 +1184,7 @@ export class Coordinator {
     if (!(await this.require(interaction, "manage-queue"))) return;
     const entry = this.queue.find((track) => track.id === interaction.value);
     if (!entry || !interaction.triggerId) return;
+    this.rememberQueueView(interaction);
     const position = this.queue.indexOf(entry) + 1;
     await this.slack.pushModal(interaction.triggerId, {
       type: "modal",
@@ -1225,18 +1252,14 @@ export class Coordinator {
       this.syncPreloads();
       await this.render();
     }
-    if (interaction.previousViewId)
-      await this.slack.updateModal(
-        interaction.previousViewId,
-        undefined,
-        this.queueView(interaction.userId),
-      );
+    this.queueChanged();
   }
 
   private queueView(userId: string) {
     return {
       type: "modal",
       callback_id: "manage_queue",
+      notify_on_close: true,
       private_metadata: JSON.stringify({ sessionId: this.id }),
       title: plain("HuddleFM queue"),
       close: plain("Close"),
@@ -1327,13 +1350,45 @@ export class Coordinator {
     }
   }
 
-  private async updateQueueModal(interaction: Interaction) {
-    if (interaction.viewId && interaction.viewHash)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.queueView(interaction.userId),
-      );
+  private rememberQueueView(interaction: Interaction) {
+    if (interaction.viewId && this.queueViews.has(interaction.viewId))
+      this.queueViews.set(interaction.viewId, {
+        userId: interaction.userId,
+        hash: interaction.viewHash,
+      });
+  }
+
+  private queueChanged(interaction?: Interaction) {
+    if (interaction) this.rememberQueueView(interaction);
+    if (!this.queueViews.size) return;
+    clearTimeout(this.queueModalTimer);
+    this.queueModalTimer = setTimeout(() => {
+      this.queueModalTimer = undefined;
+      void this.enqueue(() => this.refreshQueueModals());
+    }, 100);
+  }
+
+  private async refreshQueueModals() {
+    await Promise.all(
+      [...this.queueViews].map(async ([viewId, current]) => {
+        try {
+          const view = await this.slack.updateModal(
+            viewId,
+            current.hash,
+            this.queueView(current.userId),
+          );
+          if (this.queueViews.get(viewId) === current && view)
+            this.queueViews.set(viewId, {
+              userId: current.userId,
+              hash: view.hash,
+            });
+        } catch (error) {
+          console.error(
+            `[queue] could not update modal ${viewId}: ${message(error)}`,
+          );
+        }
+      }),
+    );
   }
 
   private async settingsModal(interaction: Interaction) {
@@ -2433,6 +2488,8 @@ export class Coordinator {
     clearTimeout(this.pausedWarningTimer);
     clearTimeout(this.anchorTimer);
     clearTimeout(this.renderTimer);
+    clearTimeout(this.queueModalTimer);
+    this.queueViews.clear();
     this.store.endSession(
       this.id,
       {

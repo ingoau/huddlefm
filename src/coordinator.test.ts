@@ -36,6 +36,7 @@ function setup(
   const audit: unknown[] = [];
   const sessionChanges: unknown[] = [];
   let post = 0;
+  let modal = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
     update: async (...args: unknown[]) => {
@@ -51,12 +52,18 @@ function setup(
     },
     modal: async (...args: unknown[]) => {
       modals.push(args);
+      modal++;
+      return { id: `view-${modal}`, hash: `hash-${modal}` };
     },
     pushModal: async (...args: unknown[]) => {
       pushedModals.push(args);
     },
     updateModal: async (...args: [unknown, unknown, unknown]) => {
       updatedModals.push(args);
+      return {
+        id: String(args[0]),
+        hash: `updated-${updatedModals.length}`,
+      };
     },
   } as unknown as SlackAppAdapter;
   const store =
@@ -191,6 +198,52 @@ async function until(predicate: () => boolean) {
   for (let index = 0; index < 100 && !predicate(); index++) await Bun.sleep(1);
   expect(predicate()).toBeTrue();
 }
+
+test("keeps open queue modals current until they close", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [
+    {
+      id: "track",
+      requesterId: "host",
+      sourceInput: "track",
+      canonicalUrl: "track",
+      sourceId: "track",
+      title: "Track",
+      artist: "Artist",
+      status: "ready",
+    },
+  ]);
+  const open = interaction(result.coordinator, "view_full_queue");
+  await result.coordinator.action(open);
+  await result.coordinator.action({ ...open, userId: "guest" });
+  expect(JSON.stringify(result.modals)).toContain('"notify_on_close":true');
+
+  await result.coordinator.action(
+    interaction(result.coordinator, "clear_queue"),
+  );
+  await Bun.sleep(110);
+  await until(() => result.updatedModals.length === 2);
+  expect(result.updatedModals.map(([viewId]) => viewId)).toEqual([
+    "view-1",
+    "view-2",
+  ]);
+  expect(JSON.stringify(result.updatedModals)).toContain("The queue is empty.");
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "manage_queue"),
+    type: "view_closed",
+    messageTs: "",
+    viewId: "view-1",
+    viewHash: "updated-1",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id }),
+  });
+  Reflect.get(result.coordinator, "queueChanged").call(result.coordinator);
+  await Bun.sleep(110);
+  await until(() => result.updatedModals.length === 3);
+  expect(result.updatedModals.at(-1)?.[0]).toBe("view-2");
+  await result.coordinator.endFromSlack();
+});
 
 test("suspends with a restart notice and restores playback", async () => {
   const first = setup();
