@@ -1903,6 +1903,8 @@ export class Coordinator {
     const enabled = !settings.sessionEnabled;
     this.scrobbling.setSessionEnabled(this.id, interaction.userId, enabled);
     if (enabled) this.playbackScrobbling?.sessionEnabled(interaction.userId);
+    if (interaction.responseUrl)
+      await this.slack.deleteOriginal(interaction.responseUrl);
     if (interaction.viewId)
       await this.slack.updateModal(
         interaction.viewId,

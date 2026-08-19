@@ -6,6 +6,7 @@ type Body = {
   value?: string;
   action_id?: string;
   trigger_id?: string;
+  response_url?: string;
   user?: { id?: string };
   channel?: { id?: string };
   container?: { channel_id?: string; message_ts?: string };
@@ -74,6 +75,7 @@ export function normalizeInteraction(body: Body) {
     channelId: body.container?.channel_id ?? body.channel?.id ?? "",
     messageTs: body.container?.message_ts ?? body.message?.ts ?? "",
     triggerId: body.trigger_id ?? "",
+    ...(body.response_url ? { responseUrl: body.response_url } : {}),
     ...(body.view?.id
       ? { viewId: body.view.id, viewHash: body.view.hash ?? "" }
       : {}),
@@ -144,6 +146,16 @@ export class SlackAppAdapter {
 
   async delete(channel: string, ts: string) {
     await this.web.chat.delete({ channel, ts });
+  }
+
+  async deleteOriginal(responseUrl: string) {
+    const response = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ delete_original: true }),
+    });
+    if (!response.ok)
+      throw new Error(`response_url deletion failed: ${response.status}`);
   }
 
   async ephemeral(
