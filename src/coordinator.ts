@@ -327,6 +327,7 @@ export class Coordinator {
           "That player is stale; use the newest one.",
         );
       const handlers: Record<string, () => Promise<void> | void> = {
+        open_add_to_queue: () => this.addModal(interaction),
         remove_queue_track: () => this.remove(interaction),
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
@@ -551,6 +552,10 @@ export class Coordinator {
   }
 
   private async add(interaction: Interaction) {
+    const value =
+      interaction.state.track?.selection?.selected_option?.value ??
+      interaction.value;
+    if (!value) return;
     const accepted = await this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return false;
       if (interaction.messageTs && interaction.messageTs !== this.uiTs) {
@@ -562,13 +567,13 @@ export class Coordinator {
       }
       return this.require(
         interaction,
-        interaction.value.startsWith("bulkref_") ? "add-bulk" : "add",
+        value.startsWith("bulkref_") ? "add-bulk" : "add",
       );
     });
     if (!accepted) return;
     let selection: TrackMetadata | TrackMetadata[];
     try {
-      selection = await this.tracks.resolve(interaction.value);
+      selection = await this.tracks.resolve(value);
     } catch (error) {
       return this.notice(interaction.userId, message(error));
     }
@@ -1160,6 +1165,39 @@ export class Coordinator {
     this.syncPreloads();
     this.refreshIdle();
     this.scheduleAutoplay();
+  }
+
+  private async addModal(interaction: Interaction) {
+    if (!interaction.triggerId) return;
+    if (
+      !this.can(interaction.userId, "add") &&
+      !this.can(interaction.userId, "add-bulk")
+    ) {
+      await this.require(interaction, "add");
+      return;
+    }
+    await this.slack.modal(interaction.triggerId, {
+      type: "modal",
+      callback_id: "add_track_to_queue",
+      private_metadata: JSON.stringify({ sessionId: this.id }),
+      title: plain("Add to queue"),
+      submit: plain("Add"),
+      close: plain("Cancel"),
+      blocks: [
+        {
+          type: "input",
+          block_id: "track",
+          label: plain("Song, album, playlist, or link"),
+          element: {
+            type: "external_select",
+            action_id: "selection",
+            placeholder: plain("Search or paste a link"),
+            min_query_length: 3,
+            focus_on_load: true,
+          },
+        },
+      ],
+    });
   }
 
   private async queueModal(interaction: Interaction) {
@@ -2265,10 +2303,10 @@ export class Coordinator {
             block_id: `add_${id}`,
             elements: [
               {
-                type: "external_select",
-                action_id: "add_track_to_queue",
-                placeholder: plain("Add to queue"),
-                min_query_length: 3,
+                type: "button",
+                action_id: "open_add_to_queue",
+                text: plain("Add to queue"),
+                value: this.id,
               },
             ],
           },
