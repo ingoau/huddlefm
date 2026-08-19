@@ -1989,7 +1989,8 @@ export class Coordinator {
       permissions: [...this.allowed],
     });
     this.store.incrementUsage("settings");
-    await this.render();
+    if (!previous.anchorEnabled && this.anchorEnabled) await this.reanchor();
+    else await this.render();
     this.scheduleAutoplay();
   }
 
