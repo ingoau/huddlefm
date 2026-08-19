@@ -1550,7 +1550,7 @@ test("thread anchoring is disabled by default and can be enabled", async () => {
       actionId: type === "view_submission" ? "save_settings" : "open_settings",
       value: "",
       channelId: "channel",
-      messageTs: type === "view_submission" ? "" : "1",
+      messageTs: type === "view_submission" ? "" : String(test.posted.length),
       triggerId: "trigger",
       metadata:
         type === "view_submission"
@@ -1576,6 +1576,8 @@ test("thread anchoring is disabled by default and can be enabled", async () => {
     volume: { percent: { value: "60" } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
   });
+  expect(test.posted).toHaveLength(2);
+  expect(test.deleted).toEqual([["channel", "1"]]);
   await action("block_actions");
   const anchor = (
     test.modals[1] as [
