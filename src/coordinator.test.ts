@@ -585,9 +585,11 @@ test("adds tracks through a full-width search modal", async () => {
   } as unknown as TrackCatalog);
   await test.coordinator.start();
 
-  expect(JSON.stringify(test.posted[0])).toContain(
-    '"action_id":"open_add_to_queue"',
+  const player = JSON.stringify(test.posted[0]);
+  expect(player.indexOf('"action_id":"add_track_to_queue"')).toBeLessThan(
+    player.indexOf('"action_id":"open_add_to_queue"'),
   );
+  expect(player).toContain('"text":":ms-arrow-up-right:"');
   await test.coordinator.action(
     interaction(test.coordinator, "open_add_to_queue"),
   );

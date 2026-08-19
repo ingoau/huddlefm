@@ -2305,9 +2305,15 @@ export class Coordinator {
             block_id: `add_${id}`,
             elements: [
               {
+                type: "external_select",
+                action_id: "add_track_to_queue",
+                placeholder: plain("Add to queue"),
+                min_query_length: 3,
+              },
+              {
                 type: "button",
                 action_id: "open_add_to_queue",
-                text: plain("Add to queue"),
+                text: plain(":ms-arrow-up-right:"),
                 value: this.id,
               },
             ],
