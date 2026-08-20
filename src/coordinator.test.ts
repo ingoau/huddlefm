@@ -1499,10 +1499,174 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
       (value) => (value as unknown[])[0] === "track.autoplay_added",
     ),
   );
-  expect(seeds).toEqual([ids.b]);
+  expect(seeds).toEqual([ids.b, ids.a]);
   expect(resolved).toEqual([ids.c]);
   expect(JSON.stringify(result.updates)).toContain("Autoplay recommendation");
   expect(JSON.stringify(result.audit)).toContain('"origin":"autoplay"');
+  await result.coordinator.endFromSlack();
+});
+
+test("autoplay favors recommendations shared by recent manual tracks", async () => {
+  const ids = {
+    a: "aaaaaaaaaaa",
+    b: "bbbbbbbbbbb",
+    c: "ccccccccccc",
+    x: "xxxxxxxxxxx",
+    y: "yyyyyyyyyyy",
+    z: "zzzzzzzzzzz",
+  };
+  const seeds: string[] = [];
+  const resolved: string[] = [];
+  const tracks = {
+    resolve: async (value: keyof typeof ids) => ({
+      sourceInput: `https://example.com/${value}`,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: ids[value],
+      title: value.toUpperCase(),
+      artist: "Artist",
+    }),
+    upNextIds: async (seed: string) => {
+      seeds.push(seed);
+      if (seed === ids.c) return [ids.x, ids.y];
+      if (seed === ids.b) return [ids.z, ids.y];
+      return [ids.y];
+    },
+    resolveVideoId: async (id: string) => {
+      resolved.push(id);
+      return {
+        sourceInput: `https://music.youtube.com/watch?v=${id}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+        sourceId: id,
+        title: "Recommendation",
+        artist: "Radio",
+      };
+    },
+    prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  for (const id of ["a", "b", "c"])
+    await result.coordinator.action(
+      interaction(result.coordinator, "add_track_to_queue", id),
+    );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  for (const sourceId of [ids.a, ids.b]) {
+    const play = result.media.findLast(
+      (value) =>
+        (value as { type?: string; sourceId?: string }).type === "play" &&
+        (value as { sourceId?: string }).sourceId === sourceId,
+    ) as { entryId: string };
+    await result.coordinator.mediaEvent("track_ended", {
+      entryId: play.entryId,
+    });
+  }
+  await until(() =>
+    result.audit.some(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  );
+  expect(seeds).toEqual([ids.c, ids.b, ids.a]);
+  expect(resolved).toEqual([ids.y]);
+  await result.coordinator.endFromSlack();
+});
+
+test("skipping rejects the track and rebuilds prepared autoplay", async () => {
+  const ids = {
+    a: "aaaaaaaaaaa",
+    c: "ccccccccccc",
+    d: "ddddddddddd",
+    e: "eeeeeeeeeee",
+  };
+  const resolved: string[] = [];
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: ids.a,
+      title: "A",
+      artist: "Artist",
+    }),
+    upNextIds: async () => [ids.c, ids.d, ids.e],
+    resolveVideoId: async (id: string) => {
+      resolved.push(id);
+      return {
+        sourceInput: `https://music.youtube.com/watch?v=${id}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+        sourceId: id,
+        title: id,
+        artist: "Radio",
+      };
+    },
+    prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  await until(
+    () =>
+      result.audit.filter(
+        (value) => (value as unknown[])[0] === "track.autoplay_added",
+      ).length === 1,
+  );
+  const manual = result.media.find(
+    (value) => (value as { type?: string }).type === "play",
+  ) as { entryId: string };
+  await result.coordinator.mediaEvent("track_ended", {
+    entryId: manual.entryId,
+  });
+  await until(
+    () =>
+      result.audit.filter(
+        (value) => (value as unknown[])[0] === "track.autoplay_added",
+      ).length === 2,
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "next_track"),
+  );
+  await until(
+    () =>
+      result.audit.filter(
+        (value) => (value as unknown[])[0] === "track.autoplay_added",
+      ).length === 3,
+  );
+  expect(resolved).toEqual([ids.c, ids.d, ids.d]);
+  expect(
+    Reflect.get(result.coordinator, "history").map(
+      (track: { sourceId: string }) => track.sourceId,
+    ),
+  ).toEqual([ids.a]);
+  expect(
+    result.media.filter(
+      (value) => (value as { type?: string }).type === "play",
+    ),
+  ).toEqual([
+    expect.objectContaining({ sourceId: ids.a }),
+    expect.objectContaining({ sourceId: ids.c }),
+    expect.objectContaining({ sourceId: ids.d }),
+  ]);
   await result.coordinator.endFromSlack();
 });
 

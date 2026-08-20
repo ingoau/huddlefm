@@ -55,6 +55,7 @@ export class Coordinator {
   private autoplayEnabled = false;
   private autoplayGeneration = 0;
   private autoplayPending = false;
+  private autoplayRejected: string[] = [];
   private anchorEnabled = false;
   private revision = 0;
   private uiTs = "";
@@ -691,9 +692,14 @@ export class Coordinator {
   }
 
   private scheduleAutoplay() {
-    const seed = this.current?.sourceId ?? this.history.at(-1)?.sourceId;
+    const context = this.current?.sourceId ?? this.history.at(-1)?.sourceId;
+    const seeds = [this.current, ...[...this.history].reverse()]
+      .flatMap((track) => (track && !track.automatic ? [track.sourceId] : []))
+      .filter((id, index, all) => all.indexOf(id) === index)
+      .slice(0, 3);
     if (
-      !seed ||
+      !context ||
+      !seeds.length ||
       !this.autoplayEnabled ||
       this.autoplayPending ||
       this.state === "ended" ||
@@ -706,18 +712,39 @@ export class Coordinator {
       return;
     const generation = this.autoplayGeneration;
     this.autoplayPending = true;
-    void this.recommend(seed, generation).finally(() => {
+    void this.recommend(context, seeds, generation).finally(() => {
       if (generation === this.autoplayGeneration) this.autoplayPending = false;
     });
   }
 
-  private async recommend(seed: string, generation: number) {
+  private async recommend(
+    context: string,
+    seeds: string[],
+    generation: number,
+  ) {
     try {
-      const ids = [...new Set(await this.tracks.upNextIds(seed))];
+      const recommendations = await Promise.all(
+        seeds.map((seed) => this.tracks.upNextIds(seed).catch(() => [])),
+      );
+      const ranked = new Map<
+        string,
+        { id: string; seedCount: number; score: number }
+      >();
+      for (const ids of recommendations)
+        [...new Set(ids)].forEach((id, rank) => {
+          const candidate = ranked.get(id) ?? { id, seedCount: 0, score: 0 };
+          candidate.seedCount++;
+          candidate.score += 1 / (rank + 1);
+          ranked.set(id, candidate);
+        });
+      const ids = [...ranked.values()]
+        .sort((a, b) => b.seedCount - a.seedCount || b.score - a.score)
+        .map(({ id }) => id);
       const excluded = new Set([
         this.current?.sourceId,
         ...this.queue.map((track) => track.sourceId),
         ...this.history.slice(-20).map((track) => track.sourceId),
+        ...this.autoplayRejected,
       ]);
       for (const id of ids) {
         if (excluded.has(id)) continue;
@@ -728,11 +755,12 @@ export class Coordinator {
           continue;
         }
         const pending = await this.enqueue(async () => {
-          if (!this.canAddAutoplay(seed, generation)) return;
+          if (!this.canAddAutoplay(context, generation)) return;
           const currentIds = new Set([
             this.current?.sourceId,
             ...this.queue.map((track) => track.sourceId),
             ...this.history.slice(-20).map((track) => track.sourceId),
+            ...this.autoplayRejected,
           ]);
           if (currentIds.has(metadata.sourceId)) return false;
           const entry = {
@@ -752,7 +780,7 @@ export class Coordinator {
           });
           this.audit.record("track.autoplay_added", undefined, {
             sessionId: this.id,
-            seedSourceId: seed,
+            seedSourceIds: seeds,
             ...auditTrack(entry),
           });
           await this.render();
@@ -763,29 +791,29 @@ export class Coordinator {
         if (pending === false) continue;
         if (await this.prepareAutoplay(pending.entry, pending.controller))
           return;
-        if (!this.canAddAutoplay(seed, generation)) return;
+        if (!this.canAddAutoplay(context, generation)) return;
       }
       this.audit.record("autoplay.recommendation_failed", undefined, {
         sessionId: this.id,
-        seedSourceId: seed,
+        seedSourceIds: seeds,
         reason: "no usable recommendations",
       });
     } catch (error) {
       this.audit.record("autoplay.recommendation_failed", undefined, {
         sessionId: this.id,
-        seedSourceId: seed,
+        seedSourceIds: seeds,
         reason: safeAuditError(error),
       });
     }
   }
 
-  private canAddAutoplay(seed: string, generation: number) {
+  private canAddAutoplay(context: string, generation: number) {
     return (
       this.autoplayEnabled &&
       generation === this.autoplayGeneration &&
       this.state !== "ended" &&
       this.state !== "suspended" &&
-      (this.current?.sourceId ?? this.history.at(-1)?.sourceId) === seed &&
+      (this.current?.sourceId ?? this.history.at(-1)?.sourceId) === context &&
       !this.queue.some((track) => !track.automatic) &&
       !this.queue.some((track) => track.automatic) &&
       this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit
@@ -992,12 +1020,19 @@ export class Coordinator {
         interaction.userId,
         "Nothing was playing when you pressed Next.",
       );
+    const skipped = this.current;
     this.audit.record("track.skipped", interaction.userId, {
       sessionId: this.id,
-      ...auditTrack(this.current),
+      ...auditTrack(skipped),
     });
     this.store.incrementUsage("next");
-    await this.advance();
+    this.autoplayRejected = [
+      ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
+      skipped.sourceId,
+    ].slice(-20);
+    await this.removeQueuedAutoplay();
+    await this.advance("skipped");
+    this.scheduleAutoplay();
   }
 
   private async previous(interaction: Interaction) {
