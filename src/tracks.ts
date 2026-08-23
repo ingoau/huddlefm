@@ -1,6 +1,9 @@
 import YTMusic from "ytmusic-api";
 import { mkdir, rm, stat } from "node:fs/promises";
+import { logger } from "./logger.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
+
+const log = logger.child({ component: "tracks" });
 
 export type TrackMetadata = {
   sourceInput: string;
@@ -39,9 +42,15 @@ export class TrackCatalog {
   }
 
   async initialize() {
+    const startedAt = Date.now();
+    log.info({ event: "initialization_started" }, "Initializing track catalog");
     this.proxy = await PublicNetworkProxy.start();
     try {
       await this.music.initialize();
+      log.info(
+        { event: "initialized", durationMs: Date.now() - startedAt },
+        "Track catalog initialized",
+      );
     } catch (error) {
       await this.close();
       throw error;
@@ -51,9 +60,11 @@ export class TrackCatalog {
   async close() {
     await this.proxy?.close();
     this.proxy = undefined;
+    log.info({ event: "closed" }, "Track catalog closed");
   }
 
   async suggestions(query: string, allowed = { songs: true, bulk: false }) {
+    const startedAt = Date.now();
     const url = parseHttpUrl(query);
     if (url) {
       await assertPublicUrl(url);
@@ -67,16 +78,36 @@ export class TrackCatalog {
               ),
             ]
           : [];
-      if (!allowed.songs || url.pathname.replace(/\/$/, "") === "/playlist")
+      if (!allowed.songs || url.pathname.replace(/\/$/, "") === "/playlist") {
+        log.debug(
+          {
+            event: "suggestions_completed",
+            inputType: "playlist_url",
+            count: playlist.length,
+            durationMs: Date.now() - startedAt,
+          },
+          "Track suggestions completed",
+        );
         return playlist;
+      }
       const reference = this.remember(url.href);
-      return [option(`Link: ${url.href}`, reference), ...playlist];
+      const options = [option(`Link: ${url.href}`, reference), ...playlist];
+      log.debug(
+        {
+          event: "suggestions_completed",
+          inputType: "url",
+          count: options.length,
+          durationMs: Date.now() - startedAt,
+        },
+        "Track suggestions completed",
+      );
+      return options;
     }
     const [songs, albums] = await Promise.all([
       allowed.songs ? this.music.searchSongs(query) : [],
       allowed.bulk ? this.music.searchAlbums(query) : [],
     ]);
-    return [
+    const options = [
       ...songs
         .slice(0, 5)
         .map((song) =>
@@ -94,9 +125,22 @@ export class TrackCatalog {
           ),
         ),
     ];
+    log.debug(
+      {
+        event: "suggestions_completed",
+        inputType: "search",
+        count: options.length,
+        songsAllowed: allowed.songs,
+        bulkAllowed: allowed.bulk,
+        durationMs: Date.now() - startedAt,
+      },
+      "Track suggestions completed",
+    );
+    return options;
   }
 
   async resolve(reference: string): Promise<TrackMetadata | TrackMetadata[]> {
+    const startedAt = Date.now();
     const stored = this.references.get(reference);
     this.references.delete(reference);
     if (!stored) throw new Error("Track selection expired; search again");
@@ -112,6 +156,15 @@ export class TrackCatalog {
       if (!tracks.length)
         throw new Error("That album or playlist has no playable songs");
       for (const track of tracks) this.validate(track);
+      log.info(
+        {
+          event: "collection_resolved",
+          collectionType: stored.type,
+          count: tracks.length,
+          durationMs: Date.now() - startedAt,
+        },
+        "Track collection resolved",
+      );
       return tracks;
     }
     if (typeof stored !== "string") {
@@ -122,6 +175,7 @@ export class TrackCatalog {
   }
 
   async resolveUrl(input: string): Promise<TrackMetadata> {
+    const startedAt = Date.now();
     const url = parseHttpUrl(input);
     if (!url) throw new Error("Only absolute HTTP or HTTPS URLs are supported");
     await assertPublicUrl(url);
@@ -148,7 +202,7 @@ export class TrackCatalog {
       throw new Error("Track exceeds the download limit");
     const canonicalUrl = metadata.webpage_url ?? url.href;
     await assertPublicUrl(new URL(canonicalUrl));
-    return {
+    const track = {
       sourceInput: url.href,
       canonicalUrl,
       sourceId: String(metadata.id),
@@ -158,6 +212,18 @@ export class TrackCatalog {
       duration: metadata.duration ? Number(metadata.duration) : undefined,
       artwork: artworkUrl(metadata.thumbnail),
     };
+    log.info(
+      {
+        event: "url_resolved",
+        sourceId: track.sourceId,
+        title: track.title,
+        artist: track.artist,
+        durationSeconds: track.duration,
+        durationMs: Date.now() - startedAt,
+      },
+      "Media URL resolved",
+    );
+    return track;
   }
 
   async upNextIds(videoId: string) {
@@ -198,6 +264,17 @@ export class TrackCatalog {
         reject,
       });
       this.preparationQueue.sort((a, b) => b.priority - a.priority);
+      log.debug(
+        {
+          event: "preparation_queued",
+          entryId,
+          sourceId: track.sourceId,
+          priority,
+          queued: this.preparationQueue.length,
+          active: this.activePreparations,
+        },
+        "Track preparation queued",
+      );
       this.startPreparations();
     });
   }
@@ -208,6 +285,11 @@ export class TrackCatalog {
     entryId: string,
     signal?: AbortSignal,
   ) {
+    const startedAt = Date.now();
+    log.info(
+      { event: "download_started", entryId, sourceId: track.sourceId },
+      "Track download started",
+    );
     if (signal?.aborted) throw new Error("Track preparation cancelled");
     await mkdir(directory, { recursive: true });
     if (signal?.aborted) throw new Error("Track preparation cancelled");
@@ -234,6 +316,10 @@ export class TrackCatalog {
     } catch (error) {
       if (signal?.aborted || !String(error).includes("HTTP Error 403"))
         throw error;
+      log.warn(
+        { event: "download_retry", entryId, sourceId: track.sourceId },
+        "Retrying track download with embedded player",
+      );
       result = await run(
         [
           ...this.extractor(),
@@ -249,7 +335,8 @@ export class TrackCatalog {
     if (!filePath || !(await Bun.file(filePath).exists()))
       throw new Error("Extractor produced no playable file");
     try {
-      if ((await stat(filePath)).size > this.limits.downloadBytes)
+      const bytes = (await stat(filePath)).size;
+      if (bytes > this.limits.downloadBytes)
         throw new Error("Track exceeds the download limit");
       const probe = await run(
         [
@@ -270,6 +357,17 @@ export class TrackCatalog {
         throw new Error("Could not verify the downloaded track duration");
       if (duration > this.limits.durationSeconds)
         throw new Error("Track exceeds the duration limit");
+      log.info(
+        {
+          event: "download_completed",
+          entryId,
+          sourceId: track.sourceId,
+          bytes,
+          durationSeconds: duration,
+          durationMs: Date.now() - startedAt,
+        },
+        "Track download completed",
+      );
       return filePath;
     } catch (error) {
       await rm(filePath, { force: true });
@@ -282,11 +380,27 @@ export class TrackCatalog {
       const preparation = this.preparationQueue.shift();
       if (!preparation) return;
       this.activePreparations++;
+      log.debug(
+        {
+          event: "preparation_started",
+          active: this.activePreparations,
+          queued: this.preparationQueue.length,
+        },
+        "Track preparation started",
+      );
       void preparation
         .run()
         .then(preparation.resolve, preparation.reject)
         .finally(() => {
           this.activePreparations--;
+          log.debug(
+            {
+              event: "preparation_finished",
+              active: this.activePreparations,
+              queued: this.preparationQueue.length,
+            },
+            "Track preparation finished",
+          );
           this.startPreparations();
         });
     }

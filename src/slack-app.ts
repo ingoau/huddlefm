@@ -1,5 +1,7 @@
 import { WebClient } from "@slack/web-api";
-import { errorMessage } from "./error-message.ts";
+import { logger } from "./logger.ts";
+
+const log = logger.child({ component: "slack-app" });
 
 type Body = {
   type?: string;
@@ -104,12 +106,14 @@ export class SlackAppAdapter {
   async start() {
     this.stopping = false;
     await this.connect();
+    log.info({ event: "started" }, "Slack app started");
   }
 
   async stop() {
     this.stopping = true;
     clearTimeout(this.reconnectTimer);
     this.socket?.close();
+    log.info({ event: "stopped" }, "Slack app stopped");
   }
 
   async post(
@@ -125,11 +129,24 @@ export class SlackAppAdapter {
       blocks: blocks as never,
     });
     if (!result.ts) throw new Error("chat.postMessage returned no timestamp");
+    log.debug(
+      {
+        event: "message_posted",
+        channelId: channel,
+        threadTs,
+        messageTs: result.ts,
+      },
+      "Slack message posted",
+    );
     return result.ts;
   }
 
   async update(channel: string, ts: string, text: string, blocks: unknown[]) {
     await this.web.chat.update({ channel, ts, text, blocks: blocks as never });
+    log.debug(
+      { event: "message_updated", channelId: channel, messageTs: ts },
+      "Slack message updated",
+    );
   }
 
   async updateCanvas(canvasId: string, markdown: string) {
@@ -142,10 +159,15 @@ export class SlackAppAdapter {
         },
       ],
     });
+    log.debug({ event: "canvas_updated", canvasId }, "Slack Canvas updated");
   }
 
   async delete(channel: string, ts: string) {
     await this.web.chat.delete({ channel, ts });
+    log.debug(
+      { event: "message_deleted", channelId: channel, messageTs: ts },
+      "Slack message deleted",
+    );
   }
 
   async deleteOriginal(responseUrl: string) {
@@ -156,6 +178,10 @@ export class SlackAppAdapter {
     });
     if (!response.ok)
       throw new Error(`response_url deletion failed: ${response.status}`);
+    log.debug(
+      { event: "original_response_deleted" },
+      "Slack original response deleted",
+    );
   }
 
   async ephemeral(
@@ -172,6 +198,10 @@ export class SlackAppAdapter {
       thread_ts: threadTs,
       blocks: blocks as never,
     });
+    log.debug(
+      { event: "ephemeral_posted", channelId: channel, userId: user, threadTs },
+      "Slack ephemeral message posted",
+    );
   }
 
   async modal(triggerId: string, view: unknown) {
@@ -179,11 +209,16 @@ export class SlackAppAdapter {
       trigger_id: triggerId,
       view: view as never,
     });
+    log.debug(
+      { event: "modal_opened", viewId: result.view?.id },
+      "Slack modal opened",
+    );
     return result.view;
   }
 
   async pushModal(triggerId: string, view: unknown) {
     await this.web.views.push({ trigger_id: triggerId, view: view as never });
+    log.debug({ event: "modal_pushed" }, "Slack modal pushed");
   }
 
   async updateModal(viewId: string, hash: string | undefined, view: unknown) {
@@ -192,6 +227,7 @@ export class SlackAppAdapter {
       ...(hash ? { hash } : {}),
       view: view as never,
     });
+    log.debug({ event: "modal_updated", viewId }, "Slack modal updated");
     return result.view;
   }
 
@@ -209,7 +245,10 @@ export class SlackAppAdapter {
           userId,
       )
       .catch((error) => {
-        console.error(`[slack-app] user lookup failed: ${safeError(error)}`);
+        log.warn(
+          { event: "user_lookup_failed", userId, err: error },
+          "Slack user lookup failed",
+        );
         return userId;
       });
     this.names.set(userId, name);
@@ -228,9 +267,15 @@ export class SlackAppAdapter {
     if (!opened.channel?.id)
       throw new Error("conversations.open returned no channel");
     await this.web.chat.postMessage({ channel: opened.channel.id, text });
+    log.debug({ event: "dm_posted", userId }, "Slack direct message posted");
   }
 
   private async connect() {
+    const startedAt = Date.now();
+    log.info(
+      { event: "connection_started", attempt: this.reconnectAttempts + 1 },
+      "Connecting Slack Socket Mode",
+    );
     const response = await fetch(
       "https://slack.com/api/apps.connections.open",
       {
@@ -255,6 +300,13 @@ export class SlackAppAdapter {
         const envelope = JSON.parse(String(event.data));
         if (envelope.type === "hello") {
           this.reconnectAttempts = 0;
+          log.info(
+            {
+              event: "connected",
+              durationMs: Date.now() - startedAt,
+            },
+            "Slack Socket Mode connected",
+          );
           resolve();
         } else void this.handleEnvelope(socket, envelope);
       });
@@ -264,6 +316,8 @@ export class SlackAppAdapter {
       socket.addEventListener("close", () => {
         if (this.socket !== socket) return;
         this.socket = undefined;
+        if (!this.stopping)
+          log.warn({ event: "connection_closed" }, "Slack socket closed");
         this.scheduleReconnect();
       });
     });
@@ -272,10 +326,17 @@ export class SlackAppAdapter {
   private scheduleReconnect() {
     if (this.stopping || this.reconnectTimer) return;
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempts++);
+    log.warn(
+      { event: "reconnect_scheduled", delayMs: delay },
+      "Slack reconnect scheduled",
+    );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.connect().catch((error) => {
-        console.error(error instanceof Error ? error.message : error);
+        log.error(
+          { event: "reconnect_failed", err: error },
+          "Slack reconnect failed",
+        );
         this.scheduleReconnect();
       });
     }, delay);
@@ -295,24 +356,41 @@ export class SlackAppAdapter {
       try {
         ack({ options: (await this.onSuggestion?.(interaction)) ?? [] });
       } catch (error) {
-        console.error(`[slack-app] suggestion failed: ${safeError(error)}`);
+        log.warn(
+          {
+            event: "suggestion_failed",
+            userId: interaction.userId,
+            channelId: interaction.channelId,
+            err: error,
+          },
+          "Slack suggestion failed",
+        );
         ack({ options: [] });
       }
       return;
     }
     ack();
-    console.log(
-      `[slack-app] ${interaction.type} ${interaction.actionId} ${interaction.userId}`,
+    log.info(
+      {
+        event: "interaction_received",
+        interactionType: interaction.type,
+        actionId: interaction.actionId,
+        userId: interaction.userId,
+        channelId: interaction.channelId,
+      },
+      "Slack interaction received",
     );
     void Promise.resolve(this.onAction?.(interaction)).catch((error) =>
-      console.error(`[slack-app] action failed: ${safeError(error)}`),
+      log.error(
+        {
+          event: "action_failed",
+          actionId: interaction.actionId,
+          userId: interaction.userId,
+          channelId: interaction.channelId,
+          err: error,
+        },
+        "Slack action failed",
+      ),
     );
   }
-}
-
-function safeError(error: unknown) {
-  return errorMessage(error).replace(
-    /(xox[acpbrs]-|token|cookie|authorization)[^\s,]*/gi,
-    "$1[redacted]",
-  );
 }

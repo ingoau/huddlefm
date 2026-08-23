@@ -1,6 +1,9 @@
 import { lookup } from "node:dns/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { connect, isIP } from "node:net";
+import { logger } from "./logger.ts";
+
+const log = logger.child({ component: "public-proxy" });
 
 export class PublicNetworkProxy {
   private constructor(private server: ReturnType<typeof createServer>) {}
@@ -58,6 +61,14 @@ export class PublicNetworkProxy {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", resolve);
     });
+    const address = server.address();
+    log.info(
+      {
+        event: "started",
+        port: address && typeof address !== "string" ? address.port : undefined,
+      },
+      "Public network proxy started",
+    );
     return new PublicNetworkProxy(server);
   }
 
@@ -70,7 +81,11 @@ export class PublicNetworkProxy {
 
   close() {
     return new Promise<void>((resolve, reject) =>
-      this.server.close((error) => (error ? reject(error) : resolve())),
+      this.server.close((error) => {
+        if (error) return reject(error);
+        log.info({ event: "stopped" }, "Public network proxy stopped");
+        resolve();
+      }),
     );
   }
 }

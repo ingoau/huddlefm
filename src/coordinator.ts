@@ -17,6 +17,7 @@ import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
 import { errorMessage as message } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
+import { logger } from "./logger.ts";
 import {
   auditTrack,
   confirm,
@@ -77,6 +78,7 @@ export class Coordinator {
   >();
   private lastSearch = new Map<string, number>();
   private playbackScrobbling?: PlaybackScrobbler;
+  private log = logger.child({ component: "coordinator" });
 
   constructor(
     readonly room: JoinedHuddle,
@@ -107,6 +109,12 @@ export class Coordinator {
     private sessionEnded = (_sessionId: string) => {},
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
+    this.log = logger.child({
+      component: "coordinator",
+      sessionId: this.id,
+      huddleId: room.huddleId,
+      channelId: room.uiChannelId,
+    });
     this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
     const requestedHost = restored?.hostId ?? hostId;
     this.hostId = this.isExcluded(requestedHost)
@@ -136,9 +144,22 @@ export class Coordinator {
         (track) => track !== this.current && track.status !== "played",
       );
     }
+    this.log.info(
+      {
+        event: "created",
+        restored: Boolean(restored),
+        state: this.state,
+        participants: this.participants.size,
+        queuedTracks: this.queue.length,
+        historyTracks: this.history.length,
+      },
+      "Session coordinator created",
+    );
   }
 
   async start() {
+    const startedAt = Date.now();
+    this.log.info({ event: "start_started" }, "Starting session");
     this.store.createSession({
       id: this.id,
       huddleId: this.room.huddleId,
@@ -166,9 +187,15 @@ export class Coordinator {
     });
     this.refreshIdle();
     this.sessionChanged();
+    this.log.info(
+      { event: "started", durationMs: Date.now() - startedAt },
+      "Session started",
+    );
   }
 
   async resume() {
+    const startedAt = Date.now();
+    this.log.info({ event: "resume_started" }, "Resuming session");
     const missing = await Promise.all(
       [this.current, ...this.queue]
         .filter(Boolean)
@@ -223,9 +250,23 @@ export class Coordinator {
       this.scheduleAutoplay();
     }
     for (const entry of missingEntries) void this.prepareRestored(entry);
+    this.log.info(
+      {
+        event: "resumed",
+        state: this.state,
+        missingTracks: missingEntries.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Session resumed",
+    );
   }
 
   private async prepareRestored(entry: Entry) {
+    const startedAt = Date.now();
+    this.log.info(
+      { event: "restored_track_preparation_started", entryId: entry.id },
+      "Preparing restored track",
+    );
     const controller = new AbortController();
     this.preparations.set(entry.id, controller);
     try {
@@ -253,8 +294,25 @@ export class Coordinator {
           this.queueRender();
           this.syncPreloads();
         }
+        this.log.info(
+          {
+            event: "restored_track_prepared",
+            entryId: entry.id,
+            durationMs: Date.now() - startedAt,
+          },
+          "Restored track prepared",
+        );
       });
     } catch (error) {
+      this.log.error(
+        {
+          event: "restored_track_preparation_failed",
+          entryId: entry.id,
+          durationMs: Date.now() - startedAt,
+          err: error,
+        },
+        "Restored track preparation failed",
+      );
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
         if (this.state === "suspended" || !this.queue.includes(entry)) return;
@@ -299,6 +357,15 @@ export class Coordinator {
   }
 
   action(interaction: Interaction) {
+    this.log.debug(
+      {
+        event: "action_received",
+        actionId: interaction.actionId,
+        interactionType: interaction.type,
+        userId: interaction.userId,
+      },
+      "Session action received",
+    );
     if (interaction.actionId === "add_track_to_queue")
       return this.add(interaction);
     const currentId = this.current?.id;
@@ -375,8 +442,20 @@ export class Coordinator {
         playbackSeconds: details.seconds,
         listenedSeconds: this.listenedSeconds,
       });
+      this.log.trace(
+        {
+          event: "playback_position",
+          entryId: details.entryId,
+          seconds: details.seconds,
+        },
+        "Playback position updated",
+      );
       return;
     }
+    this.log.info(
+      { event: "media_event", mediaEvent: type, entryId: details?.entryId },
+      "Media event received",
+    );
     if (type === "track_ended" || type === "track_error" || type === "stalled")
       return this.enqueue(() => this.advance(type, details?.entryId));
     if (type === "fatal" || type === "ended")
@@ -409,6 +488,10 @@ export class Coordinator {
     this.playbackScrobbling?.memberJoined(userId);
     void this.promptScrobbling(userId);
     this.refreshIdle();
+    this.log.info(
+      { event: "member_joined", userId, participants: this.participants.size },
+      "Huddle member joined",
+    );
   }
 
   memberLeft(userId: string) {
@@ -421,6 +504,10 @@ export class Coordinator {
         ? this.enqueue(() => this.hostLeft())
         : Promise.resolve();
     this.refreshIdle();
+    this.log.info(
+      { event: "member_left", userId, participants: this.participants.size },
+      "Huddle member left",
+    );
     return changed;
   }
 
@@ -431,7 +518,11 @@ export class Coordinator {
   suspendForRestart(resumeUntil: number) {
     return this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return;
-      console.log(`[shutdown:${this.id}] posting restart notice`);
+      const startedAt = Date.now();
+      this.log.info(
+        { event: "suspend_started" },
+        "Suspending session for restart",
+      );
       const notice = this.slack
         .post(
           this.room.uiChannelId,
@@ -439,7 +530,10 @@ export class Coordinator {
           "HuddleFM is restarting. Playback should resume shortly.",
         )
         .catch((error) =>
-          console.error(`[restart] could not post notice: ${message(error)}`),
+          this.log.error(
+            { event: "restart_notice_failed", err: error },
+            "Could not post restart notice",
+          ),
         );
       const state = this.state;
       this.state = "suspended";
@@ -470,10 +564,12 @@ export class Coordinator {
         sessionId: this.id,
         resumeUntil,
       });
-      console.log(`[shutdown:${this.id}] leaving media`);
       this.sendMedia({ type: "leave" });
       await Promise.all([this.leaveMedia(), notice]);
-      console.log(`[shutdown:${this.id}] suspended`);
+      this.log.info(
+        { event: "suspended", durationMs: Date.now() - startedAt },
+        "Session suspended for restart",
+      );
     });
   }
 
@@ -636,6 +732,15 @@ export class Coordinator {
   }
 
   private async prepareManual(entry: Entry, controller: AbortController) {
+    const startedAt = Date.now();
+    this.log.info(
+      {
+        event: "track_preparation_started",
+        entryId: entry.id,
+        automatic: false,
+      },
+      "Preparing queued track",
+    );
     const prepared = this.tracks.prepare(
       entry,
       `data/media/${this.id}`,
@@ -658,8 +763,27 @@ export class Coordinator {
           this.queueRender();
           this.syncPreloads();
         }
+        this.log.info(
+          {
+            event: "track_prepared",
+            entryId: entry.id,
+            automatic: false,
+            durationMs: Date.now() - startedAt,
+          },
+          "Queued track prepared",
+        );
       });
     } catch (error) {
+      this.log.error(
+        {
+          event: "track_preparation_failed",
+          entryId: entry.id,
+          automatic: false,
+          durationMs: Date.now() - startedAt,
+          err: error,
+        },
+        "Queued track preparation failed",
+      );
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
         if (
@@ -722,6 +846,11 @@ export class Coordinator {
     seeds: string[],
     generation: number,
   ) {
+    const startedAt = Date.now();
+    this.log.debug(
+      { event: "autoplay_recommendation_started", seeds: seeds.length },
+      "Finding autoplay recommendation",
+    );
     try {
       const recommendations = await Promise.all(
         seeds.map((seed) => this.tracks.upNextIds(seed).catch(() => [])),
@@ -789,8 +918,18 @@ export class Coordinator {
         });
         if (pending === undefined) return;
         if (pending === false) continue;
-        if (await this.prepareAutoplay(pending.entry, pending.controller))
+        if (await this.prepareAutoplay(pending.entry, pending.controller)) {
+          this.log.info(
+            {
+              event: "autoplay_recommendation_added",
+              entryId: pending.entry.id,
+              sourceId: pending.entry.sourceId,
+              durationMs: Date.now() - startedAt,
+            },
+            "Autoplay recommendation added",
+          );
           return;
+        }
         if (!this.canAddAutoplay(context, generation)) return;
       }
       this.audit.record("autoplay.recommendation_failed", undefined, {
@@ -798,12 +937,27 @@ export class Coordinator {
         seedSourceIds: seeds,
         reason: "no usable recommendations",
       });
+      this.log.warn(
+        {
+          event: "autoplay_recommendation_unavailable",
+          durationMs: Date.now() - startedAt,
+        },
+        "No usable autoplay recommendation found",
+      );
     } catch (error) {
       this.audit.record("autoplay.recommendation_failed", undefined, {
         sessionId: this.id,
         seedSourceIds: seeds,
         reason: safeAuditError(error),
       });
+      this.log.error(
+        {
+          event: "autoplay_recommendation_failed",
+          durationMs: Date.now() - startedAt,
+          err: error,
+        },
+        "Autoplay recommendation failed",
+      );
     }
   }
 
@@ -821,6 +975,7 @@ export class Coordinator {
   }
 
   private async prepareAutoplay(entry: Entry, controller: AbortController) {
+    const startedAt = Date.now();
     const prepared = this.tracks.prepare(
       entry,
       `data/media/${this.id}`,
@@ -845,9 +1000,26 @@ export class Coordinator {
           await this.render();
           this.syncPreloads();
         }
+        this.log.debug(
+          {
+            event: "autoplay_track_prepared",
+            entryId: entry.id,
+            durationMs: Date.now() - startedAt,
+          },
+          "Autoplay track prepared",
+        );
         return true;
       });
     } catch (error) {
+      this.log.warn(
+        {
+          event: "autoplay_track_preparation_failed",
+          entryId: entry.id,
+          durationMs: Date.now() - startedAt,
+          err: error,
+        },
+        "Autoplay track preparation failed",
+      );
       return this.enqueue(async () => {
         this.preparations.delete(entry.id);
         if (!this.queue.includes(entry)) return false;
@@ -895,6 +1067,7 @@ export class Coordinator {
       this.state = "ready";
       this.sendMedia({ type: "stop" });
       await this.render();
+      this.log.info({ event: "queue_idle" }, "No playable track in queue");
       return this.refreshIdle();
     }
     this.queue.splice(this.queue.indexOf(next), 1);
@@ -909,13 +1082,31 @@ export class Coordinator {
       sessionId: this.id,
       ...auditTrack(next),
     });
+    this.log.info(
+      {
+        event: "track_started",
+        entryId: next.id,
+        sourceId: next.sourceId,
+        title: next.title,
+        artist: next.artist,
+        automatic: Boolean(next.automatic),
+        queueLength: this.queue.length,
+      },
+      "Track started",
+    );
     this.playbackScrobbling?.start(next, this.participants);
     this.sendMedia(this.playMessage(next));
     void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
       if (lyrics) {
-        console.log(
-          `[lyrics] ${next.title}: ${lyrics.source}, ${lyrics.lines.length} lines`,
+        this.log.info(
+          {
+            event: "lyrics_loaded",
+            entryId: next.id,
+            source: lyrics.source,
+            lines: lyrics.lines.length,
+          },
+          "Track lyrics loaded",
         );
         this.sendMedia({ type: "lyrics", entryId: next.id, ...lyrics });
       } else this.sendMedia({ type: "lyrics_unavailable", entryId: next.id });
@@ -973,7 +1164,10 @@ export class Coordinator {
 
   private loadLyrics(entry: Entry) {
     return (entry.lyrics ??= this.lyrics.get(entry).catch((error) => {
-      console.warn(`[lyrics] ${message(error)}`);
+      this.log.warn(
+        { event: "lyrics_failed", entryId: entry.id, err: error },
+        "Track lyrics failed",
+      );
       return undefined;
     }));
   }
@@ -985,6 +1179,15 @@ export class Coordinator {
   private async advance(reason = "played", expectedId?: string) {
     if (expectedId && this.current?.id !== expectedId) return;
     if (this.current) {
+      this.log.info(
+        {
+          event: "track_advanced",
+          entryId: this.current.id,
+          reason,
+          playbackSeconds: this.playbackSeconds,
+        },
+        "Track advanced",
+      );
       this.playbackScrobbling?.finish();
       if (reason === "track_ended" && this.current.duration)
         this.listenedSeconds += Math.max(
@@ -1456,8 +1659,9 @@ export class Coordinator {
               hash: view.hash,
             });
         } catch (error) {
-          console.error(
-            `[queue] could not update modal ${viewId}: ${message(error)}`,
+          this.log.error(
+            { event: "queue_modal_update_failed", viewId, err: error },
+            "Could not update queue modal",
           );
         }
       }),
@@ -2188,7 +2392,16 @@ export class Coordinator {
     this.store.setUi(this.id, current, revision);
     await this.slack
       .delete(this.room.uiChannelId, old)
-      .catch((error) => console.error(`[ui] orphan ${old}: ${message(error)}`));
+      .catch((error) =>
+        this.log.error(
+          { event: "old_player_delete_failed", messageTs: old, err: error },
+          "Could not delete old player message",
+        ),
+      );
+    this.log.info(
+      { event: "player_reanchored", revision },
+      "Player message reanchored",
+    );
   }
 
   private blocks() {
@@ -2442,8 +2655,9 @@ export class Coordinator {
         ],
       )
       .catch((error) =>
-        console.error(
-          `[scrobbling] could not prompt ${userId}: ${message(error)}`,
+        this.log.warn(
+          { event: "scrobbling_prompt_failed", userId, err: error },
+          "Could not send scrobbling prompt",
         ),
       );
   }
@@ -2459,10 +2673,15 @@ export class Coordinator {
           "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
         )
         .catch((error) =>
-          console.error(
-            `[idle] could not post leave notice: ${message(error)}`,
+          this.log.warn(
+            { event: "alone_notice_failed", err: error },
+            "Could not post alone timeout notice",
           ),
         );
+      this.log.debug(
+        { event: "alone_timeout_scheduled", timeoutMs: this.config.aloneMs },
+        "Alone timeout scheduled",
+      );
       this.aloneTimer = setTimeout(
         () =>
           void this.enqueue(async () => {
@@ -2489,8 +2708,9 @@ export class Coordinator {
                 "Nothing is playing, so I’ll leave in 2 minutes.",
               )
               .catch((error) =>
-                console.error(
-                  `[idle] could not post leave notice: ${message(error)}`,
+                this.log.warn(
+                  { event: "idle_notice_failed", err: error },
+                  "Could not post idle timeout notice",
                 ),
               );
         },
@@ -2503,6 +2723,10 @@ export class Coordinator {
             if (!this.current) await this.end(undefined, "idle timeout");
           }),
         this.config.idleMs,
+      );
+      this.log.debug(
+        { event: "idle_timeout_scheduled", timeoutMs: this.config.idleMs },
+        "Idle timeout scheduled",
       );
     } else if (this.current) {
       clearTimeout(this.idleTimer);
@@ -2523,8 +2747,9 @@ export class Coordinator {
                 "Playback is paused, so I’ll leave in 2 minutes.",
               )
               .catch((error) =>
-                console.error(
-                  `[paused] could not post leave notice: ${message(error)}`,
+                this.log.warn(
+                  { event: "paused_notice_failed", err: error },
+                  "Could not post paused timeout notice",
                 ),
               );
         },
@@ -2538,6 +2763,10 @@ export class Coordinator {
               await this.end(undefined, "paused timeout");
           }),
         this.config.pausedMs,
+      );
+      this.log.debug(
+        { event: "paused_timeout_scheduled", timeoutMs: this.config.pausedMs },
+        "Paused timeout scheduled",
       );
     } else if (this.state !== "paused") {
       clearTimeout(this.pausedTimer);
@@ -2557,6 +2786,11 @@ export class Coordinator {
       return this.notice(userId, "Only the host can end this session.");
     }
     const state = this.state;
+    const startedAt = Date.now();
+    this.log.info(
+      { event: "end_started", userId, reason, previousState: state },
+      "Ending session",
+    );
     this.state = "ended";
     this.playbackScrobbling?.finish();
     this.autoplayGeneration++;
@@ -2593,8 +2827,13 @@ export class Coordinator {
         await this.slack
           .delete(this.room.uiChannelId, this.uiTs)
           .catch((error) =>
-            console.error(
-              `[ui] could not delete ended player ${this.uiTs}: ${message(error)}`,
+            this.log.error(
+              {
+                event: "ended_player_delete_failed",
+                messageTs: this.uiTs,
+                err: error,
+              },
+              "Could not delete ended player message",
             ),
           );
         const text = `Session ended: ${reason}`;
@@ -2610,6 +2849,16 @@ export class Coordinator {
       }
     } finally {
       this.sessionEnded(this.id);
+      this.log.info(
+        {
+          event: "ended",
+          reason,
+          tracksPlayed: this.history.length,
+          listenedSeconds: this.listenedSeconds,
+          durationMs: Date.now() - startedAt,
+        },
+        "Session ended",
+      );
     }
   }
 
