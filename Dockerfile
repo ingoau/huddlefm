@@ -2,7 +2,8 @@ FROM denoland/deno:bin AS deno
 FROM oven/bun:debian
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates chromium ffmpeg python3 python3-venv \
+    ca-certificates chromium ffmpeg fonts-noto-cjk fonts-noto-color-emoji \
+    fonts-noto-core python3 python3-venv \
   && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /opt/yt-dlp \
   && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade --pre "yt-dlp[default]"
