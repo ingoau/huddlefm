@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { scrobblingModes, type ScrobblingMode, type Store } from "./store.ts";
-import { errorMessage } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
+import { logger } from "./logger.ts";
 
 const lastFmEndpoint = "https://ws.audioscrobbler.com/2.0/";
 const listenBrainzEndpoint = "https://api.listenbrainz.org/1";
+const log = logger.child({ component: "scrobbling" });
 
 export type ScrobbleTrack = {
   id: string;
@@ -44,11 +45,13 @@ export class ScrobbleDispatcher {
   start() {
     void this.flush();
     this.timer = setInterval(() => void this.flush(), 60_000);
+    log.info({ event: "started" }, "Scrobble dispatcher started");
   }
 
   async stop() {
     clearInterval(this.timer);
     await this.flushing;
+    log.info({ event: "stopped" }, "Scrobble dispatcher stopped");
   }
 
   playback(sessionId: string, botUserId: string) {
@@ -84,6 +87,10 @@ export class ScrobbleDispatcher {
     if (!scrobblingModes.includes(mode)) throw new Error("Invalid mode");
     this.store.setScrobblingMode(userId, mode);
     if (mode !== "always") this.store.clearPendingUserScrobbles(userId);
+    log.info(
+      { event: "mode_changed", userId, mode },
+      "Scrobbling mode changed",
+    );
   }
 
   sessionEnabled(sessionId: string, userId: string) {
@@ -103,12 +110,20 @@ export class ScrobbleDispatcher {
   setSessionEnabled(sessionId: string, userId: string, enabled: boolean) {
     this.store.setSessionScrobbling(sessionId, userId, enabled);
     if (!enabled) this.store.clearPendingSessionScrobbles(sessionId, userId);
+    log.info(
+      { event: "session_setting_changed", sessionId, userId, enabled },
+      "Session scrobbling setting changed",
+    );
   }
 
   async beginLastFm(userId: string) {
     const token = String((await this.lastFm("auth.getToken")).token ?? "");
     if (!token) throw new Error("Last.fm returned no authentication token");
     this.store.setLastFmPending(userId, token, Date.now());
+    log.info(
+      { event: "lastfm_auth_started", userId },
+      "Last.fm authorization started",
+    );
     return `https://www.last.fm/api/auth/?api_key=${encodeURIComponent(this.config.lastFmApiKey!)}&token=${encodeURIComponent(token)}`;
   }
 
@@ -128,12 +143,14 @@ export class ScrobbleDispatcher {
     if (!session?.key || !session.name)
       throw new Error("Last.fm returned no session");
     this.store.connectLastFm(userId, session.name, session.key);
+    log.info({ event: "lastfm_connected", userId }, "Last.fm connected");
     return session.name;
   }
 
   disconnectLastFm(userId: string) {
     this.store.disconnectLastFm(userId);
     this.store.clearPendingScrobbles(userId, "lastfm");
+    log.info({ event: "lastfm_disconnected", userId }, "Last.fm disconnected");
   }
 
   setLastFmEnabled(userId: string, enabled: boolean) {
@@ -142,6 +159,10 @@ export class ScrobbleDispatcher {
       throw new Error("Connect Last.fm before enabling scrobbling");
     this.store.setLastFmEnabled(userId, enabled);
     if (!enabled) this.store.clearPendingScrobbles(userId, "lastfm");
+    log.info(
+      { event: "lastfm_setting_changed", userId, enabled },
+      "Last.fm scrobbling setting changed",
+    );
   }
 
   async setListenBrainz(
@@ -173,19 +194,38 @@ export class ScrobbleDispatcher {
       );
     this.store.setListenBrainzEnabled(userId, enabled);
     if (!enabled) this.store.clearPendingScrobbles(userId, "listenbrainz");
+    log.info(
+      {
+        event: "listenbrainz_setting_changed",
+        userId,
+        enabled,
+        connected: Boolean(username),
+      },
+      "ListenBrainz setting changed",
+    );
     return username;
   }
 
   disconnectListenBrainz(userId: string) {
     this.store.disconnectListenBrainz(userId);
     this.store.clearPendingScrobbles(userId, "listenbrainz");
+    log.info(
+      { event: "listenbrainz_disconnected", userId },
+      "ListenBrainz disconnected",
+    );
   }
 
   nowPlaying(userIds: Iterable<string>, track: ScrobbleTrack) {
     for (const userId of userIds)
       void this.sendNowPlaying(userId, track).catch((error) =>
-        console.error(
-          `[scrobbling] now playing failed for ${userId}: ${safeError(error)}`,
+        log.warn(
+          {
+            event: "now_playing_failed",
+            userId,
+            trackId: track.id,
+            err: error,
+          },
+          "Now-playing submission failed",
         ),
       );
   }
@@ -223,6 +263,19 @@ export class ScrobbleDispatcher {
         listenedAt,
         track,
       );
+    log.debug(
+      {
+        event: "eligible_listen_queued",
+        sessionId,
+        userId,
+        trackId: track.id,
+        lastFm: Boolean(settings.lastFmEnabled && settings.lastFmSessionKey),
+        listenBrainz: Boolean(
+          settings.listenBrainzEnabled && settings.listenBrainzToken,
+        ),
+      },
+      "Eligible listen queued",
+    );
     void this.flush();
   }
 
@@ -265,7 +318,13 @@ export class ScrobbleDispatcher {
   }
 
   private async flushPending() {
-    for (const item of this.store.pendingScrobbles(Date.now())) {
+    const pending = this.store.pendingScrobbles(Date.now());
+    if (pending.length)
+      log.debug(
+        { event: "flush_started", count: pending.length },
+        "Flushing pending scrobbles",
+      );
+    for (const item of pending) {
       const settings = this.store.getUserScrobbling(item.userId);
       try {
         if (!this.sessionEnabled(item.sessionId, item.userId)) continue;
@@ -291,6 +350,17 @@ export class ScrobbleDispatcher {
           );
         }
         this.store.finishScrobble(item.id, "sent");
+        log.info(
+          {
+            event: "submission_sent",
+            service: item.service,
+            sessionId: item.sessionId,
+            userId: item.userId,
+            trackId: item.track.id,
+            attempts: item.attempts + 1,
+          },
+          "Scrobble submitted",
+        );
       } catch (error) {
         if (error instanceof LastFmError && error.code === 9) {
           this.disconnectLastFm(item.userId);
@@ -313,8 +383,18 @@ export class ScrobbleDispatcher {
             Date.now() + Math.min(3_600_000, 30_000 * 2 ** item.attempts),
           );
         else this.store.finishScrobble(item.id, "failed");
-        console.error(
-          `[scrobbling] ${item.service} submission failed for ${item.userId}: ${safeError(error)}`,
+        log.error(
+          {
+            event: "submission_failed",
+            service: item.service,
+            sessionId: item.sessionId,
+            userId: item.userId,
+            trackId: item.track.id,
+            attempts: item.attempts + 1,
+            retry,
+            err: error,
+          },
+          "Scrobble submission failed",
         );
         if (retry) break;
       }
@@ -523,11 +603,4 @@ function trackParams(track: ScrobbleTrack, sessionKey: string) {
     ...(track.duration ? { duration: String(Math.round(track.duration)) } : {}),
     sk: sessionKey,
   };
-}
-
-function safeError(error: unknown) {
-  return errorMessage(error).replace(
-    /(token|authorization|sk)[^\s,]*/gi,
-    "$1[redacted]",
-  );
 }

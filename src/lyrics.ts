@@ -1,6 +1,9 @@
 import { parseLRC, parseTTMLContent, PlainParser } from "@braccato/parsers";
 import type { Lyric } from "@braccato/core";
+import { logger } from "./logger.ts";
 import type { TrackMetadata } from "./tracks.ts";
+
+const log = logger.child({ component: "lyrics" });
 
 export type LyricsPayload = {
   lines: Lyric[];
@@ -29,25 +32,58 @@ export class LyricsCatalog {
   get(track: TrackMetadata) {
     let request = this.cache.get(track.sourceId);
     if (!request) {
+      log.debug(
+        { event: "cache_miss", sourceId: track.sourceId },
+        "Fetching lyrics",
+      );
       request = this.fetch(track);
       this.cache.set(track.sourceId, request);
-    }
+    } else
+      log.debug(
+        { event: "cache_hit", sourceId: track.sourceId },
+        "Using cached lyrics request",
+      );
     return request;
   }
 
   private async fetch(track: TrackMetadata) {
-    const results = await Promise.allSettled([
-      this.betterLyrics(track),
-      this.binimum(track),
-      this.unison(track),
-      this.amll(track),
-      this.lrclib(track),
-    ]);
-    return results
+    const startedAt = Date.now();
+    const providers = [
+      ["better-lyrics", this.betterLyrics(track)],
+      ["binimum", this.binimum(track)],
+      ["unison", this.unison(track)],
+      ["amll", this.amll(track)],
+      ["lrclib", this.lrclib(track)],
+    ] as const;
+    const results = await Promise.allSettled(providers.map(([, work]) => work));
+    results.forEach((result, index) => {
+      if (result.status === "rejected")
+        log.warn(
+          {
+            event: "provider_failed",
+            provider: providers[index]?.[0],
+            sourceId: track.sourceId,
+            err: result.reason,
+          },
+          "Lyrics provider failed",
+        );
+    });
+    const selected = results
       .flatMap((result) =>
         result.status === "fulfilled" && result.value ? [result.value] : [],
       )
       .sort((a, b) => a.priority - b.priority)[0];
+    log.info(
+      {
+        event: selected ? "found" : "unavailable",
+        sourceId: track.sourceId,
+        source: selected?.source,
+        lines: selected?.lines.length,
+        durationMs: Date.now() - startedAt,
+      },
+      selected ? "Lyrics found" : "Lyrics unavailable",
+    );
+    return selected;
   }
 
   private async betterLyrics(track: TrackMetadata) {

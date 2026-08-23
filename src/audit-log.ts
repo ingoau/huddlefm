@@ -1,7 +1,10 @@
 import { appendFile, readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { logger } from "./logger.ts";
 import type { UsageCounts } from "./store.ts";
+
+const log = logger.child({ component: "audit" });
 
 export class AuditLog {
   private pending = Promise.resolve();
@@ -11,6 +14,7 @@ export class AuditLog {
     private resolveName: (id: string) => Promise<string> = async (id) => id,
   ) {
     mkdirSync(dirname(path), { recursive: true });
+    log.debug({ event: "initialized", path }, "Audit log initialized");
   }
 
   record(
@@ -34,10 +38,8 @@ export class AuditLog {
           })}\n`,
         );
       })
-      .catch((error) =>
-        console.error(
-          `[audit] ${error instanceof Error ? error.message : error}`,
-        ),
+      .catch((err) =>
+        log.error({ event: "write_failed", err }, "Audit write failed"),
       );
   }
 
@@ -47,6 +49,7 @@ export class AuditLog {
 
   async historicalUsage() {
     await this.flush();
+    let malformed = 0;
     const counts = {
       added: 0,
       removed: 0,
@@ -90,9 +93,17 @@ export class AuditLog {
           if (Number(entry.seconds) < Number(entry.previous)) counts.back++;
         }
       } catch {
-        // Ignore incomplete or malformed audit lines.
+        malformed++;
       }
     }
+    log.info(
+      {
+        event: "usage_loaded",
+        malformed,
+        entries: contents.split("\n").length - 1,
+      },
+      "Loaded historical audit usage",
+    );
     return counts satisfies UsageCounts;
   }
 }

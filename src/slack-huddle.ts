@@ -1,3 +1,7 @@
+import { logger } from "./logger.ts";
+
+const log = logger.child({ component: "slack-huddle" });
+
 export type ChimeBootstrap = {
   sessionId: string;
   meeting: Record<string, unknown>;
@@ -116,6 +120,7 @@ export class SlackHuddleAdapter {
     this.stopping = false;
     this.onEvent = onEvent;
     await this.connect();
+    log.info({ event: "started" }, "Slack Huddle connection started");
   }
 
   stop() {
@@ -123,9 +128,15 @@ export class SlackHuddleAdapter {
     clearInterval(this.pingTimer);
     clearTimeout(this.reconnectTimer);
     this.socket?.close();
+    log.info({ event: "stopped" }, "Slack Huddle connection stopped");
   }
 
   private async connect() {
+    const startedAt = Date.now();
+    log.info(
+      { event: "connection_started", attempt: this.reconnectAttempts + 1 },
+      "Connecting Slack Huddle realtime API",
+    );
     const response = await fetch(
       new URL("/api/auth.test", this.config.workspaceUrl),
       {
@@ -161,6 +172,10 @@ export class SlackHuddleAdapter {
             () => socket.send(JSON.stringify({ type: "ping", id: Date.now() })),
             5_000,
           );
+          log.info(
+            { event: "connected", durationMs: Date.now() - startedAt },
+            "Slack Huddle realtime API connected",
+          );
           resolve();
           return;
         }
@@ -169,17 +184,33 @@ export class SlackHuddleAdapter {
         try {
           const normalized = normalizeRealtimeEvent(message);
           if (normalized) this.onEvent?.(normalized);
-        } catch {
-          console.warn(
-            `[slack-huddle] ignored invalid ${String(message.type)} event`,
+        } catch (err) {
+          log.warn(
+            {
+              event: "invalid_event_ignored",
+              realtimeType: String(message.type),
+              err,
+            },
+            "Ignored invalid Slack Huddle event",
           );
         }
       });
       socket.addEventListener("error", () => {
+        log.warn(
+          { event: "connection_error", ready },
+          "Slack Huddle connection error",
+        );
         if (!ready)
           reject(new Error("Private Slack realtime connection failed"));
       });
-      socket.addEventListener("close", () => this.scheduleReconnect());
+      socket.addEventListener("close", (event) => {
+        if (!this.stopping)
+          log.warn(
+            { event: "connection_closed", code: event.code },
+            "Slack Huddle connection closed",
+          );
+        this.scheduleReconnect();
+      });
     });
   }
 
@@ -207,10 +238,17 @@ export class SlackHuddleAdapter {
     clearInterval(this.pingTimer);
     if (this.stopping || this.reconnectTimer) return;
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempts++);
+    log.warn(
+      { event: "reconnect_scheduled", delayMs: delay },
+      "Slack Huddle reconnect scheduled",
+    );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.connect().catch((error) => {
-        console.error(error instanceof Error ? error.message : error);
+        log.error(
+          { event: "reconnect_failed", err: error },
+          "Slack Huddle reconnect failed",
+        );
         this.scheduleReconnect();
       });
     }, delay);
@@ -225,13 +263,26 @@ export class SlackHuddleAdapter {
       );
     }
     const access = channelAccess(object(info.channel, "channel"));
-    if (access === "ready") return true;
-    if (access === "decline") return false;
+    if (access === "ready") {
+      log.debug(
+        { event: "channel_access_ready", channelId },
+        "Channel accessible",
+      );
+      return true;
+    }
+    if (access === "decline") {
+      log.info(
+        { event: "channel_access_declined", channelId },
+        "Private channel is inaccessible",
+      );
+      return false;
+    }
     const joined = await this.api("conversations.join", { channel: channelId });
     if (joined.ok !== true)
       throw new Error(
         `conversations.join failed: ${String(joined.error ?? "unknown_error")}`,
       );
+    log.info({ event: "channel_joined", channelId }, "Joined Slack channel");
     return true;
   }
 
@@ -262,6 +313,7 @@ export class SlackHuddleAdapter {
   }
 
   private async api(method: string, fields: Record<string, string>) {
+    const startedAt = Date.now();
     const response = await fetch(
       new URL(`/api/${method}`, this.config.workspaceUrl),
       {
@@ -271,10 +323,16 @@ export class SlackHuddleAdapter {
       },
     );
     if (!response.ok) throw new Error(`${method} HTTP ${response.status}`);
+    log.debug(
+      { event: "api_completed", method, durationMs: Date.now() - startedAt },
+      "Slack private API call completed",
+    );
     return object(await response.json(), method);
   }
 
   async join(channelId: string) {
+    const startedAt = Date.now();
+    log.info({ event: "join_started", channelId }, "Joining Slack Huddle");
     const form = new FormData();
     form.set("channel_id", channelId);
     form.set("regions", this.config.mediaRegion);
@@ -290,7 +348,19 @@ export class SlackHuddleAdapter {
       },
     );
     if (!response.ok) throw new Error(`rooms.join HTTP ${response.status}`);
-    return normalizeJoinResponse(await response.json());
+    const joined = normalizeJoinResponse(await response.json());
+    log.info(
+      {
+        event: "join_completed",
+        channelId,
+        callId: joined.huddleCallId,
+        huddleId: joined.huddleId,
+        participants: joined.participantIds.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Joined Slack Huddle",
+    );
+    return joined;
   }
 
   async decline(channelId: string, callId: string) {
@@ -314,6 +384,10 @@ export class SlackHuddleAdapter {
       throw new Error(
         `rooms.inviteResponse failed: ${String(result.error ?? response.status)}`,
       );
+    log.info(
+      { event: "invite_declined", channelId, callId },
+      "Declined inaccessible Huddle invitation",
+    );
   }
 }
 
@@ -400,6 +474,10 @@ export async function verifySlackIdentity(config: {
   xoxc: string;
   xoxd: string;
 }) {
+  log.info(
+    { event: "identity_verification_started" },
+    "Verifying Slack credentials",
+  );
   const auth = async (token: string, cookie?: string) => {
     const response = await fetch(
       new URL("/api/auth.test", config.workspaceUrl),
@@ -427,5 +505,9 @@ export async function verifySlackIdentity(config: {
     throw new Error(
       "Slack app and Huddle credentials belong to different users",
     );
+  log.info(
+    { event: "identity_verified", botUserId: appUserId },
+    "Slack credentials verified",
+  );
   return appUserId;
 }

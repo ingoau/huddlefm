@@ -1,4 +1,4 @@
-import { errorMessage } from "./error-message.ts";
+import { safeError } from "./error-message.ts";
 
 export const permissionLabels = {
   add: "Add songs",
@@ -32,10 +32,7 @@ export function auditTrack(track: {
 }
 
 export function safeAuditError(error: unknown) {
-  return errorMessage(error).replace(
-    /(xox[acpbrs]-|token|cookie|authorization|JoinToken)[^\s,]*/gi,
-    "$1[redacted]",
-  );
+  return safeError(error);
 }
 
 export function plain(text: string) {

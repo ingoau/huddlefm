@@ -56,6 +56,10 @@ CHIME_MEDIA_REGION=ap-southeast-2 # AWS region for Chime
 CHROME_PATH=/usr/bin/chromium # Path to Chrome executable
 BIND_ADDRESS=0.0.0.0 # IP address to bind to
 PORT=3210 # Port to listen on
+LOG_LEVEL=info # Minimum operational log level
+LOG_FILE=data/logs/huddlefm.jsonl # Rotated JSON logs in the persistent data volume; set empty to disable
+LOG_FILE_SIZE=10m # Maximum size of each log file
+LOG_FILE_COUNT=7 # Rotated files retained in addition to the active file
 ```
 
 #### 3. `docker compose up -d`!
@@ -70,6 +74,12 @@ docker compose up -d
 ```
 
 All sessions should seamlessly restore after an update
+
+### Logs
+
+HuddleFM writes structured JSON logs to stdout and, by default, rotated files under `data/logs`. The files survive container recreation because `data` is mounted from the host. Use `LOG_LEVEL=debug` for detailed API and queue activity or `trace` for playback-position events.
+
+Logs can contain Slack user, channel, session, and track identifiers. Credentials and known token fields are redacted. Rotation retains the active file plus `LOG_FILE_COUNT` older files.
 
 ## About this project
 
