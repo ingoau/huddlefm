@@ -375,9 +375,7 @@ socket.addEventListener("message", async (event) => {
       lyricPriority = Infinity;
       const next = deck(message.entryId, message.url);
       const player = next.audio;
-      if (!alreadyPlaying)
-        player.currentTime =
-          transitionMode === "gapless" ? (message.introSeconds ?? 0) : 0;
+      if (!alreadyPlaying) player.currentTime = 0;
       const now = audioContext.currentTime;
       if (!alreadyPlaying) {
         next.gain.gain.cancelScheduledValues(now);
