@@ -424,7 +424,8 @@ socket.addEventListener("message", async (event) => {
       else showNoLyrics();
     }
     if (message.type === "pause") {
-      if (currentId) decks.get(currentId)?.audio.pause();
+      for (const deck of decks.values())
+        if (!deck.audio.paused) deck.audio.pause();
       send("paused");
     }
     if (message.type === "resume") {
