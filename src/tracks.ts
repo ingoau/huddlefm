@@ -5,6 +5,11 @@ import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
 const log = logger.child({ component: "tracks" });
 
+export const loudnessNormalizationArgs = (enabled = true) =>
+  enabled
+    ? ["--postprocessor-args", "ffmpeg:-af loudnorm=I=-14:LRA=11:TP=-1"]
+    : [];
+
 export type TrackMetadata = {
   sourceInput: string;
   canonicalUrl: string;
@@ -36,7 +41,11 @@ export class TrackCatalog {
   }[] = [];
 
   constructor(
-    private limits: { durationSeconds: number; downloadBytes: number },
+    private limits: {
+      durationSeconds: number;
+      downloadBytes: number;
+      loudnessNormalization?: boolean;
+    },
   ) {
     this.command = ["yt-dlp", "--force-ipv4"];
   }
@@ -300,6 +309,7 @@ export class TrackCatalog {
       "opus",
       "--audio-quality",
       "0",
+      ...loudnessNormalizationArgs(this.limits.loudnessNormalization),
       "--no-playlist",
       "--max-filesize",
       String(this.limits.downloadBytes),
