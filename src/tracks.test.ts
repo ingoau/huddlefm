@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { assertPublicUrl } from "./public-proxy.ts";
-import { TrackCatalog } from "./tracks.ts";
+import { TrackCatalog, transitionData } from "./tracks.ts";
 
 test("rejects credentials and private destinations", async () => {
   await expect(
@@ -193,4 +193,16 @@ test("expands remembered YouTube playlists", async () => {
       canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
     }),
   ]);
+});
+test("finds the audible bounds from FFmpeg silence analysis", () => {
+  expect(
+    transitionData(
+      "silence_start: 0\nsilence_end: 1.25\nsilence_start: 58.4\nsilence_end: 60",
+      60,
+    ),
+  ).toEqual({ introSeconds: 1.25, outroSeconds: 58.4 });
+  expect(transitionData("", 60)).toEqual({
+    introSeconds: 0,
+    outroSeconds: 60,
+  });
 });

@@ -9,9 +9,11 @@ import {
   permissionPresets,
   scrobblingModes,
   Store,
+  transitionModes,
   type DisplayMode,
   type SavedSession,
   type ScrobblingMode,
+  type TransitionMode,
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
 import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
@@ -40,6 +42,8 @@ type Entry = TrackMetadata & {
   status: string;
   filePath?: string;
   lyrics?: Promise<LyricsPayload | undefined>;
+  introSeconds?: number;
+  outroSeconds?: number;
 };
 
 export class Coordinator {
@@ -54,6 +58,7 @@ export class Coordinator {
   private volume: number;
   private displayMode: DisplayMode = "default";
   private autoplayEnabled = false;
+  private transitionMode: TransitionMode = "none";
   private autoplayGeneration = 0;
   private autoplayPending = false;
   private autoplayRejected: string[] = [];
@@ -132,6 +137,7 @@ export class Coordinator {
       this.playbackSeconds = restored.playbackSeconds;
       this.listenedSeconds = restored.listenedSeconds ?? 0;
       this.autoplayEnabled = restored.autoplay;
+      this.transitionMode = restored.transitionMode;
       this.displayMode = restored.displayMode;
       this.anchorEnabled = restored.anchorEnabled;
       this.revision = restored.revision;
@@ -224,6 +230,7 @@ export class Coordinator {
     this.sessionChanged();
     this.sendMedia({ type: "volume", value: this.volume });
     this.sendMedia({ type: "display_mode", mode: this.displayMode });
+    this.sendMedia({ type: "transition_mode", mode: this.transitionMode });
     if (!this.current) await this.startNext();
     else {
       this.playbackScrobbling?.start(
@@ -286,9 +293,7 @@ export class Coordinator {
           !this.queue.includes(entry)
         )
           return;
-        entry.filePath = filePath;
-        entry.status = "ready";
-        this.store.setTrack(entry.id, { status: "ready", filePath });
+        this.prepared(entry, filePath);
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
@@ -456,7 +461,12 @@ export class Coordinator {
       { event: "media_event", mediaEvent: type, entryId: details?.entryId },
       "Media event received",
     );
-    if (type === "track_ended" || type === "track_error" || type === "stalled")
+    if (
+      type === "track_ended" ||
+      type === "transition" ||
+      type === "track_error" ||
+      type === "stalled"
+    )
       return this.enqueue(() => this.advance(type, details?.entryId));
     if (type === "fatal" || type === "ended")
       return this.enqueue(() => this.end(undefined, "media connection ended"));
@@ -755,9 +765,7 @@ export class Coordinator {
         if (this.state === "suspended") return;
         if (this.state === "ended" || !this.queue.includes(entry))
           return rm(filePath, { force: true });
-        entry.filePath = filePath;
-        entry.status = "ready";
-        this.store.setTrack(entry.id, { status: "ready", filePath });
+        this.prepared(entry, filePath);
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
@@ -992,9 +1000,7 @@ export class Coordinator {
           await rm(filePath, { force: true });
           return false;
         }
-        entry.filePath = filePath;
-        entry.status = "ready";
-        this.store.setTrack(entry.id, { status: "ready", filePath });
+        this.prepared(entry, filePath);
         if (!this.current) await this.startNext();
         else {
           await this.render();
@@ -1139,25 +1145,28 @@ export class Coordinator {
       artwork: entry.artwork,
       duration: entry.duration,
       sourceId: entry.sourceId,
+      introSeconds: entry.introSeconds ?? 0,
+      outroSeconds: entry.outroSeconds ?? entry.duration,
     };
   }
 
   private syncPreloads() {
-    const entries = [
-      this.queue.find((entry) => entry.status === "ready" && entry.filePath),
-      this.history.at(-1),
-    ].filter(
+    const next = this.queue.find(
+      (entry) => entry.status === "ready" && entry.filePath,
+    );
+    const entries = [next, this.history.at(-1)].filter(
       (entry, index, all): entry is Entry =>
         Boolean(entry?.filePath) &&
         all.findIndex((other) => other?.id === entry?.id) === index,
     );
-    const next = entries[0];
     if (next) void this.loadLyrics(next);
     this.sendMedia({
       type: "preload",
+      nextEntryId: next?.id,
       entries: entries.map((entry) => ({
         entryId: entry.id,
         url: this.mediaUrl(entry),
+        introSeconds: entry.introSeconds ?? 0,
       })),
     });
   }
@@ -1176,6 +1185,16 @@ export class Coordinator {
     return entry.automatic ? -1_000_000 : -this.queue.indexOf(entry);
   }
 
+  private prepared(entry: Entry, filePath: string) {
+    const transition = this.tracks.transition?.(filePath);
+    Object.assign(entry, { filePath, status: "ready", ...transition });
+    this.store.setTrack(entry.id, {
+      status: "ready",
+      filePath,
+      ...transition,
+    });
+  }
+
   private async advance(reason = "played", expectedId?: string) {
     if (expectedId && this.current?.id !== expectedId) return;
     if (this.current) {
@@ -1188,18 +1207,20 @@ export class Coordinator {
         },
         "Track advanced",
       );
+      const end =
+        reason === "transition"
+          ? (this.current.outroSeconds ?? this.current.duration)
+          : this.current.duration;
+      if ((reason === "track_ended" || reason === "transition") && end) {
+        this.playbackScrobbling?.position(end);
+        this.listenedSeconds += Math.max(0, end - this.playbackSeconds);
+      }
       this.playbackScrobbling?.finish();
-      if (reason === "track_ended" && this.current.duration)
-        this.listenedSeconds += Math.max(
-          0,
-          this.current.duration - this.playbackSeconds,
-        );
-      this.current.status =
-        reason === "played" || reason === "track_ended" ? "played" : "failed";
-      if (reason === "played" || reason === "track_ended")
-        this.history.push(this.current);
+      const played = ["played", "track_ended", "transition"].includes(reason);
+      this.current.status = played ? "played" : "failed";
+      if (played) this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
-      if (reason === "track_ended")
+      if (reason === "track_ended" || reason === "transition")
         this.audit.record("track.finished", undefined, {
           sessionId: this.id,
           ...auditTrack(this.current),
@@ -1761,6 +1782,32 @@ export class Coordinator {
               },
               {
                 type: "input",
+                block_id: "transition",
+                label: plain("Transitions"),
+                element: {
+                  type: "static_select",
+                  action_id: "mode",
+                  options: transitionModes.map((mode) => ({
+                    text: plain(
+                      mode === "none"
+                        ? "Disabled"
+                        : mode[0]!.toUpperCase() + mode.slice(1),
+                    ),
+                    value: mode,
+                  })),
+                  initial_option: {
+                    text: plain(
+                      this.transitionMode === "none"
+                        ? "Disabled"
+                        : this.transitionMode[0]!.toUpperCase() +
+                            this.transitionMode.slice(1),
+                    ),
+                    value: this.transitionMode,
+                  },
+                },
+              },
+              {
+                type: "input",
                 block_id: "anchor",
                 optional: true,
                 label: plain("Thread position"),
@@ -2187,6 +2234,7 @@ export class Coordinator {
       hostId: this.hostId,
       volume: this.volume,
       autoplay: this.autoplayEnabled,
+      transitionMode: this.transitionMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     };
@@ -2225,6 +2273,13 @@ export class Coordinator {
           this.store.setSession(this.id, { autoplay: autoplayEnabled });
           if (!autoplayEnabled) await this.removeQueuedAutoplay();
         }
+      }
+      const transitionMode = interaction.state.transition?.mode?.selected_option
+        ?.value as TransitionMode | undefined;
+      if (transitionMode && transitionModes.includes(transitionMode)) {
+        this.transitionMode = transitionMode;
+        this.sendMedia({ type: "transition_mode", mode: transitionMode });
+        this.store.setSession(this.id, { transitionMode });
       }
       const anchorState = interaction.state.anchor?.enabled;
       if (anchorState) {

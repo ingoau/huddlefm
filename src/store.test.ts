@@ -20,18 +20,23 @@ test("persists session and permission defaults", () => {
   expect(
     store.db
       .query(
-        "SELECT status, autoplay, display_mode, anchor_enabled FROM sessions",
+        "SELECT status, autoplay, transition_mode, display_mode, anchor_enabled FROM sessions",
       )
       .get(),
   ).toEqual({
     status: "ready",
     autoplay: 0,
+    transition_mode: "none",
     display_mode: "default",
     anchor_enabled: 0,
   });
   store.setSession("session", { autoplay: true });
   expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({
     autoplay: 1,
+  });
+  store.setSession("session", { transitionMode: "crossfade" });
+  expect(store.db.query("SELECT transition_mode FROM sessions").get()).toEqual({
+    transition_mode: "crossfade",
   });
   expect(
     store.db
@@ -111,6 +116,7 @@ test("restores suspended sessions for three minutes", () => {
     artist: "Artist",
     status: "ready",
   });
+  store.setTrack("track", { introSeconds: 1.2, outroSeconds: 58.4 });
   store.addTrack({
     id: "played",
     sessionId: "session",
@@ -124,6 +130,7 @@ test("restores suspended sessions for three minutes", () => {
   });
   store.setSession("session", {
     autoplay: true,
+    transitionMode: "gapless",
     playbackSeconds: 42,
     listenedSeconds: 84,
     displayMode: "off",
@@ -151,13 +158,19 @@ test("restores suspended sessions for three minutes", () => {
       playbackSeconds: 42,
       listenedSeconds: 84,
       autoplay: true,
+      transitionMode: "gapless",
       displayMode: "lyrics",
       anchorEnabled: false,
       resumeUntil: 180_000,
     }),
   );
   expect(saved.sessions[0]?.tracks).toEqual([
-    expect.objectContaining({ id: "track", queuePosition: 0 }),
+    expect.objectContaining({
+      id: "track",
+      queuePosition: 0,
+      introSeconds: 1.2,
+      outroSeconds: 58.4,
+    }),
     expect.objectContaining({ id: "played", status: "played" }),
   ]);
   expect(store.resumableSessions(180_000, 180_000)).toEqual({

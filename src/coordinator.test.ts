@@ -282,6 +282,7 @@ test("suspends with a restart notice and restores playback", async () => {
     state: "paused",
     volume: 0.4,
     autoplay: false,
+    transitionMode: "none",
     displayMode: "lyrics",
     anchorEnabled: true,
     playbackSeconds: 42,
@@ -1112,12 +1113,19 @@ test("autoplay defaults off and host settings persist both toggle states", async
   );
   const modal = JSON.stringify(result.modals.at(-1));
   expect(modal).toContain('"block_id":"autoplay"');
+  expect(modal).toContain(
+    '"block_id":"transition","label":{"type":"plain_text","text":"Transitions"}',
+  );
+  expect(modal).toContain('"text":"Disabled"');
+  expect(modal).toContain('"value":"crossfade"');
+  expect(modal).toContain('"value":"gapless"');
   expect(modal).toContain('"initial_options":[]');
   const positions = [
     '"text":"Session"',
     '"block_id":"volume"',
     '"block_id":"display"',
     '"block_id":"autoplay"',
+    '"block_id":"transition"',
     '"block_id":"anchor"',
     '"block_id":"session_actions"',
     '"text":"Permissions"',
@@ -1162,6 +1170,22 @@ test("autoplay defaults off and host settings persist both toggle states", async
   };
   await result.coordinator.action(disable);
   expect(result.sessions).toContainEqual({ autoplay: false });
+
+  const transition = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  transition.state = {
+    transition: { mode: { selected_option: { value: "gapless" } } },
+  };
+  await result.coordinator.action(transition);
+  expect(result.sessions).toContainEqual({ transitionMode: "gapless" });
+  expect(result.media).toContainEqual({
+    type: "transition_mode",
+    mode: "gapless",
+  });
   await result.coordinator.endFromSlack();
 });
 
