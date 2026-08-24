@@ -364,22 +364,31 @@ export class TrackCatalog {
         throw new Error("Could not verify the downloaded track duration");
       if (duration > this.limits.durationSeconds)
         throw new Error("Track exceeds the duration limit");
-      const analysis = await run(
-        [
-          "ffmpeg",
-          "-hide_banner",
-          "-i",
-          filePath,
-          "-af",
-          "silencedetect=noise=-45dB:d=0.1",
-          "-f",
-          "null",
-          "-",
-        ],
-        30_000,
-        signal,
-      );
-      const transition = transitionData(analysis.stderr, duration);
+      let transition = { introSeconds: 0, outroSeconds: duration };
+      try {
+        const analysis = await run(
+          [
+            "ffmpeg",
+            "-hide_banner",
+            "-i",
+            filePath,
+            "-af",
+            "silencedetect=noise=-60dB:d=0.25",
+            "-f",
+            "null",
+            "-",
+          ],
+          30_000,
+          signal,
+        );
+        transition = transitionData(analysis.stderr, duration);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        log.warn(
+          { event: "transition_analysis_failed", entryId, err: error },
+          "Using untrimmed track boundaries",
+        );
+      }
       this.transitions.set(filePath, transition);
       log.info(
         {
