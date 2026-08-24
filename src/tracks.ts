@@ -21,6 +21,8 @@ export type TrackMetadata = {
   artwork?: string;
 };
 
+export type TransitionData = { introSeconds: number; outroSeconds: number };
+
 type CollectionReference =
   { type: "album"; id: string } | { type: "playlist"; id: string; url: string };
 
@@ -33,6 +35,7 @@ export class TrackCatalog {
   private command: string[];
   private proxy?: PublicNetworkProxy;
   private activePreparations = 0;
+  private transitions = new Map<string, TransitionData>();
   private preparationQueue: {
     priority: number;
     run: () => Promise<string>;
@@ -288,6 +291,10 @@ export class TrackCatalog {
     });
   }
 
+  transition(filePath: string) {
+    return this.transitions.get(filePath);
+  }
+
   private async download(
     track: TrackMetadata,
     directory: string,
@@ -367,6 +374,32 @@ export class TrackCatalog {
         throw new Error("Could not verify the downloaded track duration");
       if (duration > this.limits.durationSeconds)
         throw new Error("Track exceeds the duration limit");
+      let transition = { introSeconds: 0, outroSeconds: duration };
+      try {
+        const analysis = await run(
+          [
+            "ffmpeg",
+            "-hide_banner",
+            "-i",
+            filePath,
+            "-af",
+            "silencedetect=noise=-60dB:d=0.25",
+            "-f",
+            "null",
+            "-",
+          ],
+          30_000,
+          signal,
+        );
+        transition = transitionData(analysis.stderr, duration);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        log.warn(
+          { event: "transition_analysis_failed", entryId, err: error },
+          "Using untrimmed track boundaries",
+        );
+      }
+      this.transitions.set(filePath, transition);
       log.info(
         {
           event: "download_completed",
@@ -374,6 +407,7 @@ export class TrackCatalog {
           sourceId: track.sourceId,
           bytes,
           durationSeconds: duration,
+          ...transition,
           durationMs: Date.now() - startedAt,
         },
         "Track download completed",
@@ -427,6 +461,22 @@ export class TrackCatalog {
     setTimeout(() => this.references.delete(reference), 10 * 60_000);
     return reference;
   }
+}
+
+export function transitionData(output: string, duration: number) {
+  const events = [...output.matchAll(/silence_(start|end): ([\d.]+)/g)].map(
+    ([, type, seconds]) => ({ type, seconds: Number(seconds) }),
+  );
+  const leading = events[0]?.type === "start" && events[0].seconds < 0.1;
+  const introSeconds =
+    leading && events[1]?.type === "end" ? events[1].seconds : 0;
+  const lastStart = events.findLast((event) => event.type === "start");
+  const lastEnd = events.findLast((event) => event.type === "end");
+  const outroSeconds =
+    lastStart && (!lastEnd || lastEnd.seconds >= duration - 0.1)
+      ? lastStart.seconds
+      : duration;
+  return { introSeconds, outroSeconds };
 }
 
 function songMetadata(

@@ -26,6 +26,8 @@ export const permissionPresets = {
 
 export const displayModes = ["default", "lyrics", "off"] as const;
 export type DisplayMode = (typeof displayModes)[number];
+export const transitionModes = ["none", "crossfade", "gapless"] as const;
+export type TransitionMode = (typeof transitionModes)[number];
 
 export const scrobblingModes = ["always", "ask", "disabled"] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
@@ -61,6 +63,8 @@ type SavedTrack = {
   automatic?: boolean;
   status: string;
   filePath?: string;
+  introSeconds?: number;
+  outroSeconds?: number;
   queuePosition?: number;
 };
 
@@ -77,6 +81,7 @@ export type SavedSession = {
   state: string;
   volume: number;
   autoplay: boolean;
+  transitionMode: TransitionMode;
   displayMode: DisplayMode;
   anchorEnabled: boolean;
   playbackSeconds: number;
@@ -142,6 +147,7 @@ export class Store {
         status TEXT NOT NULL,
         volume REAL NOT NULL DEFAULT 0.6,
         autoplay INTEGER NOT NULL DEFAULT 0,
+        transition_mode TEXT NOT NULL DEFAULT 'none',
         resume_state TEXT,
         resume_until INTEGER,
         playback_seconds REAL NOT NULL DEFAULT 0,
@@ -168,6 +174,8 @@ export class Store {
         automatic INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL,
         file_path TEXT,
+        intro_seconds REAL,
+        outro_seconds REAL,
         queue_position INTEGER,
         created_at INTEGER NOT NULL
       );
@@ -228,6 +236,11 @@ export class Store {
         ON scrobbles(status, next_attempt_at, listened_at, created_at);
     `);
     this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn(
+      "sessions",
+      "transition_mode",
+      "TEXT NOT NULL DEFAULT 'none'",
+    );
     this.ensureColumn("sessions", "resume_state", "TEXT");
     this.ensureColumn("sessions", "resume_until", "INTEGER");
     this.ensureColumn(
@@ -264,6 +277,8 @@ export class Store {
     this.ensureColumn("sessions", "end_blocks", "TEXT");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
+    this.ensureColumn("tracks", "intro_seconds", "REAL");
+    this.ensureColumn("tracks", "outro_seconds", "REAL");
     this.ensureColumn(
       "user_scrobbling",
       "mode",
@@ -329,6 +344,7 @@ export class Store {
       hostId?: string | null;
       volume?: number;
       autoplay?: boolean;
+      transitionMode?: TransitionMode;
       playbackSeconds?: number;
       listenedSeconds?: number;
       displayMode?: DisplayMode;
@@ -351,6 +367,12 @@ export class Store {
       this.db
         .query("UPDATE sessions SET autoplay = ?, updated_at = ? WHERE id = ?")
         .run(fields.autoplay ? 1 : 0, Date.now(), sessionId);
+    if (fields.transitionMode !== undefined)
+      this.db
+        .query(
+          "UPDATE sessions SET transition_mode = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(fields.transitionMode, Date.now(), sessionId);
     if (fields.playbackSeconds !== undefined)
       this.db
         .query(
@@ -629,6 +651,12 @@ export class Store {
         ...(track.automatic ? { automatic: true } : {}),
         status: String(track.status),
         ...(track.file_path ? { filePath: String(track.file_path) } : {}),
+        ...(track.intro_seconds === null
+          ? {}
+          : { introSeconds: Number(track.intro_seconds) }),
+        ...(track.outro_seconds === null
+          ? {}
+          : { outroSeconds: Number(track.outro_seconds) }),
         ...(track.queue_position === null
           ? {}
           : { queuePosition: Number(track.queue_position) }),
@@ -647,6 +675,11 @@ export class Store {
           state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
           autoplay: Boolean(row.autoplay),
+          transitionMode: transitionModes.includes(
+            row.transition_mode as TransitionMode,
+          )
+            ? (row.transition_mode as TransitionMode)
+            : "none",
           displayMode: displayModes.includes(row.display_mode as DisplayMode)
             ? (row.display_mode as DisplayMode)
             : "default",
@@ -740,7 +773,15 @@ export class Store {
       );
   }
 
-  setTrack(id: string, fields: { status?: string; filePath?: string | null }) {
+  setTrack(
+    id: string,
+    fields: {
+      status?: string;
+      filePath?: string | null;
+      introSeconds?: number;
+      outroSeconds?: number;
+    },
+  ) {
     if (fields.status !== undefined)
       this.db
         .query("UPDATE tracks SET status = ? WHERE id = ?")
@@ -749,6 +790,14 @@ export class Store {
       this.db
         .query("UPDATE tracks SET file_path = ? WHERE id = ?")
         .run(fields.filePath, id);
+    if (fields.introSeconds !== undefined)
+      this.db
+        .query("UPDATE tracks SET intro_seconds = ? WHERE id = ?")
+        .run(fields.introSeconds, id);
+    if (fields.outroSeconds !== undefined)
+      this.db
+        .query("UPDATE tracks SET outro_seconds = ? WHERE id = ?")
+        .run(fields.outroSeconds, id);
   }
 
   removeTrack(id: string) {
