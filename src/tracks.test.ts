@@ -1,6 +1,21 @@
 import { expect, test } from "bun:test";
 import { assertPublicUrl } from "./public-proxy.ts";
-import { TrackCatalog, transitionData } from "./tracks.ts";
+import {
+  loudnessNormalizationArgs,
+  TrackCatalog,
+  transitionData,
+} from "./tracks.ts";
+
+test("enables loudness normalization by default", () => {
+  expect(loudnessNormalizationArgs()).toEqual([
+    "--postprocessor-args",
+    "ffmpeg:-af loudnorm=I=-14:LRA=11:TP=-1",
+  ]);
+});
+
+test("allows loudness normalization to be disabled", () => {
+  expect(loudnessNormalizationArgs(false)).toEqual([]);
+});
 
 test("rejects credentials and private destinations", async () => {
   await expect(
