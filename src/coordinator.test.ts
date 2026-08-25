@@ -324,7 +324,7 @@ test("suspends with a restart notice and restores playback", async () => {
     ],
   };
   const second = setup(undefined, undefined, restored);
-  await second.coordinator.resume();
+  await second.coordinator.resume("restorer");
   expect(second.coordinator.id).toBe("saved");
   expect(second.media).toContainEqual(
     expect.objectContaining({ type: "play", entryId: "track" }),
@@ -332,6 +332,11 @@ test("suspends with a restart notice and restores playback", async () => {
   expect(second.media).toContainEqual({ type: "seek", seconds: 42 });
   expect(second.media).toContainEqual({ type: "pause" });
   expect(second.media).toContainEqual({ type: "display_mode", mode: "lyrics" });
+  expect(second.audit).toContainEqual([
+    "session.resumed",
+    "restorer",
+    { sessionId: "saved", huddleId: "huddle" },
+  ]);
   await second.coordinator.endFromSlack();
 });
 

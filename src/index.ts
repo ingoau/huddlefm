@@ -208,6 +208,7 @@ async function joinHuddle(
   inviterUserId: string,
   callId?: string,
   restored?: SavedSession,
+  resumeActorId?: string,
 ) {
   if (shuttingDown) throw new Error("HuddleFM is shutting down");
   if (
@@ -365,7 +366,7 @@ async function joinHuddle(
       },
     ));
     try {
-      if (restored) await coordinator.resume();
+      if (restored) await coordinator.resume(resumeActorId);
       else await coordinator.start();
       store.setSessionParticipants(
         coordinator.id,
@@ -607,6 +608,7 @@ async function restoreEndedSession(interaction: Interaction) {
       interaction.userId,
       callId,
       session,
+      interaction.userId,
     );
     clearTimeout(endCleanupTimers.get(session.id));
     endCleanupTimers.delete(session.id);
