@@ -262,7 +262,7 @@ export class SlackAppAdapter {
     );
   }
 
-  private async dm(userId: string, text: string) {
+  async dm(userId: string, text: string) {
     const opened = await this.web.conversations.open({ users: userId });
     if (!opened.channel?.id)
       throw new Error("conversations.open returned no channel");
