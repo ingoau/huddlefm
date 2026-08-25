@@ -13,7 +13,7 @@ test("disables loudness normalization by default", () => {
 test("allows loudness normalization to be enabled", () => {
   expect(loudnessNormalizationArgs(true)).toEqual([
     "--postprocessor-args",
-    "ffmpeg:-af loudnorm=I=-14:LRA=11:TP=-1",
+    "ffmpeg:-c:a libopus -af loudnorm=I=-14:LRA=11:TP=-1",
   ]);
 });
 
