@@ -85,7 +85,7 @@ test("persists companion channels and cleanup jobs", () => {
   store.scheduleCompanionRemoval("replacement", "user", 100);
   expect(store.dueCompanionRemovals(99)).toEqual([]);
   expect(store.dueCompanionRemovals(100)).toEqual([
-    { channelId: "replacement", userId: "user", attempts: 0 },
+    { channelId: "replacement", userId: "user", dueAt: 100, attempts: 0 },
   ]);
   store.cancelCompanionRemoval("replacement", "user");
   expect(store.dueCompanionRemovals(100)).toEqual([]);

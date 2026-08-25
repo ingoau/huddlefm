@@ -9,6 +9,7 @@ const log = logger.child({ component: "companion-channels" });
 export class CompanionChannels {
   private timer?: ReturnType<typeof setInterval>;
   private cleaning = false;
+  private membership = new Map<string, Promise<void>>();
 
   constructor(
     private store: Store,
@@ -97,7 +98,9 @@ export class CompanionChannels {
 
   async add(channelId: string, userId: string) {
     this.store.cancelCompanionRemoval(channelId, userId);
-    await this.slack.inviteToChannel(channelId, userId);
+    await this.serialize(channelId, userId, () =>
+      this.slack.inviteToChannel(channelId, userId),
+    );
   }
 
   removeLater(channelId: string, userId: string, now = Date.now()) {
@@ -110,8 +113,9 @@ export class CompanionChannels {
   }
 
   removeNow(channelId: string, userId: string) {
-    this.store.scheduleCompanionRemoval(channelId, userId, Date.now());
-    return this.remove(channelId, userId);
+    const dueAt = Date.now();
+    this.store.scheduleCompanionRemoval(channelId, userId, dueAt);
+    return this.remove({ channelId, userId, dueAt, attempts: 0 });
   }
 
   endSession(sessionId: string, channelId: string, userIds: string[]) {
@@ -126,9 +130,48 @@ export class CompanionChannels {
     this.store.recordSessionMessage(sessionId, channelId, messageTs);
   }
 
-  private async remove(channelId: string, userId: string) {
-    await this.slack.removeFromChannel(channelId, userId);
-    this.store.completeCompanionRemoval(channelId, userId);
+  private remove(job: {
+    channelId: string;
+    userId: string;
+    dueAt: number;
+    attempts: number;
+  }) {
+    return this.serialize(job.channelId, job.userId, async () => {
+      if (
+        this.store.companionRemovalDeadline(job.channelId, job.userId) !==
+        job.dueAt
+      )
+        return;
+      await this.slack.removeFromChannel(job.channelId, job.userId);
+      const current = this.store.companionRemovalDeadline(
+        job.channelId,
+        job.userId,
+      );
+      if (current === undefined)
+        await this.slack.inviteToChannel(job.channelId, job.userId);
+      else if (current === job.dueAt)
+        this.store.completeCompanionRemoval(
+          job.channelId,
+          job.userId,
+          job.dueAt,
+        );
+    });
+  }
+
+  private serialize(
+    channelId: string,
+    userId: string,
+    operation: () => Promise<void>,
+  ) {
+    const key = `${channelId}:${userId}`;
+    const pending = (this.membership.get(key) ?? Promise.resolve())
+      .catch(() => {})
+      .then(operation)
+      .finally(() => {
+        if (this.membership.get(key) === pending) this.membership.delete(key);
+      });
+    this.membership.set(key, pending);
+    return pending;
   }
 
   private async create(sourceChannelId: string) {
@@ -151,12 +194,13 @@ export class CompanionChannels {
     await Promise.all([
       ...this.store.dueCompanionRemovals(now).map(async (job) => {
         try {
-          await this.remove(job.channelId, job.userId);
+          await this.remove(job);
         } catch (error) {
           const attempts = job.attempts + 1;
           this.store.retryCompanionRemoval(
             job.channelId,
             job.userId,
+            job.dueAt,
             attempts,
             now + retryDelay(attempts),
           );

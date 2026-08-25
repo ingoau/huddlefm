@@ -73,3 +73,41 @@ test("cleans tracked members and messages after their deadlines", async () => {
   expect(deleted).toEqual(["1.0"]);
   store.close();
 });
+
+test("reinvites a participant who rejoins during an in-flight removal", async () => {
+  const store = new Store(":memory:");
+  const operations: string[] = [];
+  const kickStarted = Promise.withResolvers<void>();
+  const releaseKick = Promise.withResolvers<void>();
+  const slack = {
+    ensureChannelAccess: async () => false,
+    createCompanionChannel: async () => "companion",
+    restrictCompanionPosting: async () => {},
+    inviteToChannel: async () => {
+      operations.push("invite");
+    },
+    removeFromChannel: async () => {
+      operations.push("kick");
+      kickStarted.resolve();
+      await releaseKick.promise;
+    },
+    channelMembers: async () => [],
+  };
+  const manager = new CompanionChannels(
+    store,
+    slack,
+    { dm: async () => {}, delete: async () => {} },
+    "bot",
+  );
+  manager.removeLater("companion", "user", 0);
+  const cleanup = (
+    manager as unknown as { cleanup(now: number): Promise<void> }
+  ).cleanup(10 * 60_000);
+  await kickStarted.promise;
+  const rejoin = manager.add("companion", "user");
+  releaseKick.resolve();
+  await Promise.all([cleanup, rejoin]);
+  expect(operations).toEqual(["kick", "invite", "invite"]);
+  expect(store.companionRemovalDeadline("companion", "user")).toBeUndefined();
+  store.close();
+});

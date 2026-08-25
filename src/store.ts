@@ -904,28 +904,48 @@ export class Store {
   dueCompanionRemovals(now: number) {
     return this.db
       .query(
-        `SELECT channel_id AS channelId, user_id AS userId, attempts
+        `SELECT channel_id AS channelId, user_id AS userId, due_at AS dueAt, attempts
         FROM companion_removals WHERE next_attempt_at <= ?`,
       )
-      .all(now) as { channelId: string; userId: string; attempts: number }[];
+      .all(now) as {
+      channelId: string;
+      userId: string;
+      dueAt: number;
+      attempts: number;
+    }[];
   }
 
-  completeCompanionRemoval(channelId: string, userId: string) {
-    this.cancelCompanionRemoval(channelId, userId);
+  companionRemovalDeadline(channelId: string, userId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT due_at AS dueAt FROM companion_removals WHERE channel_id = ? AND user_id = ?",
+        )
+        .get(channelId, userId) as { dueAt: number } | null
+    )?.dueAt;
+  }
+
+  completeCompanionRemoval(channelId: string, userId: string, dueAt: number) {
+    this.db
+      .query(
+        "DELETE FROM companion_removals WHERE channel_id = ? AND user_id = ? AND due_at = ?",
+      )
+      .run(channelId, userId, dueAt);
   }
 
   retryCompanionRemoval(
     channelId: string,
     userId: string,
+    dueAt: number,
     attempts: number,
     nextAttemptAt: number,
   ) {
     this.db
       .query(
         `UPDATE companion_removals SET attempts = ?, next_attempt_at = ?
-        WHERE channel_id = ? AND user_id = ?`,
+        WHERE channel_id = ? AND user_id = ? AND due_at = ?`,
       )
-      .run(attempts, nextAttemptAt, channelId, userId);
+      .run(attempts, nextAttemptAt, channelId, userId, dueAt);
   }
 
   recordSessionMessage(
