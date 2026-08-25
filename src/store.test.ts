@@ -76,6 +76,62 @@ test("persists session and permission defaults", () => {
   store.close();
 });
 
+test("persists companion channels and cleanup jobs", () => {
+  const store = new Store(":memory:");
+  store.setCompanionChannel("source", "companion");
+  store.setCompanionChannel("source", "replacement");
+  expect(store.companionChannel("source")).toBe("replacement");
+
+  store.scheduleCompanionRemoval("replacement", "user", 100);
+  expect(store.dueCompanionRemovals(99)).toEqual([]);
+  expect(store.dueCompanionRemovals(100)).toEqual([
+    { channelId: "replacement", userId: "user", dueAt: 100, attempts: 0 },
+  ]);
+  store.cancelCompanionRemoval("replacement", "user");
+  expect(store.dueCompanionRemovals(100)).toEqual([]);
+
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "replacement",
+    threadTs: "",
+    sourceChannelId: "source",
+    huddleThreadTs: "1.0",
+    companionChannelId: "replacement",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  store.recordSessionMessage("session", "replacement", "2.0");
+  store.setSessionParticipants("session", ["host", "guest", "guest"]);
+  store.removeSessionParticipant("session", "guest");
+  store.addSessionParticipant("session", "listener");
+  store.scheduleSessionMessageCleanup("session", 200);
+  expect(store.dueSessionMessages(200)).toEqual([
+    {
+      sessionId: "session",
+      channelId: "replacement",
+      messageTs: "2.0",
+      attempts: 0,
+    },
+  ]);
+  expect(store.restorableSessions()).toEqual([]);
+  expect(store.sessionParticipants("session")).toEqual(["host", "listener"]);
+  expect(store.sessionCompanionChannel("session")).toBe("replacement");
+  expect(
+    store.db
+      .query(
+        "SELECT source_channel_id, huddle_thread_ts, companion_channel_id FROM sessions",
+      )
+      .get(),
+  ).toEqual({
+    source_channel_id: "source",
+    huddle_thread_ts: "1.0",
+    companion_channel_id: "replacement",
+  });
+  store.close();
+});
+
 test("creates indexes for recurring session, track, and scrobble queries", () => {
   const store = new Store(":memory:");
   const indexes = ["sessions", "tracks", "scrobbles"].flatMap((table) =>
@@ -298,6 +354,40 @@ test("aggregates all-time canvas stats", () => {
       { channelId: "one", count: 1 },
     ],
   });
+  store.close();
+});
+
+test("groups channel statistics by source after companion replacement", () => {
+  const store = new Store(":memory:");
+  for (const [id, channelId] of [
+    ["one", "companion-one"],
+    ["two", "companion-two"],
+  ] as const) {
+    store.createSession({
+      id,
+      huddleId: id,
+      callId: id,
+      channelId,
+      threadTs: "",
+      sourceChannelId: "source",
+      creatorId: "creator",
+      volume: 0.6,
+    });
+    store.addTrack({
+      id: `track-${id}`,
+      sessionId: id!,
+      requesterId: "user",
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id,
+      artist: "Artist",
+      status: "played",
+    });
+  }
+  expect(store.canvasStats().topChannels).toEqual([
+    { channelId: "source", count: 2 },
+  ]);
   store.close();
 });
 

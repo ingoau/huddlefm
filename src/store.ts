@@ -74,6 +74,9 @@ export type SavedSession = {
   callId: string;
   channelId: string;
   threadTs: string;
+  sourceChannelId?: string;
+  huddleThreadTs?: string;
+  companionChannelId?: string;
   uiTs: string;
   revision: number;
   creatorId: string;
@@ -226,6 +229,34 @@ export class Store {
         name TEXT PRIMARY KEY,
         completed_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS companion_channels (
+        source_channel_id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS companion_removals (
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        due_at INTEGER NOT NULL,
+        next_attempt_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (channel_id, user_id)
+      );
+      CREATE TABLE IF NOT EXISTS session_messages (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        channel_id TEXT NOT NULL,
+        message_ts TEXT NOT NULL,
+        delete_at INTEGER,
+        next_attempt_at INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (channel_id, message_ts)
+      );
+      CREATE TABLE IF NOT EXISTS session_participants (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        PRIMARY KEY (session_id, user_id)
+      );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
       CREATE INDEX IF NOT EXISTS tracks_session_status
@@ -234,6 +265,10 @@ export class Store {
         ON tracks(status, source_id);
       CREATE INDEX IF NOT EXISTS scrobbles_pending
         ON scrobbles(status, next_attempt_at, listened_at, created_at);
+      CREATE INDEX IF NOT EXISTS companion_removals_due
+        ON companion_removals(next_attempt_at);
+      CREATE INDEX IF NOT EXISTS session_messages_due
+        ON session_messages(next_attempt_at);
     `);
     this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn(
@@ -275,6 +310,10 @@ export class Store {
     );
     this.ensureColumn("sessions", "end_text", "TEXT");
     this.ensureColumn("sessions", "end_blocks", "TEXT");
+    this.ensureColumn("sessions", "source_channel_id", "TEXT");
+    this.ensureColumn("sessions", "huddle_thread_ts", "TEXT");
+    this.ensureColumn("sessions", "companion_channel_id", "TEXT");
+    this.ensureColumn("sessions", "message_cleanup_at", "INTEGER");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
     this.ensureColumn("tracks", "intro_seconds", "REAL");
@@ -292,6 +331,9 @@ export class Store {
     callId: string;
     channelId: string;
     threadTs: string;
+    sourceChannelId?: string;
+    huddleThreadTs?: string;
+    companionChannelId?: string;
     creatorId: string;
     hostId?: string;
     volume: number;
@@ -301,8 +343,10 @@ export class Store {
       this.db
         .query(
           `INSERT INTO sessions
-          (id, huddle_id, call_id, channel_id, thread_ts, creator_id, host_id, status, volume, anchor_enabled, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, 0, ?, ?)`,
+          (id, huddle_id, call_id, channel_id, thread_ts, source_channel_id,
+          huddle_thread_ts, companion_channel_id, creator_id, host_id, status,
+          volume, anchor_enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, 0, ?, ?)`,
         )
         .run(
           session.id,
@@ -310,6 +354,9 @@ export class Store {
           session.callId,
           session.channelId,
           session.threadTs,
+          session.sourceChannelId ?? session.channelId,
+          session.huddleThreadTs ?? session.threadTs,
+          session.companionChannelId ?? null,
           session.creatorId,
           session.hostId ?? null,
           session.volume,
@@ -335,6 +382,74 @@ export class Store {
         "UPDATE sessions SET ui_ts = ?, revision = ?, updated_at = ? WHERE id = ?",
       )
       .run(timestamp, revision, Date.now(), sessionId);
+  }
+
+  setUiLocation(
+    sessionId: string,
+    channelId: string,
+    threadTs: string,
+    companionChannelId?: string,
+  ) {
+    this.db
+      .query(
+        `UPDATE sessions SET channel_id = ?, thread_ts = ?, companion_channel_id = ?,
+        updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        channelId,
+        threadTs,
+        companionChannelId ?? null,
+        Date.now(),
+        sessionId,
+      );
+  }
+
+  setSessionParticipants(sessionId: string, userIds: string[]) {
+    this.db.transaction(() => {
+      this.db
+        .query("DELETE FROM session_participants WHERE session_id = ?")
+        .run(sessionId);
+      const insert = this.db.query(
+        "INSERT INTO session_participants (session_id, user_id) VALUES (?, ?)",
+      );
+      for (const userId of new Set(userIds)) insert.run(sessionId, userId);
+    })();
+  }
+
+  addSessionParticipant(sessionId: string, userId: string) {
+    this.db
+      .query(
+        "INSERT OR IGNORE INTO session_participants (session_id, user_id) VALUES (?, ?)",
+      )
+      .run(sessionId, userId);
+  }
+
+  removeSessionParticipant(sessionId: string, userId: string) {
+    this.db
+      .query(
+        "DELETE FROM session_participants WHERE session_id = ? AND user_id = ?",
+      )
+      .run(sessionId, userId);
+  }
+
+  sessionParticipants(sessionId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT user_id AS userId FROM session_participants WHERE session_id = ?",
+        )
+        .all(sessionId) as { userId: string }[]
+    ).map(({ userId }) => userId);
+  }
+
+  sessionCompanionChannel(sessionId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT companion_channel_id AS channelId FROM sessions WHERE id = ?",
+        )
+        .get(sessionId) as { channelId: string | null } | null
+    )?.channelId;
   }
 
   setSession(
@@ -494,7 +609,7 @@ export class Store {
       .query(
         `UPDATE sessions SET
       status = ?, resume_state = NULL, resume_until = NULL, end_text = NULL,
-      end_blocks = NULL, updated_at = ? WHERE id = ?`,
+      end_blocks = NULL, message_cleanup_at = NULL, updated_at = ? WHERE id = ?`,
       )
       .run(status, Date.now(), sessionId);
   }
@@ -540,9 +655,10 @@ export class Store {
       .all() as { title: string; artist: string; count: number }[];
     const topChannels = this.db
       .query(
-        `SELECT sessions.channel_id AS channelId, COUNT(*) AS count
+        `SELECT COALESCE(sessions.source_channel_id, sessions.channel_id) AS channelId, COUNT(*) AS count
         FROM tracks JOIN sessions ON sessions.id = tracks.session_id
-        WHERE tracks.status = 'played' GROUP BY sessions.channel_id
+        WHERE tracks.status = 'played'
+        GROUP BY COALESCE(sessions.source_channel_id, sessions.channel_id)
         ORDER BY count DESC, channelId LIMIT 5`,
       )
       .all() as { channelId: string; count: number }[];
@@ -668,6 +784,11 @@ export class Store {
           callId: String(row.call_id),
           channelId: String(row.channel_id),
           threadTs: String(row.thread_ts),
+          sourceChannelId: String(row.source_channel_id ?? row.channel_id),
+          huddleThreadTs: String(row.huddle_thread_ts ?? row.thread_ts),
+          ...(row.companion_channel_id
+            ? { companionChannelId: String(row.companion_channel_id) }
+            : {}),
           uiTs: String(row.ui_ts ?? ""),
           revision: Number(row.revision),
           creatorId: String(row.creator_id),
@@ -732,6 +853,169 @@ export class Store {
         )
         .run(Date.now(), sessionId);
     })();
+  }
+
+  companionChannel(sourceChannelId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT channel_id AS channelId FROM companion_channels WHERE source_channel_id = ?",
+        )
+        .get(sourceChannelId) as { channelId: string } | null
+    )?.channelId;
+  }
+
+  setCompanionChannel(sourceChannelId: string, channelId: string) {
+    const now = Date.now();
+    this.db
+      .query(
+        `INSERT INTO companion_channels
+        (source_channel_id, channel_id, created_at, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (source_channel_id) DO UPDATE SET
+        channel_id = excluded.channel_id, updated_at = excluded.updated_at`,
+      )
+      .run(sourceChannelId, channelId, now, now);
+  }
+
+  clearCompanionChannel(sourceChannelId: string) {
+    this.db
+      .query("DELETE FROM companion_channels WHERE source_channel_id = ?")
+      .run(sourceChannelId);
+  }
+
+  scheduleCompanionRemoval(channelId: string, userId: string, dueAt: number) {
+    this.db
+      .query(
+        `INSERT INTO companion_removals
+        (channel_id, user_id, due_at, next_attempt_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (channel_id, user_id) DO UPDATE SET
+        due_at = excluded.due_at, next_attempt_at = excluded.next_attempt_at,
+        attempts = 0`,
+      )
+      .run(channelId, userId, dueAt, dueAt);
+  }
+
+  cancelCompanionRemoval(channelId: string, userId: string) {
+    this.db
+      .query(
+        "DELETE FROM companion_removals WHERE channel_id = ? AND user_id = ?",
+      )
+      .run(channelId, userId);
+  }
+
+  dueCompanionRemovals(now: number) {
+    return this.db
+      .query(
+        `SELECT channel_id AS channelId, user_id AS userId, due_at AS dueAt, attempts
+        FROM companion_removals WHERE next_attempt_at <= ?`,
+      )
+      .all(now) as {
+      channelId: string;
+      userId: string;
+      dueAt: number;
+      attempts: number;
+    }[];
+  }
+
+  companionRemovalDeadline(channelId: string, userId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT due_at AS dueAt FROM companion_removals WHERE channel_id = ? AND user_id = ?",
+        )
+        .get(channelId, userId) as { dueAt: number } | null
+    )?.dueAt;
+  }
+
+  completeCompanionRemoval(channelId: string, userId: string, dueAt: number) {
+    this.db
+      .query(
+        "DELETE FROM companion_removals WHERE channel_id = ? AND user_id = ? AND due_at = ?",
+      )
+      .run(channelId, userId, dueAt);
+  }
+
+  retryCompanionRemoval(
+    channelId: string,
+    userId: string,
+    dueAt: number,
+    attempts: number,
+    nextAttemptAt: number,
+  ) {
+    this.db
+      .query(
+        `UPDATE companion_removals SET attempts = ?, next_attempt_at = ?
+        WHERE channel_id = ? AND user_id = ? AND due_at = ?`,
+      )
+      .run(attempts, nextAttemptAt, channelId, userId, dueAt);
+  }
+
+  recordSessionMessage(
+    sessionId: string,
+    channelId: string,
+    messageTs: string,
+  ) {
+    this.db
+      .query(
+        `INSERT OR IGNORE INTO session_messages
+        (session_id, channel_id, message_ts, delete_at, next_attempt_at)
+        SELECT id, ?, ?, message_cleanup_at, message_cleanup_at
+        FROM sessions WHERE id = ?`,
+      )
+      .run(channelId, messageTs, sessionId);
+  }
+
+  scheduleSessionMessageCleanup(sessionId: string, deleteAt: number) {
+    this.db.transaction(() => {
+      this.db
+        .query(
+          "UPDATE sessions SET message_cleanup_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(deleteAt, Date.now(), sessionId);
+      this.db
+        .query(
+          `UPDATE session_messages SET delete_at = ?, next_attempt_at = ?, attempts = 0
+          WHERE session_id = ?`,
+        )
+        .run(deleteAt, deleteAt, sessionId);
+    })();
+  }
+
+  dueSessionMessages(now: number) {
+    return this.db
+      .query(
+        `SELECT session_id AS sessionId, channel_id AS channelId,
+        message_ts AS messageTs, attempts FROM session_messages
+        WHERE next_attempt_at IS NOT NULL AND next_attempt_at <= ?`,
+      )
+      .all(now) as {
+      sessionId: string;
+      channelId: string;
+      messageTs: string;
+      attempts: number;
+    }[];
+  }
+
+  completeSessionMessage(channelId: string, messageTs: string) {
+    this.db
+      .query(
+        "DELETE FROM session_messages WHERE channel_id = ? AND message_ts = ?",
+      )
+      .run(channelId, messageTs);
+  }
+
+  retrySessionMessage(
+    channelId: string,
+    messageTs: string,
+    attempts: number,
+    nextAttemptAt: number,
+  ) {
+    this.db
+      .query(
+        `UPDATE session_messages SET attempts = ?, next_attempt_at = ?
+        WHERE channel_id = ? AND message_ts = ?`,
+      )
+      .run(attempts, nextAttemptAt, channelId, messageTs);
   }
 
   addTrack(track: {

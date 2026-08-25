@@ -36,6 +36,7 @@ function setup(
   const media: unknown[] = [];
   const audit: unknown[] = [];
   const sessionChanges: unknown[] = [];
+  const recordedMessages: unknown[] = [];
   let post = 0;
   let modal = 0;
   const slack = {
@@ -75,6 +76,7 @@ function setup(
     ({
       createSession: () => {},
       setUi: () => {},
+      setUiLocation: () => {},
       setTrack: () => {},
       removeTrack: () => {},
       addTrack: () => {},
@@ -135,6 +137,8 @@ function setup(
     restored,
     scrobbling,
     () => sessionChanges.push({}),
+    () => {},
+    (...args) => recordedMessages.push(args),
   );
   return {
     coordinator,
@@ -153,6 +157,7 @@ function setup(
     media,
     audit,
     sessionChanges,
+    recordedMessages,
   };
 }
 
@@ -176,6 +181,21 @@ test("coalesces queued player renders", async () => {
   await Bun.sleep(110);
 
   expect(result.updates).toHaveLength(1);
+  await result.coordinator.endFromSlack();
+});
+
+test("moves controls to a replacement channel", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.moveControls("replacement");
+  expect(result.coordinator.room.uiChannelId).toBe("replacement");
+  expect(result.posted.at(-1)).toEqual([
+    "replacement",
+    "",
+    "HuddleFM player",
+    expect.any(Array),
+  ]);
+  expect(result.deleted).toContainEqual(["channel", "1"]);
   await result.coordinator.endFromSlack();
 });
 
@@ -991,6 +1011,7 @@ test("warns two minutes before leaving after ten minutes with nothing playing", 
     "1.0",
     "Nothing is playing, so I’ll leave in 2 minutes.",
   ]);
+  expect(result.recordedMessages).toHaveLength(result.posted.length);
   expect(result.media).not.toContainEqual({ type: "leave" });
   await until(() =>
     result.media.some((value) => (value as { type?: string }).type === "leave"),
