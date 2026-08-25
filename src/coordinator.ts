@@ -2753,18 +2753,16 @@ export class Coordinator {
     if (this.state === "ended" || this.state === "suspended") return;
     const alone = ![...this.participants].some((id) => id !== this.botUserId);
     if (alone && !this.aloneTimer) {
-      void this.slack
-        .post(
-          this.room.uiChannelId,
-          this.room.uiThreadTs,
-          "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
-        )
-        .catch((error) =>
-          this.log.warn(
-            { event: "alone_notice_failed", err: error },
-            "Could not post alone timeout notice",
-          ),
-        );
+      void this.post(
+        this.room.uiChannelId,
+        this.room.uiThreadTs,
+        "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
+      ).catch((error) =>
+        this.log.warn(
+          { event: "alone_notice_failed", err: error },
+          "Could not post alone timeout notice",
+        ),
+      );
       this.log.debug(
         { event: "alone_timeout_scheduled", timeoutMs: this.config.aloneMs },
         "Alone timeout scheduled",
@@ -2788,18 +2786,16 @@ export class Coordinator {
         () => {
           this.idleWarningTimer = undefined;
           if (!this.current)
-            void this.slack
-              .post(
-                this.room.uiChannelId,
-                this.room.uiThreadTs,
-                "Nothing is playing, so I’ll leave in 2 minutes.",
-              )
-              .catch((error) =>
-                this.log.warn(
-                  { event: "idle_notice_failed", err: error },
-                  "Could not post idle timeout notice",
-                ),
-              );
+            void this.post(
+              this.room.uiChannelId,
+              this.room.uiThreadTs,
+              "Nothing is playing, so I’ll leave in 2 minutes.",
+            ).catch((error) =>
+              this.log.warn(
+                { event: "idle_notice_failed", err: error },
+                "Could not post idle timeout notice",
+              ),
+            );
         },
         Math.max(0, this.config.idleMs - this.config.warningMs),
       );
@@ -2827,18 +2823,16 @@ export class Coordinator {
         () => {
           this.pausedWarningTimer = undefined;
           if (this.state === "paused")
-            void this.slack
-              .post(
-                this.room.uiChannelId,
-                this.room.uiThreadTs,
-                "Playback is paused, so I’ll leave in 2 minutes.",
-              )
-              .catch((error) =>
-                this.log.warn(
-                  { event: "paused_notice_failed", err: error },
-                  "Could not post paused timeout notice",
-                ),
-              );
+            void this.post(
+              this.room.uiChannelId,
+              this.room.uiThreadTs,
+              "Playback is paused, so I’ll leave in 2 minutes.",
+            ).catch((error) =>
+              this.log.warn(
+                { event: "paused_notice_failed", err: error },
+                "Could not post paused timeout notice",
+              ),
+            );
         },
         Math.max(0, this.config.pausedMs - this.config.warningMs),
       );

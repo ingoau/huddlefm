@@ -656,7 +656,8 @@ export class Store {
       .query(
         `SELECT COALESCE(sessions.source_channel_id, sessions.channel_id) AS channelId, COUNT(*) AS count
         FROM tracks JOIN sessions ON sessions.id = tracks.session_id
-        WHERE tracks.status = 'played' GROUP BY sessions.channel_id
+        WHERE tracks.status = 'played'
+        GROUP BY COALESCE(sessions.source_channel_id, sessions.channel_id)
         ORDER BY count DESC, channelId LIMIT 5`,
       )
       .all() as { channelId: string; count: number }[];

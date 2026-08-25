@@ -357,6 +357,40 @@ test("aggregates all-time canvas stats", () => {
   store.close();
 });
 
+test("groups channel statistics by source after companion replacement", () => {
+  const store = new Store(":memory:");
+  for (const [id, channelId] of [
+    ["one", "companion-one"],
+    ["two", "companion-two"],
+  ] as const) {
+    store.createSession({
+      id,
+      huddleId: id,
+      callId: id,
+      channelId,
+      threadTs: "",
+      sourceChannelId: "source",
+      creatorId: "creator",
+      volume: 0.6,
+    });
+    store.addTrack({
+      id: `track-${id}`,
+      sessionId: id!,
+      requesterId: "user",
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id,
+      artist: "Artist",
+      status: "played",
+    });
+  }
+  expect(store.canvasStats().topChannels).toEqual([
+    { channelId: "source", count: 2 },
+  ]);
+  store.close();
+});
+
 test("stores usage counters and imports audit history once", () => {
   const store = new Store(":memory:");
   const history = {

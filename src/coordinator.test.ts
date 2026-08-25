@@ -36,6 +36,7 @@ function setup(
   const media: unknown[] = [];
   const audit: unknown[] = [];
   const sessionChanges: unknown[] = [];
+  const recordedMessages: unknown[] = [];
   let post = 0;
   let modal = 0;
   const slack = {
@@ -136,6 +137,8 @@ function setup(
     restored,
     scrobbling,
     () => sessionChanges.push({}),
+    () => {},
+    (...args) => recordedMessages.push(args),
   );
   return {
     coordinator,
@@ -154,6 +157,7 @@ function setup(
     media,
     audit,
     sessionChanges,
+    recordedMessages,
   };
 }
 
@@ -1007,6 +1011,7 @@ test("warns two minutes before leaving after ten minutes with nothing playing", 
     "1.0",
     "Nothing is playing, so I’ll leave in 2 minutes.",
   ]);
+  expect(result.recordedMessages).toHaveLength(result.posted.length);
   expect(result.media).not.toContainEqual({ type: "leave" });
   await until(() =>
     result.media.some((value) => (value as { type?: string }).type === "leave"),
