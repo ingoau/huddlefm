@@ -313,6 +313,7 @@ export class Store {
     this.ensureColumn("sessions", "source_channel_id", "TEXT");
     this.ensureColumn("sessions", "huddle_thread_ts", "TEXT");
     this.ensureColumn("sessions", "companion_channel_id", "TEXT");
+    this.ensureColumn("sessions", "message_cleanup_at", "INTEGER");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tracks", "queue_position", "INTEGER");
     this.ensureColumn("tracks", "intro_seconds", "REAL");
@@ -608,7 +609,7 @@ export class Store {
       .query(
         `UPDATE sessions SET
       status = ?, resume_state = NULL, resume_until = NULL, end_text = NULL,
-      end_blocks = NULL, updated_at = ? WHERE id = ?`,
+      end_blocks = NULL, message_cleanup_at = NULL, updated_at = ? WHERE id = ?`,
       )
       .run(status, Date.now(), sessionId);
   }
@@ -957,18 +958,27 @@ export class Store {
     this.db
       .query(
         `INSERT OR IGNORE INTO session_messages
-        (session_id, channel_id, message_ts) VALUES (?, ?, ?)`,
+        (session_id, channel_id, message_ts, delete_at, next_attempt_at)
+        SELECT id, ?, ?, message_cleanup_at, message_cleanup_at
+        FROM sessions WHERE id = ?`,
       )
-      .run(sessionId, channelId, messageTs);
+      .run(channelId, messageTs, sessionId);
   }
 
   scheduleSessionMessageCleanup(sessionId: string, deleteAt: number) {
-    this.db
-      .query(
-        `UPDATE session_messages SET delete_at = ?, next_attempt_at = ?, attempts = 0
-        WHERE session_id = ?`,
-      )
-      .run(deleteAt, deleteAt, sessionId);
+    this.db.transaction(() => {
+      this.db
+        .query(
+          "UPDATE sessions SET message_cleanup_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(deleteAt, Date.now(), sessionId);
+      this.db
+        .query(
+          `UPDATE session_messages SET delete_at = ?, next_attempt_at = ?, attempts = 0
+          WHERE session_id = ?`,
+        )
+        .run(deleteAt, deleteAt, sessionId);
+    })();
   }
 
   dueSessionMessages(now: number) {

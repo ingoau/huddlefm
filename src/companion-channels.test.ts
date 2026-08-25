@@ -65,12 +65,13 @@ test("cleans tracked members and messages after their deadlines", async () => {
   manager.recordMessage("session", "companion", "1.0");
   manager.removeLater("companion", "guest", 0);
   manager.endSession("session", "companion", ["host"]);
+  manager.recordMessage("session", "companion", "2.0");
   const deadline = Date.now() + 10 * 60_000;
   await (manager as unknown as { cleanup(now: number): Promise<void> }).cleanup(
     deadline,
   );
   expect(removed).toEqual(["guest", "host"]);
-  expect(deleted).toEqual(["1.0"]);
+  expect(deleted).toEqual(["1.0", "2.0"]);
   store.close();
 });
 
