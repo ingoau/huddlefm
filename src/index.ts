@@ -195,6 +195,13 @@ async function migrateControls(runtime: Runtime) {
   }
 }
 
+async function abandonSession(sessionId: string) {
+  companions.abandonSession(sessionId);
+  store.expireSession(sessionId);
+  await rm(`data/media/${sessionId}`, { recursive: true, force: true });
+  pendingRestores.delete(sessionId);
+}
+
 async function joinHuddle(
   channelId: string,
   inviterUserId: string,
@@ -225,8 +232,9 @@ async function joinHuddle(
   joiningChannels.add(channelId);
   if (callId) joiningCalls.add(callId);
   let runtime: Runtime | undefined;
+  let companionChannelId: string | undefined;
+  let preparedParticipantIds = [inviterUserId];
   try {
-    let companionChannelId: string | undefined;
     try {
       companionChannelId = await companions.prepare(channelId, inviterUserId);
     } catch (error) {
@@ -250,13 +258,11 @@ async function joinHuddle(
     }
     const joined = await slackHuddle.join(channelId);
     const huddleThreadTs = joined.uiThreadTs;
+    preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
+      (userId) => !config.excludedUserIds.has(userId),
+    );
     if (companionChannelId) {
-      await companions.activate(
-        companionChannelId,
-        [inviterUserId, ...joined.participantIds].filter(
-          (userId) => !config.excludedUserIds.has(userId),
-        ),
-      );
+      await companions.activate(companionChannelId, preparedParticipantIds);
       joined.uiChannelId = companionChannelId;
       joined.uiThreadTs = "";
       joined.companionChannelId = companionChannelId;
@@ -378,6 +384,17 @@ async function joinHuddle(
     );
     return { sessionId: coordinator.id, huddleId: joined.huddleId };
   } catch (err) {
+    if (companionChannelId) {
+      companions.abortSetup(companionChannelId, preparedParticipantIds);
+      if (runtime?.coordinator) {
+        companions.endSession(
+          runtime.coordinator.id,
+          companionChannelId,
+          runtime.coordinator.participantIds(),
+        );
+        store.expireSession(runtime.coordinator.id);
+      }
+    }
     log.error(
       {
         event: "huddle_join_failed",
@@ -398,9 +415,7 @@ async function joinHuddle(
 
 async function restoreSession(saved: SavedSession) {
   if (Date.now() >= saved.resumeUntil) {
-    store.expireSession(saved.id);
-    await rm(`data/media/${saved.id}`, { recursive: true, force: true });
-    pendingRestores.delete(saved.id);
+    await abandonSession(saved.id);
     log.info(
       { event: "restore_expired", sessionId: saved.id },
       "Expired interrupted session",
@@ -412,9 +427,7 @@ async function restoreSession(saved: SavedSession) {
     saved.huddleThreadTs ?? saved.threadTs,
   );
   if (!callId) {
-    store.expireSession(saved.id);
-    await rm(`data/media/${saved.id}`, { recursive: true, force: true });
-    pendingRestores.delete(saved.id);
+    await abandonSession(saved.id);
     log.info(
       { event: "restore_huddle_ended", sessionId: saved.id },
       "Expired session because its Huddle ended",
@@ -869,13 +882,7 @@ botUserId = await verifySlackIdentity(config);
 companions = new CompanionChannels(store, slackHuddle, slackApp, botUserId);
 companions.start();
 for (const sessionId of saved.expiredIds) {
-  const channelId = store.sessionCompanionChannel(sessionId);
-  if (channelId)
-    companions.endSession(
-      sessionId,
-      channelId,
-      store.sessionParticipants(sessionId),
-    );
+  companions.abandonSession(sessionId);
 }
 await catalog.initialize();
 slackApp.onSuggestion = (interaction) =>

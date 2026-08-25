@@ -43,14 +43,20 @@ export class CompanionChannels {
       channelId = undefined;
     }
     if (!channelId) channelId = await this.create(sourceChannelId);
-    await this.add(channelId, hostId);
+    await this.add(channelId, hostId).catch((error) => {
+      this.abortSetup(channelId, [hostId]);
+      throw error;
+    });
     return channelId;
   }
 
   async replace(sourceChannelId: string, hostId: string) {
     this.store.clearCompanionChannel(sourceChannelId);
     const channelId = await this.create(sourceChannelId);
-    await this.add(channelId, hostId);
+    await this.add(channelId, hostId).catch((error) => {
+      this.abortSetup(channelId, [hostId]);
+      throw error;
+    });
     return channelId;
   }
 
@@ -124,6 +130,23 @@ export class CompanionChannels {
       if (userId !== this.userId)
         this.store.scheduleCompanionRemoval(channelId, userId, deadline);
     this.store.scheduleSessionMessageCleanup(sessionId, deadline);
+  }
+
+  abortSetup(channelId: string, userIds: string[]) {
+    const deadline = Date.now() + cleanupDelayMs;
+    for (const userId of new Set(userIds))
+      if (userId !== this.userId)
+        this.store.scheduleCompanionRemoval(channelId, userId, deadline);
+  }
+
+  abandonSession(sessionId: string) {
+    const channelId = this.store.sessionCompanionChannel(sessionId);
+    if (channelId)
+      this.endSession(
+        sessionId,
+        channelId,
+        this.store.sessionParticipants(sessionId),
+      );
   }
 
   recordMessage(sessionId: string, channelId: string, messageTs: string) {

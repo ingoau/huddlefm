@@ -111,3 +111,26 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
   expect(store.companionRemovalDeadline("companion", "user")).toBeUndefined();
   store.close();
 });
+
+test("schedules persisted participants when abandoning a session", () => {
+  const { store, manager } = setup();
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "companion",
+    threadTs: "",
+    companionChannelId: "companion",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  store.setSessionParticipants("session", ["bot", "host", "guest"]);
+  manager.abandonSession("session");
+  expect(
+    store
+      .dueCompanionRemovals(Date.now() + 10 * 60_000)
+      .map(({ userId }) => userId)
+      .sort(),
+  ).toEqual(["guest", "host"]);
+  store.close();
+});
