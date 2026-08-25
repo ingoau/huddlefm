@@ -103,6 +103,9 @@ test("persists companion channels and cleanup jobs", () => {
     volume: 0.6,
   });
   store.recordSessionMessage("session", "replacement", "2.0");
+  store.setSessionParticipants("session", ["host", "guest", "guest"]);
+  store.removeSessionParticipant("session", "guest");
+  store.addSessionParticipant("session", "listener");
   store.scheduleSessionMessageCleanup("session", 200);
   expect(store.dueSessionMessages(200)).toEqual([
     {
@@ -113,6 +116,8 @@ test("persists companion channels and cleanup jobs", () => {
     },
   ]);
   expect(store.restorableSessions()).toEqual([]);
+  expect(store.sessionParticipants("session")).toEqual(["host", "listener"]);
+  expect(store.sessionCompanionChannel("session")).toBe("replacement");
   expect(
     store.db
       .query(

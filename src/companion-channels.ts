@@ -8,6 +8,7 @@ const log = logger.child({ component: "companion-channels" });
 
 export class CompanionChannels {
   private timer?: ReturnType<typeof setInterval>;
+  private cleaning = false;
 
   constructor(
     private store: Store,
@@ -40,16 +41,14 @@ export class CompanionChannels {
       this.store.clearCompanionChannel(sourceChannelId);
       channelId = undefined;
     }
-    if (!channelId) {
-      channelId = await this.slack.createCompanionChannel(sourceChannelId);
-      this.store.setCompanionChannel(sourceChannelId, channelId);
-      await this.slack.restrictCompanionPosting(channelId).catch((error) =>
-        log.warn(
-          { event: "posting_restriction_failed", channelId, err: error },
-          "Could not restrict companion channel posting",
-        ),
-      );
-    }
+    if (!channelId) channelId = await this.create(sourceChannelId);
+    await this.add(channelId, hostId);
+    return channelId;
+  }
+
+  async replace(sourceChannelId: string, hostId: string) {
+    this.store.clearCompanionChannel(sourceChannelId);
+    const channelId = await this.create(sourceChannelId);
     await this.add(channelId, hostId);
     return channelId;
   }
@@ -57,27 +56,43 @@ export class CompanionChannels {
   async activate(channelId: string, participantIds: string[]) {
     const allowed = new Set([this.userId, ...participantIds]);
     await Promise.all(
-      participantIds.map((userId) =>
-        this.add(channelId, userId).catch(async (error) => {
-          log.warn(
-            { event: "participant_invite_failed", channelId, userId, err: error },
-            "Could not add Huddle participant to companion channel",
-          );
-          await this.messages
-            .dm(
-              userId,
-              "I couldn’t add you to the HuddleFM controls channel. Ask the host to restart the session.",
-            )
-            .catch(() => {});
-        }),
-      ),
+      [...new Set(participantIds)]
+        .filter((userId) => userId !== this.userId)
+        .map((userId) =>
+          this.add(channelId, userId).catch(async (error) => {
+            log.warn(
+              {
+                event: "participant_invite_failed",
+                channelId,
+                userId,
+                err: error,
+              },
+              "Could not add Huddle participant to companion channel",
+            );
+            await this.messages
+              .dm(
+                userId,
+                "I couldn’t add you to the HuddleFM controls channel. Ask the host to restart the session.",
+              )
+              .catch(() => {});
+          }),
+        ),
     );
-    const members = await this.slack.channelMembers(channelId);
-    await Promise.all(
-      members
-        .filter((userId) => !allowed.has(userId))
-        .map((userId) => this.remove(channelId, userId)),
-    );
+    await this.slack
+      .channelMembers(channelId)
+      .then((members) =>
+        Promise.all(
+          members
+            .filter((userId) => !allowed.has(userId))
+            .map((userId) => this.removeNow(channelId, userId)),
+        ),
+      )
+      .catch((error) =>
+        log.warn(
+          { event: "membership_reconciliation_failed", channelId, err: error },
+          "Could not reconcile companion channel membership",
+        ),
+      );
   }
 
   async add(channelId: string, userId: string) {
@@ -92,6 +107,11 @@ export class CompanionChannels {
         userId,
         now + cleanupDelayMs,
       );
+  }
+
+  removeNow(channelId: string, userId: string) {
+    this.store.scheduleCompanionRemoval(channelId, userId, Date.now());
+    return this.remove(channelId, userId);
   }
 
   endSession(sessionId: string, channelId: string, userIds: string[]) {
@@ -111,7 +131,23 @@ export class CompanionChannels {
     this.store.completeCompanionRemoval(channelId, userId);
   }
 
+  private async create(sourceChannelId: string) {
+    const channelId = await this.slack.createCompanionChannel(sourceChannelId);
+    this.store.setCompanionChannel(sourceChannelId, channelId);
+    await this.slack
+      .restrictCompanionPosting(channelId)
+      .catch((error) =>
+        log.warn(
+          { event: "posting_restriction_failed", channelId, err: error },
+          "Could not restrict companion channel posting",
+        ),
+      );
+    return channelId;
+  }
+
   private async cleanup(now = Date.now()) {
+    if (this.cleaning) return;
+    this.cleaning = true;
     await Promise.all([
       ...this.store.dueCompanionRemovals(now).map(async (job) => {
         try {
@@ -148,7 +184,9 @@ export class CompanionChannels {
           );
         }
       }),
-    ]);
+    ]).finally(() => {
+      this.cleaning = false;
+    });
   }
 }
 

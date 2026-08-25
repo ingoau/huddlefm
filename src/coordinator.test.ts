@@ -75,6 +75,7 @@ function setup(
     ({
       createSession: () => {},
       setUi: () => {},
+      setUiLocation: () => {},
       setTrack: () => {},
       removeTrack: () => {},
       addTrack: () => {},
@@ -176,6 +177,21 @@ test("coalesces queued player renders", async () => {
   await Bun.sleep(110);
 
   expect(result.updates).toHaveLength(1);
+  await result.coordinator.endFromSlack();
+});
+
+test("moves controls to a replacement channel", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.moveControls("replacement");
+  expect(result.coordinator.room.uiChannelId).toBe("replacement");
+  expect(result.posted.at(-1)).toEqual([
+    "replacement",
+    "",
+    "HuddleFM player",
+    expect.any(Array),
+  ]);
+  expect(result.deleted).toContainEqual(["channel", "1"]);
   await result.coordinator.endFromSlack();
 });
 

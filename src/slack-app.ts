@@ -124,7 +124,7 @@ export class SlackAppAdapter {
   ) {
     const result = await this.web.chat.postMessage({
       channel,
-      thread_ts: threadTs,
+      thread_ts: threadTs || undefined,
       text,
       blocks: blocks as never,
     });
@@ -163,7 +163,20 @@ export class SlackAppAdapter {
   }
 
   async delete(channel: string, ts: string) {
-    await this.web.chat.delete({ channel, ts });
+    try {
+      await this.web.chat.delete({ channel, ts });
+    } catch (error) {
+      if (
+        !error ||
+        typeof error !== "object" ||
+        !("data" in error) ||
+        !error.data ||
+        typeof error.data !== "object" ||
+        !("error" in error.data) ||
+        error.data.error !== "message_not_found"
+      )
+        throw error;
+    }
     log.debug(
       { event: "message_deleted", channelId: channel, messageTs: ts },
       "Slack message deleted",
@@ -195,7 +208,7 @@ export class SlackAppAdapter {
       channel,
       user,
       text,
-      thread_ts: threadTs,
+      thread_ts: threadTs || undefined,
       blocks: blocks as never,
     });
     log.debug(
@@ -253,13 +266,6 @@ export class SlackAppAdapter {
       });
     this.names.set(userId, name);
     return name;
-  }
-
-  async privateChannelNotice(userId: string) {
-    await this.dm(
-      userId,
-      "I can’t join that huddle until I’m a member of its private channel. Add HuddleFM to the channel, then invite me again.",
-    );
   }
 
   async dm(userId: string, text: string) {

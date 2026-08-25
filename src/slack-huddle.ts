@@ -17,6 +17,9 @@ export type JoinedHuddle = {
   participantIds: string[];
   uiChannelId: string;
   uiThreadTs: string;
+  sourceChannelId?: string;
+  huddleThreadTs?: string;
+  companionChannelId?: string;
   chimeMeeting: Record<string, unknown>;
   chimeAttendee: Record<string, unknown>;
 };
@@ -38,6 +41,9 @@ export type HuddleEvent =
     }
   | { type: "MemberLeft"; callId: string; userId: string }
   | { type: "MemberJoined"; callId: string; userId: string }
+  | { type: "ChannelLeft"; channelId: string }
+  | { type: "ChannelMemberJoined"; channelId: string; userId: string }
+  | { type: "ChannelMemberLeft"; channelId: string; userId: string }
   | { type: "HuddleEnded"; callId: string };
 
 function object(value: unknown, name: string) {
@@ -496,6 +502,22 @@ export class SlackHuddleAdapter {
 
 export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
   const event = object(raw, "realtime event");
+  if (event.type === "channel_left" && typeof event.channel === "string")
+    return { type: "ChannelLeft", channelId: event.channel };
+  if (
+    (event.type === "member_joined_channel" ||
+      event.type === "member_left_channel") &&
+    typeof event.channel === "string" &&
+    typeof event.user === "string"
+  )
+    return {
+      type:
+        event.type === "member_joined_channel"
+          ? "ChannelMemberJoined"
+          : "ChannelMemberLeft",
+      channelId: event.channel,
+      userId: event.user,
+    };
   if (event.type === "huddle_invite") {
     return {
       type: "HuddleInvited",

@@ -2,6 +2,7 @@ import type { ServerWebSocket } from "bun";
 import { rm } from "node:fs/promises";
 import { AuditLog } from "./audit-log.ts";
 import { canvasMarkdown } from "./canvas.ts";
+import { CompanionChannels } from "./companion-channels.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { safeError } from "./error-message.ts";
@@ -79,7 +80,9 @@ const pendingRestores = new Map<string, SavedSession>();
 const restoring = new Set<string>();
 const restoreWork = new Set<Promise<void>>();
 const endCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const migratingControls = new Set<string>();
 let botUserId = "";
+let companions: CompanionChannels;
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
 let canvasTimer: ReturnType<typeof setInterval> | undefined;
 let canvasUpdate: Promise<void> | undefined;
@@ -152,6 +155,46 @@ function runtimeForCall(callId: string) {
   );
 }
 
+async function migrateControls(runtime: Runtime) {
+  const coordinator = runtime.coordinator;
+  if (!coordinator || migratingControls.has(runtime.sourceChannelId)) return;
+  migratingControls.add(runtime.sourceChannelId);
+  const oldChannelId = coordinator.room.uiChannelId;
+  try {
+    const channelId =
+      oldChannelId === runtime.sourceChannelId
+        ? await companions.replace(
+            runtime.sourceChannelId,
+            coordinator.hostUserId(),
+          )
+        : await companions.prepare(
+            runtime.sourceChannelId,
+            coordinator.hostUserId(),
+          );
+    if (!channelId) throw new Error("No replacement channel was created");
+    await companions.activate(channelId, coordinator.participantIds());
+    await coordinator.moveControls(channelId);
+    log.info(
+      { event: "controls_channel_migrated", oldChannelId, channelId },
+      "Migrated Huddle controls channel",
+    );
+  } catch (error) {
+    await slackApp
+      .dm(
+        coordinator.hostUserId(),
+        `I lost access to the HuddleFM controls channel and couldn’t replace it: ${safeError(error)}`,
+      )
+      .catch(() => {});
+    log.error(
+      { event: "controls_channel_migration_failed", oldChannelId, err: error },
+      "Could not migrate Huddle controls channel",
+    );
+    await coordinator.endFromSlack();
+  } finally {
+    migratingControls.delete(runtime.sourceChannelId);
+  }
+}
+
 async function joinHuddle(
   channelId: string,
   inviterUserId: string,
@@ -183,16 +226,43 @@ async function joinHuddle(
   if (callId) joiningCalls.add(callId);
   let runtime: Runtime | undefined;
   try {
-    if (!(await slackHuddle.ensureChannelAccess(channelId))) {
-      if (callId) await slackHuddle.decline(channelId, callId);
-      await slackApp.privateChannelNotice(inviterUserId);
-      log.info(
-        { event: "huddle_join_declined", channelId, callId },
-        "Huddle join declined because the channel is inaccessible",
+    let companionChannelId: string | undefined;
+    try {
+      companionChannelId = await companions.prepare(channelId, inviterUserId);
+    } catch (error) {
+      if (callId) await slackHuddle.decline(channelId, callId).catch(() => {});
+      await slackApp
+        .dm(
+          inviterUserId,
+          `I couldn’t prepare a controls channel, so I didn’t join the Huddle: ${safeError(error)}`,
+        )
+        .catch(() => {});
+      log.warn(
+        {
+          event: "controls_channel_prepare_failed",
+          channelId,
+          callId,
+          err: error,
+        },
+        "Could not prepare Huddle controls channel",
       );
       return { declined: true };
     }
     const joined = await slackHuddle.join(channelId);
+    const huddleThreadTs = joined.uiThreadTs;
+    if (companionChannelId) {
+      await companions.activate(
+        companionChannelId,
+        [inviterUserId, ...joined.participantIds].filter(
+          (userId) => !config.excludedUserIds.has(userId),
+        ),
+      );
+      joined.uiChannelId = companionChannelId;
+      joined.uiThreadTs = "";
+      joined.companionChannelId = companionChannelId;
+    }
+    joined.sourceChannelId = channelId;
+    joined.huddleThreadTs = huddleThreadTs;
     if (runtimeForCall(joined.huddleCallId))
       throw new Error("HuddleFM is already active in this Huddle");
     const bootstrap = {
@@ -269,11 +339,27 @@ async function joinHuddle(
       restored,
       scrobbling,
       () => void updateCanvas(),
-      scheduleEndCleanup,
+      (sessionId, participantIds) => {
+        scheduleEndCleanup(sessionId);
+        if (joined.companionChannelId)
+          companions.endSession(
+            sessionId,
+            joined.companionChannelId,
+            participantIds,
+          );
+      },
+      (sessionId, postedChannelId, messageTs) => {
+        if (joined.companionChannelId === postedChannelId)
+          companions.recordMessage(sessionId, postedChannelId, messageTs);
+      },
     ));
     try {
       if (restored) await coordinator.resume();
       else await coordinator.start();
+      store.setSessionParticipants(
+        coordinator.id,
+        coordinator.participantIds(),
+      );
     } catch (error) {
       await runtime.browser.close();
       runtimes.delete(bootstrap.sessionId);
@@ -322,8 +408,8 @@ async function restoreSession(saved: SavedSession) {
     return;
   }
   const callId = await slackHuddle.activeHuddleCall(
-    saved.channelId,
-    saved.threadTs,
+    saved.sourceChannelId ?? saved.channelId,
+    saved.huddleThreadTs ?? saved.threadTs,
   );
   if (!callId) {
     store.expireSession(saved.id);
@@ -336,7 +422,7 @@ async function restoreSession(saved: SavedSession) {
     return;
   }
   await joinHuddle(
-    saved.channelId,
+    saved.sourceChannelId ?? saved.channelId,
     saved.hostId ?? saved.creatorId,
     callId,
     saved,
@@ -486,8 +572,8 @@ async function restoreEndedSession(interaction: Interaction) {
   );
   try {
     const callId = await slackHuddle.activeHuddleCall(
-      session.channelId,
-      session.threadTs,
+      session.sourceChannelId ?? session.channelId,
+      session.huddleThreadTs ?? session.threadTs,
     );
     if (!callId) {
       await slackApp.ephemeral(
@@ -498,7 +584,12 @@ async function restoreEndedSession(interaction: Interaction) {
       );
       return;
     }
-    await joinHuddle(session.channelId, interaction.userId, callId, session);
+    await joinHuddle(
+      session.sourceChannelId ?? session.channelId,
+      interaction.userId,
+      callId,
+      session,
+    );
     clearTimeout(endCleanupTimers.get(session.id));
     endCleanupTimers.delete(session.id);
     log.info(
@@ -775,6 +866,17 @@ function selectedRuntime(request: Request) {
 }
 
 botUserId = await verifySlackIdentity(config);
+companions = new CompanionChannels(store, slackHuddle, slackApp, botUserId);
+companions.start();
+for (const sessionId of saved.expiredIds) {
+  const channelId = store.sessionCompanionChannel(sessionId);
+  if (channelId)
+    companions.endSession(
+      sessionId,
+      channelId,
+      store.sessionParticipants(sessionId),
+    );
+}
 await catalog.initialize();
 slackApp.onSuggestion = (interaction) =>
   coordinatorFor(interaction)?.suggestions(interaction) ?? Promise.resolve([]);
@@ -834,11 +936,91 @@ await slackHuddle.start((event) => {
     if (!mentioned) runtime?.coordinator?.threadActivity(event.userId);
     return;
   }
+  if (
+    event.type === "ChannelLeft" ||
+    event.type === "ChannelMemberJoined" ||
+    event.type === "ChannelMemberLeft"
+  ) {
+    const runtime = [...runtimes.values()].find(
+      ({ coordinator }) => coordinator?.room.uiChannelId === event.channelId,
+    );
+    const coordinator = runtime?.coordinator;
+    if (!runtime || !coordinator) return;
+    if (
+      event.type === "ChannelLeft" ||
+      (event.type === "ChannelMemberLeft" && event.userId === botUserId)
+    ) {
+      void migrateControls(runtime);
+      return;
+    }
+    if (!coordinator.room.companionChannelId) return;
+    if (event.type === "ChannelMemberJoined") {
+      if (!coordinator.hasParticipant(event.userId))
+        void companions
+          .removeNow(event.channelId, event.userId)
+          .catch((error) =>
+            log.warn(
+              {
+                event: "unexpected_member_remove_failed",
+                ...event,
+                err: error,
+              },
+              "Could not remove unexpected companion channel member",
+            ),
+          );
+      return;
+    }
+    if (coordinator.hasParticipant(event.userId))
+      void companions
+        .add(event.channelId, event.userId)
+        .catch((error) =>
+          log.warn(
+            { event: "active_member_reinvite_failed", ...event, err: error },
+            "Could not restore active companion channel member",
+          ),
+        );
+    return;
+  }
   const runtime = runtimeForCall(event.callId);
   if (!runtime?.coordinator) return;
+  if (
+    event.type === "MemberJoined" &&
+    config.excludedUserIds.has(event.userId)
+  ) {
+    if (runtime.coordinator.room.companionChannelId)
+      void companions
+        .removeNow(runtime.coordinator.room.companionChannelId, event.userId)
+        .catch(() => {});
+    return;
+  }
   if (event.type === "MemberJoined")
-    runtime.coordinator.memberJoined(event.userId);
-  if (event.type === "MemberLeft") runtime.coordinator.memberLeft(event.userId);
+    void (
+      runtime.coordinator.room.companionChannelId
+        ? companions
+            .add(runtime.coordinator.room.companionChannelId, event.userId)
+            .catch((error) =>
+              slackApp
+                .dm(
+                  event.userId,
+                  `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
+                )
+                .catch(() => {}),
+            )
+        : Promise.resolve()
+    ).then(() => {
+      runtime.coordinator?.memberJoined(event.userId);
+      if (runtime.coordinator)
+        store.addSessionParticipant(runtime.coordinator.id, event.userId);
+    });
+  if (event.type === "MemberLeft") {
+    if (runtime.coordinator.room.companionChannelId)
+      companions.removeLater(
+        runtime.coordinator.room.companionChannelId,
+        event.userId,
+      );
+    runtime.coordinator.memberLeft(event.userId);
+    store.removeSessionParticipant(runtime.coordinator.id, event.userId);
+  }
   if (event.type === "HuddleEnded") void runtime.coordinator.endFromSlack();
 });
 if (config.canvasId) {
@@ -873,6 +1055,7 @@ const shutdown = async () => {
   canvasPending = false;
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
+  companions.stop();
   for (const timer of endCleanupTimers.values()) clearTimeout(timer);
   log.debug({ event: "shutdown_canvas_wait" }, "Waiting for Canvas update");
   await canvasUpdate;

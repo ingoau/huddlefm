@@ -252,6 +252,11 @@ export class Store {
         attempts INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (channel_id, message_ts)
       );
+      CREATE TABLE IF NOT EXISTS session_participants (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        PRIMARY KEY (session_id, user_id)
+      );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
       CREATE INDEX IF NOT EXISTS tracks_session_status
@@ -376,6 +381,74 @@ export class Store {
         "UPDATE sessions SET ui_ts = ?, revision = ?, updated_at = ? WHERE id = ?",
       )
       .run(timestamp, revision, Date.now(), sessionId);
+  }
+
+  setUiLocation(
+    sessionId: string,
+    channelId: string,
+    threadTs: string,
+    companionChannelId?: string,
+  ) {
+    this.db
+      .query(
+        `UPDATE sessions SET channel_id = ?, thread_ts = ?, companion_channel_id = ?,
+        updated_at = ? WHERE id = ?`,
+      )
+      .run(
+        channelId,
+        threadTs,
+        companionChannelId ?? null,
+        Date.now(),
+        sessionId,
+      );
+  }
+
+  setSessionParticipants(sessionId: string, userIds: string[]) {
+    this.db.transaction(() => {
+      this.db
+        .query("DELETE FROM session_participants WHERE session_id = ?")
+        .run(sessionId);
+      const insert = this.db.query(
+        "INSERT INTO session_participants (session_id, user_id) VALUES (?, ?)",
+      );
+      for (const userId of new Set(userIds)) insert.run(sessionId, userId);
+    })();
+  }
+
+  addSessionParticipant(sessionId: string, userId: string) {
+    this.db
+      .query(
+        "INSERT OR IGNORE INTO session_participants (session_id, user_id) VALUES (?, ?)",
+      )
+      .run(sessionId, userId);
+  }
+
+  removeSessionParticipant(sessionId: string, userId: string) {
+    this.db
+      .query(
+        "DELETE FROM session_participants WHERE session_id = ? AND user_id = ?",
+      )
+      .run(sessionId, userId);
+  }
+
+  sessionParticipants(sessionId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT user_id AS userId FROM session_participants WHERE session_id = ?",
+        )
+        .all(sessionId) as { userId: string }[]
+    ).map(({ userId }) => userId);
+  }
+
+  sessionCompanionChannel(sessionId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT companion_channel_id AS channelId FROM sessions WHERE id = ?",
+        )
+        .get(sessionId) as { channelId: string | null } | null
+    )?.channelId;
   }
 
   setSession(
@@ -581,7 +654,7 @@ export class Store {
       .all() as { title: string; artist: string; count: number }[];
     const topChannels = this.db
       .query(
-        `SELECT sessions.channel_id AS channelId, COUNT(*) AS count
+        `SELECT COALESCE(sessions.source_channel_id, sessions.channel_id) AS channelId, COUNT(*) AS count
         FROM tracks JOIN sessions ON sessions.id = tracks.session_id
         WHERE tracks.status = 'played' GROUP BY sessions.channel_id
         ORDER BY count DESC, channelId LIMIT 5`,
@@ -855,7 +928,11 @@ export class Store {
       .run(attempts, nextAttemptAt, channelId, userId);
   }
 
-  recordSessionMessage(sessionId: string, channelId: string, messageTs: string) {
+  recordSessionMessage(
+    sessionId: string,
+    channelId: string,
+    messageTs: string,
+  ) {
     this.db
       .query(
         `INSERT OR IGNORE INTO session_messages

@@ -111,7 +111,15 @@ export class Coordinator {
     restored?: SavedSession,
     private scrobbling?: ScrobbleDispatcher,
     private sessionChanged = () => {},
-    private sessionEnded = (_sessionId: string) => {},
+    private sessionEnded = (
+      _sessionId: string,
+      _participantIds: string[],
+    ) => {},
+    private messagePosted = (
+      _sessionId: string,
+      _channelId: string,
+      _messageTs: string,
+    ) => {},
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
@@ -172,11 +180,14 @@ export class Coordinator {
       callId: this.room.huddleCallId,
       channelId: this.room.uiChannelId,
       threadTs: this.room.uiThreadTs,
+      sourceChannelId: this.room.sourceChannelId,
+      huddleThreadTs: this.room.huddleThreadTs,
+      companionChannelId: this.room.companionChannelId,
       creatorId: this.room.huddleCreatorId,
       hostId: this.hostId,
       volume: this.volume,
     });
-    this.uiTs = await this.slack.post(
+    this.uiTs = await this.post(
       this.room.uiChannelId,
       this.room.uiThreadTs,
       "HuddleFM player",
@@ -492,6 +503,29 @@ export class Coordinator {
     return this.enqueue(() => this.reanchor());
   }
 
+  participantIds() {
+    return [...this.participants];
+  }
+
+  hasParticipant(userId: string) {
+    return this.participants.has(userId);
+  }
+
+  hostUserId() {
+    return this.hostId ?? this.room.huddleCreatorId;
+  }
+
+  moveControls(channelId: string) {
+    return this.enqueue(async () => {
+      const previousChannelId = this.room.uiChannelId;
+      this.room.uiChannelId = channelId;
+      this.room.uiThreadTs = "";
+      this.room.companionChannelId = channelId;
+      this.store.setUiLocation(this.id, channelId, "", channelId);
+      await this.reanchor(previousChannelId);
+    });
+  }
+
   memberJoined(userId: string) {
     if (this.isExcluded(userId)) return;
     this.participants.add(userId);
@@ -533,18 +567,16 @@ export class Coordinator {
         { event: "suspend_started" },
         "Suspending session for restart",
       );
-      const notice = this.slack
-        .post(
-          this.room.uiChannelId,
-          this.room.uiThreadTs,
-          "HuddleFM is restarting. Playback should resume shortly.",
-        )
-        .catch((error) =>
-          this.log.error(
-            { event: "restart_notice_failed", err: error },
-            "Could not post restart notice",
-          ),
-        );
+      const notice = this.post(
+        this.room.uiChannelId,
+        this.room.uiThreadTs,
+        "HuddleFM is restarting. Playback should resume shortly.",
+      ).catch((error) =>
+        this.log.error(
+          { event: "restart_notice_failed", err: error },
+          "Could not post restart notice",
+        ),
+      );
       const state = this.state;
       this.state = "suspended";
       this.playbackScrobbling?.pause();
@@ -2433,11 +2465,11 @@ export class Coordinator {
     }, 100);
   }
 
-  private async reanchor() {
+  private async reanchor(previousChannelId = this.room.uiChannelId) {
     if (this.state === "ended" || this.state === "suspended") return;
     const revision = ++this.revision;
     const old = this.uiTs;
-    const current = await this.slack.post(
+    const current = await this.post(
       this.room.uiChannelId,
       this.room.uiThreadTs,
       "HuddleFM player",
@@ -2446,7 +2478,7 @@ export class Coordinator {
     this.uiTs = current;
     this.store.setUi(this.id, current, revision);
     await this.slack
-      .delete(this.room.uiChannelId, old)
+      .delete(previousChannelId, old)
       .catch((error) =>
         this.log.error(
           { event: "old_player_delete_failed", messageTs: old, err: error },
@@ -2893,7 +2925,7 @@ export class Coordinator {
           );
         const text = `Session ended: ${reason}`;
         const blocks = this.recapBlocks(text);
-        const timestamp = await this.slack.post(
+        const timestamp = await this.post(
           this.room.uiChannelId,
           this.room.uiThreadTs,
           text,
@@ -2903,7 +2935,7 @@ export class Coordinator {
         this.store.setEndMessage(this.id, timestamp, text, blocks);
       }
     } finally {
-      this.sessionEnded(this.id);
+      this.sessionEnded(this.id, [...this.participants]);
       this.log.info(
         {
           event: "ended",
@@ -2915,6 +2947,17 @@ export class Coordinator {
         "Session ended",
       );
     }
+  }
+
+  private async post(
+    channelId: string,
+    threadTs: string | undefined,
+    text: string,
+    blocks?: unknown[],
+  ) {
+    const messageTs = await this.slack.post(channelId, threadTs, text, blocks);
+    this.messagePosted(this.id, channelId, messageTs);
+    return messageTs;
   }
 
   private recapBlocks(text: string) {
