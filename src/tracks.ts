@@ -7,7 +7,10 @@ const log = logger.child({ component: "tracks" });
 
 export const loudnessNormalizationArgs = (enabled = false) =>
   enabled
-    ? ["--postprocessor-args", "ffmpeg:-af loudnorm=I=-14:LRA=11:TP=-1"]
+    ? [
+        "--postprocessor-args",
+        "ffmpeg:-c:a libopus -af loudnorm=I=-14:LRA=11:TP=-1",
+      ]
     : [];
 
 export type TrackMetadata = {
