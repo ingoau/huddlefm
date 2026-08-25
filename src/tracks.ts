@@ -5,7 +5,7 @@ import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
 const log = logger.child({ component: "tracks" });
 
-export const loudnessNormalizationArgs = (enabled = true) =>
+export const loudnessNormalizationArgs = (enabled = false) =>
   enabled
     ? ["--postprocessor-args", "ffmpeg:-af loudnorm=I=-14:LRA=11:TP=-1"]
     : [];
