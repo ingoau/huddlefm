@@ -6,6 +6,10 @@ const required = [
   "SLACK_XOXD",
 ] as const;
 
+export function parseIds(value = "") {
+  return new Set(value.split(/[\s,]+/).filter(Boolean));
+}
+
 export function loadConfig() {
   for (const name of required)
     if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -31,8 +35,9 @@ export function loadConfig() {
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID,
-    excludedUserIds: new Set(
-      (process.env.EXCLUDED_USER_IDS ?? "").split(/[\s,]+/).filter(Boolean),
+    excludedUserIds: parseIds(process.env.EXCLUDED_USER_IDS),
+    forcedCompanionChannelIds: parseIds(
+      process.env.FORCE_COMPANION_CHANNEL_IDS,
     ),
     canvasId: process.env.SLACK_CANVAS_ID,
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,

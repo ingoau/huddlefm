@@ -35,8 +35,9 @@ export class CompanionChannels {
     clearInterval(this.timer);
   }
 
-  async prepare(sourceChannelId: string, hostId: string) {
-    if (await this.slack.ensureChannelAccess(sourceChannelId)) return;
+  async prepare(sourceChannelId: string, hostId: string, force = false) {
+    if (!force && (await this.slack.ensureChannelAccess(sourceChannelId)))
+      return;
     let channelId = this.store.companionChannel(sourceChannelId);
     if (channelId && !(await this.slack.ensureChannelAccess(channelId))) {
       this.store.clearCompanionChannel(sourceChannelId);

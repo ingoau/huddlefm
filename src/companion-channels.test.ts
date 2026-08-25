@@ -51,6 +51,13 @@ test("uses an accessible source channel without creating a companion", async () 
   store.close();
 });
 
+test("forces a companion channel for an accessible source", async () => {
+  const { store, manager, invited } = setup(true);
+  expect(await manager.prepare("source", "host", true)).toBe("companion");
+  expect(invited).toEqual(["host"]);
+  store.close();
+});
+
 test("cleans tracked members and messages after their deadlines", async () => {
   const { store, manager, removed, deleted } = setup();
   store.createSession({

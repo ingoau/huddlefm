@@ -170,6 +170,7 @@ async function migrateControls(runtime: Runtime) {
         : await companions.prepare(
             runtime.sourceChannelId,
             coordinator.hostUserId(),
+            config.forcedCompanionChannelIds.has(runtime.sourceChannelId),
           );
     if (!channelId) throw new Error("No replacement channel was created");
     await companions.activate(channelId, coordinator.participantIds());
@@ -236,7 +237,11 @@ async function joinHuddle(
   let preparedParticipantIds = [inviterUserId];
   try {
     try {
-      companionChannelId = await companions.prepare(channelId, inviterUserId);
+      companionChannelId = await companions.prepare(
+        channelId,
+        inviterUserId,
+        config.forcedCompanionChannelIds.has(channelId),
+      );
     } catch (error) {
       if (callId) await slackHuddle.decline(channelId, callId).catch(() => {});
       await slackApp
