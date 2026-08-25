@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   activeHuddleCallId,
   channelAccess,
+  companionChannelName,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
 } from "./slack-huddle.ts";
@@ -11,6 +12,13 @@ test("classifies channel access", () => {
   expect(channelAccess({ is_member: false, is_private: false })).toBe("join");
   expect(channelAccess({ is_member: false, is_private: true })).toBe("decline");
   expect(channelAccess()).toBe("decline");
+});
+
+test("names companion channels from the source channel ID", () => {
+  expect(companionChannelName("C123ABC")).toBe("huddlefm-c123abc");
+  expect(companionChannelName("C123ABC", "4k9x2m")).toBe(
+    "huddlefm-c123abc-4k9x2m",
+  );
 });
 
 test("normalizes the private join response without nullable MeetingFeatures", () => {

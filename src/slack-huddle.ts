@@ -98,6 +98,10 @@ export function channelAccess(channel?: {
   return !channel || channel.is_private ? "decline" : "join";
 }
 
+export function companionChannelName(channelId: string, suffix?: string) {
+  return `huddlefm-${channelId.toLowerCase()}${suffix ? `-${suffix}` : ""}`;
+}
+
 export class SlackHuddleAdapter {
   private socket?: WebSocket;
   private pingTimer?: ReturnType<typeof setInterval>;
@@ -284,6 +288,105 @@ export class SlackHuddleAdapter {
       );
     log.info({ event: "channel_joined", channelId }, "Joined Slack channel");
     return true;
+  }
+
+  async createCompanionChannel(sourceChannelId: string) {
+    let suffix: string | undefined;
+    for (;;) {
+      const name = companionChannelName(sourceChannelId, suffix);
+      const result = await this.api("conversations.create", {
+        name,
+        is_private: "true",
+      });
+      if (result.ok === true) {
+        const channelId = text(
+          object(result.channel, "conversations.create.channel").id,
+          "conversations.create.channel.id",
+        );
+        await this.api("conversations.setTopic", {
+          channel: channelId,
+          topic: `HuddleFM controls for <#${sourceChannelId}>. Membership and messages are managed automatically.`,
+        });
+        return channelId;
+      }
+      if (result.error !== "name_taken")
+        throw new Error(
+          `conversations.create failed: ${String(result.error ?? "unknown_error")}`,
+        );
+      suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 6);
+    }
+  }
+
+  async restrictCompanionPosting(channelId: string) {
+    const result = await this.api("channel.perfs.set", {
+      channel: channelId,
+      prefs: JSON.stringify({
+        who_can_post: "type:admin",
+        can_thread: "type:admin",
+        enable_at_here: "true",
+        enable_at_channel: "true",
+      }),
+    });
+    if (result.ok !== true)
+      throw new Error(
+        `channel.perfs.set failed: ${String(result.error ?? "unknown_error")}`,
+      );
+  }
+
+  async inviteToChannel(channelId: string, userId: string) {
+    const result = await this.api("conversations.invite", {
+      channel: channelId,
+      users: userId,
+    });
+    if (result.ok !== true && result.error !== "already_in_channel")
+      throw new Error(
+        `conversations.invite failed: ${String(result.error ?? "unknown_error")}`,
+      );
+  }
+
+  async removeFromChannel(channelId: string, userId: string) {
+    const result = await this.api("conversations.kick", {
+      channel: channelId,
+      user: userId,
+    });
+    if (
+      result.ok !== true &&
+      result.error !== "not_in_channel" &&
+      result.error !== "user_not_in_channel"
+    )
+      throw new Error(
+        `conversations.kick failed: ${String(result.error ?? "unknown_error")}`,
+      );
+  }
+
+  async channelMembers(channelId: string) {
+    const members: string[] = [];
+    let cursor = "";
+    do {
+      const result = await this.api("conversations.members", {
+        channel: channelId,
+        limit: "200",
+        ...(cursor ? { cursor } : {}),
+      });
+      if (result.ok !== true)
+        throw new Error(
+          `conversations.members failed: ${String(result.error ?? "unknown_error")}`,
+        );
+      if (Array.isArray(result.members))
+        members.push(
+          ...result.members.filter(
+            (member): member is string => typeof member === "string",
+          ),
+        );
+      const metadata = result.response_metadata;
+      cursor =
+        metadata &&
+        typeof metadata === "object" &&
+        typeof (metadata as { next_cursor?: unknown }).next_cursor === "string"
+          ? (metadata as { next_cursor: string }).next_cursor
+          : "";
+    } while (cursor);
+    return members;
   }
 
   async activeHuddleCall(channelId: string, threadTs: string) {
