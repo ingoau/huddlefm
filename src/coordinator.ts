@@ -210,7 +210,7 @@ export class Coordinator {
     );
   }
 
-  async resume() {
+  async resume(actorId?: string) {
     const startedAt = Date.now();
     this.log.info({ event: "resume_started" }, "Resuming session");
     const missing = await Promise.all(
@@ -234,7 +234,7 @@ export class Coordinator {
       this.store.setTrack(entry.id, { status: "preparing", filePath: null });
     }
     this.store.activateSession(this.id, this.state);
-    this.audit.record("session.resumed", undefined, {
+    this.audit.record("session.resumed", actorId, {
       sessionId: this.id,
       huddleId: this.room.huddleId,
     });
