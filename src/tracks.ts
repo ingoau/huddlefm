@@ -230,7 +230,7 @@ export class TrackCatalog {
       artist: String(metadata.artist ?? metadata.uploader ?? "Unknown artist"),
       album: metadata.album ? String(metadata.album) : undefined,
       duration: metadata.duration ? Number(metadata.duration) : undefined,
-      artwork: artworkUrl(metadata.thumbnail),
+      artwork: await publicArtworkUrl(metadata.thumbnail),
     };
     log.info(
       {
@@ -566,6 +566,19 @@ function artworkUrl(value: unknown) {
     return url.href;
   } catch {
     return artwork;
+  }
+}
+
+// Artwork from arbitrary media pages is fetched by the host-side browser, so
+// it must pass the same public-network check as the media URL itself.
+export async function publicArtworkUrl(value: unknown) {
+  const artwork = artworkUrl(value);
+  if (!artwork) return;
+  try {
+    await assertPublicUrl(new URL(artwork));
+    return artwork;
+  } catch {
+    return;
   }
 }
 

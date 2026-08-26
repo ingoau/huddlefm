@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { assertPublicUrl } from "./public-proxy.ts";
 import {
   loudnessNormalizationArgs,
+  publicArtworkUrl,
   TrackCatalog,
   transitionData,
 } from "./tracks.ts";
@@ -24,6 +25,17 @@ test("rejects credentials and private destinations", async () => {
   await expect(
     assertPublicUrl(new URL("http://127.0.0.1/test")),
   ).rejects.toThrow("Private");
+});
+
+test("drops artwork that points at private destinations", async () => {
+  expect(await publicArtworkUrl("http://169.254.169.254/meta.png")).toBe(
+    undefined,
+  );
+  expect(await publicArtworkUrl("file:///etc/passwd")).toBe(undefined);
+  expect(await publicArtworkUrl("not a url")).toBe(undefined);
+  expect(await publicArtworkUrl("https://93.184.216.34/art.png")).toBe(
+    "https://93.184.216.34/art.png",
+  );
 });
 
 test("uses search metadata without extracting it again", async () => {
