@@ -1063,14 +1063,42 @@ log.info(
   "HuddleFM ready",
 );
 
+const shutdownTimeoutMs = 30_000;
 const shutdown = async () => {
-  if (shuttingDown) return;
+  if (shuttingDown) {
+    log.warn({ event: "shutdown_forced" }, "Forcing exit on repeated signal");
+    flushLogs();
+    process.exit(1);
+  }
   shuttingDown = true;
   const startedAt = Date.now();
   log.info(
     { event: "shutdown_started", activeSessions: runtimes.size },
     "Shutdown started",
   );
+  const failsafe = setTimeout(() => {
+    log.error(
+      { event: "shutdown_timeout", durationMs: Date.now() - startedAt },
+      "Shutdown did not complete in time; exiting",
+    );
+    flushLogs();
+    process.exit(1);
+  }, shutdownTimeoutMs);
+  failsafe.unref();
+  try {
+    await shutdownSteps();
+    log.info(
+      { event: "shutdown_completed", durationMs: Date.now() - startedAt },
+      "Shutdown complete",
+    );
+  } catch (error) {
+    log.error({ event: "shutdown_failed", err: error }, "Shutdown failed");
+  }
+  flushLogs();
+  process.exit(0);
+};
+
+async function shutdownSteps() {
   canvasPending = false;
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
@@ -1111,13 +1139,7 @@ const shutdown = async () => {
   store.close();
   log.debug({ event: "shutdown_audit" }, "Flushing audit log");
   await audit.flush();
-  log.info(
-    { event: "shutdown_completed", durationMs: Date.now() - startedAt },
-    "Shutdown complete",
-  );
-  flushLogs();
-  process.exit(0);
-};
+}
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
