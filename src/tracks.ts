@@ -24,7 +24,12 @@ export type TrackMetadata = {
   artwork?: string;
 };
 
-export type TransitionData = { introSeconds: number; outroSeconds: number };
+export type TransitionData = {
+  introSeconds: number;
+  outroSeconds: number;
+  fadeInSeconds: number;
+  fadeOutSeconds: number;
+};
 
 type CollectionReference =
   { type: "album"; id: string } | { type: "playlist"; id: string; url: string };
@@ -377,7 +382,12 @@ export class TrackCatalog {
         throw new Error("Could not verify the downloaded track duration");
       if (duration > this.limits.durationSeconds)
         throw new Error("Track exceeds the duration limit");
-      let transition = { introSeconds: 0, outroSeconds: duration };
+      let transition = {
+        introSeconds: 0,
+        outroSeconds: duration,
+        fadeInSeconds: 0,
+        fadeOutSeconds: 0,
+      };
       try {
         const analysis = await run(
           [
@@ -386,7 +396,7 @@ export class TrackCatalog {
             "-i",
             filePath,
             "-af",
-            "silencedetect=noise=-60dB:d=0.25",
+            "silencedetect=noise=-60dB:d=0.25,aresample=1000,asetnsamples=n=250:p=1,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level",
             "-f",
             "null",
             "-",
@@ -479,7 +489,45 @@ export function transitionData(output: string, duration: number) {
     lastStart && (!lastEnd || lastEnd.seconds >= duration - 0.1)
       ? lastStart.seconds
       : duration;
-  return { introSeconds, outroSeconds };
+  const levels: { seconds: number; db: number }[] = [];
+  let seconds: number | undefined;
+  for (const line of output.split("\n")) {
+    const timestamp = line.match(/pts_time:([\d.]+)/);
+    if (timestamp) seconds = Number(timestamp[1]);
+    const level = line.match(/RMS_level=([-\w.]+)/);
+    if (level && seconds !== undefined) {
+      const db = Number(level[1]);
+      if (Number.isFinite(db)) levels.push({ seconds, db });
+      seconds = undefined;
+    }
+  }
+  const audible = levels.filter(
+    (sample) => sample.seconds >= introSeconds && sample.seconds < outroSeconds,
+  );
+  if (audible.length < 4)
+    return {
+      introSeconds,
+      outroSeconds,
+      fadeInSeconds: 0,
+      fadeOutSeconds: 0,
+    };
+  const sorted = audible.map(({ db }) => db).sort((a, b) => a - b);
+  const threshold = sorted[Math.floor((sorted.length - 1) * 0.75)]! - 8;
+  const maximum = Math.min(8, (outroSeconds - introSeconds) / 4);
+  const firstStrong = audible.find(({ db }) => db >= threshold);
+  const lastStrong = audible.findLast(({ db }) => db >= threshold);
+  const fadeInSeconds = Math.min(
+    maximum,
+    Math.max(0.75, (firstStrong?.seconds ?? introSeconds + 8) - introSeconds),
+  );
+  const fadeOutSeconds = Math.min(
+    maximum,
+    Math.max(
+      0.75,
+      outroSeconds - ((lastStrong?.seconds ?? outroSeconds - 8) + 0.25),
+    ),
+  );
+  return { introSeconds, outroSeconds, fadeInSeconds, fadeOutSeconds };
 }
 
 function songMetadata(

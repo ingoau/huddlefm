@@ -172,7 +172,12 @@ test("restores suspended sessions for three minutes", () => {
     artist: "Artist",
     status: "ready",
   });
-  store.setTrack("track", { introSeconds: 1.2, outroSeconds: 58.4 });
+  store.setTrack("track", {
+    introSeconds: 1.2,
+    outroSeconds: 58.4,
+    fadeInSeconds: 2,
+    fadeOutSeconds: 4,
+  });
   store.addTrack({
     id: "played",
     sessionId: "session",
@@ -226,6 +231,8 @@ test("restores suspended sessions for three minutes", () => {
       queuePosition: 0,
       introSeconds: 1.2,
       outroSeconds: 58.4,
+      fadeInSeconds: 2,
+      fadeOutSeconds: 4,
     }),
     expect.objectContaining({ id: "played", status: "played" }),
   ]);

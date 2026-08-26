@@ -44,6 +44,8 @@ type Entry = TrackMetadata & {
   lyrics?: Promise<LyricsPayload | undefined>;
   introSeconds?: number;
   outroSeconds?: number;
+  fadeInSeconds?: number;
+  fadeOutSeconds?: number;
 };
 
 export class Coordinator {
@@ -1179,6 +1181,7 @@ export class Coordinator {
       sourceId: entry.sourceId,
       introSeconds: entry.introSeconds ?? 0,
       outroSeconds: entry.outroSeconds ?? entry.duration,
+      fadeOutSeconds: entry.fadeOutSeconds ?? 0,
     };
   }
 
@@ -1199,6 +1202,7 @@ export class Coordinator {
         entryId: entry.id,
         url: this.mediaUrl(entry),
         introSeconds: entry.introSeconds ?? 0,
+        fadeInSeconds: entry.fadeInSeconds ?? 0,
       })),
     });
   }
@@ -1823,7 +1827,9 @@ export class Coordinator {
                     text: plain(
                       mode === "none"
                         ? "Disabled"
-                        : mode[0]!.toUpperCase() + mode.slice(1),
+                        : mode === "adaptive"
+                          ? "Adaptive crossfade"
+                          : mode[0]!.toUpperCase() + mode.slice(1),
                     ),
                     value: mode,
                   })),
@@ -1831,7 +1837,9 @@ export class Coordinator {
                     text: plain(
                       this.transitionMode === "none"
                         ? "Disabled"
-                        : this.transitionMode[0]!.toUpperCase() +
+                        : this.transitionMode === "adaptive"
+                          ? "Adaptive crossfade"
+                          : this.transitionMode[0]!.toUpperCase() +
                             this.transitionMode.slice(1),
                     ),
                     value: this.transitionMode,
