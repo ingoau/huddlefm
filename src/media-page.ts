@@ -279,14 +279,15 @@ async function beginTransition() {
   const previousId = currentId;
   const previous = decks.get(previousId)!;
   const next = deck(nextEntry.entryId, nextEntry.url);
-  next.audio.currentTime =
-    transitionMode === "gapless" ? nextEntry.introSeconds : 0;
-  const now = audioContext.currentTime;
-  next.gain.gain.setValueAtTime(transitionMode === "crossfade" ? 0 : 1, now);
+  next.audio.currentTime = nextEntry.introSeconds;
+  next.gain.gain.value = transitionMode === "crossfade" ? 0 : 1;
   await next.audio.play();
   if (transitionMode === "crossfade") {
+    const now = audioContext.currentTime;
+    next.gain.gain.cancelScheduledValues(now);
+    next.gain.gain.setValueAtTime(0, now);
     next.gain.gain.linearRampToValueAtTime(1, now + fadeSeconds);
-    previous.gain.gain.setValueAtTime(previous.gain.gain.value, now);
+    previous.gain.gain.cancelAndHoldAtTime(now);
     previous.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
     setTimeout(() => previous.audio.pause(), fadeSeconds * 1_000);
   } else previous.audio.pause();
