@@ -441,6 +441,48 @@ test("loads lyrics only for the current and next tracks", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("sends adaptive fade analysis for the current and next tracks", async () => {
+  const tracks = {
+    resolve: async (id: string) => ({
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id,
+      artist: "Artist",
+    }),
+    prepare: async (_track: unknown, _directory: string, id: string) =>
+      `${id}.opus`,
+    transition: () => ({
+      introSeconds: 1,
+      outroSeconds: 59,
+      fadeInSeconds: 3,
+      fadeOutSeconds: 5,
+    }),
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  for (const id of ["a", "b"])
+    await result.coordinator.action(
+      interaction(result.coordinator, "add_track_to_queue", id),
+    );
+  expect(result.media).toContainEqual(
+    expect.objectContaining({
+      type: "play",
+      fadeOutSeconds: 5,
+      outroSeconds: 59,
+    }),
+  );
+  expect(result.media).toContainEqual(
+    expect.objectContaining({
+      type: "preload",
+      entries: expect.arrayContaining([
+        expect.objectContaining({ fadeInSeconds: 3, introSeconds: 1 }),
+      ]),
+    }),
+  );
+  await result.coordinator.endFromSlack();
+});
+
 test("rejects stale player actions", async () => {
   const test = setup();
   await test.coordinator.start();
@@ -1145,6 +1187,8 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(modal).toContain('"text":"Disabled"');
   expect(modal).not.toContain('"value":"crossfade"');
   expect(modal).toContain('"value":"gapless"');
+  expect(modal).toContain('"text":"Adaptive crossfade"');
+  expect(modal).toContain('"value":"adaptive"');
   expect(modal).toContain('"initial_options":[]');
   const positions = [
     '"text":"Session"',
@@ -1211,6 +1255,15 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(result.media).toContainEqual({
     type: "transition_mode",
     mode: "gapless",
+  });
+  transition.state = {
+    transition: { mode: { selected_option: { value: "adaptive" } } },
+  };
+  await result.coordinator.action(transition);
+  expect(result.sessions).toContainEqual({ transitionMode: "adaptive" });
+  expect(result.media).toContainEqual({
+    type: "transition_mode",
+    mode: "adaptive",
   });
   await result.coordinator.endFromSlack();
 });
