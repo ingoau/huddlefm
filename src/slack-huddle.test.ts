@@ -3,6 +3,7 @@ import {
   activeHuddleCallId,
   channelAccess,
   companionChannelName,
+  companionChannelRequest,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
 } from "./slack-huddle.ts";
@@ -19,6 +20,14 @@ test("names companion channels from the source channel ID", () => {
   expect(companionChannelName("C123ABC", "4k9x2m")).toBe(
     "huddlefm-c123abc-4k9x2m",
   );
+});
+
+test("targets companion channel creation to a configured workspace", () => {
+  expect(companionChannelRequest("huddlefm-c123", "T123")).toEqual({
+    name: "huddlefm-c123",
+    is_private: "true",
+    team_id: "T123",
+  });
 });
 
 test("normalizes the private join response without nullable MeetingFeatures", () => {

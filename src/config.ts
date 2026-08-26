@@ -20,6 +20,7 @@ export function loadConfig() {
     xapp: process.env.SLACK_XAPP!,
     xoxc: process.env.SLACK_XOXC!,
     xoxd: process.env.SLACK_XOXD!,
+    teamId: process.env.SLACK_TEAM_ID,
     port: Number(process.env.PORT ?? 3210),
     bindAddress: process.env.BIND_ADDRESS ?? "127.0.0.1",
     mediaRegion: process.env.CHIME_MEDIA_REGION ?? "ap-southeast-2",

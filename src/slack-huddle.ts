@@ -108,6 +108,10 @@ export function companionChannelName(channelId: string, suffix?: string) {
   return `huddlefm-${channelId.toLowerCase()}${suffix ? `-${suffix}` : ""}`;
 }
 
+export function companionChannelRequest(name: string, teamId?: string) {
+  return { name, is_private: "true", ...(teamId ? { team_id: teamId } : {}) };
+}
+
 export class SlackHuddleAdapter {
   private socket?: WebSocket;
   private pingTimer?: ReturnType<typeof setInterval>;
@@ -122,6 +126,7 @@ export class SlackHuddleAdapter {
       workspaceUrl: string;
       xoxc: string;
       xoxd: string;
+      teamId?: string;
       mediaRegion: string;
     },
   ) {}
@@ -300,10 +305,10 @@ export class SlackHuddleAdapter {
     let suffix: string | undefined;
     for (;;) {
       const name = companionChannelName(sourceChannelId, suffix);
-      const result = await this.api("conversations.create", {
-        name,
-        is_private: "true",
-      });
+      const result = await this.api(
+        "conversations.create",
+        companionChannelRequest(name, this.config.teamId),
+      );
       if (result.ok === true) {
         const channelId = text(
           object(result.channel, "conversations.create.channel").id,
