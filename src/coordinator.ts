@@ -432,6 +432,7 @@ export class Coordinator {
         volume_up: () => this.changeVolume(interaction, 0.05),
         queue_move_up: () => this.reorder(interaction, -1),
         queue_move_down: () => this.reorder(interaction, 1),
+        queue_play_next: () => this.playNext(interaction),
         queue_move_to_position: () => this.queuePositionModal(interaction),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
@@ -1462,6 +1463,32 @@ export class Coordinator {
     this.syncPreloads();
   }
 
+  private async playNext(interaction: Interaction) {
+    if (!this.validQueueView(interaction))
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
+    if (!(await this.require(interaction, "manage-queue"))) return;
+    const index = this.queue.findIndex(
+      (track) => track.id === interaction.value,
+    );
+    if (index <= 0) return;
+    const [entry] = this.queue.splice(index, 1);
+    this.queue.unshift(entry!);
+    this.audit.record("queue.reordered", interaction.userId, {
+      sessionId: this.id,
+      trackId: interaction.value,
+      from: index,
+      to: 0,
+      reason: "play_next",
+    });
+    this.store.incrementUsage("reordered");
+    this.queueChanged(interaction);
+    await this.render();
+    this.syncPreloads();
+  }
+
   private async clear(interaction: Interaction) {
     if (!(await this.require(interaction, "clear"))) return;
     this.autoplayGeneration++;
@@ -1623,6 +1650,16 @@ export class Coordinator {
         ? this.queue.flatMap((track, index) => {
             const manages = this.can(userId, "manage-queue");
             const controls = [
+              ...(manages && index
+                ? [
+                    {
+                      type: "button",
+                      action_id: "queue_play_next",
+                      text: plain("Play next"),
+                      value: track.id,
+                    },
+                  ]
+                : []),
               ...(manages && index
                 ? [
                     {
