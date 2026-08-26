@@ -287,7 +287,8 @@ async function beginTransition() {
     next.gain.gain.cancelScheduledValues(now);
     next.gain.gain.setValueAtTime(0, now);
     next.gain.gain.linearRampToValueAtTime(1, now + fadeSeconds);
-    previous.gain.gain.cancelAndHoldAtTime(now);
+    previous.gain.gain.cancelScheduledValues(now);
+    previous.gain.gain.setValueAtTime(1, now);
     previous.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
     setTimeout(() => previous.audio.pause(), fadeSeconds * 1_000);
   } else previous.audio.pause();
