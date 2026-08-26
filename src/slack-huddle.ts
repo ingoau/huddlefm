@@ -30,6 +30,7 @@ export type HuddleEvent =
       channelId: string;
       callId: string;
       inviterUserId: string;
+      freeWilly?: Record<string, unknown>;
     }
   | {
       type: "ThreadActivity";
@@ -93,6 +94,42 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
     uiThreadTs: text(canvas.root_thread_ts, "canvas.root_thread_ts"),
     chimeMeeting: meeting,
     chimeAttendee: object(freeWilly.attendee, "call.free_willy.attendee"),
+  };
+}
+
+export function normalizeInvitedJoinResponse(
+  raw: unknown,
+  channelId: string,
+  freeWilly: Record<string, unknown>,
+): JoinedHuddle {
+  const root = object(raw, "screenhero.rooms.info response");
+  if (root.ok !== true)
+    throw new Error(
+      `screenhero.rooms.info failed: ${String(root.error ?? "unknown_error")}`,
+    );
+
+  const room = object(root.room, "room");
+  const meeting = { ...object(freeWilly.meeting, "free_willy.meeting") };
+  if (meeting.MeetingFeatures === null) delete meeting.MeetingFeatures;
+  const callId = text(room.id, "room.id");
+
+  return {
+    huddleCallId: callId,
+    huddleId: callId,
+    huddleCreatorId: text(room.created_by, "room.created_by"),
+    participantIds: Array.isArray(room.participants)
+      ? room.participants.filter(
+          (participant): participant is string =>
+            typeof participant === "string",
+        )
+      : [],
+    uiChannelId: channelId,
+    uiThreadTs: text(
+      room.thread_root_ts ?? room.canvas_thread_ts,
+      "room.thread_root_ts",
+    ),
+    chimeMeeting: meeting,
+    chimeAttendee: object(freeWilly.attendee, "free_willy.attendee"),
   };
 }
 
@@ -477,6 +514,54 @@ export class SlackHuddleAdapter {
     return joined;
   }
 
+  async joinInvited(
+    channelId: string,
+    callId: string,
+    freeWilly: Record<string, unknown>,
+  ) {
+    const startedAt = Date.now();
+    log.info(
+      { event: "invite_join_started", channelId, callId },
+      "Joining invited Slack Huddle",
+    );
+    const form = new FormData();
+    form.set("token", this.config.xoxc);
+    form.set("room", callId);
+    form.set("_x_reason", "all-calls-store/conditional-fetch");
+    form.set("_x_mode", "online");
+    form.set("_x_sonic", "true");
+    form.set("_x_app_name", "client");
+
+    const response = await fetch(
+      new URL("/api/screenhero.rooms.info", this.config.workspaceUrl),
+      {
+        method: "POST",
+        headers: { cookie: `d=${this.config.xoxd}` },
+        body: form,
+      },
+    );
+    if (!response.ok)
+      throw new Error(`screenhero.rooms.info HTTP ${response.status}`);
+    const joined = normalizeInvitedJoinResponse(
+      await response.json(),
+      channelId,
+      freeWilly,
+    );
+    if (joined.huddleCallId !== callId)
+      throw new Error("screenhero.rooms.info returned the wrong Huddle");
+    log.info(
+      {
+        event: "invite_join_completed",
+        channelId,
+        callId,
+        participants: joined.participantIds.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Joined invited Slack Huddle",
+    );
+    return joined;
+  }
+
   async decline(channelId: string, callId: string) {
     const form = new FormData();
     form.set("token", this.config.xoxc);
@@ -524,11 +609,18 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
       userId: event.user,
     };
   if (event.type === "huddle_invite") {
+    const freeWilly =
+      event.free_willy &&
+      typeof event.free_willy === "object" &&
+      !Array.isArray(event.free_willy)
+        ? (event.free_willy as Record<string, unknown>)
+        : undefined;
     return {
       type: "HuddleInvited",
       channelId: text(event.channel_id, "huddle_invite.channel_id"),
       callId: text(event.call_id, "huddle_invite.call_id"),
       inviterUserId: text(event.sender_user_id, "huddle_invite.sender_user_id"),
+      ...(freeWilly ? { freeWilly } : {}),
     };
   }
   if (

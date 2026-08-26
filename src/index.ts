@@ -207,6 +207,7 @@ async function joinHuddle(
   channelId: string,
   inviterUserId: string,
   callId?: string,
+  inviteFreeWilly?: Record<string, unknown>,
   restored?: SavedSession,
   resumeActorId?: string,
 ) {
@@ -262,7 +263,10 @@ async function joinHuddle(
       );
       return { declined: true };
     }
-    const joined = await slackHuddle.join(channelId);
+    const joined =
+      callId && inviteFreeWilly
+        ? await slackHuddle.joinInvited(channelId, callId, inviteFreeWilly)
+        : await slackHuddle.join(channelId);
     const huddleThreadTs = joined.uiThreadTs;
     preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
       (userId) => !config.excludedUserIds.has(userId),
@@ -444,6 +448,7 @@ async function restoreSession(saved: SavedSession) {
     saved.sourceChannelId ?? saved.channelId,
     saved.hostId ?? saved.creatorId,
     callId,
+    undefined,
     saved,
   );
   pendingRestores.delete(saved.id);
@@ -607,6 +612,7 @@ async function restoreEndedSession(interaction: Interaction) {
       session.sourceChannelId ?? session.channelId,
       interaction.userId,
       callId,
+      undefined,
       session,
       interaction.userId,
     );
@@ -910,9 +916,12 @@ await slackHuddle.start((event) => {
       },
       "Huddle invitation received",
     );
-    void joinHuddle(event.channelId, event.inviterUserId, event.callId).catch(
-      () => {},
-    );
+    void joinHuddle(
+      event.channelId,
+      event.inviterUserId,
+      event.callId,
+      event.freeWilly,
+    ).catch(() => {});
     return;
   }
   if (event.type === "ThreadActivity") {
