@@ -237,10 +237,10 @@ export class ScrobbleDispatcher {
     listenedAt: number,
     listenedSeconds: number,
   ) {
-    if (!this.sessionEnabled(sessionId, userId)) return;
-    const settings = this.store.getUserScrobbling(userId);
     const threshold = track.duration ? Math.min(track.duration / 2, 240) : 240;
-    if (listenedSeconds < threshold) return;
+    if (listenedSeconds < threshold) return false;
+    if (!this.sessionEnabled(sessionId, userId)) return true;
+    const settings = this.store.getUserScrobbling(userId);
     if (
       settings.lastFmEnabled &&
       settings.lastFmSessionKey &&
@@ -277,6 +277,7 @@ export class ScrobbleDispatcher {
       "Eligible listen queued",
     );
     void this.flush();
+    return true;
   }
 
   flush() {
@@ -479,7 +480,12 @@ export class PlaybackScrobbler {
     lastPosition: number;
     listeners: Map<
       string,
-      { listenedAt: number; seconds: number; active: boolean }
+      {
+        listenedAt: number;
+        seconds: number;
+        active: boolean;
+        reported?: boolean;
+      }
     >;
   };
 
@@ -497,7 +503,12 @@ export class PlaybackScrobbler {
   ) {
     const listeners = new Map<
       string,
-      { listenedAt: number; seconds: number; active: boolean }
+      {
+        listenedAt: number;
+        seconds: number;
+        active: boolean;
+        reported?: boolean;
+      }
     >();
     for (const userId of userIds)
       if (userId !== this.botUserId)
@@ -560,6 +571,8 @@ export class PlaybackScrobbler {
   }
 
   settingsEnabled(userId: string) {
+    const listener = this.current?.listeners.get(userId);
+    if (listener) listener.reported = false;
     if (
       this.current?.playing &&
       this.dispatcher.sessionEnabled(this.sessionId, userId)
@@ -573,9 +586,9 @@ export class PlaybackScrobbler {
     this.current.lastPosition = seconds;
     if (!this.current.playing || delta < 0 || delta > 5) return;
     for (const [userId, listener] of this.current.listeners) {
-      if (!listener.active) continue;
+      if (!listener.active || listener.reported) continue;
       listener.seconds += delta;
-      this.dispatcher.reached(
+      listener.reported = this.dispatcher.reached(
         this.sessionId,
         userId,
         this.current.track,
