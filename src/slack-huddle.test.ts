@@ -4,6 +4,7 @@ import {
   channelAccess,
   companionChannelName,
   companionChannelRequest,
+  companionPostingPrefs,
   normalizeInvitedJoinResponse,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
@@ -28,6 +29,15 @@ test("targets companion channel creation to a configured workspace", () => {
     name: "huddlefm-c123",
     is_private: "true",
     team_id: "T123",
+  });
+});
+
+test("restricts companion posting to admins and HuddleFM", () => {
+  expect(companionPostingPrefs("U123")).toEqual({
+    who_can_post: "type:admin,user:U123",
+    can_thread: "type:admin,user:U123",
+    enable_at_here: "true",
+    enable_at_channel: "true",
   });
 });
 

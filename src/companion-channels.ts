@@ -44,6 +44,7 @@ export class CompanionChannels {
       channelId = undefined;
     }
     if (!channelId) channelId = await this.create(sourceChannelId);
+    await this.restrict(channelId);
     await this.add(channelId, hostId).catch((error) => {
       this.abortSetup(channelId, [hostId]);
       throw error;
@@ -54,6 +55,7 @@ export class CompanionChannels {
   async replace(sourceChannelId: string, hostId: string) {
     this.store.clearCompanionChannel(sourceChannelId);
     const channelId = await this.create(sourceChannelId);
+    await this.restrict(channelId);
     await this.add(channelId, hostId).catch((error) => {
       this.abortSetup(channelId, [hostId]);
       throw error;
@@ -201,15 +203,18 @@ export class CompanionChannels {
   private async create(sourceChannelId: string) {
     const channelId = await this.slack.createCompanionChannel(sourceChannelId);
     this.store.setCompanionChannel(sourceChannelId, channelId);
+    return channelId;
+  }
+
+  private async restrict(channelId: string) {
     await this.slack
-      .restrictCompanionPosting(channelId)
+      .restrictCompanionPosting(channelId, this.userId)
       .catch((error) =>
         log.warn(
           { event: "posting_restriction_failed", channelId, err: error },
           "Could not restrict companion channel posting",
         ),
       );
-    return channelId;
   }
 
   private async cleanup(now = Date.now()) {
