@@ -1143,7 +1143,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     '"block_id":"transition","label":{"type":"plain_text","text":"Transitions"}',
   );
   expect(modal).toContain('"text":"Disabled"');
-  expect(modal).toContain('"value":"crossfade"');
+  expect(modal).not.toContain('"value":"crossfade"');
   expect(modal).toContain('"value":"gapless"');
   expect(modal).toContain('"initial_options":[]');
   const positions = [

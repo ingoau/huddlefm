@@ -51,13 +51,12 @@ type Deck = {
 
 const decks = new Map<string, Deck>();
 let currentId: string | undefined;
-let transitionMode: "none" | "crossfade" | "gapless" = "none";
+let transitionMode: "none" | "gapless" = "none";
 let nextEntry:
   { entryId: string; url: string; introSeconds: number } | undefined;
 let currentOutro: number | undefined;
 let transitioning = false;
 let transitionTimer: ReturnType<typeof setTimeout> | undefined;
-let fadeSeconds = 5;
 let lyricPriority = Infinity;
 let transition = 0;
 let pendingLyrics:
@@ -241,10 +240,7 @@ function updateProgress() {
     !transitioning &&
     transitionReady()
   ) {
-    fadeSeconds = Math.min(5, Math.max(0.1, currentOutro / 2));
-    if (transitionMode === "crossfade" && remaining <= fadeSeconds)
-      void beginTransition().catch(transitionFailed);
-    if (transitionMode === "gapless" && remaining <= 0.25 && !transitionTimer)
+    if (remaining <= 0.25 && !transitionTimer)
       transitionTimer = setTimeout(
         () => {
           transitionTimer = undefined;
@@ -280,18 +276,9 @@ async function beginTransition() {
   const previous = decks.get(previousId)!;
   const next = deck(nextEntry.entryId, nextEntry.url);
   next.audio.currentTime = nextEntry.introSeconds;
-  next.gain.gain.value = transitionMode === "crossfade" ? 0 : 1;
+  next.gain.gain.value = 1;
   await next.audio.play();
-  if (transitionMode === "crossfade") {
-    const now = audioContext.currentTime;
-    next.gain.gain.cancelScheduledValues(now);
-    next.gain.gain.setValueAtTime(0, now);
-    next.gain.gain.linearRampToValueAtTime(1, now + fadeSeconds);
-    previous.gain.gain.cancelScheduledValues(now);
-    previous.gain.gain.setValueAtTime(1, now);
-    previous.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
-    setTimeout(() => previous.audio.pause(), fadeSeconds * 1_000);
-  } else previous.audio.pause();
+  previous.audio.pause();
   currentId = nextEntry.entryId;
   send("transition", { entryId: previousId });
 }

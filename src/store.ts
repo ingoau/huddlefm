@@ -26,7 +26,7 @@ export const permissionPresets = {
 
 export const displayModes = ["default", "lyrics", "off"] as const;
 export type DisplayMode = (typeof displayModes)[number];
-export const transitionModes = ["none", "crossfade", "gapless"] as const;
+export const transitionModes = ["none", "gapless"] as const;
 export type TransitionMode = (typeof transitionModes)[number];
 
 export const scrobblingModes = ["always", "ask", "disabled"] as const;

@@ -34,9 +34,9 @@ test("persists session and permission defaults", () => {
   expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({
     autoplay: 1,
   });
-  store.setSession("session", { transitionMode: "crossfade" });
+  store.setSession("session", { transitionMode: "gapless" });
   expect(store.db.query("SELECT transition_mode FROM sessions").get()).toEqual({
-    transition_mode: "crossfade",
+    transition_mode: "gapless",
   });
   expect(
     store.db
