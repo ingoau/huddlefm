@@ -124,14 +124,14 @@ test("sends now playing immediately and queues scrobbles at the listening thresh
     calls
       .filter((call) => call.url.includes("audioscrobbler"))
       .map((call) => new URLSearchParams(call.body).get("artist")),
-  ).toEqual(["Artist", "Artist"]);
+  ).toEqual(["Artist, Featured Artist", "Artist, Featured Artist"]);
   expect(
     calls
       .filter((call) => call.url.includes("listenbrainz"))
       .map(
         (call) => JSON.parse(call.body).payload[0].track_metadata.artist_name,
       ),
-  ).toEqual(["Artist", "Artist"]);
+  ).toEqual(["Artist, Featured Artist", "Artist, Featured Artist"]);
   store.close();
 });
 
