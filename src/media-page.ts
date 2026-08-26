@@ -20,6 +20,8 @@ const capture = document.querySelector<HTMLButtonElement>("#capture")!;
 const artwork = document.querySelector<HTMLElement>("#artwork")!;
 const cover = document.querySelector<HTMLElement>("#cover")!;
 const progress = document.querySelector<HTMLElement>("#progress-fill")!;
+const elapsed = document.querySelector("#elapsed")!;
+const duration = document.querySelector("#duration")!;
 const stage = document.querySelector<HTMLElement>("#stage")!;
 lyrics.host = { getScrollElement: () => lyrics };
 lyrics.theme = "/* blyrics-target-scroll-pos-ratio = 0.45; */";
@@ -219,6 +221,16 @@ function stop() {
   artwork.style.backgroundImage = "";
   cover.style.backgroundImage = "";
   progress.style.transform = "scaleX(0)";
+  elapsed.textContent = "0:00";
+  duration.textContent = "0:00";
+}
+
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${Math.floor(seconds % 60)
+    .toString()
+    .padStart(2, "0")}`;
 }
 
 function updateProgress() {
@@ -228,6 +240,8 @@ function updateProgress() {
       ? player.currentTime / player.duration
       : 0;
   progress.style.transform = `scaleX(${Math.min(1, Math.max(0, amount))})`;
+  elapsed.textContent = formatTime(player?.currentTime ?? 0);
+  duration.textContent = formatTime(player?.duration ?? 0);
   const remaining =
     player && currentOutro !== undefined
       ? currentOutro - player.currentTime
