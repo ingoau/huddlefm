@@ -2,24 +2,28 @@ import { expect, test } from "bun:test";
 import { CompanionChannels } from "./companion-channels.ts";
 import { Store } from "./store.ts";
 
-function setup(accessible = false) {
+function setup(accessible = false, restrictionFails = false) {
   const store = new Store(":memory:");
   const invited: string[] = [];
   const removed: string[] = [];
   const deleted: string[] = [];
+  const restricted: string[] = [];
   const slack = {
     ensureChannelAccess: async () => accessible,
     createCompanionChannel: async () => "companion",
-    restrictCompanionPosting: async () => {},
+    restrictCompanionPosting: async (channelId: string, userId: string) => {
+      restricted.push(`${channelId}:${userId}`);
+      if (restrictionFails) throw new Error("failed");
+    },
     inviteToChannel: async (_channelId: string, userId: string) => {
       invited.push(userId);
     },
     removeFromChannel: async (_channelId: string, userId: string) => {
       removed.push(userId);
     },
-    channelMembers: async () => ["bot", "host", "stale"],
   };
   const messages = {
+    channelMembers: async () => ["bot", "host", "stale"],
     dm: async () => {},
     delete: async (_channelId: string, messageTs: string) => {
       deleted.push(messageTs);
@@ -30,17 +34,26 @@ function setup(accessible = false) {
     invited,
     removed,
     deleted,
+    restricted,
     manager: new CompanionChannels(store, slack, messages, "bot"),
   };
 }
 
 test("creates and reconciles a companion channel", async () => {
-  const { store, manager, invited, removed } = setup();
+  const { store, manager, invited, removed, restricted } = setup();
   expect(await manager.prepare("source", "host")).toBe("companion");
   expect(store.companionChannel("source")).toBe("companion");
+  expect(restricted).toEqual(["companion:bot"]);
   await manager.activate("companion", ["host", "guest"]);
   expect(invited).toEqual(["host", "host", "guest"]);
   expect(removed).toEqual(["stale"]);
+  store.close();
+});
+
+test("continues when companion posting restrictions fail", async () => {
+  const { store, manager, invited } = setup(false, true);
+  expect(await manager.prepare("source", "host")).toBe("companion");
+  expect(invited).toEqual(["host"]);
   store.close();
 });
 
@@ -99,12 +112,15 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
       kickStarted.resolve();
       await releaseKick.promise;
     },
-    channelMembers: async () => [],
   };
   const manager = new CompanionChannels(
     store,
     slack,
-    { dm: async () => {}, delete: async () => {} },
+    {
+      dm: async () => {},
+      delete: async () => {},
+      channelMembers: async () => [],
+    },
     "bot",
   );
   manager.removeLater("companion", "user", 0);

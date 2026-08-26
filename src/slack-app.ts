@@ -276,6 +276,21 @@ export class SlackAppAdapter {
     log.debug({ event: "dm_posted", userId }, "Slack direct message posted");
   }
 
+  async channelMembers(channel: string) {
+    const members: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const result = await this.web.conversations.members({
+        channel,
+        limit: 200,
+        cursor,
+      });
+      members.push(...(result.members ?? []));
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return members;
+  }
+
   private async connect() {
     const startedAt = Date.now();
     log.info(

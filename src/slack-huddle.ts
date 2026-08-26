@@ -149,6 +149,15 @@ export function companionChannelRequest(name: string, teamId?: string) {
   return { name, is_private: "true", ...(teamId ? { team_id: teamId } : {}) };
 }
 
+export function companionPostingPrefs(userId: string) {
+  return {
+    who_can_post: `type:admin,user:${userId}`,
+    can_thread: `type:admin,user:${userId}`,
+    enable_at_here: "true",
+    enable_at_channel: "true",
+  };
+}
+
 export class SlackHuddleAdapter {
   private socket?: WebSocket;
   private pingTimer?: ReturnType<typeof setInterval>;
@@ -365,20 +374,36 @@ export class SlackHuddleAdapter {
     }
   }
 
-  async restrictCompanionPosting(channelId: string) {
-    const result = await this.api("channel.perfs.set", {
-      channel: channelId,
-      prefs: JSON.stringify({
-        who_can_post: "type:admin",
-        can_thread: "type:admin",
-        enable_at_here: "true",
-        enable_at_channel: "true",
-      }),
-    });
-    if (result.ok !== true)
-      throw new Error(
-        `channel.perfs.set failed: ${String(result.error ?? "unknown_error")}`,
+  async restrictCompanionPosting(channelId: string, userId: string) {
+    let error = "unknown_error";
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const form = new FormData();
+      form.set("token", this.config.xoxc);
+      form.set("channel_id", channelId);
+      form.set("prefs", JSON.stringify(companionPostingPrefs(userId)));
+      form.set(
+        "_x_reason",
+        "channel-options-ia-posting-permission-modal-contents",
       );
+      form.set("_x_mode", "online");
+      form.set("_x_sonic", "true");
+      form.set("_x_app_name", "client");
+      const response = await fetch(
+        new URL("/api/channels.prefs.set", this.config.workspaceUrl),
+        {
+          method: "POST",
+          headers: { cookie: `d=${this.config.xoxd}` },
+          body: form,
+        },
+      );
+      const result = response.ok
+        ? object(await response.json(), "channels.prefs.set")
+        : undefined;
+      if (result?.ok === true) return;
+      error = String(result?.error ?? response.status);
+      if (attempt < 4) await Bun.sleep(250 * 2 ** attempt);
+    }
+    throw new Error(`channels.prefs.set failed: ${error}`);
   }
 
   async inviteToChannel(channelId: string, userId: string) {
@@ -405,36 +430,6 @@ export class SlackHuddleAdapter {
       throw new Error(
         `conversations.kick failed: ${String(result.error ?? "unknown_error")}`,
       );
-  }
-
-  async channelMembers(channelId: string) {
-    const members: string[] = [];
-    let cursor = "";
-    do {
-      const result = await this.api("conversations.members", {
-        channel: channelId,
-        limit: "200",
-        ...(cursor ? { cursor } : {}),
-      });
-      if (result.ok !== true)
-        throw new Error(
-          `conversations.members failed: ${String(result.error ?? "unknown_error")}`,
-        );
-      if (Array.isArray(result.members))
-        members.push(
-          ...result.members.filter(
-            (member): member is string => typeof member === "string",
-          ),
-        );
-      const metadata = result.response_metadata;
-      cursor =
-        metadata &&
-        typeof metadata === "object" &&
-        typeof (metadata as { next_cursor?: unknown }).next_cursor === "string"
-          ? (metadata as { next_cursor: string }).next_cursor
-          : "";
-    } while (cursor);
-    return members;
   }
 
   async activeHuddleCall(channelId: string, threadTs: string) {
