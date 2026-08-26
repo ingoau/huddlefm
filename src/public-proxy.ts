@@ -30,6 +30,8 @@ export class PublicNetworkProxy {
           },
         );
         upstream.on("error", () => response.destroy());
+        request.on("error", () => upstream.destroy());
+        response.on("close", () => upstream.destroy());
         request.pipe(upstream);
       } catch {
         response.writeHead(403).end();
@@ -53,6 +55,9 @@ export class PublicNetworkProxy {
           },
         );
         upstream.on("error", () => client.destroy());
+        upstream.on("close", () => client.destroy());
+        client.on("error", () => upstream.destroy());
+        client.on("close", () => upstream.destroy());
       } catch {
         client.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       }

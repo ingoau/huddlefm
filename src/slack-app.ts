@@ -318,7 +318,16 @@ export class SlackAppAdapter {
       const socket = new WebSocket(result.url!);
       this.socket = socket;
       socket.addEventListener("message", (event) => {
-        const envelope = JSON.parse(String(event.data));
+        let envelope;
+        try {
+          envelope = JSON.parse(String(event.data));
+        } catch (error) {
+          log.warn(
+            { event: "malformed_frame", err: error },
+            "Ignoring malformed Socket Mode frame",
+          );
+          return;
+        }
         if (envelope.type === "hello") {
           this.reconnectAttempts = 0;
           log.info(
