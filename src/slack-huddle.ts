@@ -136,10 +136,20 @@ export function normalizeInvitedJoinResponse(
 export function channelAccess(channel?: {
   is_member?: boolean;
   is_private?: boolean;
+  is_archived?: boolean;
 }) {
+  if (channel?.is_archived) return "decline";
   if (channel?.is_member) return "ready";
   return !channel || channel.is_private ? "decline" : "join";
 }
+
+// Kick outcomes after which the member can never be removed by retrying.
+const kickSettledErrors = new Set([
+  "not_in_channel",
+  "user_not_in_channel",
+  "channel_not_found",
+  "is_archived",
+]);
 
 export function companionChannelName(channelId: string, suffix?: string) {
   return `huddlefm-${channelId.toLowerCase()}${suffix ? `-${suffix}` : ""}`;
@@ -422,11 +432,7 @@ export class SlackHuddleAdapter {
       channel: channelId,
       user: userId,
     });
-    if (
-      result.ok !== true &&
-      result.error !== "not_in_channel" &&
-      result.error !== "user_not_in_channel"
-    )
+    if (result.ok !== true && !kickSettledErrors.has(String(result.error)))
       throw new Error(
         `conversations.kick failed: ${String(result.error ?? "unknown_error")}`,
       );

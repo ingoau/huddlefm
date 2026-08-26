@@ -3,6 +3,13 @@ import { logger } from "./logger.ts";
 
 const log = logger.child({ component: "slack-app" });
 
+// Deletion outcomes after which the message can never be removed by retrying.
+const deleteSettledErrors = new Set([
+  "message_not_found",
+  "channel_not_found",
+  "is_archived",
+]);
+
 type Body = {
   type?: string;
   value?: string;
@@ -173,7 +180,7 @@ export class SlackAppAdapter {
         !error.data ||
         typeof error.data !== "object" ||
         !("error" in error.data) ||
-        error.data.error !== "message_not_found"
+        !deleteSettledErrors.has(String(error.data.error))
       )
         throw error;
     }

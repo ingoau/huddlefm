@@ -15,6 +15,7 @@ test("classifies channel access", () => {
   expect(channelAccess({ is_member: false, is_private: false })).toBe("join");
   expect(channelAccess({ is_member: false, is_private: true })).toBe("decline");
   expect(channelAccess()).toBe("decline");
+  expect(channelAccess({ is_member: true, is_archived: true })).toBe("decline");
 });
 
 test("names companion channels from the source channel ID", () => {
