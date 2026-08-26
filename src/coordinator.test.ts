@@ -1760,7 +1760,7 @@ test("skipping rejects the track and rebuilds prepared autoplay", async () => {
     Reflect.get(result.coordinator, "history").map(
       (track: { sourceId: string }) => track.sourceId,
     ),
-  ).toEqual([ids.a]);
+  ).toEqual([ids.a, ids.c]);
   expect(
     result.media.filter(
       (value) => (value as { type?: string }).type === "play",

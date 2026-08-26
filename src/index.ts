@@ -1016,25 +1016,21 @@ await slackHuddle.start((event) => {
         .catch(() => {});
     return;
   }
-  if (event.type === "MemberJoined")
-    void (
-      runtime.coordinator.room.companionChannelId
-        ? companions
-            .add(runtime.coordinator.room.companionChannelId, event.userId)
-            .catch((error) =>
-              slackApp
-                .dm(
-                  event.userId,
-                  `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
-                )
-                .catch(() => {}),
+  if (event.type === "MemberJoined") {
+    runtime.coordinator.memberJoined(event.userId);
+    store.addSessionParticipant(runtime.coordinator.id, event.userId);
+    if (runtime.coordinator.room.companionChannelId)
+      void companions
+        .add(runtime.coordinator.room.companionChannelId, event.userId)
+        .catch((error) =>
+          slackApp
+            .dm(
+              event.userId,
+              `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
             )
-        : Promise.resolve()
-    ).then(() => {
-      runtime.coordinator?.memberJoined(event.userId);
-      if (runtime.coordinator)
-        store.addSessionParticipant(runtime.coordinator.id, event.userId);
-    });
+            .catch(() => {}),
+        );
+  }
   if (event.type === "MemberLeft") {
     if (runtime.coordinator.room.companionChannelId)
       companions.removeLater(

@@ -333,7 +333,12 @@ export class Coordinator {
       );
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
-        if (this.state === "suspended" || !this.queue.includes(entry)) return;
+        if (
+          this.state === "ended" ||
+          this.state === "suspended" ||
+          !this.queue.includes(entry)
+        )
+          return;
         this.queue = this.queue.filter((track) => track !== entry);
         this.queueChanged();
         this.store.setTrack(entry.id, { status: "failed" });
@@ -1062,7 +1067,12 @@ export class Coordinator {
       );
       return this.enqueue(async () => {
         this.preparations.delete(entry.id);
-        if (!this.queue.includes(entry)) return false;
+        if (
+          this.state === "ended" ||
+          this.state === "suspended" ||
+          !this.queue.includes(entry)
+        )
+          return false;
         entry.status = "failed";
         this.queue = this.queue.filter((track) => track !== entry);
         this.queueChanged();
@@ -1252,7 +1262,12 @@ export class Coordinator {
         this.listenedSeconds += Math.max(0, end - this.playbackSeconds);
       }
       this.playbackScrobbling?.finish();
-      const played = ["played", "track_ended", "transition"].includes(reason);
+      const played = [
+        "played",
+        "track_ended",
+        "transition",
+        "skipped",
+      ].includes(reason);
       this.current.status = played ? "played" : "failed";
       if (played) this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
