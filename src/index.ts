@@ -77,6 +77,8 @@ const runtimes = new Map<string, Runtime>();
 const joiningChannels = new Set<string>();
 const joiningCalls = new Set<string>();
 const pendingRestores = new Map<string, SavedSession>();
+const restoreFailures = new Map<string, number>();
+const maxRestoreAttempts = 4;
 const restoring = new Set<string>();
 const restoreWork = new Set<Promise<void>>();
 const endCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -465,16 +467,26 @@ async function retryRestores() {
     .map((saved) => {
       restoring.add(saved.id);
       const task = restoreSession(saved)
-        .catch((error) =>
+        .catch(async (error) => {
+          const failures = (restoreFailures.get(saved.id) ?? 0) + 1;
+          restoreFailures.set(saved.id, failures);
           log.warn(
             {
               event: "restore_attempt_failed",
               sessionId: saved.id,
+              attempt: failures,
               err: error,
             },
             "Interrupted session restore attempt failed",
-          ),
-        )
+          );
+          if (failures < maxRestoreAttempts) return;
+          pendingRestores.delete(saved.id);
+          await abandonSession(saved.id);
+          log.error(
+            { event: "restore_abandoned", sessionId: saved.id, err: error },
+            "Gave up restoring interrupted session",
+          );
+        })
         .finally(() => {
           restoring.delete(saved.id);
           restoreWork.delete(task);
