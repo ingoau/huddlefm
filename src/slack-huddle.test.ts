@@ -4,6 +4,7 @@ import {
   channelAccess,
   companionChannelName,
   companionChannelRequest,
+  normalizeInvitedJoinResponse,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
 } from "./slack-huddle.ts";
@@ -66,6 +67,36 @@ test("does not leak a failed response", () => {
   ).toThrow("rooms.join failed: invalid_auth");
 });
 
+test("normalizes an invited Huddle from room metadata", () => {
+  expect(
+    normalizeInvitedJoinResponse(
+      {
+        ok: true,
+        room: {
+          id: "R123",
+          created_by: "U1",
+          participants: ["U1"],
+          thread_root_ts: "123.456",
+        },
+      },
+      "C123",
+      {
+        meeting: { MeetingId: "meeting", MeetingFeatures: null },
+        attendee: { AttendeeId: "attendee", JoinToken: "secret" },
+      },
+    ),
+  ).toEqual({
+    huddleCallId: "R123",
+    huddleId: "R123",
+    huddleCreatorId: "U1",
+    participantIds: ["U1"],
+    uiChannelId: "C123",
+    uiThreadTs: "123.456",
+    chimeMeeting: { MeetingId: "meeting" },
+    chimeAttendee: { AttendeeId: "attendee", JoinToken: "secret" },
+  });
+});
+
 test("normalizes a Huddle invitation with its actor", () => {
   expect(
     normalizeRealtimeEvent({
@@ -73,13 +104,14 @@ test("normalizes a Huddle invitation with its actor", () => {
       channel_id: "C123",
       call_id: "R123",
       sender_user_id: "U123",
-      free_willy: { secret: "discarded" },
+      free_willy: { meeting: "kept" },
     }),
   ).toEqual({
     type: "HuddleInvited",
     channelId: "C123",
     callId: "R123",
     inviterUserId: "U123",
+    freeWilly: { meeting: "kept" },
   });
 });
 
