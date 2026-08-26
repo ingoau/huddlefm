@@ -51,12 +51,21 @@ type Deck = {
 
 const decks = new Map<string, Deck>();
 let currentId: string | undefined;
-let transitionMode: "none" | "gapless" = "none";
+let transitionMode: "none" | "gapless" | "adaptive" = "none";
 let nextEntry:
-  { entryId: string; url: string; introSeconds: number } | undefined;
+  | {
+      entryId: string;
+      url: string;
+      introSeconds: number;
+      fadeInSeconds: number;
+    }
+  | undefined;
 let currentOutro: number | undefined;
+let currentFadeOut = 0;
 let transitioning = false;
 let transitionTimer: ReturnType<typeof setTimeout> | undefined;
+let handoffTimer: ReturnType<typeof setTimeout> | undefined;
+let fadeTimer: ReturnType<typeof setTimeout> | undefined;
 let lyricPriority = Infinity;
 let transition = 0;
 let pendingLyrics:
@@ -202,14 +211,37 @@ function preload(entries: { entryId: string; url: string }[]) {
     if (!keep.has(entryId)) dispose(entryId, value);
 }
 
-function stop() {
+function clearTransitionTimers() {
   clearTimeout(transitionTimer);
+  clearTimeout(handoffTimer);
+  clearTimeout(fadeTimer);
   transitionTimer = undefined;
+  handoffTimer = undefined;
+  fadeTimer = undefined;
+}
+
+function cancelTransition(keepId = currentId) {
+  clearTransitionTimers();
+  transitioning = false;
+  const now = audioContext.currentTime;
+  for (const [entryId, value] of decks) {
+    value.gain.gain.cancelScheduledValues(now);
+    value.gain.gain.setValueAtTime(entryId === keepId ? 1 : 0, now);
+    if (entryId !== keepId) value.audio.pause();
+  }
+}
+
+function stop() {
+  clearTransitionTimers();
+  transitioning = false;
   transition++;
   pendingLyrics = undefined;
   pendingNoLyrics = undefined;
   stage.classList.remove("changing");
   currentId = undefined;
+  nextEntry = undefined;
+  currentOutro = undefined;
+  currentFadeOut = 0;
   lyricPriority = Infinity;
   for (const [entryId, value] of decks) dispose(entryId, value);
   lyrics.source = null;
@@ -230,11 +262,12 @@ function updateProgress() {
   progress.style.transform = `scaleX(${Math.min(1, Math.max(0, amount))})`;
   const remaining =
     player && currentOutro !== undefined
-      ? currentOutro - player.currentTime
+      ? currentOutro - adaptiveCrossfadeSeconds() - player.currentTime
       : Infinity;
   if (
     player &&
     nextEntry &&
+    nextEntry.entryId !== currentId &&
     currentOutro !== undefined &&
     transitionMode !== "none" &&
     !transitioning &&
@@ -246,7 +279,8 @@ function updateProgress() {
           transitionTimer = undefined;
           const current = currentId ? decks.get(currentId)?.audio : undefined;
           if (!current || current.paused || currentOutro === undefined) return;
-          if (current.currentTime < currentOutro - 0.02) return;
+          const transitionAt = currentOutro - adaptiveCrossfadeSeconds();
+          if (current.currentTime < transitionAt - 0.02) return;
           void beginTransition().catch(transitionFailed);
         },
         Math.max(0, remaining * 1_000),
@@ -262,6 +296,12 @@ function transitionReady() {
   );
 }
 
+function adaptiveCrossfadeSeconds() {
+  if (transitionMode !== "adaptive" || !nextEntry) return 0;
+  const duration = Math.min(8, currentFadeOut, nextEntry.fadeInSeconds);
+  return Number.isFinite(duration) ? Math.max(0, duration) : 0;
+}
+
 function transitionFailed(error: unknown) {
   send("track_error", {
     entryId: nextEntry?.entryId,
@@ -275,12 +315,52 @@ async function beginTransition() {
   const previousId = currentId;
   const previous = decks.get(previousId)!;
   const next = deck(nextEntry.entryId, nextEntry.url);
+  const nextId = nextEntry.entryId;
+  const duration = adaptiveCrossfadeSeconds();
   next.audio.currentTime = nextEntry.introSeconds;
-  next.gain.gain.value = 1;
+  next.pastRestartThreshold = next.audio.currentTime > 5;
+  previous.gain.gain.cancelScheduledValues(audioContext.currentTime);
+  next.gain.gain.cancelScheduledValues(audioContext.currentTime);
+  next.gain.gain.value = duration ? 0 : 1;
   await next.audio.play();
-  previous.audio.pause();
-  currentId = nextEntry.entryId;
-  send("transition", { entryId: previousId });
+  if (!duration) {
+    previous.audio.pause();
+    currentId = nextId;
+    transitioning = false;
+    return send("transition", { entryId: previousId });
+  }
+  const now = audioContext.currentTime;
+  const steps = 64;
+  previous.gain.gain.setValueCurveAtTime(
+    Float32Array.from({ length: steps }, (_, index) =>
+      Math.cos((index / (steps - 1)) * (Math.PI / 2)),
+    ),
+    now,
+    duration,
+  );
+  next.gain.gain.setValueCurveAtTime(
+    Float32Array.from({ length: steps }, (_, index) =>
+      Math.sin((index / (steps - 1)) * (Math.PI / 2)),
+    ),
+    now,
+    duration,
+  );
+  handoffTimer = setTimeout(() => {
+    handoffTimer = undefined;
+    if (!transitioning || currentId !== previousId) return;
+    currentId = nextId;
+    send("transition", { entryId: previousId });
+  }, duration * 500);
+  fadeTimer = setTimeout(
+    () => {
+      fadeTimer = undefined;
+      previous.audio.pause();
+      previous.gain.gain.cancelScheduledValues(audioContext.currentTime);
+      previous.gain.gain.value = 1;
+      transitioning = false;
+    },
+    duration * 1_000 + 50,
+  );
 }
 
 function showLyrics(message: {
@@ -376,22 +456,21 @@ socket.addEventListener("message", async (event) => {
       nextEntry = message.entries.find(
         (entry: { entryId: string }) => entry.entryId === message.nextEntryId,
       );
-      transitioning = false;
       preload(message.entries);
     }
     if (message.type === "play") {
-      clearTimeout(transitionTimer);
-      transitionTimer = undefined;
       const change = ++transition;
       pendingLyrics = undefined;
       pendingNoLyrics = undefined;
       stage.classList.add("changing");
       tone?.stop();
       const alreadyPlaying = currentId === message.entryId;
+      if (!alreadyPlaying) cancelTransition(message.entryId);
       const previous = !alreadyPlaying && currentId && decks.get(currentId);
       if (previous) previous.audio.pause();
       currentId = message.entryId;
       currentOutro = message.outroSeconds;
+      currentFadeOut = message.fadeOutSeconds ?? 0;
       lyricPriority = Infinity;
       const next = deck(message.entryId, message.url);
       const player = next.audio;
@@ -442,8 +521,7 @@ socket.addEventListener("message", async (event) => {
       else showNoLyrics();
     }
     if (message.type === "pause") {
-      clearTimeout(transitionTimer);
-      transitionTimer = undefined;
+      cancelTransition();
       for (const deck of decks.values())
         if (!deck.audio.paused) deck.audio.pause();
       send("paused");
@@ -453,8 +531,7 @@ socket.addEventListener("message", async (event) => {
       send("playing", { entryId: currentId });
     }
     if (message.type === "seek" && currentId) {
-      clearTimeout(transitionTimer);
-      transitionTimer = undefined;
+      cancelTransition();
       const current = decks.get(currentId)!;
       const seconds =
         message.seconds ?? current.audio.currentTime + message.offset;
@@ -470,7 +547,10 @@ socket.addEventListener("message", async (event) => {
     }
     if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = volumeGain(message.value);
-    if (message.type === "transition_mode") transitionMode = message.mode;
+    if (message.type === "transition_mode") {
+      transitionMode = message.mode;
+      if (transitioning) cancelTransition();
+    }
     if (message.type === "display_mode") await setDisplayMode(message.mode);
     if (message.type === "leave") {
       send("leaving");

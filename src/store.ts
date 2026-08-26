@@ -26,7 +26,7 @@ export const permissionPresets = {
 
 export const displayModes = ["default", "lyrics", "off"] as const;
 export type DisplayMode = (typeof displayModes)[number];
-export const transitionModes = ["none", "gapless"] as const;
+export const transitionModes = ["none", "gapless", "adaptive"] as const;
 export type TransitionMode = (typeof transitionModes)[number];
 
 export const scrobblingModes = ["always", "ask", "disabled"] as const;
@@ -65,6 +65,8 @@ type SavedTrack = {
   filePath?: string;
   introSeconds?: number;
   outroSeconds?: number;
+  fadeInSeconds?: number;
+  fadeOutSeconds?: number;
   queuePosition?: number;
 };
 
@@ -179,6 +181,8 @@ export class Store {
         file_path TEXT,
         intro_seconds REAL,
         outro_seconds REAL,
+        fade_in_seconds REAL,
+        fade_out_seconds REAL,
         queue_position INTEGER,
         created_at INTEGER NOT NULL
       );
@@ -318,6 +322,8 @@ export class Store {
     this.ensureColumn("tracks", "queue_position", "INTEGER");
     this.ensureColumn("tracks", "intro_seconds", "REAL");
     this.ensureColumn("tracks", "outro_seconds", "REAL");
+    this.ensureColumn("tracks", "fade_in_seconds", "REAL");
+    this.ensureColumn("tracks", "fade_out_seconds", "REAL");
     this.ensureColumn(
       "user_scrobbling",
       "mode",
@@ -773,6 +779,12 @@ export class Store {
         ...(track.outro_seconds === null
           ? {}
           : { outroSeconds: Number(track.outro_seconds) }),
+        ...(track.fade_in_seconds === null
+          ? {}
+          : { fadeInSeconds: Number(track.fade_in_seconds) }),
+        ...(track.fade_out_seconds === null
+          ? {}
+          : { fadeOutSeconds: Number(track.fade_out_seconds) }),
         ...(track.queue_position === null
           ? {}
           : { queuePosition: Number(track.queue_position) }),
@@ -1064,6 +1076,8 @@ export class Store {
       filePath?: string | null;
       introSeconds?: number;
       outroSeconds?: number;
+      fadeInSeconds?: number;
+      fadeOutSeconds?: number;
     },
   ) {
     if (fields.status !== undefined)
@@ -1082,6 +1096,14 @@ export class Store {
       this.db
         .query("UPDATE tracks SET outro_seconds = ? WHERE id = ?")
         .run(fields.outroSeconds, id);
+    if (fields.fadeInSeconds !== undefined)
+      this.db
+        .query("UPDATE tracks SET fade_in_seconds = ? WHERE id = ?")
+        .run(fields.fadeInSeconds, id);
+    if (fields.fadeOutSeconds !== undefined)
+      this.db
+        .query("UPDATE tracks SET fade_out_seconds = ? WHERE id = ?")
+        .run(fields.fadeOutSeconds, id);
   }
 
   removeTrack(id: string) {

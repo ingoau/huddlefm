@@ -215,9 +215,42 @@ test("finds the audible bounds from FFmpeg silence analysis", () => {
       "silence_start: 0\nsilence_end: 1.25\nsilence_start: 58.4\nsilence_end: 60",
       60,
     ),
-  ).toEqual({ introSeconds: 1.25, outroSeconds: 58.4 });
+  ).toEqual({
+    introSeconds: 1.25,
+    outroSeconds: 58.4,
+    fadeInSeconds: 0,
+    fadeOutSeconds: 0,
+  });
   expect(transitionData("", 60)).toEqual({
     introSeconds: 0,
     outroSeconds: 60,
+    fadeInSeconds: 0,
+    fadeOutSeconds: 0,
+  });
+});
+
+test("finds conservative fade lengths from track loudness", () => {
+  const output = [
+    [0, -40],
+    [1, -25],
+    [2, -10],
+    [10, -10],
+    [14, -10],
+    [15, -12],
+    [16, -16],
+    [17, -22],
+    [18, -30],
+    [19, -40],
+  ]
+    .map(
+      ([seconds, db]) =>
+        `frame:0 pts_time:${seconds}\nlavfi.astats.Overall.RMS_level=${db}`,
+    )
+    .join("\n");
+  expect(transitionData(output, 20)).toEqual({
+    introSeconds: 0,
+    outroSeconds: 20,
+    fadeInSeconds: 2,
+    fadeOutSeconds: 3.75,
   });
 });
