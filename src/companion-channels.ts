@@ -43,7 +43,7 @@ export class CompanionChannels {
       channelId = undefined;
     }
     if (!channelId) channelId = await this.create(sourceChannelId);
-    await this.restrict(channelId);
+    await this.restrict(channelId, hostId);
     await this.add(channelId, hostId).catch((error) => {
       this.abortSetup(channelId, [hostId]);
       throw error;
@@ -54,7 +54,7 @@ export class CompanionChannels {
   async replace(sourceChannelId: string, hostId: string) {
     this.store.clearCompanionChannel(sourceChannelId);
     const channelId = await this.create(sourceChannelId);
-    await this.restrict(channelId);
+    await this.restrict(channelId, hostId);
     await this.add(channelId, hostId).catch((error) => {
       this.abortSetup(channelId, [hostId]);
       throw error;
@@ -205,15 +205,21 @@ export class CompanionChannels {
     return channelId;
   }
 
-  private async restrict(channelId: string) {
+  private async restrict(channelId: string, hostId: string) {
     await this.slack
       .restrictCompanionPosting(channelId, this.userId)
-      .catch((error) =>
+      .catch(async (error) => {
         log.warn(
           { event: "posting_restriction_failed", channelId, err: error },
           "Could not restrict companion channel posting",
-        ),
-      );
+        );
+        await this.app
+          .dm(
+            hostId,
+            `I couldn’t restrict posting in <#${channelId}>, so anyone in it can post there. You can change this in the channel’s settings.`,
+          )
+          .catch(() => {});
+      });
   }
 
   private async cleanup(now = Date.now()) {

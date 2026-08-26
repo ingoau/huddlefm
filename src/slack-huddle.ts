@@ -406,9 +406,13 @@ export class SlackHuddleAdapter {
           body: form,
         },
       );
-      const result = response.ok
-        ? object(await response.json(), "channels.prefs.set")
-        : undefined;
+      let result: Record<string, unknown> | undefined;
+      try {
+        if (response.ok)
+          result = object(await response.json(), "channels.prefs.set");
+      } catch {
+        result = { error: "invalid_response" };
+      }
       if (result?.ok === true) return;
       error = String(result?.error ?? response.status);
       if (attempt < 4) await Bun.sleep(250 * 2 ** attempt);
