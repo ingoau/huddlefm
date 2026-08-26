@@ -162,7 +162,6 @@ export class TrackCatalog {
   async resolve(reference: string): Promise<TrackMetadata | TrackMetadata[]> {
     const startedAt = Date.now();
     const stored = this.references.get(reference);
-    this.references.delete(reference);
     if (!stored) throw new Error("Track selection expired; search again");
     if (typeof stored === "object" && "type" in stored) {
       const tracks =
@@ -176,6 +175,7 @@ export class TrackCatalog {
       if (!tracks.length)
         throw new Error("That album or playlist has no playable songs");
       for (const track of tracks) this.validate(track);
+      this.references.delete(reference);
       log.info(
         {
           event: "collection_resolved",
@@ -189,9 +189,12 @@ export class TrackCatalog {
     }
     if (typeof stored !== "string") {
       this.validate(stored);
+      this.references.delete(reference);
       return stored;
     }
-    return this.resolveUrl(stored);
+    const track = await this.resolveUrl(stored);
+    this.references.delete(reference);
+    return track;
   }
 
   async resolveUrl(input: string): Promise<TrackMetadata> {

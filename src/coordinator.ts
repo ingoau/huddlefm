@@ -34,6 +34,7 @@ import {
 } from "./coordinator-ui.ts";
 
 const endRestoreMs = 2 * 60_000;
+const searchDebounceMs = 300;
 
 type Entry = TrackMetadata & {
   id: string;
@@ -352,16 +353,18 @@ export class Coordinator {
     }
   }
 
-  suggestions(interaction: Interaction) {
+  async suggestions(interaction: Interaction) {
     const allowed = {
       songs: this.can(interaction.userId, "add"),
       bulk: this.can(interaction.userId, "add-bulk"),
     };
-    if (!allowed.songs && !allowed.bulk) return Promise.resolve([]);
-    const now = Date.now();
-    if (now - (this.lastSearch.get(interaction.userId) ?? 0) < 400)
-      return Promise.resolve([]);
-    this.lastSearch.set(interaction.userId, now);
+    if (!allowed.songs && !allowed.bulk) return [];
+    // Slack sends a request per keystroke; only the newest one per user is
+    // searched, so the result always matches what the user finished typing.
+    const generation = (this.lastSearch.get(interaction.userId) ?? 0) + 1;
+    this.lastSearch.set(interaction.userId, generation);
+    await Bun.sleep(searchDebounceMs);
+    if (this.lastSearch.get(interaction.userId) !== generation) return [];
     return this.tracks.suggestions(interaction.value, allowed);
   }
 
@@ -1405,11 +1408,16 @@ export class Coordinator {
         entry.requesterId === interaction.userId &&
         this.can(interaction.userId, "remove-own")
       )
-    )
+    ) {
+      this.audit.record("action.denied", interaction.userId, {
+        sessionId: this.id,
+        capability: "manage-queue",
+      });
       return this.notice(
         interaction.userId,
         "You do not have permission for that.",
       );
+    }
     this.queue.splice(this.queue.indexOf(entry), 1);
     this.preparations.get(entry.id)?.abort();
     this.store.removeTrack(entry.id);
@@ -1741,11 +1749,16 @@ export class Coordinator {
   }
 
   private async settingsModal(interaction: Interaction) {
-    if (!this.canOpenSettings(interaction.userId))
+    if (!this.canOpenSettings(interaction.userId)) {
+      this.audit.record("action.denied", interaction.userId, {
+        sessionId: this.id,
+        capability: "settings",
+      });
       return this.notice(
         interaction.userId,
         "You do not have permission to change settings.",
       );
+    }
     await this.slack.modal(
       interaction.triggerId,
       this.settingsView(interaction.userId),
@@ -2887,7 +2900,10 @@ export class Coordinator {
         sessionId: this.id,
         capability: "end-session",
       });
-      return this.notice(userId, "Only the host can end this session.");
+      return this.notice(
+        userId,
+        "You do not have permission to end this session.",
+      );
     }
     const state = this.state;
     const startedAt = Date.now();
