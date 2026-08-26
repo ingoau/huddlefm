@@ -21,9 +21,9 @@ function setup(accessible = false, restrictionFails = false) {
     removeFromChannel: async (_channelId: string, userId: string) => {
       removed.push(userId);
     },
-    channelMembers: async () => ["bot", "host", "stale"],
   };
   const messages = {
+    channelMembers: async () => ["bot", "host", "stale"],
     dm: async () => {},
     delete: async (_channelId: string, messageTs: string) => {
       deleted.push(messageTs);
@@ -112,12 +112,15 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
       kickStarted.resolve();
       await releaseKick.promise;
     },
-    channelMembers: async () => [],
   };
   const manager = new CompanionChannels(
     store,
     slack,
-    { dm: async () => {}, delete: async () => {} },
+    {
+      dm: async () => {},
+      delete: async () => {},
+      channelMembers: async () => [],
+    },
     "bot",
   );
   manager.removeLater("companion", "user", 0);

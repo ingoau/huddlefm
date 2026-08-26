@@ -432,36 +432,6 @@ export class SlackHuddleAdapter {
       );
   }
 
-  async channelMembers(channelId: string) {
-    const members: string[] = [];
-    let cursor = "";
-    do {
-      const result = await this.api("conversations.members", {
-        channel: channelId,
-        limit: "200",
-        ...(cursor ? { cursor } : {}),
-      });
-      if (result.ok !== true)
-        throw new Error(
-          `conversations.members failed: ${String(result.error ?? "unknown_error")}`,
-        );
-      if (Array.isArray(result.members))
-        members.push(
-          ...result.members.filter(
-            (member): member is string => typeof member === "string",
-          ),
-        );
-      const metadata = result.response_metadata;
-      cursor =
-        metadata &&
-        typeof metadata === "object" &&
-        typeof (metadata as { next_cursor?: unknown }).next_cursor === "string"
-          ? (metadata as { next_cursor: string }).next_cursor
-          : "";
-    } while (cursor);
-    return members;
-  }
-
   async activeHuddleCall(channelId: string, threadTs: string) {
     const replies = await this.api("conversations.replies", {
       channel: channelId,
