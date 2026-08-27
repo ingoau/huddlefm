@@ -270,6 +270,49 @@ test("keeps open queue modals current until they close", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("plays a queued track next", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [
+    {
+      id: "first",
+      requesterId: "host",
+      sourceInput: "first",
+      canonicalUrl: "first",
+      sourceId: "first",
+      title: "First",
+      artist: "Artist",
+      status: "ready",
+    },
+    {
+      id: "second",
+      requesterId: "host",
+      sourceInput: "second",
+      canonicalUrl: "second",
+      sourceId: "second",
+      title: "Second",
+      artist: "Artist",
+      status: "ready",
+    },
+  ]);
+  const queueView = {
+    ...interaction(result.coordinator, "queue_play_next"),
+    viewId: "view-1",
+    viewHash: "hash-1",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id }),
+    value: "second",
+  };
+
+  await result.coordinator.action(queueView);
+
+  expect(
+    (Reflect.get(result.coordinator, "queue") as { id: string }[]).map(
+      (track) => track.id,
+    ),
+  ).toEqual(["second", "first"]);
+  await result.coordinator.endFromSlack();
+});
+
 test("suspends with a restart notice and restores playback", async () => {
   const first = setup();
   await first.coordinator.start();
