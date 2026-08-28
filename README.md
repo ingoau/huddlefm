@@ -88,7 +88,7 @@ Logs can contain Slack user, channel, session, and track identifiers. Credential
 
 ### Analytics
 
-Set `POSTHOG_API_KEY` to send product events and sanitized errors to PostHog. Events use Slack user IDs as distinct IDs and never include Slack names, messages, search text, lyrics, audio, credentials, or raw API payloads. HuddleFM keeps a random system identity in `data/posthog-installation-id`. Analytics is best-effort and disabled when the key is absent.
+Set `POSTHOG_API_KEY` to send product events and sanitized errors to PostHog. Events use Slack user IDs as distinct IDs and never include Slack names, messages, search text, lyrics, audio, credentials, or raw API payloads. Active users get current-state person properties for their Last.fm and ListenBrainz connections, enabled settings, and scrobbling mode. HuddleFM keeps a random system identity in `data/posthog-installation-id`. Analytics is best-effort and disabled when the key is absent.
 
 ## About this project
 

@@ -4,7 +4,10 @@ import { PostHog } from "posthog-node";
 import { redactSecrets, safeError } from "./error-message.ts";
 
 type Properties = Record<string, unknown>;
-type Client = Pick<PostHog, "capture" | "captureException" | "shutdown">;
+type Client = Pick<
+  PostHog,
+  "capture" | "captureException" | "setPersonProperties" | "shutdown"
+>;
 type Context = {
   distinctId?: string;
   sessionId?: string;
@@ -13,7 +16,8 @@ type Context = {
 
 const secret =
   /authorization|cookie|password|secret|token|api[_-]?key|session[_-]?key|xox[acpbrs]/i;
-const userName = /^(?:name|user_?name|display_?name|real_?name|actor_?name)$/i;
+const userName =
+  /(?:^|_)(?:user_?name|display_?name|real_?name|actor_?name)$|^name$/i;
 
 function sanitize(value: unknown, seen = new WeakSet<object>()): unknown {
   if (typeof value === "string") return redactSecrets(value);
@@ -108,6 +112,18 @@ export class Analytics {
     });
   }
 
+  setPersonProperties(distinctId: string, properties: Properties) {
+    if (!this.client) return;
+    try {
+      this.client.setPersonProperties({
+        distinctId,
+        properties: sanitize(properties) as Properties,
+      });
+    } catch (error) {
+      this.onError(error);
+    }
+  }
+
   exception(error: unknown, context: Context = {}) {
     if (!this.client) return;
     if (error && typeof error === "object") {
@@ -165,6 +181,12 @@ export function capture(...args: Parameters<Analytics["capture"]>) {
 
 export function captureAudit(...args: Parameters<Analytics["audit"]>) {
   current.audit(...args);
+}
+
+export function setPersonProperties(
+  ...args: Parameters<Analytics["setPersonProperties"]>
+) {
+  current.setPersonProperties(...args);
 }
 
 export function captureException(...args: Parameters<Analytics["exception"]>) {

@@ -8,6 +8,7 @@ function fakeClient() {
     distinctId?: string;
     properties?: Record<string | number, unknown>;
   }[] = [];
+  const people: unknown[] = [];
   let shutdownTimeout: number | undefined;
   const client: NonNullable<ConstructorParameters<typeof Analytics>[0]> = {
     capture(event) {
@@ -16,6 +17,9 @@ function fakeClient() {
     captureException(error, distinctId, properties) {
       exceptions.push({ error, distinctId, properties });
     },
+    setPersonProperties(message) {
+      people.push(message);
+    },
     async shutdown(timeout) {
       shutdownTimeout = timeout;
     },
@@ -23,6 +27,7 @@ function fakeClient() {
   return {
     events,
     exceptions,
+    people,
     get shutdownTimeout() {
       return shutdownTimeout;
     },
@@ -69,6 +74,26 @@ test("attributes autoplay to the installation", () => {
       distinctId: "installation",
       event: "track.autoplay_added",
       properties: { origin: "autoplay" },
+    },
+  ]);
+});
+
+test("sets current person state without user names", () => {
+  const fake = fakeClient();
+  const analytics = new Analytics(fake.client, "installation");
+  analytics.setPersonProperties("U123", {
+    lastfm_connected: true,
+    lastfm_username: "sam",
+    listenbrainz_connected: false,
+  });
+
+  expect(fake.people).toEqual([
+    {
+      distinctId: "U123",
+      properties: {
+        lastfm_connected: true,
+        listenbrainz_connected: false,
+      },
     },
   ]);
 });

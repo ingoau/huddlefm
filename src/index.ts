@@ -265,6 +265,8 @@ async function joinHuddle(
     )
   )
     throw new Error("HuddleFM is already joining or active in this Huddle");
+  if (!restored) scrobbling.syncAnalyticsUser(inviterUserId);
+  else if (resumeActorId) scrobbling.syncAnalyticsUser(resumeActorId);
   const startedAt = Date.now();
   log.info(
     {

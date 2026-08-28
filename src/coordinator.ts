@@ -384,6 +384,7 @@ export class Coordinator {
   }
 
   action(interaction: Interaction) {
+    this.scrobbling?.syncAnalyticsUser(interaction.userId);
     this.log.debug(
       {
         event: "action_received",

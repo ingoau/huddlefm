@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { capture as captureAnalytics } from "./analytics.ts";
+import {
+  capture as captureAnalytics,
+  setPersonProperties,
+} from "./analytics.ts";
 import { scrobblingModes, type ScrobblingMode, type Store } from "./store.ts";
 import { logger } from "./logger.ts";
 
@@ -35,6 +38,7 @@ class ListenBrainzError extends Error {
 export class ScrobbleDispatcher {
   private flushing = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
+  private analyticsUsers = new Map<string, string>();
 
   constructor(
     private store: Store,
@@ -95,6 +99,7 @@ export class ScrobbleDispatcher {
       distinctId: userId,
       properties: { mode },
     });
+    this.syncAnalyticsUser(userId);
   }
 
   sessionEnabled(sessionId: string, userId: string) {
@@ -157,6 +162,7 @@ export class ScrobbleDispatcher {
     this.store.connectLastFm(userId, session.name, session.key);
     log.info({ event: "lastfm_connected", userId }, "Last.fm connected");
     captureAnalytics("scrobbling.lastfm_connected", { distinctId: userId });
+    this.syncAnalyticsUser(userId);
     return session.name;
   }
 
@@ -167,6 +173,7 @@ export class ScrobbleDispatcher {
     captureAnalytics("scrobbling.lastfm_disconnected", {
       distinctId: userId,
     });
+    this.syncAnalyticsUser(userId);
   }
 
   setLastFmEnabled(userId: string, enabled: boolean) {
@@ -183,6 +190,7 @@ export class ScrobbleDispatcher {
       distinctId: userId,
       properties: { enabled },
     });
+    this.syncAnalyticsUser(userId);
   }
 
   async setListenBrainz(
@@ -227,6 +235,7 @@ export class ScrobbleDispatcher {
       distinctId: userId,
       properties: { enabled, connected: Boolean(username) },
     });
+    this.syncAnalyticsUser(userId);
     return username;
   }
 
@@ -240,6 +249,22 @@ export class ScrobbleDispatcher {
     captureAnalytics("scrobbling.listenbrainz_disconnected", {
       distinctId: userId,
     });
+    this.syncAnalyticsUser(userId);
+  }
+
+  syncAnalyticsUser(userId: string) {
+    const settings = this.settings(userId);
+    const properties = {
+      lastfm_connected: settings.lastFmConnected,
+      lastfm_enabled: settings.lastFmEnabled,
+      listenbrainz_connected: settings.listenBrainzConnected,
+      listenbrainz_enabled: settings.listenBrainzEnabled,
+      scrobbling_mode: settings.mode,
+    };
+    const snapshot = JSON.stringify(properties);
+    if (this.analyticsUsers.get(userId) === snapshot) return;
+    this.analyticsUsers.set(userId, snapshot);
+    setPersonProperties(userId, properties);
   }
 
   nowPlaying(userIds: Iterable<string>, track: ScrobbleTrack) {
