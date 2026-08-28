@@ -26,6 +26,7 @@
     "pino": "^10.1.0",
     "pino-roll": "^4.0.0",
     "playwright-core": "1.55.0",
+    "posthog-node": "^5.51.4",
     "ytmusic-api": "5.3.1"
   }
 }

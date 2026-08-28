@@ -1,5 +1,11 @@
 import type { ServerWebSocket } from "bun";
 import { rm } from "node:fs/promises";
+import {
+  capture as captureAnalytics,
+  captureAudit,
+  shutdownAnalytics,
+  startAnalytics,
+} from "./analytics.ts";
 import { AuditLog } from "./audit-log.ts";
 import { canvasMarkdown } from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
@@ -32,6 +38,29 @@ log.info(
   "HuddleFM startup started",
 );
 const config = loadConfig();
+await startAnalytics(config.posthogApiKey, config.posthogHost, (error) =>
+  log.warn(
+    { event: "posthog_delivery_failed", error: safeError(error) },
+    "PostHog delivery failed",
+  ),
+);
+captureAnalytics("app.started", {
+  properties: {
+    bunVersion: Bun.version,
+    queueLimit: config.queueLimit,
+    trackDurationLimitSeconds: config.durationSeconds,
+    trackDownloadLimitBytes: config.downloadBytes,
+    initialVolume: config.initialVolume,
+    loudnessNormalization: config.loudnessNormalization,
+    aloneTimeoutMs: config.aloneMs,
+    idleTimeoutMs: config.idleMs,
+    pausedTimeoutMs: config.pausedMs,
+    mediaRegion: config.mediaRegion,
+    canvasConfigured: Boolean(config.canvasId),
+    localControlConfigured: Boolean(config.localControlToken),
+    lastFmConfigured: Boolean(config.lastFmApiKey && config.lastFmSharedSecret),
+  },
+});
 const buildAt = Date.now();
 const build = await Bun.build({
   entrypoints: [new URL("./media-page.ts", import.meta.url).pathname],
@@ -68,7 +97,11 @@ await Promise.all(
 const catalog = new TrackCatalog(config);
 const lyrics = new LyricsCatalog();
 const slackApp = new SlackAppAdapter(config);
-const audit = new AuditLog("data/audit.jsonl", (id) => slackApp.userName(id));
+const audit = new AuditLog(
+  "data/audit.jsonl",
+  (id) => slackApp.userName(id),
+  captureAudit,
+);
 if (store.needsUsageBackfill())
   store.importUsage(await audit.historicalUsage());
 const slackHuddle = new SlackHuddleAdapter(config);
@@ -181,6 +214,10 @@ async function migrateControls(runtime: Runtime) {
       { event: "controls_channel_migrated", oldChannelId, channelId },
       "Migrated Huddle controls channel",
     );
+    captureAnalytics("controls_channel.migrated", {
+      sessionId: coordinator.id,
+      properties: { oldChannelId, channelId },
+    });
   } catch (error) {
     await slackApp
       .dm(
@@ -189,7 +226,12 @@ async function migrateControls(runtime: Runtime) {
       )
       .catch(() => {});
     log.error(
-      { event: "controls_channel_migration_failed", oldChannelId, err: error },
+      {
+        event: "controls_channel_migration_failed",
+        oldChannelId,
+        userId: coordinator.hostUserId(),
+        err: error,
+      },
       "Could not migrate Huddle controls channel",
     );
     await coordinator.endFromSlack();
@@ -223,6 +265,8 @@ async function joinHuddle(
     )
   )
     throw new Error("HuddleFM is already joining or active in this Huddle");
+  if (!restored) scrobbling.syncAnalyticsUser(inviterUserId);
+  else if (resumeActorId) scrobbling.syncAnalyticsUser(resumeActorId);
   const startedAt = Date.now();
   log.info(
     {
@@ -234,6 +278,15 @@ async function joinHuddle(
     },
     restored ? "Restoring Huddle session" : "Joining Huddle",
   );
+  captureAnalytics("huddle.join_started", {
+    distinctId: inviterUserId,
+    sessionId: restored?.id,
+    properties: {
+      channelId,
+      callId,
+      restored: Boolean(restored),
+    },
+  });
   joiningChannels.add(channelId);
   if (callId) joiningCalls.add(callId);
   let runtime: Runtime | undefined;
@@ -263,6 +316,11 @@ async function joinHuddle(
         },
         "Could not prepare Huddle controls channel",
       );
+      captureAnalytics("controls_channel.prepare_failed", {
+        distinctId: inviterUserId,
+        sessionId: restored?.id,
+        properties: { channelId, callId },
+      });
       return { declined: true };
     }
     const joined =
@@ -378,6 +436,10 @@ async function joinHuddle(
         coordinator.id,
         coordinator.participantIds(),
       );
+      captureAnalytics("media.joined", {
+        sessionId: coordinator.id,
+        properties: { mediaSessionId: bootstrap.sessionId },
+      });
     } catch (error) {
       await runtime.browser.close();
       runtimes.delete(bootstrap.sessionId);
@@ -394,6 +456,18 @@ async function joinHuddle(
       },
       restored ? "Huddle session restored" : "Huddle joined",
     );
+    captureAnalytics("huddle.join_completed", {
+      distinctId: inviterUserId,
+      sessionId: coordinator.id,
+      properties: {
+        huddleId: joined.huddleId,
+        channelId,
+        mediaSessionId: bootstrap.sessionId,
+        restored: Boolean(restored),
+        companionChannel: Boolean(joined.companionChannelId),
+        durationMs: Date.now() - startedAt,
+      },
+    });
     return { sessionId: coordinator.id, huddleId: joined.huddleId };
   } catch (err) {
     if (companionChannelId) {
@@ -412,12 +486,23 @@ async function joinHuddle(
         event: "huddle_join_failed",
         channelId,
         callId,
+        inviterUserId,
         restoredSessionId: restored?.id,
         durationMs: Date.now() - startedAt,
         err,
       },
       restored ? "Huddle session restore failed" : "Huddle join failed",
     );
+    captureAnalytics("huddle.join_failed", {
+      distinctId: inviterUserId,
+      sessionId: restored?.id,
+      properties: {
+        channelId,
+        callId,
+        restored: Boolean(restored),
+        durationMs: Date.now() - startedAt,
+      },
+    });
     throw err;
   } finally {
     joiningChannels.delete(channelId);
@@ -432,6 +517,7 @@ async function restoreSession(saved: SavedSession) {
       { event: "restore_expired", sessionId: saved.id },
       "Expired interrupted session",
     );
+    captureAnalytics("session.restore_expired", { sessionId: saved.id });
     return;
   }
   const callId = await slackHuddle.activeHuddleCall(
@@ -444,6 +530,9 @@ async function restoreSession(saved: SavedSession) {
       { event: "restore_huddle_ended", sessionId: saved.id },
       "Expired session because its Huddle ended",
     );
+    captureAnalytics("session.restore_huddle_ended", {
+      sessionId: saved.id,
+    });
     return;
   }
   await joinHuddle(
@@ -458,6 +547,7 @@ async function restoreSession(saved: SavedSession) {
     { event: "restore_completed", sessionId: saved.id },
     "Interrupted session restored",
   );
+  captureAnalytics("session.restore_completed", { sessionId: saved.id });
 }
 
 async function retryRestores() {
@@ -486,6 +576,10 @@ async function retryRestores() {
             { event: "restore_abandoned", sessionId: saved.id, err: error },
             "Gave up restoring interrupted session",
           );
+          captureAnalytics("session.restore_abandoned", {
+            sessionId: saved.id,
+            properties: { attempts: failures },
+          });
         })
         .finally(() => {
           restoring.delete(saved.id);
@@ -606,6 +700,10 @@ async function restoreEndedSession(interaction: Interaction) {
     },
     "Manual session restore started",
   );
+  captureAnalytics("session.manual_restore_started", {
+    distinctId: interaction.userId,
+    sessionId: session.id,
+  });
   try {
     const callId = await slackHuddle.activeHuddleCall(
       session.sourceChannelId ?? session.channelId,
@@ -638,11 +736,17 @@ async function restoreEndedSession(interaction: Interaction) {
       },
       "Manual session restore completed",
     );
+    captureAnalytics("session.manual_restore_completed", {
+      distinctId: interaction.userId,
+      sessionId: session.id,
+      properties: { durationMs: Date.now() - startedAt },
+    });
   } catch (error) {
     log.error(
       {
         event: "manual_restore_failed",
         sessionId: session.id,
+        userId: interaction.userId,
         durationMs: Date.now() - startedAt,
         err: error,
       },
@@ -826,6 +930,10 @@ const server = Bun.serve<SocketData>({
           },
           "Media WebSocket opened",
         );
+        captureAnalytics("media.socket_opened", {
+          sessionId: runtime.coordinator?.id,
+          properties: { mediaSessionId: socket.data.sessionId },
+        });
       } else socket.close();
     },
     message(socket, raw) {
@@ -865,7 +973,10 @@ const server = Bun.serve<SocketData>({
           : {}),
       };
       if (message.type === "fatal")
-        log.error(fields, "Media page reported fatal error");
+        log.error(
+          { ...fields, err: new Error(detailMessage(message.details)) },
+          "Media page reported fatal error",
+        );
       else if (message.type === "playback_position")
         log.trace(fields, "Media playback position received");
       else log.info(fields, "Media message received");
@@ -877,6 +988,10 @@ const server = Bun.serve<SocketData>({
         { event: "media_socket_closed", mediaSessionId: socket.data.sessionId },
         "Media WebSocket closed",
       );
+      captureAnalytics("media.socket_closed", {
+        sessionId: runtime?.coordinator?.id,
+        properties: { mediaSessionId: socket.data.sessionId },
+      });
     },
   },
 });
@@ -928,6 +1043,10 @@ await slackHuddle.start((event) => {
       },
       "Huddle invitation received",
     );
+    captureAnalytics("huddle.invited", {
+      distinctId: event.inviterUserId,
+      properties: { channelId: event.channelId, callId: event.callId },
+    });
     void joinHuddle(
       event.channelId,
       event.inviterUserId,
@@ -1074,6 +1193,13 @@ log.info(
   },
   "HuddleFM ready",
 );
+captureAnalytics("app.ready", {
+  properties: {
+    restoredSessions: saved.sessions.length - pendingRestores.size,
+    pendingRestores: pendingRestores.size,
+    durationMs: Date.now() - startupAt,
+  },
+});
 
 const shutdownTimeoutMs = 30_000;
 const shutdown = async () => {
@@ -1088,6 +1214,9 @@ const shutdown = async () => {
     { event: "shutdown_started", activeSessions: runtimes.size },
     "Shutdown started",
   );
+  captureAnalytics("app.shutdown_started", {
+    properties: { activeSessions: runtimes.size },
+  });
   const failsafe = setTimeout(() => {
     log.error(
       { event: "shutdown_timeout", durationMs: Date.now() - startedAt },
@@ -1099,13 +1228,20 @@ const shutdown = async () => {
   failsafe.unref();
   try {
     await shutdownSteps();
+    captureAnalytics("app.shutdown_completed", {
+      properties: { durationMs: Date.now() - startedAt },
+    });
     log.info(
       { event: "shutdown_completed", durationMs: Date.now() - startedAt },
       "Shutdown complete",
     );
   } catch (error) {
     log.error({ event: "shutdown_failed", err: error }, "Shutdown failed");
+    captureAnalytics("app.shutdown_failed", {
+      properties: { durationMs: Date.now() - startedAt },
+    });
   }
+  await shutdownAnalytics();
   flushLogs();
   process.exit(0);
 };

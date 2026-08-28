@@ -12,6 +12,11 @@ export class AuditLog {
   constructor(
     private path = "data/audit.jsonl",
     private resolveName: (id: string) => Promise<string> = async (id) => id,
+    private capture: (
+      event: string,
+      actorId: string | undefined,
+      details: Record<string, unknown>,
+    ) => void = () => {},
   ) {
     mkdirSync(dirname(path), { recursive: true });
     log.debug({ event: "initialized", path }, "Audit log initialized");
@@ -22,6 +27,7 @@ export class AuditLog {
     actorId: string | undefined,
     details: Record<string, unknown> = {},
   ) {
+    this.capture(event, actorId, details);
     this.pending = this.pending
       .then(async () => {
         const id = actorId ?? "system";

@@ -44,6 +44,8 @@ export function loadConfig() {
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,
     lastFmApiKey: process.env.LASTFM_API_KEY,
     lastFmSharedSecret: process.env.LASTFM_SHARED_SECRET,
+    posthogApiKey: process.env.POSTHOG_API_KEY,
+    posthogHost: process.env.POSTHOG_HOST ?? "https://us.i.posthog.com",
     chromePath:
       process.env.CHROME_PATH ??
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

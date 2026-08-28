@@ -47,6 +47,8 @@ SLACK_CANVAS_ID=F0123456789 # Canvas used to display all-time listening stats
 LOCAL_CONTROL_TOKEN=replace-me # You shouldn't have to add this if the endpoints aren't exposed (ie. in a docker setup)
 LASTFM_API_KEY=replace-me # Last.fm API key for account linking for scrobbling
 LASTFM_SHARED_SECRET=replace-me # Last.fm shared secret
+POSTHOG_API_KEY=phc_... # Enable PostHog analytics and error tracking
+POSTHOG_HOST=https://us.i.posthog.com # PostHog ingestion host
 QUEUE_LIMIT=50 # Maximum number of tracks in the queue
 TRACK_DURATION_LIMIT_SECONDS=1200 # Maximum duration of a track in seconds
 TRACK_DOWNLOAD_LIMIT_BYTES=100000000 # Maximum size of a track in bytes
@@ -83,6 +85,10 @@ All sessions should seamlessly restore after an update
 HuddleFM writes structured JSON logs to stdout and, by default, rotated files under `data/logs`. The files survive container recreation because `data` is mounted from the host. Use `LOG_LEVEL=debug` for detailed API and queue activity or `trace` for playback-position events.
 
 Logs can contain Slack user, channel, session, and track identifiers. Credentials and known token fields are redacted. Rotation retains the active file plus `LOG_FILE_COUNT` older files.
+
+### Analytics
+
+Set `POSTHOG_API_KEY` to send product events and sanitized errors to PostHog. Events use Slack user IDs as distinct IDs and never include Slack names, messages, search text, lyrics, audio, credentials, or raw API payloads. Active users get current-state person properties for their Last.fm and ListenBrainz connections, enabled settings, and scrobbling mode. HuddleFM keeps a random system identity in `data/posthog-installation-id`. Analytics is best-effort and disabled when the key is absent.
 
 ## About this project
 
