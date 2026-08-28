@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { capture as captureAnalytics } from "./analytics.ts";
 import { scrobblingModes, type ScrobblingMode, type Store } from "./store.ts";
 import { logger } from "./logger.ts";
 
@@ -90,6 +91,10 @@ export class ScrobbleDispatcher {
       { event: "mode_changed", userId, mode },
       "Scrobbling mode changed",
     );
+    captureAnalytics("scrobbling.mode_changed", {
+      distinctId: userId,
+      properties: { mode },
+    });
   }
 
   sessionEnabled(sessionId: string, userId: string) {
@@ -113,6 +118,11 @@ export class ScrobbleDispatcher {
       { event: "session_setting_changed", sessionId, userId, enabled },
       "Session scrobbling setting changed",
     );
+    captureAnalytics("scrobbling.session_setting_changed", {
+      distinctId: userId,
+      sessionId,
+      properties: { enabled },
+    });
   }
 
   async beginLastFm(userId: string) {
@@ -123,6 +133,9 @@ export class ScrobbleDispatcher {
       { event: "lastfm_auth_started", userId },
       "Last.fm authorization started",
     );
+    captureAnalytics("scrobbling.lastfm_auth_started", {
+      distinctId: userId,
+    });
     return `https://www.last.fm/api/auth/?api_key=${encodeURIComponent(this.config.lastFmApiKey!)}&token=${encodeURIComponent(token)}`;
   }
 
@@ -143,6 +156,7 @@ export class ScrobbleDispatcher {
       throw new Error("Last.fm returned no session");
     this.store.connectLastFm(userId, session.name, session.key);
     log.info({ event: "lastfm_connected", userId }, "Last.fm connected");
+    captureAnalytics("scrobbling.lastfm_connected", { distinctId: userId });
     return session.name;
   }
 
@@ -150,6 +164,9 @@ export class ScrobbleDispatcher {
     this.store.disconnectLastFm(userId);
     this.store.clearPendingScrobbles(userId, "lastfm");
     log.info({ event: "lastfm_disconnected", userId }, "Last.fm disconnected");
+    captureAnalytics("scrobbling.lastfm_disconnected", {
+      distinctId: userId,
+    });
   }
 
   setLastFmEnabled(userId: string, enabled: boolean) {
@@ -162,6 +179,10 @@ export class ScrobbleDispatcher {
       { event: "lastfm_setting_changed", userId, enabled },
       "Last.fm scrobbling setting changed",
     );
+    captureAnalytics("scrobbling.lastfm_setting_changed", {
+      distinctId: userId,
+      properties: { enabled },
+    });
   }
 
   async setListenBrainz(
@@ -202,6 +223,10 @@ export class ScrobbleDispatcher {
       },
       "ListenBrainz setting changed",
     );
+    captureAnalytics("scrobbling.listenbrainz_setting_changed", {
+      distinctId: userId,
+      properties: { enabled, connected: Boolean(username) },
+    });
     return username;
   }
 
@@ -212,6 +237,9 @@ export class ScrobbleDispatcher {
       { event: "listenbrainz_disconnected", userId },
       "ListenBrainz disconnected",
     );
+    captureAnalytics("scrobbling.listenbrainz_disconnected", {
+      distinctId: userId,
+    });
   }
 
   nowPlaying(userIds: Iterable<string>, track: ScrobbleTrack) {

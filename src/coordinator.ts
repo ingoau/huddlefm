@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import { capture as captureAnalytics } from "./analytics.ts";
 import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
@@ -829,6 +830,7 @@ export class Coordinator {
         {
           event: "track_preparation_failed",
           entryId: entry.id,
+          userId: entry.requesterId,
           automatic: false,
           durationMs: Date.now() - startedAt,
           err: error,
@@ -1152,6 +1154,18 @@ export class Coordinator {
     this.sendMedia(this.playMessage(next));
     void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
+      captureAnalytics(lyrics ? "lyrics.available" : "lyrics.unavailable", {
+        distinctId: next.automatic ? undefined : next.requesterId,
+        sessionId: this.id,
+        properties: {
+          trackId: next.id,
+          sourceId: next.sourceId,
+          origin: next.automatic ? "autoplay" : "manual",
+          ...(lyrics
+            ? { source: lyrics.source, lines: lyrics.lines.length }
+            : {}),
+        },
+      });
       if (lyrics) {
         this.log.info(
           {
@@ -2224,6 +2238,14 @@ export class Coordinator {
         ],
       });
     } catch (error) {
+      this.log.error(
+        {
+          event: "lastfm_auth_start_failed",
+          userId: interaction.userId,
+          err: error,
+        },
+        "Could not start Last.fm authorization",
+      );
       await this.notice(
         interaction.userId,
         `Could not start Last.fm login: ${message(error)}`,
@@ -2258,6 +2280,14 @@ export class Coordinator {
         );
       this.playbackScrobbling?.settingsEnabled(interaction.userId);
     } catch (error) {
+      this.log.error(
+        {
+          event: "lastfm_auth_failed",
+          userId: interaction.userId,
+          err: error,
+        },
+        "Could not finish Last.fm authorization",
+      );
       await this.notice(
         interaction.userId,
         `Last.fm login is not complete: ${message(error)}`,
@@ -2469,6 +2499,14 @@ export class Coordinator {
         else if (newlyEnabled && sessionEnabled)
           this.playbackScrobbling?.settingsEnabled(interaction.userId);
       } catch (error) {
+        this.log.error(
+          {
+            event: "scrobbling_settings_failed",
+            userId: interaction.userId,
+            err: error,
+          },
+          "Could not change scrobbling settings",
+        );
         await this.notice(interaction.userId, message(error));
       }
     }
@@ -2975,7 +3013,13 @@ export class Coordinator {
       },
       Date.now() + endRestoreMs,
     );
-    this.audit.record("session.ended", userId, { sessionId: this.id, reason });
+    this.audit.record("session.ended", userId, {
+      sessionId: this.id,
+      reason,
+      previousState: state,
+      tracksPlayed: this.history.length,
+      listenedSeconds: this.listenedSeconds,
+    });
     this.sessionChanged();
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();

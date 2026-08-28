@@ -1,4 +1,5 @@
 import pino from "pino";
+import { captureException } from "./analytics.ts";
 import { redactSecrets, safeError } from "./error-message.ts";
 
 const level = process.env.LOG_LEVEL ?? "info";
@@ -74,6 +75,60 @@ export const logger = pino(
           message: safeError(error),
           stack: error.stack ? redactSecrets(error.stack) : undefined,
         };
+      },
+    },
+    hooks: {
+      logMethod(args, method, level) {
+        const fields =
+          args[0] && typeof args[0] === "object"
+            ? (args[0] as Record<string, unknown>)
+            : undefined;
+        if (level >= 50 && fields?.err) {
+          const bindings = this.bindings();
+          const userId = [fields.userId, fields.inviterUserId].find(
+            (value): value is string => typeof value === "string",
+          );
+          const sessionId = [fields.sessionId, bindings.sessionId].find(
+            (value): value is string => typeof value === "string",
+          );
+          const properties = Object.fromEntries(
+            [
+              "event",
+              "component",
+              "actionId",
+              "automatic",
+              "callId",
+              "channelId",
+              "count",
+              "entryId",
+              "huddleId",
+              "mediaSessionId",
+              "mediaEvent",
+              "messageTs",
+              "provider",
+              "restoredSessionId",
+              "service",
+              "reason",
+              "sourceId",
+              "status",
+              "attempt",
+              "trackId",
+              "viewId",
+              "durationMs",
+            ].flatMap((key) => {
+              const value = fields[key] ?? bindings[key];
+              return ["string", "number", "boolean"].includes(typeof value)
+                ? [[key, value]]
+                : [];
+            }),
+          );
+          captureException(fields.err, {
+            distinctId: userId,
+            sessionId,
+            properties,
+          });
+        }
+        return method.apply(this, args);
       },
     },
   },

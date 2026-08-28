@@ -7,8 +7,11 @@ import { AuditLog } from "./audit-log.ts";
 test("appends JSONL records with resolved actors", async () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-audit-"));
   const path = join(directory, "audit.jsonl");
-  const audit = new AuditLog(path, async (id) =>
-    id === "U123" ? "Sam Smith" : id,
+  const captured: unknown[] = [];
+  const audit = new AuditLog(
+    path,
+    async (id) => (id === "U123" ? "Sam Smith" : id),
+    (...args) => captured.push(args),
   );
   audit.record("track.skipped", "U123", {
     sessionId: "session",
@@ -33,6 +36,10 @@ test("appends JSONL records with resolved actors", async () => {
       actor: { id: "system", name: "HuddleFM" },
       sessionId: "session",
     }),
+  ]);
+  expect(captured).toEqual([
+    ["track.skipped", "U123", { sessionId: "session", trackId: "track" }],
+    ["session.ended", undefined, { sessionId: "session" }],
   ]);
   rmSync(directory, { recursive: true });
 });
