@@ -70,6 +70,19 @@ type SavedTrack = {
   queuePosition?: number;
 };
 
+type RecentTrack = Pick<
+  SavedTrack,
+  | "id"
+  | "sourceInput"
+  | "canonicalUrl"
+  | "sourceId"
+  | "title"
+  | "artist"
+  | "album"
+  | "duration"
+  | "artwork"
+>;
+
 export type SavedSession = {
   id: string;
   huddleId: string;
@@ -267,6 +280,8 @@ export class Store {
         ON tracks(session_id, status);
       CREATE INDEX IF NOT EXISTS tracks_status_source
         ON tracks(status, source_id);
+      CREATE INDEX IF NOT EXISTS tracks_requester_recent
+        ON tracks(requester_id, automatic, created_at DESC);
       CREATE INDEX IF NOT EXISTS scrobbles_pending
         ON scrobbles(status, next_attempt_at, listened_at, created_at);
       CREATE INDEX IF NOT EXISTS companion_removals_due
@@ -1067,6 +1082,25 @@ export class Store {
         track.status,
         Date.now(),
       );
+  }
+
+  recentTracks(userId: string, limit = 10) {
+    return this.db
+      .query(
+        `SELECT id, sourceInput, canonicalUrl, sourceId, title, artist, album, duration, artwork
+        FROM (
+          SELECT id, source_input AS sourceInput, canonical_url AS canonicalUrl,
+          source_id AS sourceId, title, artist, album, duration, artwork, created_at,
+          rowid AS insertionOrder,
+          ROW_NUMBER() OVER (
+            PARTITION BY source_id ORDER BY created_at DESC, rowid DESC
+          ) AS recency
+          FROM tracks WHERE requester_id = ? AND automatic = 0
+        )
+        WHERE recency = 1
+        ORDER BY created_at DESC, insertionOrder DESC LIMIT ?`,
+      )
+      .all(userId, limit) as RecentTrack[];
   }
 
   setTrack(

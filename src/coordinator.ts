@@ -704,9 +704,13 @@ export class Coordinator {
   }
 
   private async add(interaction: Interaction) {
-    const value =
+    const searchValue =
       interaction.state.track?.selection?.selected_option?.value ??
       interaction.value;
+    const recentId = searchValue
+      ? undefined
+      : interaction.state.recent?.selection?.selected_option?.value;
+    const value = searchValue || recentId;
     if (!value) return;
     const accepted = await this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return false;
@@ -725,7 +729,12 @@ export class Coordinator {
     if (!accepted) return;
     let selection: TrackMetadata | TrackMetadata[];
     try {
-      selection = await this.tracks.resolve(value);
+      selection = recentId
+        ? (this.store
+            .recentTracks(interaction.userId)
+            .find((track) => track.id === recentId) ??
+          (await this.tracks.resolve(value)))
+        : await this.tracks.resolve(value);
     } catch (error) {
       return this.notice(interaction.userId, message(error));
     }
@@ -1536,6 +1545,7 @@ export class Coordinator {
       await this.require(interaction, "add");
       return;
     }
+    const recent = this.store.recentTracks(interaction.userId);
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
       callback_id: "add_track_to_queue",
@@ -1547,6 +1557,7 @@ export class Coordinator {
         {
           type: "input",
           block_id: "track",
+          optional: Boolean(recent.length),
           label: plain("Song, album, playlist, or link"),
           element: {
             type: "external_select",
@@ -1556,6 +1567,27 @@ export class Coordinator {
             focus_on_load: true,
           },
         },
+        ...(recent.length
+          ? [
+              {
+                type: "input",
+                block_id: "recent",
+                optional: true,
+                label: plain("Recent songs"),
+                element: {
+                  type: "static_select",
+                  action_id: "selection",
+                  placeholder: plain("Choose a recent song"),
+                  options: recent.map((track) => ({
+                    text: plain(
+                      `${track.title} — ${track.artist}`.slice(0, 75),
+                    ),
+                    value: track.id,
+                  })),
+                },
+              },
+            ]
+          : []),
       ],
     });
   }

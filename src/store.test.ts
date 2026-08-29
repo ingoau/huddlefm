@@ -364,6 +364,49 @@ test("aggregates all-time canvas stats", () => {
   store.close();
 });
 
+test("returns each user's latest distinct manual tracks", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  const add = (
+    id: string,
+    sourceId: string,
+    requesterId = "user",
+    automatic = false,
+  ) =>
+    store.addTrack({
+      id,
+      sessionId: "session",
+      requesterId,
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId,
+      title: id,
+      artist: "Artist",
+      automatic,
+      status: "played",
+    });
+  add("old", "same");
+  add("other-user", "other", "other-user");
+  add("automatic", "automatic", "user", true);
+  add("new", "same");
+  add("latest", "latest");
+
+  expect(store.recentTracks("user").map(({ id }) => id)).toEqual([
+    "latest",
+    "new",
+  ]);
+  expect(store.recentTracks("user", 1).map(({ id }) => id)).toEqual(["latest"]);
+  store.close();
+});
+
 test("groups channel statistics by source after companion replacement", () => {
   const store = new Store(":memory:");
   for (const [id, channelId] of [
