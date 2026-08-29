@@ -280,8 +280,6 @@ export class Store {
         ON tracks(session_id, status);
       CREATE INDEX IF NOT EXISTS tracks_status_source
         ON tracks(status, source_id);
-      CREATE INDEX IF NOT EXISTS tracks_requester_recent
-        ON tracks(requester_id, automatic, created_at DESC);
       CREATE INDEX IF NOT EXISTS scrobbles_pending
         ON scrobbles(status, next_attempt_at, listened_at, created_at);
       CREATE INDEX IF NOT EXISTS companion_removals_due
@@ -334,6 +332,8 @@ export class Store {
     this.ensureColumn("sessions", "companion_channel_id", "TEXT");
     this.ensureColumn("sessions", "message_cleanup_at", "INTEGER");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
+    this.db.run(`CREATE INDEX IF NOT EXISTS tracks_requester_recent
+      ON tracks(requester_id, automatic, created_at DESC)`);
     this.ensureColumn("tracks", "queue_position", "INTEGER");
     this.ensureColumn("tracks", "intro_seconds", "REAL");
     this.ensureColumn("tracks", "outro_seconds", "REAL");

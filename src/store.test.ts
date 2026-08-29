@@ -147,6 +147,31 @@ test("creates indexes for recurring session, track, and scrobble queries", () =>
   store.close();
 });
 
+test("creates the recent-track index after migrating legacy databases", () => {
+  const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
+  const path = join(directory, "store.sqlite");
+  const legacy = new Database(path, { create: true });
+  legacy.run(`CREATE TABLE tracks (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    requester_id TEXT,
+    source_id TEXT,
+    status TEXT,
+    created_at INTEGER
+  )`);
+  legacy.close();
+
+  const store = new Store(path);
+  expect(
+    store.db
+      .query("PRAGMA index_list(tracks)")
+      .all()
+      .map((row) => (row as { name: string }).name),
+  ).toContain("tracks_requester_recent");
+  store.close();
+  rmSync(directory, { recursive: true });
+});
+
 test("restores suspended sessions for three minutes", () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
   const path = join(directory, "store.sqlite");
