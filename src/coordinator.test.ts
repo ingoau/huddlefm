@@ -80,6 +80,7 @@ function setup(
       setTrack: () => {},
       removeTrack: () => {},
       addTrack: () => {},
+      recentTracks: () => [],
       incrementUsage: () => {},
       setSession: (_id: string, value: unknown) => {
         sessions.push(value);
@@ -722,6 +723,73 @@ test("adds tracks through a full-width search modal", async () => {
   });
   expect(resolved).toBe("track-reference");
   await test.coordinator.endFromSlack();
+});
+
+test("adds a recent song from the expanded queue modal", async () => {
+  let resolved = false;
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "previous",
+    huddleId: "previous",
+    callId: "previous",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.addTrack({
+    id: "recent-track",
+    sessionId: "previous",
+    requesterId: "host",
+    sourceInput: "https://example.com/recent",
+    canonicalUrl: "https://example.com/recent",
+    sourceId: "recent",
+    title: "Recent track",
+    artist: "Recent artist",
+    status: "played",
+  });
+  const test = setup(
+    {
+      resolve: async () => ((resolved = true), {}),
+      prepare: async () => "track.opus",
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    store,
+  );
+  await test.coordinator.start();
+
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  const modal = JSON.stringify(test.modals[0]);
+  expect(modal).toContain('"block_id":"recent"');
+  expect(modal).toContain('"type":"static_select"');
+  expect(modal).toContain("Recent track — Recent artist");
+
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "add_track_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: {
+      recent: {
+        selection: { selected_option: { value: "recent-track" } },
+      },
+    },
+  });
+  expect(resolved).toBeFalse();
+  expect(
+    store.db
+      .query("SELECT title FROM tracks WHERE session_id = ?")
+      .all(test.coordinator.id),
+  ).toEqual([{ title: "Recent track" }]);
+  await test.coordinator.endFromSlack();
+  store.close();
 });
 
 test("first current participant claims a vacant host role", async () => {

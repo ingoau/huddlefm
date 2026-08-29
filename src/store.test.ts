@@ -147,6 +147,31 @@ test("creates indexes for recurring session, track, and scrobble queries", () =>
   store.close();
 });
 
+test("creates the recent-track index after migrating legacy databases", () => {
+  const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
+  const path = join(directory, "store.sqlite");
+  const legacy = new Database(path, { create: true });
+  legacy.run(`CREATE TABLE tracks (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    requester_id TEXT,
+    source_id TEXT,
+    status TEXT,
+    created_at INTEGER
+  )`);
+  legacy.close();
+
+  const store = new Store(path);
+  expect(
+    store.db
+      .query("PRAGMA index_list(tracks)")
+      .all()
+      .map((row) => (row as { name: string }).name),
+  ).toContain("tracks_requester_recent");
+  store.close();
+  rmSync(directory, { recursive: true });
+});
+
 test("restores suspended sessions for three minutes", () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
   const path = join(directory, "store.sqlite");
@@ -361,6 +386,49 @@ test("aggregates all-time canvas stats", () => {
       { channelId: "one", count: 1 },
     ],
   });
+  store.close();
+});
+
+test("returns each user's latest distinct manual tracks", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  const add = (
+    id: string,
+    sourceId: string,
+    requesterId = "user",
+    automatic = false,
+  ) =>
+    store.addTrack({
+      id,
+      sessionId: "session",
+      requesterId,
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId,
+      title: id,
+      artist: "Artist",
+      automatic,
+      status: "played",
+    });
+  add("old", "same");
+  add("other-user", "other", "other-user");
+  add("automatic", "automatic", "user", true);
+  add("new", "same");
+  add("latest", "latest");
+
+  expect(store.recentTracks("user").map(({ id }) => id)).toEqual([
+    "latest",
+    "new",
+  ]);
+  expect(store.recentTracks("user", 1).map(({ id }) => id)).toEqual(["latest"]);
   store.close();
 });
 

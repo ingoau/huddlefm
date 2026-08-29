@@ -70,6 +70,19 @@ type SavedTrack = {
   queuePosition?: number;
 };
 
+type RecentTrack = Pick<
+  SavedTrack,
+  | "id"
+  | "sourceInput"
+  | "canonicalUrl"
+  | "sourceId"
+  | "title"
+  | "artist"
+  | "album"
+  | "duration"
+  | "artwork"
+>;
+
 export type SavedSession = {
   id: string;
   huddleId: string;
@@ -319,6 +332,8 @@ export class Store {
     this.ensureColumn("sessions", "companion_channel_id", "TEXT");
     this.ensureColumn("sessions", "message_cleanup_at", "INTEGER");
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
+    this.db.run(`CREATE INDEX IF NOT EXISTS tracks_requester_recent
+      ON tracks(requester_id, automatic, created_at DESC)`);
     this.ensureColumn("tracks", "queue_position", "INTEGER");
     this.ensureColumn("tracks", "intro_seconds", "REAL");
     this.ensureColumn("tracks", "outro_seconds", "REAL");
@@ -1067,6 +1082,25 @@ export class Store {
         track.status,
         Date.now(),
       );
+  }
+
+  recentTracks(userId: string, limit = 10) {
+    return this.db
+      .query(
+        `SELECT id, sourceInput, canonicalUrl, sourceId, title, artist, album, duration, artwork
+        FROM (
+          SELECT id, source_input AS sourceInput, canonical_url AS canonicalUrl,
+          source_id AS sourceId, title, artist, album, duration, artwork, created_at,
+          rowid AS insertionOrder,
+          ROW_NUMBER() OVER (
+            PARTITION BY source_id ORDER BY created_at DESC, rowid DESC
+          ) AS recency
+          FROM tracks WHERE requester_id = ? AND automatic = 0
+        )
+        WHERE recency = 1
+        ORDER BY created_at DESC, insertionOrder DESC LIMIT ?`,
+      )
+      .all(userId, limit) as RecentTrack[];
   }
 
   setTrack(
