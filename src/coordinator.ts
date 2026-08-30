@@ -17,7 +17,12 @@ import {
   type TransitionMode,
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
-import { TrackCatalog, type TrackMetadata } from "./tracks.ts";
+import {
+  isExpectedTrackFailure,
+  TrackCatalog,
+  trackFailureDetail,
+  type TrackMetadata,
+} from "./tracks.ts";
 import { safeError as message } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
@@ -324,13 +329,14 @@ export class Coordinator {
         );
       });
     } catch (error) {
-      this.log.error(
+      this.logTrackFailure(
         {
           event: "restored_track_preparation_failed",
           entryId: entry.id,
+          sourceId: entry.sourceId,
           durationMs: Date.now() - startedAt,
-          err: error,
         },
+        error,
         "Restored track preparation failed",
       );
       await this.enqueue(async () => {
@@ -795,6 +801,20 @@ export class Coordinator {
     );
   }
 
+  // Media that is removed, private, blocked, or cancelled mid-preparation is an
+  // everyday condition rather than a fault, so it is logged as a warning and
+  // kept out of error tracking. The extractor's own wording goes in `reason`.
+  private logTrackFailure(
+    fields: Record<string, unknown>,
+    error: unknown,
+    text: string,
+  ) {
+    this.log[isExpectedTrackFailure(error) ? "warn" : "error"](
+      { ...fields, reason: trackFailureDetail(error), err: error },
+      text,
+    );
+  }
+
   private async prepareManual(entry: Entry, controller: AbortController) {
     const startedAt = Date.now();
     this.log.info(
@@ -836,15 +856,16 @@ export class Coordinator {
         );
       });
     } catch (error) {
-      this.log.error(
+      this.logTrackFailure(
         {
           event: "track_preparation_failed",
           entryId: entry.id,
+          sourceId: entry.sourceId,
           userId: entry.requesterId,
           automatic: false,
           durationMs: Date.now() - startedAt,
-          err: error,
         },
+        error,
         "Queued track preparation failed",
       );
       await this.enqueue(async () => {
@@ -1013,12 +1034,12 @@ export class Coordinator {
         seedSourceIds: seeds,
         reason: safeAuditError(error),
       });
-      this.log.error(
+      this.logTrackFailure(
         {
           event: "autoplay_recommendation_failed",
           durationMs: Date.now() - startedAt,
-          err: error,
         },
+        error,
         "Autoplay recommendation failed",
       );
     }
@@ -1072,13 +1093,14 @@ export class Coordinator {
         return true;
       });
     } catch (error) {
-      this.log.warn(
+      this.logTrackFailure(
         {
           event: "autoplay_track_preparation_failed",
           entryId: entry.id,
+          sourceId: entry.sourceId,
           durationMs: Date.now() - startedAt,
-          err: error,
         },
+        error,
         "Autoplay track preparation failed",
       );
       return this.enqueue(async () => {
