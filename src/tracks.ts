@@ -5,6 +5,92 @@ import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
 const log = logger.child({ component: "tracks" });
 
+// A track failure that is caused by the media itself, not by a fault in
+// HuddleFM. The message is stable and safe to show in Slack; `detail` keeps the
+// raw extractor line for the logs.
+export class TrackError extends Error {
+  readonly expected: boolean;
+  readonly detail?: string;
+
+  constructor(
+    message: string,
+    { expected = true, detail }: { expected?: boolean; detail?: string } = {},
+  ) {
+    super(message);
+    this.name = "TrackError";
+    this.expected = expected;
+    this.detail = detail;
+  }
+}
+
+export function isExpectedTrackFailure(error: unknown) {
+  return error instanceof TrackError && error.expected;
+}
+
+export function trackFailureDetail(error: unknown) {
+  return error instanceof TrackError ? error.detail : undefined;
+}
+
+// Removed, private, blocked, and unreleased media are everyday conditions, so
+// they get a stable message rather than the extractor's own wording. That
+// wording embeds the source ID ("[youtube] H1FAwIMz-RQ: This video is not
+// available."), which would otherwise fingerprint every bad link as a separate
+// error tracking issue.
+const expectedExtractorFailures = [
+  {
+    pattern: /live event will begin|premieres? in|is scheduled for/i,
+    message: "Track has not been released yet",
+  },
+  {
+    pattern: /unsupported url/i,
+    message: "That link is not supported",
+  },
+  {
+    pattern: new RegExp(
+      [
+        "video unavailable",
+        "(?:video|content|media|item) is (?:not|no longer) available",
+        "(?:not|no longer) available (?:on this app|in your country|from your location)",
+        "not made this video available",
+        "blocked it in your country",
+        "private video",
+        "sign in to confirm your age",
+        "age[- ]restricted",
+        "members[- ]only",
+        "premium members",
+        "has been removed",
+        "has been terminated",
+        "copyright",
+        "does not exist",
+        "http error (?:404|410)",
+      ].join("|"),
+      "i",
+    ),
+    message: "Track is not available",
+  },
+];
+
+export function extractorFailure(stderr: string) {
+  const line = stderr.trim().split("\n").at(-1)?.trim();
+  if (!line) return new TrackError("Extractor failed", { expected: false });
+  const known = expectedExtractorFailures.find(({ pattern }) =>
+    pattern.test(line),
+  );
+  return new TrackError(known?.message ?? anonymousFailure(line), {
+    expected: Boolean(known),
+    detail: line,
+  });
+}
+
+// Unclassified failures still reach error tracking, so drop the source ID from
+// the message to keep occurrences of the same fault grouped together.
+function anonymousFailure(line: string) {
+  return line
+    .replace(/^ERROR:\s*/i, "")
+    .replace(/^(\[[^\]]+\]\s+)[\w-]{6,}:\s+/, "$1")
+    .trim();
+}
+
 export const loudnessNormalizationArgs = (enabled = false) =>
   enabled
     ? [
@@ -162,7 +248,7 @@ export class TrackCatalog {
   async resolve(reference: string): Promise<TrackMetadata | TrackMetadata[]> {
     const startedAt = Date.now();
     const stored = this.references.get(reference);
-    if (!stored) throw new Error("Track selection expired; search again");
+    if (!stored) throw new TrackError("Track selection expired; search again");
     if (typeof stored === "object" && "type" in stored) {
       const tracks =
         stored.type === "album"
@@ -173,7 +259,7 @@ export class TrackCatalog {
               songMetadata(song, stored.url),
             );
       if (!tracks.length)
-        throw new Error("That album or playlist has no playable songs");
+        throw new TrackError("That album or playlist has no playable songs");
       for (const track of tracks) this.validate(track);
       this.references.delete(reference);
       log.info(
@@ -200,7 +286,8 @@ export class TrackCatalog {
   async resolveUrl(input: string): Promise<TrackMetadata> {
     const startedAt = Date.now();
     const url = parseHttpUrl(input);
-    if (!url) throw new Error("Only absolute HTTP or HTTPS URLs are supported");
+    if (!url)
+      throw new TrackError("Only absolute HTTP or HTTPS URLs are supported");
     await assertPublicUrl(url);
     const metadata = await runJson([
       ...this.extractor(),
@@ -213,16 +300,16 @@ export class TrackCatalog {
       url.href,
     ]);
     if (metadata._type === "playlist" || metadata.entries)
-      throw new Error("Playlists are not supported");
+      throw new TrackError("Playlists are not supported");
     if (metadata.is_live || metadata.live_status === "is_live")
-      throw new Error("Live streams are not supported");
+      throw new TrackError("Live streams are not supported");
     if (metadata.duration && metadata.duration > this.limits.durationSeconds)
-      throw new Error("Track exceeds the duration limit");
+      throw new TrackError("Track exceeds the duration limit");
     if (
       (metadata.filesize ?? metadata.filesize_approx ?? 0) >
       this.limits.downloadBytes
     )
-      throw new Error("Track exceeds the download limit");
+      throw new TrackError("Track exceeds the download limit");
     const canonicalUrl = metadata.webpage_url ?? url.href;
     await assertPublicUrl(new URL(canonicalUrl));
     const track = {
@@ -269,7 +356,7 @@ export class TrackCatalog {
 
   private validate(track: TrackMetadata) {
     if (track.duration && track.duration > this.limits.durationSeconds)
-      throw new Error("Track exceeds the duration limit");
+      throw new TrackError("Track exceeds the duration limit");
   }
 
   async prepare(
@@ -317,9 +404,9 @@ export class TrackCatalog {
       { event: "download_started", entryId, sourceId: track.sourceId },
       "Track download started",
     );
-    if (signal?.aborted) throw new Error("Track preparation cancelled");
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
     await mkdir(directory, { recursive: true });
-    if (signal?.aborted) throw new Error("Track preparation cancelled");
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
     const path = `${directory}/${entryId}.%(ext)s`;
     const download = [
       "--extract-audio",
@@ -342,8 +429,9 @@ export class TrackCatalog {
     try {
       result = await run([...this.extractor(), ...download], 180_000, signal);
     } catch (error) {
-      if (signal?.aborted || !String(error).includes("HTTP Error 403"))
-        throw error;
+      // The thrown message is classified, so match the raw extractor line.
+      const detail = trackFailureDetail(error) ?? String(error);
+      if (signal?.aborted || !detail.includes("HTTP Error 403")) throw error;
       log.warn(
         { event: "download_retry", entryId, sourceId: track.sourceId },
         "Retrying track download with embedded player",
@@ -365,7 +453,7 @@ export class TrackCatalog {
     try {
       const bytes = (await stat(filePath)).size;
       if (bytes > this.limits.downloadBytes)
-        throw new Error("Track exceeds the download limit");
+        throw new TrackError("Track exceeds the download limit");
       const probe = await run(
         [
           "ffprobe",
@@ -384,7 +472,7 @@ export class TrackCatalog {
       if (!Number.isFinite(duration) || duration <= 0)
         throw new Error("Could not verify the downloaded track duration");
       if (duration > this.limits.durationSeconds)
-        throw new Error("Track exceeds the duration limit");
+        throw new TrackError("Track exceeds the duration limit");
       let transition = {
         introSeconds: 0,
         outroSeconds: duration,
@@ -621,7 +709,7 @@ async function runJson(command: string[]) {
 }
 
 async function run(command: string[], timeout: number, signal?: AbortSignal) {
-  if (signal?.aborted) throw new Error("Track preparation cancelled");
+  if (signal?.aborted) throw new TrackError("Track preparation cancelled");
   const process = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => process.kill(), timeout);
   const abort = () => process.kill();
@@ -633,8 +721,7 @@ async function run(command: string[], timeout: number, signal?: AbortSignal) {
   ]);
   clearTimeout(timer);
   signal?.removeEventListener("abort", abort);
-  if (signal?.aborted) throw new Error("Track preparation cancelled");
-  if (code)
-    throw new Error(stderr.trim().split("\n").at(-1) ?? "Extractor failed");
+  if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+  if (code) throw extractorFailure(stderr);
   return { stdout, stderr };
 }

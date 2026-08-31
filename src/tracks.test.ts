@@ -1,11 +1,57 @@
 import { expect, test } from "bun:test";
 import { assertPublicUrl } from "./public-proxy.ts";
 import {
+  extractorFailure,
+  isExpectedTrackFailure,
   loudnessNormalizationArgs,
   publicArtworkUrl,
   TrackCatalog,
+  trackFailureDetail,
   transitionData,
 } from "./tracks.ts";
+
+test("gives unplayable media a stable message without the source ID", () => {
+  for (const line of [
+    "ERROR: [youtube] H1FAwIMz-RQ: This video is not available.",
+    "ERROR: [youtube] H1FAwIMz-RQ: Video unavailable. This video has been removed by the uploader",
+    "ERROR: [youtube] H1FAwIMz-RQ: Private video. Sign in if you've been granted access to this video",
+    "ERROR: [youtube] H1FAwIMz-RQ: The uploader has not made this video available in your country",
+  ]) {
+    const failure = extractorFailure(`WARNING: falling back\n${line}\n`);
+    expect(failure.message).toBe("Track is not available");
+    expect(isExpectedTrackFailure(failure)).toBe(true);
+    expect(failure.detail).toBe(line);
+  }
+});
+
+test("separates unreleased and unsupported media from missing media", () => {
+  expect(
+    extractorFailure(
+      "ERROR: [youtube] H1FAwIMz-RQ: This live event will begin in 3 hours.",
+    ).message,
+  ).toBe("Track has not been released yet");
+  expect(
+    extractorFailure("ERROR: Unsupported URL: https://example.com/song")
+      .message,
+  ).toBe("That link is not supported");
+});
+
+test("still reports unexpected extractor faults, without the source ID", () => {
+  const failure = extractorFailure(
+    "ERROR: [youtube] H1FAwIMz-RQ: Sign in to confirm you're not a bot",
+  );
+  expect(failure.message).toBe("[youtube] Sign in to confirm you're not a bot");
+  expect(isExpectedTrackFailure(failure)).toBe(false);
+  expect(trackFailureDetail(failure)).toContain("H1FAwIMz-RQ");
+});
+
+test("keeps the retry hint on forbidden downloads", () => {
+  const failure = extractorFailure(
+    "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+  );
+  expect(isExpectedTrackFailure(failure)).toBe(false);
+  expect(trackFailureDetail(failure)).toContain("HTTP Error 403");
+});
 
 test("disables loudness normalization by default", () => {
   expect(loudnessNormalizationArgs()).toEqual([]);
