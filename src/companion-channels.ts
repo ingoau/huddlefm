@@ -6,6 +6,10 @@ import type { Store } from "./store.ts";
 const cleanupDelayMs = 10 * 60_000;
 const log = logger.child({ component: "companion-channels" });
 
+export function companionRemovalNotice(channelId: string) {
+  return `I automatically removed you from <#${channelId}>. That channel is only for people currently in the Huddle. You’ll be added back if you join again.`;
+}
+
 export class CompanionChannels {
   private timer?: ReturnType<typeof setInterval>;
   private cleaning = false;
@@ -167,19 +171,27 @@ export class CompanionChannels {
         job.dueAt
       )
         return;
-      await this.slack.removeFromChannel(job.channelId, job.userId);
+      const kicked = await this.slack.removeFromChannel(
+        job.channelId,
+        job.userId,
+      );
       const current = this.store.companionRemovalDeadline(
         job.channelId,
         job.userId,
       );
       if (current === undefined)
         await this.slack.inviteToChannel(job.channelId, job.userId);
-      else if (current === job.dueAt)
+      else if (current === job.dueAt) {
         this.store.completeCompanionRemoval(
           job.channelId,
           job.userId,
           job.dueAt,
         );
+        if (kicked)
+          await this.app
+            .dm(job.userId, companionRemovalNotice(job.channelId))
+            .catch(() => {});
+      }
     });
   }
 

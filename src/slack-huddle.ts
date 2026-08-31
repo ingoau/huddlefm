@@ -155,6 +155,10 @@ export function companionChannelName(channelId: string, suffix?: string) {
   return `huddlefm-${channelId.toLowerCase()}${suffix ? `-${suffix}` : ""}`;
 }
 
+export function companionChannelTopic(sourceChannelId: string) {
+  return `HuddleFM controls for <#${sourceChannelId}>. You'll be removed about 10 minutes after you leave the Huddle.`;
+}
+
 export function companionChannelRequest(name: string, teamId?: string) {
   return { name, is_private: "true", ...(teamId ? { team_id: teamId } : {}) };
 }
@@ -372,7 +376,7 @@ export class SlackHuddleAdapter {
         );
         await this.api("conversations.setTopic", {
           channel: channelId,
-          topic: `HuddleFM controls for <#${sourceChannelId}>. Membership and messages are managed automatically.`,
+          topic: companionChannelTopic(sourceChannelId),
         });
         return channelId;
       }
@@ -440,6 +444,7 @@ export class SlackHuddleAdapter {
       throw new Error(
         `conversations.kick failed: ${String(result.error ?? "unknown_error")}`,
       );
+    return result.ok === true;
   }
 
   async activeHuddleCall(channelId: string, threadTs: string) {

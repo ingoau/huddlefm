@@ -4,6 +4,7 @@ import {
   channelAccess,
   companionChannelName,
   companionChannelRequest,
+  companionChannelTopic,
   companionPostingPrefs,
   normalizeInvitedJoinResponse,
   normalizeJoinResponse,
@@ -22,6 +23,12 @@ test("names companion channels from the source channel ID", () => {
   expect(companionChannelName("C123ABC")).toBe("huddlefm-c123abc");
   expect(companionChannelName("C123ABC", "4k9x2m")).toBe(
     "huddlefm-c123abc-4k9x2m",
+  );
+});
+
+test("explains automatic companion channel removal in the topic", () => {
+  expect(companionChannelTopic("C123ABC")).toBe(
+    "HuddleFM controls for <#C123ABC>. You'll be removed about 10 minutes after you leave the Huddle.",
   );
 });
 
