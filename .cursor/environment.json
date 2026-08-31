@@ -1,0 +1,8 @@
+{
+  "name": "HuddleFM",
+  "user": "bun",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": "bun install --frozen-lockfile"
+}
