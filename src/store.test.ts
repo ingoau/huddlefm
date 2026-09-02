@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "./store.ts";
+import { recentTrackLimit, Store } from "./store.ts";
 
 test("persists session and permission defaults", () => {
   const store = new Store(":memory:");
@@ -429,6 +429,38 @@ test("returns each user's latest distinct manual tracks", () => {
     "new",
   ]);
   expect(store.recentTracks("user", 1).map(({ id }) => id)).toEqual(["latest"]);
+  store.close();
+});
+
+test("returns up to one hundred distinct recent tracks by default", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  for (let index = 0; index < recentTrackLimit + 1; index++) {
+    store.addTrack({
+      id: `song-${index}`,
+      sessionId: "session",
+      requesterId: "user",
+      sourceInput: `song-${index}`,
+      canonicalUrl: `song-${index}`,
+      sourceId: `source-${index}`,
+      title: `Song ${index}`,
+      artist: "Artist",
+      status: "played",
+    });
+  }
+  const recent = store.recentTracks("user");
+  expect(recent).toHaveLength(recentTrackLimit);
+  expect(recent[0]?.id).toBe(`song-${recentTrackLimit}`);
+  expect(recent.at(-1)?.id).toBe("song-1");
+  expect(store.recentTracks("user", 10)).toHaveLength(10);
   store.close();
 });
 

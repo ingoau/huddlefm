@@ -847,6 +847,77 @@ test("adds a recent song from the expanded queue modal", async () => {
   store.close();
 });
 
+test("lists more than ten recent songs in the add modal", async () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "previous",
+    huddleId: "previous",
+    callId: "previous",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  const titles = Array.from(
+    { length: 15 },
+    (_, index) => `Recent ${index + 1}`,
+  );
+  for (const [index, title] of titles.entries()) {
+    store.addTrack({
+      id: `recent-${index + 1}`,
+      sessionId: "previous",
+      requesterId: "host",
+      sourceInput: `https://example.com/recent-${index + 1}`,
+      canonicalUrl: `https://example.com/recent-${index + 1}`,
+      sourceId: `recent-${index + 1}`,
+      title,
+      artist: "Artist",
+      status: "played",
+    });
+  }
+  const test = setup(
+    {
+      resolve: async () => {
+        throw new Error("should reuse the recent song");
+      },
+      prepare: async () => "track.opus",
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    store,
+  );
+  await test.coordinator.start();
+
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  const modal = JSON.stringify(test.modals[0]);
+  for (const title of titles) expect(modal).toContain(`${title} — Artist`);
+
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "add_track_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: {
+      recent: {
+        selection: { selected_option: { value: "recent-1" } },
+      },
+    },
+  });
+  expect(
+    store.db
+      .query("SELECT title FROM tracks WHERE session_id = ?")
+      .all(test.coordinator.id),
+  ).toEqual([{ title: "Recent 1" }]);
+  await test.coordinator.endFromSlack();
+  store.close();
+});
+
 test("first current participant claims a vacant host role", async () => {
   const test = setup();
   await test.coordinator.start();

@@ -32,6 +32,8 @@ export type TransitionMode = (typeof transitionModes)[number];
 export const scrobblingModes = ["always", "ask", "disabled"] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
 
+export const recentTrackLimit = 100;
+
 export const usageLabels = {
   added: "Songs added",
   removed: "Songs removed",
@@ -1084,7 +1086,7 @@ export class Store {
       );
   }
 
-  recentTracks(userId: string, limit = 10) {
+  recentTracks(userId: string, limit = recentTrackLimit) {
     return this.db
       .query(
         `SELECT id, sourceInput, canonicalUrl, sourceId, title, artist, album, duration, artwork
