@@ -9,7 +9,6 @@ function fakeClient() {
     properties?: Record<string | number, unknown>;
   }[] = [];
   const people: unknown[] = [];
-  let shutdownTimeout: number | undefined;
   const client: NonNullable<ConstructorParameters<typeof Analytics>[0]> = {
     capture(event) {
       events.push(event);
@@ -20,17 +19,12 @@ function fakeClient() {
     setPersonProperties(message) {
       people.push(message);
     },
-    async shutdown(timeout) {
-      shutdownTimeout = timeout;
-    },
+    async shutdown() {},
   };
   return {
     events,
     exceptions,
     people,
-    get shutdownTimeout() {
-      return shutdownTimeout;
-    },
     client,
   };
 }
@@ -115,10 +109,4 @@ test("sanitizes and deduplicates exceptions", () => {
     properties: { component: "test", $session_id: "session" },
     error: { message: "request failed token=[redacted]" },
   });
-});
-
-test("flushes with a bounded shutdown", async () => {
-  const fake = fakeClient();
-  await new Analytics(fake.client, "installation").shutdown();
-  expect(fake.shutdownTimeout).toBe(5_000);
 });

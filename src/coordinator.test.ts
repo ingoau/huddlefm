@@ -224,18 +224,16 @@ function queueChildBlocks(posted: unknown[]) {
   return childBlocks;
 }
 
-test("omits the queue footer when none is configured", async () => {
-  const result = setup();
-  await result.coordinator.start();
+test("appends a configured mrkdwn footer under queue controls", async () => {
+  const omitted = setup();
+  await omitted.coordinator.start();
   expect(
-    queueChildBlocks(result.posted).some((block) =>
+    queueChildBlocks(omitted.posted).some((block) =>
       block.block_id?.startsWith("footer_"),
     ),
   ).toBeFalse();
-  await result.coordinator.endFromSlack();
-});
+  await omitted.coordinator.endFromSlack();
 
-test("appends a mrkdwn footer to the queue container when configured", async () => {
   const result = setup(undefined, {
     aloneMs: 60_000,
     idleMs: 600_000,
@@ -793,72 +791,6 @@ test("adds a recent song from the expanded queue modal", async () => {
     hostId: "host",
     volume: 0.6,
   });
-  store.addTrack({
-    id: "recent-track",
-    sessionId: "previous",
-    requesterId: "host",
-    sourceInput: "https://example.com/recent",
-    canonicalUrl: "https://example.com/recent",
-    sourceId: "recent",
-    title: "Recent track",
-    artist: "Recent artist",
-    status: "played",
-  });
-  const test = setup(
-    {
-      resolve: async () => ((resolved = true), {}),
-      prepare: async () => "track.opus",
-    } as unknown as TrackCatalog,
-    undefined,
-    undefined,
-    undefined,
-    store,
-  );
-  await test.coordinator.start();
-
-  await test.coordinator.action(
-    interaction(test.coordinator, "open_add_to_queue"),
-  );
-  const modal = JSON.stringify(test.modals[0]);
-  expect(modal).toContain('"block_id":"recent"');
-  expect(modal).toContain('"type":"static_select"');
-  expect(modal).toContain("Recent track — Recent artist");
-
-  await test.coordinator.action({
-    ...interaction(
-      test.coordinator,
-      "add_track_to_queue",
-      "",
-      "view_submission",
-    ),
-    state: {
-      recent: {
-        selection: { selected_option: { value: "recent-track" } },
-      },
-    },
-  });
-  expect(resolved).toBeFalse();
-  expect(
-    store.db
-      .query("SELECT title FROM tracks WHERE session_id = ?")
-      .all(test.coordinator.id),
-  ).toEqual([{ title: "Recent track" }]);
-  await test.coordinator.endFromSlack();
-  store.close();
-});
-
-test("lists more than ten recent songs in the add modal", async () => {
-  const store = new Store(":memory:");
-  store.createSession({
-    id: "previous",
-    huddleId: "previous",
-    callId: "previous",
-    channelId: "channel",
-    threadTs: "1",
-    creatorId: "host",
-    hostId: "host",
-    volume: 0.6,
-  });
   const titles = Array.from(
     { length: 15 },
     (_, index) => `Recent ${index + 1}`,
@@ -878,9 +810,7 @@ test("lists more than ten recent songs in the add modal", async () => {
   }
   const test = setup(
     {
-      resolve: async () => {
-        throw new Error("should reuse the recent song");
-      },
+      resolve: async () => ((resolved = true), {}),
       prepare: async () => "track.opus",
     } as unknown as TrackCatalog,
     undefined,
@@ -894,6 +824,8 @@ test("lists more than ten recent songs in the add modal", async () => {
     interaction(test.coordinator, "open_add_to_queue"),
   );
   const modal = JSON.stringify(test.modals[0]);
+  expect(modal).toContain('"block_id":"recent"');
+  expect(modal).toContain('"type":"static_select"');
   for (const title of titles) expect(modal).toContain(`${title} — Artist`);
 
   await test.coordinator.action({
@@ -909,6 +841,7 @@ test("lists more than ten recent songs in the add modal", async () => {
       },
     },
   });
+  expect(resolved).toBeFalse();
   expect(
     store.db
       .query("SELECT title FROM tracks WHERE session_id = ?")

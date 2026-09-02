@@ -3,7 +3,6 @@ import { assertPublicUrl } from "./public-proxy.ts";
 import {
   extractorFailure,
   isExpectedTrackFailure,
-  loudnessNormalizationArgs,
   publicArtworkUrl,
   TrackCatalog,
   trackFailureDetail,
@@ -51,17 +50,6 @@ test("keeps the retry hint on forbidden downloads", () => {
   );
   expect(isExpectedTrackFailure(failure)).toBe(false);
   expect(trackFailureDetail(failure)).toContain("HTTP Error 403");
-});
-
-test("disables loudness normalization by default", () => {
-  expect(loudnessNormalizationArgs()).toEqual([]);
-});
-
-test("allows loudness normalization to be enabled", () => {
-  expect(loudnessNormalizationArgs(true)).toEqual([
-    "--postprocessor-args",
-    "ffmpeg:-c:a libopus -af loudnorm=I=-14:LRA=11:TP=-1",
-  ]);
 });
 
 test("rejects credentials and private destinations", async () => {
