@@ -922,8 +922,11 @@ export class Coordinator {
       return;
     const generation = this.autoplayGeneration;
     this.autoplayPending = true;
+    this.queueRender();
     void this.recommend(context, seeds, generation).finally(() => {
-      if (generation === this.autoplayGeneration) this.autoplayPending = false;
+      if (generation !== this.autoplayGeneration) return;
+      this.autoplayPending = false;
+      this.queueRender();
     });
   }
 
@@ -1143,14 +1146,7 @@ export class Coordinator {
   }
 
   private async startNext() {
-    const manual = this.queue.some((track) => !track.automatic);
-    const next =
-      this.queue.find(
-        (track) => !track.automatic && track.status === "ready",
-      ) ??
-      (!manual
-        ? this.queue.find((track) => track.status === "ready")
-        : undefined);
+    const next = this.queue.find((track) => track.status === "ready");
     if (!next) {
       this.playbackScrobbling?.finish();
       this.current = undefined;
@@ -1357,14 +1353,13 @@ export class Coordinator {
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
     ].slice(-20);
-    await this.removeQueuedAutoplay();
     await this.advance("skipped");
     this.scheduleAutoplay();
   }
 
   private async previous(interaction: Interaction) {
     if (!(await this.require(interaction, "skip"))) return;
-    if (this.current && this.playbackSeconds > 5) {
+    if (this.current && (this.playbackSeconds > 5 || !this.history.length)) {
       this.audit.record("track.previous", interaction.userId, {
         sessionId: this.id,
         ...auditTrack(this.current),
@@ -1375,7 +1370,11 @@ export class Coordinator {
       this.sendMedia({ type: "seek", seconds: 0 });
       return;
     }
-    if (!this.history.length) return;
+    if (!this.history.length)
+      return this.notice(
+        interaction.userId,
+        "Nothing was playing when you pressed Previous.",
+      );
     const prior = this.history.pop()!;
     this.audit.record("track.previous", interaction.userId, {
       sessionId: this.id,
@@ -2663,6 +2662,7 @@ export class Coordinator {
     const id = `${this.id}_${this.revision}`;
     const current = this.current;
     const next = this.queue[0];
+    const findingAutoplay = !next && this.autoplayPending;
     return [
       {
         type: "container",
@@ -2777,11 +2777,19 @@ export class Coordinator {
       {
         type: "container",
         block_id: `next_${id}`,
-        title: plain(next ? `Next: ${next.title}` : "Nothing queued"),
+        title: plain(
+          next
+            ? `Next: ${next.title}`
+            : findingAutoplay
+              ? "Finding next song"
+              : "Nothing queued",
+        ),
         subtitle: plain(
           next
             ? `${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}`
-            : "Add a song to keep the music going",
+            : findingAutoplay
+              ? "Autoplay is picking a recommendation"
+              : "Add a song to keep the music going",
         ),
         ...(next?.artwork
           ? {

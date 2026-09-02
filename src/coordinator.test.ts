@@ -1047,6 +1047,103 @@ test("Previous restarts after five seconds and seek controls move ten seconds", 
   await result.coordinator.endFromSlack();
 });
 
+test("previous restarts the first track before five seconds", async () => {
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: "a",
+      title: "A",
+      artist: "Artist",
+    }),
+    prepare: async () => "a.opus",
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const playing = result.media.find(
+    (value) => (value as { type?: string }).type === "play",
+  ) as { entryId: string };
+  result.coordinator.mediaEvent("playback_position", {
+    entryId: playing.entryId,
+    seconds: 2,
+  });
+  await result.coordinator.action(
+    interaction(result.coordinator, "previous_track"),
+  );
+  expect(result.media).toContainEqual({ type: "seek", seconds: 0 });
+  expect(
+    result.media.filter(
+      (value) => (value as { type?: string }).type === "play",
+    ),
+  ).toHaveLength(1);
+  await result.coordinator.endFromSlack();
+});
+
+test("previous notices when nothing can be restarted", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "previous_track"),
+  );
+  expect(result.ephemeral).toContain(
+    "Nothing was playing when you pressed Previous.",
+  );
+  await result.coordinator.endFromSlack();
+});
+
+test("skipping plays a ready autoplay track ahead of a later manual track", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "current", {
+    id: "now",
+    requesterId: "host",
+    sourceInput: "now",
+    canonicalUrl: "now",
+    sourceId: "now",
+    title: "Now",
+    artist: "Artist",
+    status: "playing",
+    filePath: "now.opus",
+  });
+  Reflect.set(result.coordinator, "queue", [
+    {
+      id: "auto",
+      requesterId: "bot",
+      sourceInput: "auto",
+      canonicalUrl: "auto",
+      sourceId: "auto",
+      title: "Auto",
+      artist: "Radio",
+      automatic: true,
+      status: "ready",
+      filePath: "auto.opus",
+    },
+    {
+      id: "manual",
+      requesterId: "host",
+      sourceInput: "manual",
+      canonicalUrl: "manual",
+      sourceId: "manual",
+      title: "Manual",
+      artist: "Artist",
+      status: "ready",
+      filePath: "manual.opus",
+    },
+  ]);
+  await result.coordinator.action(
+    interaction(result.coordinator, "next_track"),
+  );
+  expect(
+    result.media.filter(
+      (value) => (value as { type?: string }).type === "play",
+    ),
+  ).toEqual([expect.objectContaining({ sourceId: "auto", entryId: "auto" })]);
+  await result.coordinator.endFromSlack();
+});
+
 test("manager overrides permissions and HuddleFM cannot become host", async () => {
   const result = setup();
   await result.coordinator.start();
@@ -1849,7 +1946,75 @@ test("autoplay favors recommendations shared by recent manual tracks", async () 
   await result.coordinator.endFromSlack();
 });
 
-test("skipping rejects the track and rebuilds prepared autoplay", async () => {
+test("skipping a manual track plays the queued autoplay recommendation", async () => {
+  const ids = { a: "aaaaaaaaaaa", c: "ccccccccccc", d: "ddddddddddd" };
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: ids.a,
+      title: "A",
+      artist: "Artist",
+    }),
+    upNextIds: async () => [ids.c, ids.d],
+    resolveVideoId: async (id: string) => ({
+      sourceInput: `https://music.youtube.com/watch?v=${id}`,
+      canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+      sourceId: id,
+      title: id,
+      artist: "Radio",
+    }),
+    prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  await until(
+    () =>
+      result.audit.filter(
+        (value) => (value as unknown[])[0] === "track.autoplay_added",
+      ).length === 1,
+  );
+  const queued = (
+    Reflect.get(result.coordinator, "queue") as {
+      id: string;
+      sourceId: string;
+    }[]
+  )[0];
+  expect(queued?.sourceId).toBe(ids.c);
+  await result.coordinator.action(
+    interaction(result.coordinator, "next_track"),
+  );
+  expect(
+    result.media.filter(
+      (value) => (value as { type?: string }).type === "play",
+    ),
+  ).toEqual([
+    expect.objectContaining({ sourceId: ids.a }),
+    expect.objectContaining({ sourceId: ids.c, entryId: queued?.id }),
+  ]);
+  expect(
+    Reflect.get(result.coordinator, "history").map(
+      (track: { sourceId: string }) => track.sourceId,
+    ),
+  ).toEqual([ids.a]);
+  await result.coordinator.endFromSlack();
+});
+
+test("skipping an autoplay track plays the queued next autoplay", async () => {
   const ids = {
     a: "aaaaaaaaaaa",
     c: "ccccccccccc",
@@ -1912,6 +2077,13 @@ test("skipping rejects the track and rebuilds prepared autoplay", async () => {
         (value) => (value as unknown[])[0] === "track.autoplay_added",
       ).length === 2,
   );
+  const queued = (
+    Reflect.get(result.coordinator, "queue") as {
+      id: string;
+      sourceId: string;
+    }[]
+  )[0];
+  expect(queued?.sourceId).toBe(ids.d);
   await result.coordinator.action(
     interaction(result.coordinator, "next_track"),
   );
@@ -1921,7 +2093,7 @@ test("skipping rejects the track and rebuilds prepared autoplay", async () => {
         (value) => (value as unknown[])[0] === "track.autoplay_added",
       ).length === 3,
   );
-  expect(resolved).toEqual([ids.c, ids.d, ids.d]);
+  expect(resolved).toEqual([ids.c, ids.d, ids.e]);
   expect(
     Reflect.get(result.coordinator, "history").map(
       (track: { sourceId: string }) => track.sourceId,
@@ -1934,8 +2106,63 @@ test("skipping rejects the track and rebuilds prepared autoplay", async () => {
   ).toEqual([
     expect.objectContaining({ sourceId: ids.a }),
     expect.objectContaining({ sourceId: ids.c }),
-    expect.objectContaining({ sourceId: ids.d }),
+    expect.objectContaining({ sourceId: ids.d, entryId: queued?.id }),
   ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("player shows autoplay search while the next song is being chosen", async () => {
+  const ids = { a: "aaaaaaaaaaa", c: "ccccccccccc" };
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: ids.a,
+      title: "A",
+      artist: "Artist",
+    }),
+    upNextIds: async () => {
+      await blocked;
+      return [ids.c];
+    },
+    resolveVideoId: async (id: string) => ({
+      sourceInput: `https://music.youtube.com/watch?v=${id}`,
+      canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+      sourceId: id,
+      title: "C",
+      artist: "Radio",
+    }),
+    prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  await Bun.sleep(150);
+  expect(JSON.stringify(result.updates)).toContain("Finding next song");
+  expect(JSON.stringify(result.updates)).toContain(
+    "Autoplay is picking a recommendation",
+  );
+  release();
+  await until(() =>
+    JSON.stringify(result.updates).includes("Autoplay recommendation"),
+  );
   await result.coordinator.endFromSlack();
 });
 
