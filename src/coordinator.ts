@@ -8,6 +8,7 @@ import {
   capabilities,
   displayModes,
   permissionPresets,
+  recentTrackLimit,
   scrobblingModes,
   Store,
   transitionModes,
@@ -739,7 +740,7 @@ export class Coordinator {
     try {
       selection = recentId
         ? (this.store
-            .recentTracks(interaction.userId)
+            .recentTracks(interaction.userId, recentTrackLimit)
             .find((track) => track.id === recentId) ??
           (await this.tracks.resolve(value)))
         : await this.tracks.resolve(value);
@@ -1568,7 +1569,10 @@ export class Coordinator {
       await this.require(interaction, "add");
       return;
     }
-    const recent = this.store.recentTracks(interaction.userId);
+    const recent = this.store.recentTracks(
+      interaction.userId,
+      recentTrackLimit,
+    );
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
       callback_id: "add_track_to_queue",
