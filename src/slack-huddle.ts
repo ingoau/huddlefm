@@ -425,10 +425,11 @@ export class SlackHuddleAdapter {
       channel: channelId,
       users: userId,
     });
-    if (result.ok !== true && result.error !== "already_in_channel")
-      throw new Error(
-        `conversations.invite failed: ${String(result.error ?? "unknown_error")}`,
-      );
+    if (result.ok === true) return true;
+    if (result.error === "already_in_channel") return false;
+    throw new Error(
+      `conversations.invite failed: ${String(result.error ?? "unknown_error")}`,
+    );
   }
 
   async removeFromChannel(channelId: string, userId: string) {
