@@ -1355,7 +1355,6 @@ export class Coordinator {
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
     ].slice(-20);
-    await this.removeQueuedAutoplay();
     await this.advance("skipped");
     this.scheduleAutoplay();
   }
