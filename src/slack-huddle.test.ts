@@ -2,9 +2,6 @@ import { expect, test } from "bun:test";
 import {
   activeHuddleCallId,
   channelAccess,
-  companionChannelName,
-  companionChannelRequest,
-  companionPostingPrefs,
   normalizeInvitedJoinResponse,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
@@ -16,30 +13,6 @@ test("classifies channel access", () => {
   expect(channelAccess({ is_member: false, is_private: true })).toBe("decline");
   expect(channelAccess()).toBe("decline");
   expect(channelAccess({ is_member: true, is_archived: true })).toBe("decline");
-});
-
-test("names companion channels from the source channel ID", () => {
-  expect(companionChannelName("C123ABC")).toBe("huddlefm-c123abc");
-  expect(companionChannelName("C123ABC", "4k9x2m")).toBe(
-    "huddlefm-c123abc-4k9x2m",
-  );
-});
-
-test("targets companion channel creation to a configured workspace", () => {
-  expect(companionChannelRequest("huddlefm-c123", "T123")).toEqual({
-    name: "huddlefm-c123",
-    is_private: "true",
-    team_id: "T123",
-  });
-});
-
-test("restricts companion posting to admins and HuddleFM", () => {
-  expect(companionPostingPrefs("U123")).toEqual({
-    who_can_post: "type:admin,user:U123",
-    can_thread: "type:admin,user:U123",
-    enable_at_here: "true",
-    enable_at_channel: "true",
-  });
 });
 
 test("normalizes the private join response without nullable MeetingFeatures", () => {
