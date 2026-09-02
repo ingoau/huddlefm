@@ -10,6 +10,11 @@ export function parseIds(value = "") {
   return new Set(value.split(/[\s,]+/).filter(Boolean));
 }
 
+export function optionalText(value?: string) {
+  const text = value?.trim();
+  return text || undefined;
+}
+
 export function loadConfig() {
   for (const name of required)
     if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -41,6 +46,7 @@ export function loadConfig() {
       process.env.FORCE_COMPANION_CHANNEL_IDS,
     ),
     canvasId: process.env.SLACK_CANVAS_ID,
+    footer: optionalText(process.env.FOOTER),
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,
     lastFmApiKey: process.env.LASTFM_API_KEY,
     lastFmSharedSecret: process.env.LASTFM_SHARED_SECRET,

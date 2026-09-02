@@ -9,7 +9,13 @@ import { ScrobbleDispatcher } from "./scrobbling.ts";
 
 function setup(
   tracks = {} as TrackCatalog,
-  timeouts = {
+  timeouts: {
+    aloneMs: number;
+    idleMs: number;
+    pausedMs: number;
+    warningMs: number;
+    footer?: string;
+  } = {
     aloneMs: 60_000,
     idleMs: 600_000,
     pausedMs: 600_000,
@@ -197,6 +203,49 @@ test("moves controls to a replacement channel", async () => {
     expect.any(Array),
   ]);
   expect(result.deleted).toContainEqual(["channel", "1"]);
+  await result.coordinator.endFromSlack();
+});
+
+function queueContainer(posted: unknown[]) {
+  const [, , , blocks] = posted[0] as [
+    string,
+    string,
+    string,
+    { type: string; child_blocks?: { type: string; block_id?: string }[] }[],
+  ];
+  return blocks[1];
+}
+
+test("omits the queue footer when none is configured", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  expect(
+    queueContainer(result.posted).child_blocks?.some((block) =>
+      block.block_id?.startsWith("footer_"),
+    ),
+  ).toBeFalse();
+  await result.coordinator.endFromSlack();
+});
+
+test("appends a mrkdwn footer to the queue container when configured", async () => {
+  const result = setup(undefined, {
+    aloneMs: 60_000,
+    idleMs: 600_000,
+    pausedMs: 600_000,
+    warningMs: 120_000,
+    footer: "*Need help?* Ask in <#C123>",
+  });
+  await result.coordinator.start();
+  expect(queueContainer(result.posted).child_blocks?.at(-1)).toEqual({
+    type: "context",
+    block_id: expect.stringMatching(/^footer_/),
+    elements: [
+      {
+        type: "mrkdwn",
+        text: "*Need help?* Ask in <#C123>",
+      },
+    ],
+  });
   await result.coordinator.endFromSlack();
 });
 
