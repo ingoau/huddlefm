@@ -8,6 +8,8 @@ function setup(accessible = false, restrictionFails = false) {
   const removed: string[] = [];
   const deleted: string[] = [];
   const restricted: string[] = [];
+  const dms: string[] = [];
+  const members = new Set<string>(["bot"]);
   const slack = {
     ensureChannelAccess: async () => accessible,
     createCompanionChannel: async () => "companion",
@@ -17,14 +19,20 @@ function setup(accessible = false, restrictionFails = false) {
     },
     inviteToChannel: async (_channelId: string, userId: string) => {
       invited.push(userId);
+      if (members.has(userId)) return false;
+      members.add(userId);
+      return true;
     },
     removeFromChannel: async (_channelId: string, userId: string) => {
       removed.push(userId);
+      members.delete(userId);
     },
   };
   const messages = {
     channelMembers: async () => ["bot", "host", "stale"],
-    dm: async () => {},
+    dm: async (userId: string, text: string) => {
+      dms.push(`${userId}:${text}`);
+    },
     delete: async (_channelId: string, messageTs: string) => {
       deleted.push(messageTs);
     },
@@ -35,25 +43,34 @@ function setup(accessible = false, restrictionFails = false) {
     removed,
     deleted,
     restricted,
+    dms,
     manager: new CompanionChannels(store, slack, messages, "bot"),
   };
 }
 
 test("creates and reconciles a companion channel", async () => {
-  const { store, manager, invited, removed, restricted } = setup();
+  const { store, manager, invited, removed, restricted, dms } = setup();
   expect(await manager.prepare("source", "host")).toBe("companion");
   expect(store.companionChannel("source")).toBe("companion");
   expect(restricted).toEqual(["companion:bot"]);
   await manager.activate("companion", ["host", "guest"]);
   expect(invited).toEqual(["host", "host", "guest"]);
   expect(removed).toEqual(["stale"]);
+  expect(dms).toEqual([
+    "host:I added you to <#companion> so you can control HuddleFM from there.",
+    "guest:I added you to <#companion> so you can control HuddleFM from there.",
+  ]);
   store.close();
 });
 
 test("continues when companion posting restrictions fail", async () => {
-  const { store, manager, invited } = setup(false, true);
+  const { store, manager, invited, dms } = setup(false, true);
   expect(await manager.prepare("source", "host")).toBe("companion");
   expect(invited).toEqual(["host"]);
+  expect(dms).toEqual([
+    "host:I couldn’t restrict posting in <#companion>, so anyone in it can post there. You can change this in the channel’s settings.",
+    "host:I added you to <#companion> so you can control HuddleFM from there.",
+  ]);
   store.close();
 });
 
@@ -65,9 +82,62 @@ test("uses an accessible source channel without creating a companion", async () 
 });
 
 test("forces a companion channel for an accessible source", async () => {
-  const { store, manager, invited } = setup(true);
+  const { store, manager, invited, dms } = setup(true);
   expect(await manager.prepare("source", "host", true)).toBe("companion");
   expect(invited).toEqual(["host"]);
+  expect(dms).toEqual([
+    "host:I added you to <#companion> so you can control HuddleFM from there.",
+  ]);
+  store.close();
+});
+
+test("DMs a participant when they are added after joining the huddle", async () => {
+  const { store, manager, dms } = setup();
+  await manager.prepare("source", "host");
+  dms.length = 0;
+  await manager.add("companion", "guest");
+  expect(dms).toEqual([
+    "guest:I added you to <#companion> so you can control HuddleFM from there.",
+  ]);
+  store.close();
+});
+
+test("does not DM a participant who is already in the companion channel", async () => {
+  const { store, manager, dms } = setup();
+  await manager.add("companion", "guest");
+  dms.length = 0;
+  await manager.add("companion", "guest");
+  expect(dms).toEqual([]);
+  store.close();
+});
+
+test("tells a participant when adding them to the companion channel fails", async () => {
+  const store = new Store(":memory:");
+  const dms: string[] = [];
+  const manager = new CompanionChannels(
+    store,
+    {
+      ensureChannelAccess: async () => false,
+      createCompanionChannel: async () => "companion",
+      restrictCompanionPosting: async () => {},
+      inviteToChannel: async () => {
+        throw new Error("restricted");
+      },
+      removeFromChannel: async () => {},
+    },
+    {
+      dm: async (userId: string, text: string) => {
+        dms.push(`${userId}:${text}`);
+      },
+      delete: async () => {},
+      channelMembers: async () => ["bot"],
+    },
+    "bot",
+  );
+  await manager.activate("companion", ["guest"]);
+  expect(dms).toEqual([
+    "guest:I couldn’t add you to the HuddleFM controls channel. Ask the host to restart the session.",
+  ]);
   store.close();
 });
 
@@ -98,17 +168,23 @@ test("cleans tracked members and messages after their deadlines", async () => {
 test("reinvites a participant who rejoins during an in-flight removal", async () => {
   const store = new Store(":memory:");
   const operations: string[] = [];
+  const dms: string[] = [];
+  const members = new Set<string>(["user"]);
   const kickStarted = Promise.withResolvers<void>();
   const releaseKick = Promise.withResolvers<void>();
   const slack = {
     ensureChannelAccess: async () => false,
     createCompanionChannel: async () => "companion",
     restrictCompanionPosting: async () => {},
-    inviteToChannel: async () => {
+    inviteToChannel: async (_channelId: string, userId: string) => {
       operations.push("invite");
+      if (members.has(userId)) return false;
+      members.add(userId);
+      return true;
     },
-    removeFromChannel: async () => {
+    removeFromChannel: async (_channelId: string, userId: string) => {
       operations.push("kick");
+      members.delete(userId);
       kickStarted.resolve();
       await releaseKick.promise;
     },
@@ -117,7 +193,9 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
     store,
     slack,
     {
-      dm: async () => {},
+      dm: async (userId: string, text: string) => {
+        dms.push(`${userId}:${text}`);
+      },
       delete: async () => {},
       channelMembers: async () => [],
     },
@@ -132,6 +210,9 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
   releaseKick.resolve();
   await Promise.all([cleanup, rejoin]);
   expect(operations).toEqual(["kick", "invite", "invite"]);
+  expect(dms).toEqual([
+    "user:I added you to <#companion> so you can control HuddleFM from there.",
+  ]);
   expect(store.companionRemovalDeadline("companion", "user")).toBeUndefined();
   store.close();
 });

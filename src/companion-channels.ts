@@ -107,7 +107,7 @@ export class CompanionChannels {
   async add(channelId: string, userId: string) {
     this.store.cancelCompanionRemoval(channelId, userId);
     await this.serialize(channelId, userId, () =>
-      this.slack.inviteToChannel(channelId, userId),
+      this.invite(channelId, userId),
     );
   }
 
@@ -172,8 +172,7 @@ export class CompanionChannels {
         job.channelId,
         job.userId,
       );
-      if (current === undefined)
-        await this.slack.inviteToChannel(job.channelId, job.userId);
+      if (current === undefined) await this.invite(job.channelId, job.userId);
       else if (current === job.dueAt)
         this.store.completeCompanionRemoval(
           job.channelId,
@@ -197,6 +196,22 @@ export class CompanionChannels {
       });
     this.membership.set(key, pending);
     return pending;
+  }
+
+  private async invite(channelId: string, userId: string) {
+    const invited = await this.slack.inviteToChannel(channelId, userId);
+    if (!invited || userId === this.userId) return;
+    await this.app
+      .dm(
+        userId,
+        `I added you to <#${channelId}> so you can control HuddleFM from there.`,
+      )
+      .catch((error) => {
+        log.warn(
+          { event: "invite_notice_failed", channelId, userId, err: error },
+          "Could not tell user they were added to the companion channel",
+        );
+      });
   }
 
   private async create(sourceChannelId: string) {
