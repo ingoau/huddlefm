@@ -206,21 +206,29 @@ test("moves controls to a replacement channel", async () => {
   await result.coordinator.endFromSlack();
 });
 
-function queueContainer(posted: unknown[]) {
+function queueChildBlocks(posted: unknown[]) {
   const [, , , blocks] = posted[0] as [
     string,
     string,
     string,
-    { type: string; child_blocks?: { type: string; block_id?: string }[] }[],
+    {
+      child_blocks: {
+        type: string;
+        block_id?: string;
+        elements?: unknown[];
+      }[];
+    }[],
   ];
-  return blocks[1];
+  const childBlocks = blocks[1]?.child_blocks;
+  if (!childBlocks) throw new Error("missing queue container");
+  return childBlocks;
 }
 
 test("omits the queue footer when none is configured", async () => {
   const result = setup();
   await result.coordinator.start();
   expect(
-    queueContainer(result.posted).child_blocks?.some((block) =>
+    queueChildBlocks(result.posted).some((block) =>
       block.block_id?.startsWith("footer_"),
     ),
   ).toBeFalse();
@@ -236,7 +244,7 @@ test("appends a mrkdwn footer to the queue container when configured", async () 
     footer: "*Need help?* Ask in <#C123>",
   });
   await result.coordinator.start();
-  expect(queueContainer(result.posted).child_blocks?.at(-1)).toEqual({
+  expect(queueChildBlocks(result.posted).at(-1)).toEqual({
     type: "context",
     block_id: expect.stringMatching(/^footer_/),
     elements: [
