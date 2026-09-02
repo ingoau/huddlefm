@@ -44,6 +44,7 @@ EXCLUDED_USER_IDS=U0123456789,U9876543210 # Users ignored for participation, hos
 FORCE_COMPANION_CHANNEL_IDS=C0123456789,C9876543210 # Channels that always use a separate HuddleFM controls channel
 SLACK_TEAM_ID=T0123456789 # Workspace where companion channels are created, required for Enterprise Grid credentials
 SLACK_CANVAS_ID=F0123456789 # Canvas used to display all-time listening stats
+FOOTER="*Need help?* Ask in <#C123>" # Optional mrkdwn footer under the queue controls
 LOCAL_CONTROL_TOKEN=replace-me # You shouldn't have to add this if the endpoints aren't exposed (ie. in a docker setup)
 LASTFM_API_KEY=replace-me # Last.fm API key for account linking for scrobbling
 LASTFM_SHARED_SECRET=replace-me # Last.fm shared secret

@@ -31,6 +31,7 @@ import {
   confirm,
   elapsed,
   escape,
+  footerContext,
   icon,
   permissionLabels,
   plain,
@@ -113,6 +114,7 @@ export class Coordinator {
       port: number;
       managerUserId?: string;
       excludedUserIds: Set<string>;
+      footer?: string;
     },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
@@ -2852,6 +2854,7 @@ export class Coordinator {
               },
             ],
           },
+          ...footerContext(this.config.footer, `footer_${id}`),
         ],
       },
     ];

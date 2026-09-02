@@ -65,6 +65,18 @@ export function songCount(count: number) {
   return `${count} ${count === 1 ? "song" : "songs"}`;
 }
 
+export function footerContext(text: string | undefined, blockId: string) {
+  const footer = text?.trim();
+  if (!footer) return [];
+  return [
+    {
+      type: "context",
+      block_id: blockId,
+      elements: [{ type: "mrkdwn", text: footer.slice(0, 3000) }],
+    },
+  ];
+}
+
 export function sectionBlocks(title: string, lines: string[]) {
   const sections: { type: string; text: { type: string; text: string } }[] = [];
   let text = title;
