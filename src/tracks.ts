@@ -453,7 +453,13 @@ export class TrackCatalog {
       throw new TrackError("That link is not supported", {
         detail: `Navidrome share HTTP ${response.status}`,
       });
-    const info = parseNavidromeShareInfo(await response.text());
+    const declared = Number(response.headers.get("content-length") ?? 0);
+    if (declared > 2_000_000)
+      throw new TrackError("That link is not supported", {
+        detail: "Navidrome share page is too large",
+      });
+    const html = await readLimited(response, 2_000_000);
+    const info = parseNavidromeShareInfo(html);
     if (!info?.tracks.length)
       throw new TrackError("That album or playlist has no playable songs");
     const tracks: TrackMetadata[] = [];
