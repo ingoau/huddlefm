@@ -3,6 +3,8 @@ import { assertPublicUrl } from "./public-proxy.ts";
 import {
   extractorFailure,
   isExpectedTrackFailure,
+  navidromeShare,
+  parseNavidromeShareInfo,
   publicArtworkUrl,
   TrackCatalog,
   trackFailureDetail,
@@ -255,6 +257,150 @@ test("expands remembered YouTube playlists", async () => {
     }),
   ]);
 });
+
+test("recognizes Navidrome share links including base paths", () => {
+  const root = navidromeShare(
+    new URL("https://music.example.com/share/AbCdEfGhIj"),
+  );
+  expect(root?.id).toBe("AbCdEfGhIj");
+  expect(root?.pageUrl.href).toBe("https://music.example.com/share/AbCdEfGhIj");
+  expect(root?.streamUrl("token").href).toBe(
+    "https://music.example.com/share/s/token",
+  );
+  expect(root?.coverUrl("token").href).toBe(
+    "https://music.example.com/share/img/token?size=300&square=true",
+  );
+
+  const nested = navidromeShare(
+    new URL("https://music.example.com/nd/share/AbCdEfGhIj/m3u"),
+  );
+  expect(nested?.pageUrl.href).toBe(
+    "https://music.example.com/nd/share/AbCdEfGhIj",
+  );
+  expect(nested?.streamUrl("tok").pathname).toBe("/nd/share/s/tok");
+
+  expect(
+    navidromeShare(new URL("https://music.example.com/share/s/notashareid")),
+  ).toBeUndefined();
+  expect(
+    navidromeShare(new URL("https://music.example.com/share/short")),
+  ).toBeUndefined();
+});
+
+test("parses Navidrome share info from injected page state", () => {
+  const info = {
+    id: "AbCdEfGhIj",
+    description: "Late night",
+    tracks: [
+      {
+        id: "jwt.token.one",
+        title: "Song",
+        artist: "Artist",
+        album: "Album",
+        duration: 201.5,
+      },
+      {
+        id: "jwt.token.two",
+        title: "Other",
+        artist: "Someone",
+        album: undefined,
+        duration: 90,
+      },
+    ],
+  };
+  expect(
+    parseNavidromeShareInfo(
+      `<script>window.__SHARE_INFO__ = ${JSON.stringify(JSON.stringify(info))}</script>`,
+    ),
+  ).toEqual(info);
+  expect(
+    parseNavidromeShareInfo(
+      `<script>window.__SHARE_INFO__ = ${JSON.stringify(info)};</script>`,
+    ),
+  ).toEqual(info);
+  expect(
+    parseNavidromeShareInfo(`<script>window.__SHARE_INFO__ = null</script>`),
+  ).toBeUndefined();
+});
+
+test("offers and expands Navidrome shares", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  Reflect.set(catalog, "proxy", { url: "http://127.0.0.1:9" });
+  Reflect.set(catalog, "resolveNavidromeShare", async (input: string) => [
+    {
+      sourceInput: input,
+      canonicalUrl: "https://93.184.216.34/share/s/token-a",
+      sourceId: "navidrome:AbCdEfGhIj:token-a",
+      title: "Song A",
+      artist: "Artist",
+      album: "Album",
+      duration: 120,
+      artwork: "https://93.184.216.34/share/img/token-a?size=300&square=true",
+    },
+    {
+      sourceInput: input,
+      canonicalUrl: "https://93.184.216.34/share/s/token-b",
+      sourceId: "navidrome:AbCdEfGhIj:token-b",
+      title: "Song B",
+      artist: "Artist",
+      album: "Album",
+      duration: 130,
+    },
+  ]);
+
+  const options = await catalog.suggestions(
+    "https://93.184.216.34/share/AbCdEfGhIj",
+    { songs: true, bulk: true },
+  );
+  expect(options.map((option) => option.text.text)).toEqual([
+    "Link: https://93.184.216.34/share/AbCdEfGhIj",
+    "Add share: https://93.184.216.34/share/AbCdEfGhIj",
+  ]);
+  expect(options[1]!.value.startsWith("bulkref_")).toBe(true);
+  expect(await catalog.resolve(options[1]!.value)).toEqual([
+    expect.objectContaining({ title: "Song A", album: "Album" }),
+    expect.objectContaining({ title: "Song B" }),
+  ]);
+
+  Reflect.get(catalog, "references").set(
+    "link",
+    "https://93.184.216.34/share/AbCdEfGhIj",
+  );
+  expect(await catalog.resolve("link")).toEqual([
+    expect.objectContaining({ title: "Song A" }),
+    expect.objectContaining({ title: "Song B" }),
+  ]);
+});
+
+test("resolves single-track Navidrome shares through resolveUrl", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  Reflect.set(catalog, "proxy", { url: "http://127.0.0.1:9" });
+  Reflect.set(catalog, "resolveNavidromeShare", async (input: string) => [
+    {
+      sourceInput: input,
+      canonicalUrl: "https://93.184.216.34/share/s/token",
+      sourceId: "navidrome:AbCdEfGhIj:token",
+      title: "Solo",
+      artist: "Artist",
+      duration: 90,
+    },
+  ]);
+  expect(
+    await catalog.resolveUrl("https://93.184.216.34/share/AbCdEfGhIj"),
+  ).toEqual(
+    expect.objectContaining({
+      title: "Solo",
+      canonicalUrl: "https://93.184.216.34/share/s/token",
+    }),
+  );
+});
+
 test("finds the audible bounds from FFmpeg silence analysis", () => {
   expect(
     transitionData(

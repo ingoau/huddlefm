@@ -7,7 +7,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 ## Features
 
 - Search for songs, albums, and playlists from YouTube
-- Add supported media links (e.g. YouTube, SoundCloud) to the queue
+- Add supported media links (e.g. YouTube, SoundCloud, Navidrome shares) to the queue
 - Build and reorder a shared queue
 - Control playback, volume and settings, directly through Slack
 - Set permissions for who can control playback and queue

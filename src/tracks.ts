@@ -118,7 +118,9 @@ export type TransitionData = {
 };
 
 type CollectionReference =
-  { type: "album"; id: string } | { type: "playlist"; id: string; url: string };
+  | { type: "album"; id: string }
+  | { type: "playlist"; id: string; url: string }
+  | { type: "navidrome-share"; url: string };
 
 export class TrackCatalog {
   private music = new YTMusic();
@@ -174,6 +176,40 @@ export class TrackCatalog {
     const url = parseHttpUrl(query);
     if (url) {
       await assertPublicUrl(url);
+      const share = navidromeShare(url);
+      if (share) {
+        const options = [
+          ...(allowed.songs
+            ? [
+                option(
+                  `Link: ${share.pageUrl.href}`,
+                  this.remember(share.pageUrl.href),
+                ),
+              ]
+            : []),
+          ...(allowed.bulk
+            ? [
+                option(
+                  `Add share: ${share.pageUrl.href}`,
+                  this.remember({
+                    type: "navidrome-share",
+                    url: share.pageUrl.href,
+                  }),
+                ),
+              ]
+            : []),
+        ];
+        log.debug(
+          {
+            event: "suggestions_completed",
+            inputType: "navidrome_share_url",
+            count: options.length,
+            durationMs: Date.now() - startedAt,
+          },
+          "Track suggestions completed",
+        );
+        return options;
+      }
       const id = youtubePlaylistId(url);
       const playlist =
         id && allowed.bulk
@@ -255,9 +291,11 @@ export class TrackCatalog {
           ? (await this.music.getAlbum(stored.id)).songs.map((song) =>
               songMetadata(song),
             )
-          : (await this.music.getPlaylistVideos(stored.id)).map((song) =>
-              songMetadata(song, stored.url),
-            );
+          : stored.type === "navidrome-share"
+            ? await this.resolveNavidromeShare(stored.url)
+            : (await this.music.getPlaylistVideos(stored.id)).map((song) =>
+                songMetadata(song, stored.url),
+              );
       if (!tracks.length)
         throw new TrackError("That album or playlist has no playable songs");
       for (const track of tracks) this.validate(track);
@@ -278,6 +316,24 @@ export class TrackCatalog {
       this.references.delete(reference);
       return stored;
     }
+    const share = navidromeShare(parseHttpUrl(stored));
+    if (share) {
+      const tracks = await this.resolveNavidromeShare(stored);
+      if (!tracks.length)
+        throw new TrackError("That album or playlist has no playable songs");
+      for (const track of tracks) this.validate(track);
+      this.references.delete(reference);
+      log.info(
+        {
+          event: "collection_resolved",
+          collectionType: "navidrome-share",
+          count: tracks.length,
+          durationMs: Date.now() - startedAt,
+        },
+        "Track collection resolved",
+      );
+      return tracks.length === 1 ? tracks[0]! : tracks;
+    }
     const track = await this.resolveUrl(stored);
     this.references.delete(reference);
     return track;
@@ -289,6 +345,27 @@ export class TrackCatalog {
     if (!url)
       throw new TrackError("Only absolute HTTP or HTTPS URLs are supported");
     await assertPublicUrl(url);
+    const share = navidromeShare(url);
+    if (share) {
+      const tracks = await this.resolveNavidromeShare(url.href);
+      if (!tracks.length)
+        throw new TrackError("That album or playlist has no playable songs");
+      if (tracks.length > 1)
+        throw new TrackError("Playlists are not supported");
+      this.validate(tracks[0]!);
+      log.info(
+        {
+          event: "url_resolved",
+          sourceId: tracks[0]!.sourceId,
+          title: tracks[0]!.title,
+          artist: tracks[0]!.artist,
+          durationSeconds: tracks[0]!.duration,
+          durationMs: Date.now() - startedAt,
+        },
+        "Media URL resolved",
+      );
+      return tracks[0]!;
+    }
     const metadata = await runJson([
       ...this.extractor(),
       "--dump-single-json",
@@ -352,6 +429,75 @@ export class TrackCatalog {
     if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId))
       throw new Error("Invalid YouTube Music video ID");
     return this.resolveUrl(`https://music.youtube.com/watch?v=${videoId}`);
+  }
+
+  private async resolveNavidromeShare(input: string) {
+    const startedAt = Date.now();
+    const url = parseHttpUrl(input);
+    const share = navidromeShare(url);
+    if (!url || !share)
+      throw new TrackError("Only absolute HTTP or HTTPS URLs are supported");
+    await assertPublicUrl(share.pageUrl);
+    if (!this.proxy) throw new Error("Track catalog is not initialized");
+    const response = await fetch(share.pageUrl.href, {
+      proxy: this.proxy.url,
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "user-agent": "HuddleFM",
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (response.status === 404 || response.status === 410)
+      throw new TrackError("Track is not available");
+    if (!response.ok)
+      throw new TrackError("That link is not supported", {
+        detail: `Navidrome share HTTP ${response.status}`,
+      });
+    const declared = Number(response.headers.get("content-length") ?? 0);
+    if (declared > 2_000_000)
+      throw new TrackError("That link is not supported", {
+        detail: "Navidrome share page is too large",
+      });
+    const html = await readLimited(response, 2_000_000);
+    const info = parseNavidromeShareInfo(html);
+    if (!info?.tracks.length)
+      throw new TrackError("That album or playlist has no playable songs");
+    const tracks: TrackMetadata[] = [];
+    for (const track of info.tracks) {
+      if (!track.id) continue;
+      const stream = share.streamUrl(track.id);
+      const artwork = share.coverUrl(track.id);
+      await assertPublicUrl(stream);
+      const tokenHash = new Bun.CryptoHasher("sha256")
+        .update(track.id)
+        .digest("hex")
+        .slice(0, 16);
+      tracks.push({
+        sourceInput: share.pageUrl.href,
+        canonicalUrl: stream.href,
+        sourceId: `navidrome:${share.id}:${tokenHash}`,
+        title: track.title?.trim() || "Untitled",
+        artist: track.artist?.trim() || "Unknown artist",
+        album: track.album?.trim() || undefined,
+        duration:
+          track.duration && Number.isFinite(track.duration)
+            ? Number(track.duration)
+            : undefined,
+        artwork: await publicArtworkUrl(artwork.href),
+      });
+    }
+    if (!tracks.length)
+      throw new TrackError("That album or playlist has no playable songs");
+    log.info(
+      {
+        event: "navidrome_share_resolved",
+        shareId: share.id,
+        count: tracks.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Navidrome share resolved",
+    );
+    return tracks;
   }
 
   private validate(track: TrackMetadata) {
@@ -701,6 +847,98 @@ function youtubePlaylistId(url: URL) {
     return;
   const id = url.searchParams.get("list");
   return id?.match(/^[a-zA-Z0-9_-]+$/)?.[0];
+}
+
+// Navidrome public shares use a 10-character nanoid under `/share/{id}`.
+// Stream and cover URLs reuse the encoded track tokens embedded in the share
+// page as `/share/s/{token}` and `/share/img/{token}`.
+export function navidromeShare(url?: URL) {
+  if (!url) return;
+  const match = url.pathname.match(
+    /^(?<prefix>.*\/share)\/(?<id>[0-9A-Za-z]{10})(?:\/m3u)?\/?$/,
+  );
+  if (!match?.groups?.prefix || !match.groups.id) return;
+  const { prefix, id } = match.groups;
+  const pageUrl = new URL(url.href);
+  pageUrl.pathname = `${prefix}/${id}`;
+  pageUrl.search = "";
+  pageUrl.hash = "";
+  return {
+    id,
+    pageUrl,
+    streamUrl(token: string) {
+      const stream = new URL(pageUrl.href);
+      stream.pathname = `${prefix}/s/${token}`;
+      stream.search = "";
+      stream.hash = "";
+      return stream;
+    },
+    coverUrl(token: string) {
+      const cover = new URL(pageUrl.href);
+      cover.pathname = `${prefix}/img/${token}`;
+      cover.search = "size=300&square=true";
+      cover.hash = "";
+      return cover;
+    },
+  };
+}
+
+export function parseNavidromeShareInfo(html: string) {
+  const marker = "window.__SHARE_INFO__";
+  const start = html.indexOf(marker);
+  if (start < 0) return;
+  const assignment = html.indexOf("=", start + marker.length);
+  if (assignment < 0) return;
+  const scriptEnd = html.indexOf("</script>", assignment);
+  const raw = html
+    .slice(assignment + 1, scriptEnd < 0 ? undefined : scriptEnd)
+    .trim()
+    .replace(/;+\s*$/, "");
+  if (!raw || raw === "null" || raw === "undefined") return;
+  try {
+    let parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "string") parsed = JSON.parse(parsed);
+    if (!parsed || typeof parsed !== "object") return;
+    const tracks = (parsed as { tracks?: unknown }).tracks;
+    if (!Array.isArray(tracks)) return;
+    return {
+      id:
+        typeof (parsed as { id?: unknown }).id === "string"
+          ? (parsed as { id: string }).id
+          : undefined,
+      description:
+        typeof (parsed as { description?: unknown }).description === "string"
+          ? (parsed as { description: string }).description
+          : undefined,
+      tracks: tracks.flatMap((track) => {
+        if (!track || typeof track !== "object") return [];
+        const value = track as {
+          id?: unknown;
+          title?: unknown;
+          artist?: unknown;
+          album?: unknown;
+          duration?: unknown;
+        };
+        if (typeof value.id !== "string" || !value.id) return [];
+        return [
+          {
+            id: value.id,
+            title: typeof value.title === "string" ? value.title : undefined,
+            artist: typeof value.artist === "string" ? value.artist : undefined,
+            album: typeof value.album === "string" ? value.album : undefined,
+            duration:
+              typeof value.duration === "number"
+                ? value.duration
+                : typeof value.duration === "string" && value.duration.trim()
+                  ? Number(value.duration)
+                  : undefined,
+          },
+        ];
+      }),
+    };
+  } catch {
+    return;
+  }
 }
 
 async function runJson(command: string[]) {
