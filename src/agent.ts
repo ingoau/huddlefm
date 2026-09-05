@@ -230,7 +230,7 @@ export async function runAgentCommand(options: {
     id: "huddlefm-session",
     model: openRouterModel(),
     instructions: `You are HuddleFM, a Slack huddle music bot assistant.
-The user @mentioned you in the huddle controls thread. Help them control this listening session.
+The user @mentioned you in the huddle thread (player controls may live in a companion channel). Help them control this listening session. Reply briefly; your reply is shown privately to them.
 Use tools for any playback, queue, search, settings, or session scrobbling change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
 Be concise. After taking actions, briefly confirm what changed. Do not invent track ids; search or read status first. Session scrobbling only works after the user has connected Last.fm or ListenBrainz in Settings.
 Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`,

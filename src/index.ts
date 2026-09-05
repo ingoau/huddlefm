@@ -21,6 +21,7 @@ import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import {
   SlackHuddleAdapter,
+  roomOwnsThread,
   verifySlackIdentity,
   type ChimeBootstrap,
 } from "./slack-huddle.ts";
@@ -1057,11 +1058,12 @@ await slackHuddle.start((event) => {
     return;
   }
   if (event.type === "ThreadActivity") {
-    const runtime = [...runtimes.values()].find(
-      (runtime) =>
-        event.channelId === runtime.coordinator?.room.uiChannelId &&
-        event.threadTs === runtime.coordinator.room.uiThreadTs,
-    );
+    const runtime = [...runtimes.values()].find((runtime) => {
+      const room = runtime.coordinator?.room;
+      return room
+        ? roomOwnsThread(room, event.channelId, event.threadTs)
+        : false;
+    });
     const mentioned =
       event.userId !== botUserId && event.text.includes(`<@${botUserId}>`);
     if (mentioned) {
@@ -1090,6 +1092,30 @@ await slackHuddle.start((event) => {
           ),
         );
       } else if (bare) {
+        const companionId = coordinator.room.companionChannelId;
+        const mentionedInHuddleThread =
+          Boolean(companionId) &&
+          event.channelId === coordinator.room.sourceChannelId &&
+          event.threadTs === coordinator.room.huddleThreadTs;
+        if (mentionedInHuddleThread && companionId) {
+          void slackApp
+            .ephemeral(
+              event.channelId,
+              event.userId,
+              `Player controls are in <#${companionId}>. Mention me here with a request to control the session — replies stay private.`,
+              event.threadTs,
+            )
+            .catch((error) =>
+              log.warn(
+                {
+                  event: "companion_mention_hint_failed",
+                  channelId: event.channelId,
+                  err: error,
+                },
+                "Could not send companion channel mention hint",
+              ),
+            );
+        }
         void coordinator.repost().catch((error) =>
           log.error(
             {

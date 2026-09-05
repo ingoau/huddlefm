@@ -23,7 +23,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 
 Invite the bot to a huddle or ping it in the thread. It will join the huddle and send a UI in the thread to add songs to the queue and control playback. You'll be the host by default. If the UI gets buried by conversation in the thread, mention the bot with nothing else to bring it back to the bottom, or keep it at the bottom by enabling anchor in the settings.
 
-With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap Gemini model through OpenRouter and the same permissions you already have in the player UI.
+With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap Gemini model through OpenRouter and the same permissions you already have in the player UI. Replies are ephemeral. This also works in the original huddle thread when the session uses a forced companion controls channel (where the bot cannot post publicly).
 
 ## Self hosting
 
