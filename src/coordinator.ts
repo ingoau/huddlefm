@@ -262,7 +262,7 @@ export class Coordinator {
         this.state === "playing",
         this.playbackSeconds,
       );
-      this.sendMedia(this.playMessage(this.current));
+      this.sendMedia(await this.playMessage(this.current));
       if (this.playbackSeconds)
         this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
       if (this.state === "paused") this.sendMedia({ type: "pause" });
@@ -1182,7 +1182,7 @@ export class Coordinator {
       "Track started",
     );
     this.playbackScrobbling?.start(next, this.participants);
-    this.sendMedia(this.playMessage(next));
+    this.sendMedia(await this.playMessage(next));
     void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
       captureAnalytics(lyrics ? "lyrics.available" : "lyrics.unavailable", {
@@ -1227,7 +1227,12 @@ export class Coordinator {
     return `http://127.0.0.1:${this.config.port}/audio/${entry.id}?token=${encodeURIComponent(this.mediaToken)}`;
   }
 
-  private playMessage(entry: Entry) {
+  private async playMessage(entry: Entry) {
+    const requesterLabel = entry.automatic
+      ? "Autoplay recommendation"
+      : entry.requesterId === this.botUserId
+        ? undefined
+        : `Added by ${await this.slack.userName(entry.requesterId)}`;
     return {
       type: "play",
       entryId: entry.id,
@@ -1241,6 +1246,7 @@ export class Coordinator {
       introSeconds: entry.introSeconds ?? 0,
       outroSeconds: entry.outroSeconds ?? entry.duration,
       fadeOutSeconds: entry.fadeOutSeconds ?? 0,
+      requesterLabel,
     };
   }
 
