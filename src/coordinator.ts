@@ -740,16 +740,27 @@ export class Coordinator {
         ),
       );
       throwIfAborted(signal);
-      await this.enqueue(async () => {
+      return await this.enqueue(async () => {
+        const remaining = committed.pending
+          .map(({ entry }) => entry)
+          .filter((entry) => this.queue.includes(entry));
+        if (!remaining.length) {
+          this.restoreQueuedAutoplay(committed.heldAutoplay);
+          await this.render();
+          return {
+            ok: false as const,
+            error: "Could not prepare that track.",
+          };
+        }
         await this.destroyQueuedAutoplay(committed.heldAutoplay);
+        return {
+          ok: true as const,
+          added: remaining.map((track) => ({
+            title: track.title,
+            artist: track.artist,
+          })),
+        };
       });
-      return {
-        ok: true as const,
-        added: tracks.map((track) => ({
-          title: track.title,
-          artist: track.artist,
-        })),
-      };
     } catch (error) {
       await rollback();
       throw error;
@@ -1123,15 +1134,44 @@ export class Coordinator {
           ok: false as const,
           error: "You do not have permission to change settings.",
         };
-      if (patch.displayMode !== undefined) {
-        if (!displayModes.includes(patch.displayMode))
-          return { ok: false as const, error: "Invalid display mode." };
-        if (patch.displayMode !== this.displayMode) {
-          this.displayMode = patch.displayMode;
-          this.sendMedia({ type: "display_mode", mode: patch.displayMode });
-          this.store.setSession(this.id, { displayMode: patch.displayMode });
-          changed.push(`displayMode=${patch.displayMode}`);
-        }
+      if (
+        patch.displayMode !== undefined &&
+        !displayModes.includes(patch.displayMode)
+      )
+        return { ok: false as const, error: "Invalid display mode." };
+      if (
+        patch.transitionMode !== undefined &&
+        !transitionModes.includes(patch.transitionMode)
+      )
+        return { ok: false as const, error: "Invalid transition mode." };
+      const permissionPreset =
+        patch.permissionPreset === undefined
+          ? undefined
+          : permissionPresets[
+              patch.permissionPreset as keyof typeof permissionPresets
+            ];
+      if (patch.permissionPreset !== undefined && !permissionPreset)
+        return { ok: false as const, error: "Invalid permission preset." };
+      if (patch.hostUserId !== undefined) {
+        if (patch.hostUserId === this.botUserId)
+          return {
+            ok: false as const,
+            error: "HuddleFM cannot be the host.",
+          };
+        if (!this.participants.has(patch.hostUserId))
+          return {
+            ok: false as const,
+            error: "That user is not in this huddle.",
+          };
+      }
+      if (
+        patch.displayMode !== undefined &&
+        patch.displayMode !== this.displayMode
+      ) {
+        this.displayMode = patch.displayMode;
+        this.sendMedia({ type: "display_mode", mode: patch.displayMode });
+        this.store.setSession(this.id, { displayMode: patch.displayMode });
+        changed.push(`displayMode=${patch.displayMode}`);
       }
       if (
         patch.autoplay !== undefined &&
@@ -1143,8 +1183,6 @@ export class Coordinator {
         changed.push(`autoplay=${patch.autoplay}`);
       }
       if (patch.transitionMode !== undefined) {
-        if (!transitionModes.includes(patch.transitionMode))
-          return { ok: false as const, error: "Invalid transition mode." };
         this.transitionMode = patch.transitionMode;
         this.sendMedia({
           type: "transition_mode",
@@ -1166,14 +1204,8 @@ export class Coordinator {
         });
         changed.push(`anchorEnabled=${patch.anchorEnabled}`);
       }
-      if (patch.permissionPreset !== undefined) {
-        const preset =
-          permissionPresets[
-            patch.permissionPreset as keyof typeof permissionPresets
-          ];
-        if (!preset)
-          return { ok: false as const, error: "Invalid permission preset." };
-        this.allowed = new Set(preset);
+      if (permissionPreset) {
+        this.allowed = new Set(permissionPreset);
         for (const capability of capabilities)
           this.store.setPermission(
             this.id,
@@ -1183,16 +1215,6 @@ export class Coordinator {
         changed.push(`permissions=${patch.permissionPreset}`);
       }
       if (patch.hostUserId !== undefined) {
-        if (patch.hostUserId === this.botUserId)
-          return {
-            ok: false as const,
-            error: "HuddleFM cannot be the host.",
-          };
-        if (!this.participants.has(patch.hostUserId))
-          return {
-            ok: false as const,
-            error: "That user is not in this huddle.",
-          };
         this.hostId = patch.hostUserId;
         this.store.setSession(this.id, { hostId: patch.hostUserId });
         changed.push(`hostId=${patch.hostUserId}`);
@@ -1615,6 +1637,9 @@ export class Coordinator {
         );
       });
     } catch (error) {
+      // Agent cancellation owns cleanup via rollbackAgentAdd; skip failure
+      // notices, audits, and queue/store mutation here.
+      if (controller.signal.aborted) return;
       this.logTrackFailure(
         {
           event: "track_preparation_failed",
@@ -1923,10 +1948,13 @@ export class Coordinator {
     await this.enqueue(async () => {
       for (const { entry } of pending) {
         this.preparations.delete(entry.id);
-        if (!this.queue.includes(entry)) continue;
-        this.queue = this.queue.filter((item) => item !== entry);
+        if (this.queue.includes(entry)) {
+          this.queue = this.queue.filter((item) => item !== entry);
+          if (entry.filePath) await rm(entry.filePath, { force: true });
+        }
+        // Always drop the staged store row, even if prepareManual already
+        // removed the queue entry before abort cleanup ran.
         this.store.removeTrack(entry.id);
-        if (entry.filePath) await rm(entry.filePath, { force: true });
       }
       this.restoreQueuedAutoplay(heldAutoplay);
       await this.render();

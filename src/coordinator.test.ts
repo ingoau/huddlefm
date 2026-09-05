@@ -2675,5 +2675,64 @@ test("agentAdd restores autoplay when aborted during preparation", async () => {
       }),
     ],
   });
+  expect(
+    test.ephemeral.some((text) => text.includes("Could not prepare")),
+  ).toBe(false);
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd reports failure when preparation removes the track", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: async () => {
+      throw new Error("private video");
+    },
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const result = await test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+  );
+  expect(result).toMatchObject({
+    ok: false,
+    error: "Could not prepare that track.",
+  });
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [],
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentUpdateSettings validates the full patch before mutating", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    displayMode: "default",
+  });
+  const result = await test.coordinator.agentUpdateSettings("host", {
+    displayMode: "lyrics",
+    hostUserId: "stranger",
+  });
+  expect(result).toMatchObject({
+    ok: false,
+    error: "That user is not in this huddle.",
+  });
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    displayMode: "default",
+    hostId: "host",
+  });
+  expect(test.sessions).not.toContainEqual({ displayMode: "lyrics" });
   await test.coordinator.endFromSlack();
 });
