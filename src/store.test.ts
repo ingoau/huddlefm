@@ -178,6 +178,33 @@ test("claimDueSessionMessage rejects jobs cleared by activateSession", () => {
   store.close();
 });
 
+test("retrySessionMessage does not restore jobs cleared by activateSession", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "companion",
+    threadTs: "",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  store.recordSessionMessage("session", "companion", "1.0");
+  store.scheduleSessionMessageCleanup("session", 100);
+  expect(store.dueSessionMessages(100)).toHaveLength(1);
+  store.activateSession("session", "playing");
+  expect(store.retrySessionMessage("companion", "1.0", 1, 200)).toBe(false);
+  expect(store.dueSessionMessages(200)).toEqual([]);
+  expect(
+    store.db
+      .query(
+        "SELECT delete_at, next_attempt_at FROM session_messages WHERE channel_id = ? AND message_ts = ?",
+      )
+      .get("companion", "1.0"),
+  ).toEqual({ delete_at: null, next_attempt_at: null });
+  store.close();
+});
+
 test("creates indexes for recurring session, track, and scrobble queries", () => {
   const store = new Store(":memory:");
   const indexes = ["sessions", "tracks", "scrobbles"].flatMap((table) =>

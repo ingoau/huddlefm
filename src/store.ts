@@ -1082,13 +1082,16 @@ export class Store {
     messageTs: string,
     attempts: number,
     nextAttemptAt: number,
-  ) {
-    this.db
+  ): boolean {
+    // Only restore next_attempt_at when cleanup is still active. activateSession
+    // clears delete_at; do not resurrect cancelled companion message deletions.
+    const result = this.db
       .query(
         `UPDATE session_messages SET attempts = ?, next_attempt_at = ?
-        WHERE channel_id = ? AND message_ts = ?`,
+        WHERE channel_id = ? AND message_ts = ? AND delete_at IS NOT NULL`,
       )
       .run(attempts, nextAttemptAt, channelId, messageTs);
+    return result.changes > 0;
   }
 
   addTrack(track: {

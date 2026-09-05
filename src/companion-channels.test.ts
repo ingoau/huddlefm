@@ -230,6 +230,58 @@ test("activateSession during message cleanup prevents deletion", async () => {
   store.close();
 });
 
+test("failed delete after activateSession does not restore cleanup", async () => {
+  const store = new Store(":memory:");
+  const slack = {
+    ensureChannelAccess: async () => false,
+    createCompanionChannel: async () => "companion",
+    restrictCompanionPosting: async () => {},
+    inviteToChannel: async () => true,
+    removeFromChannel: async () => {},
+  };
+  const manager = new CompanionChannels(
+    store,
+    slack,
+    {
+      channelMembers: async () => ["bot"],
+      dm: async () => {},
+      delete: async () => {
+        // Session restored while Slack delete is in flight, then delete fails.
+        store.activateSession("session", "playing");
+        throw new Error("slack failed");
+      },
+    },
+    "bot",
+  );
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "companion",
+    threadTs: "",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  manager.recordMessage("session", "companion", "player");
+  manager.endSession("session", "companion", ["host"]);
+  const deadline = Date.now() + 10 * 60_000;
+  expect(store.dueSessionMessages(deadline)).toHaveLength(1);
+
+  await (manager as unknown as { cleanup(now: number): Promise<void> }).cleanup(
+    deadline,
+  );
+
+  expect(store.dueSessionMessages(deadline)).toEqual([]);
+  expect(
+    store.db
+      .query(
+        "SELECT delete_at, next_attempt_at, attempts FROM session_messages WHERE channel_id = ? AND message_ts = ?",
+      )
+      .get("companion", "player"),
+  ).toEqual({ delete_at: null, next_attempt_at: null, attempts: 0 });
+  store.close();
+});
+
 test("reinvites a participant who rejoins during an in-flight removal", async () => {
   const store = new Store(":memory:");
   const operations: string[] = [];
