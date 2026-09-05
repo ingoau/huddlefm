@@ -2397,11 +2397,70 @@ test("agent controls enforce the same permissions as the Slack UI", async () => 
   expect(status).toMatchObject({
     ok: true,
     youAreHost: true,
+    scrobbling: { available: false },
   });
 
   const volume = await result.coordinator.agentSetVolume("host", 42);
   expect(volume).toEqual({ ok: true, volumePercent: 42 });
   expect(result.media).toContainEqual({ type: "volume", value: 0.42 });
 
+  const scrobblingDenied = result.coordinator.agentSetSessionScrobbling(
+    "host",
+    true,
+  );
+  expect(scrobblingDenied).toEqual({
+    ok: false,
+    error: "Scrobbling is not available on this bot.",
+  });
+
   await result.coordinator.endFromSlack();
+});
+
+test("agent can enable and disable session scrobbling when configured", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setListenBrainzToken("host", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("host", true);
+  userStore.setScrobblingMode("host", "ask");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+
+  const status = test.coordinator.agentStatus("host");
+  expect(status).toMatchObject({
+    ok: true,
+    scrobbling: {
+      configured: true,
+      sessionEnabled: false,
+      mode: "ask",
+    },
+  });
+
+  const enabled = test.coordinator.agentSetSessionScrobbling("host", true);
+  expect(enabled).toEqual({ ok: true, sessionEnabled: true });
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    true,
+  );
+  expect(test.coordinator.agentSetSessionScrobbling("host", true)).toEqual({
+    ok: true,
+    sessionEnabled: true,
+    unchanged: true,
+  });
+
+  const disabled = test.coordinator.agentSetSessionScrobbling("host", false);
+  expect(disabled).toEqual({ ok: true, sessionEnabled: false });
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    false,
+  );
+
+  userStore.setListenBrainzToken("listener", "", "");
+  test.coordinator.memberJoined("listener");
+  expect(
+    test.coordinator.agentSetSessionScrobbling("listener", true),
+  ).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("Connect Last.fm or ListenBrainz"),
+  });
+
+  await test.coordinator.endFromSlack();
+  userStore.close();
 });

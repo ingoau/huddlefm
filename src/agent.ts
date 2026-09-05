@@ -198,6 +198,17 @@ function agentTools(coordinator: Coordinator, userId: string) {
       inputSchema: z.object({}),
       execute: async () => coordinator.agentClaimHost(userId),
     }),
+    set_session_scrobbling: tool({
+      description:
+        "Enable or disable scrobbling for this user in the current session. Requires Last.fm or ListenBrainz to already be connected in Settings.",
+      inputSchema: z.object({
+        enabled: z
+          .boolean()
+          .describe("True to scrobble this session, false to disable"),
+      }),
+      execute: async ({ enabled }) =>
+        coordinator.agentSetSessionScrobbling(userId, enabled),
+    }),
     end_session: tool({
       description: "End the listening session and leave the huddle.",
       inputSchema: z.object({}),
@@ -220,8 +231,8 @@ export async function runAgentCommand(options: {
     model: openRouterModel(),
     instructions: `You are HuddleFM, a Slack huddle music bot assistant.
 The user @mentioned you in the huddle controls thread. Help them control this listening session.
-Use tools for any playback, queue, search, or settings change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
-Be concise. After taking actions, briefly confirm what changed. Do not invent track ids; search or read status first.
+Use tools for any playback, queue, search, settings, or session scrobbling change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
+Be concise. After taking actions, briefly confirm what changed. Do not invent track ids; search or read status first. Session scrobbling only works after the user has connected Last.fm or ListenBrainz in Settings.
 Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`,
     tools: agentTools(options.coordinator, options.userId),
     stopWhen: stepCountIs(10),

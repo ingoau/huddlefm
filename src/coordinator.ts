@@ -533,6 +533,7 @@ export class Coordinator {
       };
     const capabilities = [...this.allowed];
     const host = this.hostId === userId || userId === this.config.managerUserId;
+    const scrobbling = this.scrobbling?.settings(userId, this.id);
     return {
       ok: true as const,
       state: this.state,
@@ -570,6 +571,13 @@ export class Coordinator {
         addedBy: track.requesterId,
       })),
       queueLimit: this.config.queueLimit,
+      scrobbling: scrobbling
+        ? {
+            configured: scrobbling.configured,
+            sessionEnabled: Boolean(scrobbling.sessionEnabled),
+            mode: scrobbling.mode,
+          }
+        : { available: false as const },
     };
   }
 
@@ -1165,6 +1173,31 @@ export class Coordinator {
       };
     await this.end(userId, "ended by agent");
     return { ok: true as const, ended: true };
+  }
+
+  agentSetSessionScrobbling(userId: string, enabled: boolean) {
+    if (!this.isParticipantOrManager(userId))
+      return {
+        ok: false as const,
+        error: "Join the huddle before using the player.",
+      };
+    if (!this.scrobbling)
+      return {
+        ok: false as const,
+        error: "Scrobbling is not available on this bot.",
+      };
+    const settings = this.scrobbling.settings(userId, this.id);
+    if (!settings.configured)
+      return {
+        ok: false as const,
+        error:
+          "Connect Last.fm or ListenBrainz in Settings before toggling session scrobbling.",
+      };
+    if (settings.sessionEnabled === enabled)
+      return { ok: true as const, sessionEnabled: enabled, unchanged: true };
+    this.scrobbling.setSessionEnabled(this.id, userId, enabled);
+    if (enabled) this.playbackScrobbling?.sessionEnabled(userId);
+    return { ok: true as const, sessionEnabled: enabled };
   }
 
   participantIds() {
