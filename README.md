@@ -27,68 +27,111 @@ With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for
 
 ## Self hosting
 
+HuddleFM ships as a single Docker image (`ghcr.io/ingoau/huddlefm:latest`). You need a dedicated Slack user for the bot, plus both a Slack app (Socket Mode) and browser session credentials from that same user so it can join Huddles.
+
 ### Quickstart
 
-#### 1. Download `compose.yaml` into a folder
-
-#### 2. Create a file called `.env` and configure the environment variables
+1. Put `compose.yaml` in a folder:
 
 ```sh
-# Required
-SLACK_WORKSPACE_URL=https://example.slack.com
-SLACK_XOXP=xoxp-...
-SLACK_XAPP=xapp-...
-SLACK_XOXC=xoxc-...
-SLACK_XOXD=xoxd-...
-# Optional
-MANAGER_USER_ID=U0123456789 # This user is always treated as a host
-EXCLUDED_USER_IDS=U0123456789,U9876543210 # Users ignored for participation, hosting, permissions, and scrobbling
-FORCE_COMPANION_CHANNEL_IDS=C0123456789,C9876543210 # Channels that always use a separate HuddleFM controls channel
-SLACK_TEAM_ID=T0123456789 # Workspace where companion channels are created, required for Enterprise Grid credentials
-SLACK_CANVAS_ID=F0123456789 # Canvas used to display all-time listening stats
-FOOTER="*Need help?* Ask in <#C123>" # Optional mrkdwn footer under the queue controls
-LOCAL_CONTROL_TOKEN=replace-me # You shouldn't have to add this if the endpoints aren't exposed (ie. in a docker setup)
-LASTFM_API_KEY=replace-me # Last.fm API key for account linking for scrobbling
-LASTFM_SHARED_SECRET=replace-me # Last.fm shared secret
-POSTHOG_API_KEY=phc_... # Enable PostHog analytics and error tracking
-POSTHOG_HOST=https://us.i.posthog.com # PostHog ingestion host
-OPENROUTER_API_KEY=sk-or-... # Enables @mention AI controls via OpenRouter
-QUEUE_LIMIT=50 # Maximum number of tracks in the queue
-TRACK_DURATION_LIMIT_SECONDS=1200 # Maximum duration of a track in seconds
-TRACK_DOWNLOAD_LIMIT_BYTES=100000000 # Maximum size of a track in bytes
-INITIAL_VOLUME=0.5 # Initial volume level as a fraction of max volume
-LOUDNESS_NORMALIZATION=true # Enable -14 LUFS track normalization
-ALONE_TIMEOUT_MS=120000 # Timeout before leaving when alone
-IDLE_TIMEOUT_MS=600000 # Timeout before leaving when idle
-PAUSED_TIMEOUT_MS=600000 # Timeout before leaving when paused
-CHIME_MEDIA_REGION=ap-southeast-2 # AWS region for Chime
-CHROME_PATH=/usr/bin/chromium # Path to Chrome executable
-BIND_ADDRESS=0.0.0.0 # IP address to bind to
-PORT=3210 # Port to listen on
-LOG_LEVEL=info # Minimum operational log level
-LOG_FILE=data/logs/huddlefm.jsonl # Rotated JSON logs in the persistent data volume; set empty to disable
-LOG_FILE_SIZE=10m # Maximum size of each log file
-LOG_FILE_COUNT=7 # Rotated files retained in addition to the active file
+curl -fsSL -o compose.yaml https://raw.githubusercontent.com/ingoau/huddlefm/main/compose.yaml
 ```
 
-#### 3. `docker compose up -d`!
+2. Create `.env` next to it with the required credentials:
+
+```sh
+SLACK_WORKSPACE_URL=https://example.slack.com
+SLACK_XOXP=xoxp-...   # Slack app user token (Web API)
+SLACK_XAPP=xapp-...   # Slack app-level token (Socket Mode)
+SLACK_XOXC=xoxc-...   # Browser session token for joining Huddles
+SLACK_XOXD=xoxd-...   # Browser `d` cookie for that session
+```
+
+`SLACK_XOXP` and `SLACK_XOXC`/`SLACK_XOXD` must belong to the same Slack user. HuddleFM checks this on startup.
+
+3. Start it:
+
+```sh
+docker compose up -d
+```
+
+4. Invite the bot to a Huddle (or mention it in the Huddle thread). Session state and logs live under `./data`.
+
+That is enough for a working deploy. Optional features (scrobbling, analytics, AI @mentions, timeouts, and more) are listed under [Configuration](#configuration). [`.env.example`](.env.example) has the same options as commented defaults.
+
+### Configuration
+
+#### Required
+
+| Variable              | Purpose                                          |
+| --------------------- | ------------------------------------------------ |
+| `SLACK_WORKSPACE_URL` | Workspace URL, e.g. `https://example.slack.com`  |
+| `SLACK_XOXP`          | User OAuth token used for Slack Web API calls    |
+| `SLACK_XAPP`          | App-level token used for Socket Mode             |
+| `SLACK_XOXC`          | Client token from the bot user's browser session |
+| `SLACK_XOXD`          | `d` cookie from the same browser session         |
+
+#### Optional Slack behavior
+
+| Variable                      | Default | Purpose                                                                                     |
+| ----------------------------- | ------- | ------------------------------------------------------------------------------------------- |
+| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                        |
+| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling |
+| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                               |
+| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials          |
+| `SLACK_CANVAS_ID`             | unset   | Canvas updated with all-time listening stats                                                |
+| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                             |
+
+#### Optional features
+
+| Variable                                  | Default                    | Purpose                                                                                              |
+| ----------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling                                                       |
+| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                          |
+| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                         |
+| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                               |
+| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, and `/tone` routes; leave unset for typical Docker deploys |
+
+#### Playback and limits
+
+| Variable                       | Default          | Purpose                                        |
+| ------------------------------ | ---------------- | ---------------------------------------------- |
+| `QUEUE_LIMIT`                  | `50`             | Maximum tracks in the queue                    |
+| `TRACK_DURATION_LIMIT_SECONDS` | `1200`           | Maximum track duration                         |
+| `TRACK_DOWNLOAD_LIMIT_BYTES`   | `100000000`      | Maximum download size                          |
+| `INITIAL_VOLUME`               | `0.5`            | Starting volume as a fraction of max           |
+| `LOUDNESS_NORMALIZATION`       | `false`          | Set to `true` to enable -14 LUFS normalization |
+| `ALONE_TIMEOUT_MS`             | `120000`         | Leave when alone for this long                 |
+| `IDLE_TIMEOUT_MS`              | `600000`         | Leave when idle for this long                  |
+| `PAUSED_TIMEOUT_MS`            | `600000`         | Leave when paused for this long                |
+| `CHIME_MEDIA_REGION`           | `ap-southeast-2` | AWS region for Chime media                     |
+
+#### Runtime and logging
+
+| Variable         | Default                          | Purpose                                                              |
+| ---------------- | -------------------------------- | -------------------------------------------------------------------- |
+| `BIND_ADDRESS`   | `127.0.0.1`                      | HTTP bind address (loopback is fine; Compose does not publish ports) |
+| `PORT`           | `3210`                           | HTTP port                                                            |
+| `CHROME_PATH`    | `/usr/bin/chromium` in the image | Chromium executable path                                             |
+| `LOG_LEVEL`      | `info`                           | Minimum operational log level (`debug`, `trace`, …)                  |
+| `LOG_FILE`       | `data/logs/huddlefm.jsonl`       | Rotated JSON log path; set empty to disable file logging             |
+| `LOG_FILE_SIZE`  | `10m`                            | Maximum size of each log file                                        |
+| `LOG_FILE_COUNT` | `7`                              | Rotated files retained in addition to the active file                |
 
 ### Updating
-
-To update to the latest version, pull the latest image and restart the container:
 
 ```sh
 docker compose pull
 docker compose up -d
 ```
 
-All sessions should seamlessly restore after an update
+Active sessions should restore after a short restart.
 
 ### Logs
 
-HuddleFM writes structured JSON logs to stdout and, by default, rotated files under `data/logs`. The files survive container recreation because `data` is mounted from the host. Use `LOG_LEVEL=debug` for detailed API and queue activity or `trace` for playback-position events.
+HuddleFM writes structured JSON logs to stdout and, by default, rotated files under `data/logs`. Those files survive container recreation because `data` is bind-mounted from the host. Use `LOG_LEVEL=debug` for detailed API and queue activity, or `trace` for playback-position events.
 
-Logs can contain Slack user, channel, session, and track identifiers. Credentials and known token fields are redacted. Rotation retains the active file plus `LOG_FILE_COUNT` older files.
+Logs can include Slack user, channel, session, and track identifiers. Credentials and known token fields are redacted. Rotation keeps the active file plus `LOG_FILE_COUNT` older files.
 
 ### Analytics
 
