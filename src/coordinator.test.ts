@@ -2719,9 +2719,11 @@ test("agentUpdateSettings validates the full patch before mutating", async () =>
   expect(test.coordinator.agentStatus("host")).toMatchObject({
     ok: true,
     displayMode: "default",
+    autoplay: false,
   });
   const result = await test.coordinator.agentUpdateSettings("host", {
     displayMode: "lyrics",
+    autoplay: true,
     hostUserId: "stranger",
   });
   expect(result).toMatchObject({
@@ -2731,8 +2733,10 @@ test("agentUpdateSettings validates the full patch before mutating", async () =>
   expect(test.coordinator.agentStatus("host")).toMatchObject({
     ok: true,
     displayMode: "default",
+    autoplay: false,
     hostId: "host",
   });
   expect(test.sessions).not.toContainEqual({ displayMode: "lyrics" });
+  expect(test.sessions).not.toContainEqual({ autoplay: true });
   await test.coordinator.endFromSlack();
 });

@@ -1046,6 +1046,29 @@ export class Store {
     }[];
   }
 
+  /**
+   * Revalidate a due session message before deleting it.
+   * Returns false when activateSession() cleared delete_at / next_attempt_at
+   * after dueSessionMessages() already returned the job.
+   */
+  claimDueSessionMessage(
+    channelId: string,
+    messageTs: string,
+    now: number,
+  ): boolean {
+    return Boolean(
+      this.db
+        .query(
+          `SELECT 1 AS ok FROM session_messages
+          WHERE channel_id = ? AND message_ts = ?
+            AND delete_at IS NOT NULL
+            AND next_attempt_at IS NOT NULL
+            AND next_attempt_at <= ?`,
+        )
+        .get(channelId, messageTs, now),
+    );
+  }
+
   completeSessionMessage(channelId: string, messageTs: string) {
     this.db
       .query(
