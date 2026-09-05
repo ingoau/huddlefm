@@ -119,6 +119,7 @@ test("persists companion channels and cleanup jobs", () => {
   ]);
   store.activateSession("session", "playing");
   expect(store.dueSessionMessages(200)).toEqual([]);
+  expect(store.claimDueSessionMessage("replacement", "2.0", 200)).toBe(false);
   expect(
     store.db
       .query(
@@ -144,6 +145,63 @@ test("persists companion channels and cleanup jobs", () => {
     huddle_thread_ts: "1.0",
     companion_channel_id: "replacement",
   });
+  store.close();
+});
+
+test("claimDueSessionMessage rejects jobs cleared by activateSession", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "companion",
+    threadTs: "",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  store.recordSessionMessage("session", "companion", "1.0");
+  store.scheduleSessionMessageCleanup("session", 100);
+  const jobs = store.dueSessionMessages(100);
+  expect(jobs).toEqual([
+    {
+      sessionId: "session",
+      channelId: "companion",
+      messageTs: "1.0",
+      attempts: 0,
+    },
+  ]);
+  // Cleanup already observed the due job; activateSession must still cancel it.
+  store.activateSession("session", "playing");
+  expect(
+    store.claimDueSessionMessage(jobs[0]!.channelId, jobs[0]!.messageTs, 100),
+  ).toBe(false);
+  store.close();
+});
+
+test("retrySessionMessage does not restore jobs cleared by activateSession", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "companion",
+    threadTs: "",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  store.recordSessionMessage("session", "companion", "1.0");
+  store.scheduleSessionMessageCleanup("session", 100);
+  expect(store.dueSessionMessages(100)).toHaveLength(1);
+  store.activateSession("session", "playing");
+  expect(store.retrySessionMessage("companion", "1.0", 1, 200)).toBe(false);
+  expect(store.dueSessionMessages(200)).toEqual([]);
+  expect(
+    store.db
+      .query(
+        "SELECT delete_at, next_attempt_at FROM session_messages WHERE channel_id = ? AND message_ts = ?",
+      )
+      .get("companion", "1.0"),
+  ).toEqual({ delete_at: null, next_attempt_at: null });
   store.close();
 });
 

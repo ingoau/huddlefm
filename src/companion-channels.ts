@@ -270,16 +270,31 @@ export class CompanionChannels {
       }),
       ...this.store.dueSessionMessages(now).map(async (job) => {
         try {
+          // Reclaim after the due read so activateSession() clearing
+          // delete_at/next_attempt_at can cancel deletion of a restored player.
+          if (
+            !this.store.claimDueSessionMessage(
+              job.channelId,
+              job.messageTs,
+              now,
+            )
+          )
+            return;
           await this.app.delete(job.channelId, job.messageTs);
           this.store.completeSessionMessage(job.channelId, job.messageTs);
         } catch (error) {
-          const attempts = job.attempts + 1;
-          this.store.retrySessionMessage(
-            job.channelId,
-            job.messageTs,
-            attempts,
-            now + retryDelay(attempts),
-          );
+          // activateSession may have cleared cleanup while delete was in flight.
+          if (
+            this.store.claimDueSessionMessage(job.channelId, job.messageTs, now)
+          ) {
+            const attempts = job.attempts + 1;
+            this.store.retrySessionMessage(
+              job.channelId,
+              job.messageTs,
+              attempts,
+              now + retryDelay(attempts),
+            );
+          }
           log.warn(
             { event: "message_cleanup_failed", ...job, err: error },
             "Could not delete companion channel message",

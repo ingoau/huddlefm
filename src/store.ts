@@ -1046,6 +1046,29 @@ export class Store {
     }[];
   }
 
+  /**
+   * Revalidate a due session message before deleting it.
+   * Returns false when activateSession() cleared delete_at / next_attempt_at
+   * after dueSessionMessages() already returned the job.
+   */
+  claimDueSessionMessage(
+    channelId: string,
+    messageTs: string,
+    now: number,
+  ): boolean {
+    return Boolean(
+      this.db
+        .query(
+          `SELECT 1 AS ok FROM session_messages
+          WHERE channel_id = ? AND message_ts = ?
+            AND delete_at IS NOT NULL
+            AND next_attempt_at IS NOT NULL
+            AND next_attempt_at <= ?`,
+        )
+        .get(channelId, messageTs, now),
+    );
+  }
+
   completeSessionMessage(channelId: string, messageTs: string) {
     this.db
       .query(
@@ -1059,13 +1082,16 @@ export class Store {
     messageTs: string,
     attempts: number,
     nextAttemptAt: number,
-  ) {
-    this.db
+  ): boolean {
+    // Only restore next_attempt_at when cleanup is still active. activateSession
+    // clears delete_at; do not resurrect cancelled companion message deletions.
+    const result = this.db
       .query(
         `UPDATE session_messages SET attempts = ?, next_attempt_at = ?
-        WHERE channel_id = ? AND message_ts = ?`,
+        WHERE channel_id = ? AND message_ts = ? AND delete_at IS NOT NULL`,
       )
       .run(attempts, nextAttemptAt, channelId, messageTs);
+    return result.changes > 0;
   }
 
   addTrack(track: {
