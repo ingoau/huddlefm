@@ -303,8 +303,8 @@ function inviteNotice(
     return `You joined a huddle in <#${sourceChannelId}>, so I've added you to <#${channelId}> to control the music.`;
   }
   if (reason === "host")
-    return `I've added you to <#${channelId}> so you can control the music from there.`;
-  return `I've added you to <#${channelId}> so you can control the music from there.`;
+    return `You invited me to a huddle, so I've added you to <#${channelId}> to control the music.`;
+  return `You joined a huddle, so I've added you to <#${channelId}> to control the music.`;
 }
 
 function retryDelay(attempts: number) {
