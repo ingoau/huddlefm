@@ -9,6 +9,7 @@ import {
 import { AuditLog } from "./audit-log.ts";
 import { canvasMarkdown } from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
+import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { safeError } from "./error-message.ts";
@@ -20,6 +21,7 @@ import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import {
   SlackHuddleAdapter,
+  roomOwnsThread,
   verifySlackIdentity,
   type ChimeBootstrap,
 } from "./slack-huddle.ts";
@@ -763,6 +765,30 @@ async function restoreEndedSession(interaction: Interaction) {
   }
 }
 
+async function mentionEphemeral(
+  channelId: string,
+  userId: string,
+  text: string,
+  threadTs?: string,
+  fallbackChannelId?: string,
+) {
+  try {
+    await slackApp.ephemeral(channelId, userId, text, threadTs);
+  } catch (error) {
+    if (!fallbackChannelId || fallbackChannelId === channelId) throw error;
+    log.warn(
+      {
+        event: "mention_ephemeral_fallback",
+        channelId,
+        fallbackChannelId,
+        err: error,
+      },
+      "Mention ephemeral failed in source channel; retrying in companion channel",
+    );
+    await slackApp.ephemeral(fallbackChannelId, userId, text);
+  }
+}
+
 async function joinMentionedHuddle(
   event: Extract<
     import("./slack-huddle.ts").HuddleEvent,
@@ -1056,11 +1082,12 @@ await slackHuddle.start((event) => {
     return;
   }
   if (event.type === "ThreadActivity") {
-    const runtime = [...runtimes.values()].find(
-      (runtime) =>
-        event.channelId === runtime.coordinator?.room.uiChannelId &&
-        event.threadTs === runtime.coordinator.room.uiThreadTs,
-    );
+    const runtime = [...runtimes.values()].find((runtime) => {
+      const room = runtime.coordinator?.room;
+      return room
+        ? roomOwnsThread(room, event.channelId, event.threadTs)
+        : false;
+    });
     const mentioned =
       event.userId !== botUserId && event.text.includes(`<@${botUserId}>`);
     if (mentioned) {
@@ -1074,8 +1101,10 @@ await slackHuddle.start((event) => {
           "Could not react to Huddle mention",
         ),
       );
-      void (runtime?.coordinator?.repost() ?? joinMentionedHuddle(event)).catch(
-        (error) =>
+      const bare = isBareMention(event.text, botUserId);
+      const coordinator = runtime?.coordinator;
+      if (!coordinator) {
+        void joinMentionedHuddle(event).catch((error) =>
           log.error(
             {
               event: "mention_action_failed",
@@ -1085,7 +1114,87 @@ await slackHuddle.start((event) => {
             },
             "Could not handle Huddle mention",
           ),
-      );
+        );
+      } else if (bare) {
+        const companionId = coordinator.room.companionChannelId;
+        const mentionedInHuddleThread =
+          Boolean(companionId) &&
+          event.channelId === coordinator.room.sourceChannelId &&
+          event.threadTs === coordinator.room.huddleThreadTs;
+        if (mentionedInHuddleThread && companionId) {
+          void mentionEphemeral(
+            event.channelId,
+            event.userId,
+            `Player controls are in <#${companionId}>. Mention me here with a request to control the session.`,
+            event.threadTs,
+            companionId,
+          ).catch((error) =>
+            log.warn(
+              {
+                event: "companion_mention_hint_failed",
+                channelId: event.channelId,
+                err: error,
+              },
+              "Could not send companion channel mention hint",
+            ),
+          );
+        }
+        void coordinator.repost().catch((error) =>
+          log.error(
+            {
+              event: "mention_action_failed",
+              channelId: event.channelId,
+              userId: event.userId,
+              err: error,
+            },
+            "Could not handle Huddle mention",
+          ),
+        );
+      } else if (!agentConfigured()) {
+        void mentionEphemeral(
+          event.channelId,
+          event.userId,
+          "AI controls aren’t configured. Set OPENROUTER_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
+          event.threadTs,
+          coordinator.room.companionChannelId,
+        ).catch((error) =>
+          log.warn(
+            {
+              event: "agent_unconfigured_notice_failed",
+              channelId: event.channelId,
+              err: error,
+            },
+            "Could not send agent configuration notice",
+          ),
+        );
+      } else {
+        void runAgentCommand({
+          coordinator,
+          userId: event.userId,
+          text: event.text,
+          botUserId,
+        })
+          .then((reply) =>
+            mentionEphemeral(
+              event.channelId,
+              event.userId,
+              reply,
+              event.threadTs,
+              coordinator.room.companionChannelId,
+            ),
+          )
+          .catch((error) =>
+            log.error(
+              {
+                event: "mention_agent_failed",
+                channelId: event.channelId,
+                userId: event.userId,
+                err: error,
+              },
+              "Could not handle agent mention",
+            ),
+          );
+      }
     }
     if (!mentioned) runtime?.coordinator?.threadActivity(event.userId);
     return;

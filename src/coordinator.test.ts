@@ -2376,3 +2376,363 @@ test("reposts the player on demand when thread anchoring is disabled", async () 
   expect(test.deleted).toEqual([["channel", "1"]]);
   await test.coordinator.endFromSlack();
 });
+
+test("agent controls enforce the same permissions as the Slack UI", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  result.coordinator.memberJoined("listener");
+
+  const denied = await result.coordinator.agentSkip("listener");
+  expect(denied).toEqual({
+    ok: false,
+    error: "You do not have permission for that.",
+  });
+
+  const outsider = await result.coordinator.agentStatus("stranger");
+  expect(outsider).toMatchObject({
+    ok: false,
+    error: "Join the huddle before using the player.",
+  });
+
+  const status = await result.coordinator.agentStatus("host");
+  expect(status).toMatchObject({
+    ok: true,
+    youAreHost: true,
+    scrobbling: { available: false },
+  });
+
+  const volume = await result.coordinator.agentSetVolume("host", 42);
+  expect(volume).toEqual({ ok: true, volumePercent: 42 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.42 });
+
+  const scrobblingDenied = result.coordinator.agentSetSessionScrobbling(
+    "host",
+    true,
+  );
+  expect(scrobblingDenied).toEqual({
+    ok: false,
+    error: "Scrobbling is not available on this bot.",
+  });
+
+  await result.coordinator.endFromSlack();
+});
+
+test("agent can enable and disable session scrobbling when configured", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setListenBrainzToken("host", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("host", true);
+  userStore.setScrobblingMode("host", "ask");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+
+  const status = test.coordinator.agentStatus("host");
+  expect(status).toMatchObject({
+    ok: true,
+    scrobbling: {
+      configured: true,
+      sessionEnabled: false,
+      mode: "ask",
+    },
+  });
+
+  const enabled = test.coordinator.agentSetSessionScrobbling("host", true);
+  expect(enabled).toEqual({ ok: true, sessionEnabled: true });
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    true,
+  );
+  expect(test.coordinator.agentSetSessionScrobbling("host", true)).toEqual({
+    ok: true,
+    sessionEnabled: true,
+    unchanged: true,
+  });
+
+  const disabled = test.coordinator.agentSetSessionScrobbling("host", false);
+  expect(disabled).toEqual({ ok: true, sessionEnabled: false });
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    false,
+  );
+
+  userStore.setListenBrainzToken("listener", "", "");
+  test.coordinator.memberJoined("listener");
+  expect(
+    test.coordinator.agentSetSessionScrobbling("listener", true),
+  ).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("Connect Last.fm or ListenBrainz"),
+  });
+
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("agentAdd aborts before queue mutation when signal is aborted", async () => {
+  let resolveUrl!: (value: unknown) => void;
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: () =>
+      new Promise((resolve) => {
+        resolveUrl = resolve;
+      }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const controller = new AbortController();
+  const pending = test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+    controller.signal,
+  );
+  await Bun.sleep(10);
+  controller.abort();
+  resolveUrl({
+    sourceId: "song",
+    title: "Song",
+    artist: "Artist",
+    duration: 120,
+  });
+  await expect(pending).rejects.toBeTruthy();
+  const status = test.coordinator.agentStatus("host");
+  expect(status).toMatchObject({ ok: true, queue: [] });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd skips enqueue when aborted after resolve", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    test.coordinator.agentAdd(
+      "host",
+      "https://example.com/song",
+      controller.signal,
+    ),
+  ).rejects.toBeTruthy();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [],
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd restores autoplay when aborted during autoplay hold", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: (
+      _track: unknown,
+      _directory: string,
+      _entryId: string,
+      signal?: AbortSignal,
+    ) =>
+      new Promise<string>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () =>
+            reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "queue", [
+    {
+      id: "auto",
+      requesterId: "bot",
+      sourceId: "auto",
+      title: "Auto",
+      artist: "Radio",
+      automatic: true,
+      status: "ready",
+      filePath: "auto.opus",
+    },
+  ]);
+  const controller = new AbortController();
+  const pending = test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+    controller.signal,
+  );
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const queue = Reflect.get(test.coordinator, "queue") as {
+      automatic?: boolean;
+    }[];
+    if (!queue.some((track) => track.automatic)) {
+      controller.abort();
+      break;
+    }
+    await Bun.sleep(1);
+  }
+  await expect(pending).rejects.toBeTruthy();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [
+      expect.objectContaining({
+        id: "auto",
+        title: "Auto",
+        automatic: true,
+      }),
+    ],
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd restores autoplay when aborted during preparation", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: (
+      _track: unknown,
+      _directory: string,
+      _entryId: string,
+      signal?: AbortSignal,
+    ) =>
+      new Promise<string>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () =>
+            reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "queue", [
+    {
+      id: "auto",
+      requesterId: "bot",
+      sourceId: "auto",
+      title: "Auto",
+      artist: "Radio",
+      automatic: true,
+      status: "ready",
+      filePath: "auto.opus",
+    },
+  ]);
+  const controller = new AbortController();
+  const pending = test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+    controller.signal,
+  );
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const queue = Reflect.get(test.coordinator, "queue") as {
+      id: string;
+      automatic?: boolean;
+    }[];
+    if (queue.some((track) => track.id !== "auto" && !track.automatic)) {
+      controller.abort();
+      break;
+    }
+    await Bun.sleep(1);
+  }
+  await expect(pending).rejects.toBeTruthy();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [
+      expect.objectContaining({
+        id: "auto",
+        title: "Auto",
+        automatic: true,
+      }),
+    ],
+  });
+  expect(
+    test.ephemeral.some((text) => text.includes("Could not prepare")),
+  ).toBe(false);
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd reports failure when preparation removes the track", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: async () => {
+      throw new Error("private video");
+    },
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const result = await test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+  );
+  expect(result).toMatchObject({
+    ok: false,
+    error: "Could not prepare that track.",
+  });
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [],
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentUpdateSettings validates the full patch before mutating", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    displayMode: "default",
+  });
+  const result = await test.coordinator.agentUpdateSettings("host", {
+    displayMode: "lyrics",
+    hostUserId: "stranger",
+  });
+  expect(result).toMatchObject({
+    ok: false,
+    error: "That user is not in this huddle.",
+  });
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    displayMode: "default",
+    hostId: "host",
+  });
+  expect(test.sessions).not.toContainEqual({ displayMode: "lyrics" });
+  await test.coordinator.endFromSlack();
+});

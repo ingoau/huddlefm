@@ -5,7 +5,30 @@ import {
   normalizeInvitedJoinResponse,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
+  roomOwnsThread,
 } from "./slack-huddle.ts";
+
+test("roomOwnsThread matches the UI thread and the original huddle thread", () => {
+  const companionRoom = {
+    uiChannelId: "CCOMP",
+    uiThreadTs: "",
+    sourceChannelId: "CSOURCE",
+    huddleThreadTs: "111.222",
+  };
+  expect(roomOwnsThread(companionRoom, "CSOURCE", "111.222")).toBe(true);
+  expect(roomOwnsThread(companionRoom, "CCOMP", "")).toBe(true);
+  expect(roomOwnsThread(companionRoom, "CCOMP", "111.222")).toBe(false);
+  expect(roomOwnsThread(companionRoom, "CSOURCE", "999.000")).toBe(false);
+
+  const inlineRoom = {
+    uiChannelId: "CSOURCE",
+    uiThreadTs: "111.222",
+    sourceChannelId: "CSOURCE",
+    huddleThreadTs: "111.222",
+  };
+  expect(roomOwnsThread(inlineRoom, "CSOURCE", "111.222")).toBe(true);
+  expect(roomOwnsThread(inlineRoom, "COTHER", "111.222")).toBe(false);
+});
 
 test("classifies channel access", () => {
   expect(channelAccess({ is_member: true, is_private: true })).toBe("ready");

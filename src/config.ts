@@ -55,5 +55,6 @@ export function loadConfig() {
     chromePath:
       process.env.CHROME_PATH ??
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    openRouterApiKey: optionalText(process.env.OPENROUTER_API_KEY),
   };
 }

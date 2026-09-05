@@ -24,6 +24,25 @@ export type JoinedHuddle = {
   chimeAttendee: Record<string, unknown>;
 };
 
+/** True when activity belongs to the session UI thread or the original huddle thread. */
+export function roomOwnsThread(
+  room: Pick<
+    JoinedHuddle,
+    "uiChannelId" | "uiThreadTs" | "sourceChannelId" | "huddleThreadTs"
+  >,
+  channelId: string,
+  threadTs: string,
+) {
+  if (channelId === room.uiChannelId && threadTs === room.uiThreadTs)
+    return true;
+  return Boolean(
+    room.sourceChannelId &&
+    room.huddleThreadTs &&
+    channelId === room.sourceChannelId &&
+    threadTs === room.huddleThreadTs,
+  );
+}
+
 export type HuddleEvent =
   | {
       type: "HuddleInvited";

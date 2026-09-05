@@ -57,6 +57,12 @@ type Entry = TrackMetadata & {
   fadeOutSeconds?: number;
 };
 
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new DOMException("This operation was aborted", "AbortError");
+}
+
 export class Coordinator {
   readonly id: string;
   readonly participants = new Set<string>();
@@ -525,6 +531,778 @@ export class Coordinator {
     return this.enqueue(() => this.reanchor());
   }
 
+  agentStatus(userId: string, signal?: AbortSignal) {
+    throwIfAborted(signal);
+    if (!this.isParticipantOrManager(userId))
+      return {
+        ok: false as const,
+        error: "Join the huddle before using the player.",
+      };
+    const capabilities = [...this.allowed];
+    const host = this.hostId === userId || userId === this.config.managerUserId;
+    const scrobbling = this.scrobbling?.settings(userId, this.id);
+    return {
+      ok: true as const,
+      state: this.state,
+      volumePercent: Math.round(this.volume * 100),
+      playbackSeconds: this.playbackSeconds,
+      displayMode: this.displayMode,
+      autoplay: this.autoplayEnabled,
+      transitionMode: this.transitionMode,
+      anchorEnabled: this.anchorEnabled,
+      hostId: this.hostId ?? null,
+      youAreHost: host,
+      yourCapabilities: host
+        ? "all (host/manager)"
+        : capabilities.length
+          ? capabilities
+          : [],
+      nowPlaying: this.current
+        ? {
+            id: this.current.id,
+            title: this.current.title,
+            artist: this.current.artist,
+            album: this.current.album,
+            status: this.current.status,
+            automatic: Boolean(this.current.automatic),
+            addedBy: this.current.requesterId,
+          }
+        : null,
+      queue: this.queue.map((track, index) => ({
+        position: index + 1,
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        status: track.status,
+        automatic: Boolean(track.automatic),
+        addedBy: track.requesterId,
+      })),
+      queueLimit: this.config.queueLimit,
+      scrobbling: scrobbling
+        ? {
+            configured: scrobbling.configured,
+            sessionEnabled: Boolean(scrobbling.sessionEnabled),
+            mode: scrobbling.mode,
+          }
+        : { available: false as const },
+    };
+  }
+
+  async agentSearch(userId: string, query: string, signal?: AbortSignal) {
+    throwIfAborted(signal);
+    if (!this.isParticipantOrManager(userId))
+      return {
+        ok: false as const,
+        error: "Join the huddle before using the player.",
+      };
+    const allowed = {
+      songs: this.can(userId, "add"),
+      bulk: this.can(userId, "add-bulk"),
+    };
+    if (!allowed.songs && !allowed.bulk)
+      return {
+        ok: false as const,
+        error: "You do not have permission to add tracks.",
+      };
+    try {
+      const options = await this.tracks.suggestions(query, allowed);
+      throwIfAborted(signal);
+      return {
+        ok: true as const,
+        results: options.map((option) => ({
+          label: option.text.text,
+          reference: option.value,
+        })),
+      };
+    } catch (error) {
+      throwIfAborted(signal);
+      return { ok: false as const, error: message(error) };
+    }
+  }
+
+  async agentAdd(userId: string, reference: string, signal?: AbortSignal) {
+    throwIfAborted(signal);
+    if (!this.isParticipantOrManager(userId))
+      return {
+        ok: false as const,
+        error: "Join the huddle before using the player.",
+      };
+    const capability = reference.startsWith("bulkref_") ? "add-bulk" : "add";
+    if (!this.can(userId, capability))
+      return {
+        ok: false as const,
+        error: "You do not have permission to add that.",
+      };
+    if (this.state === "ended" || this.state === "suspended")
+      return { ok: false as const, error: "This session is not active." };
+    let selection: TrackMetadata | TrackMetadata[];
+    try {
+      selection = await this.tracks.resolve(reference);
+    } catch (error) {
+      try {
+        selection = await this.tracks.resolveUrl(reference);
+      } catch (urlError) {
+        return { ok: false as const, error: message(urlError) };
+      }
+    }
+    throwIfAborted(signal);
+    const tracks = Array.isArray(selection) ? selection : [selection];
+    const needed = Array.isArray(selection) ? "add-bulk" : "add";
+    if (!this.can(userId, needed))
+      return {
+        ok: false as const,
+        error: "You do not have permission to add that.",
+      };
+    const committed = await this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (this.state === "ended" || this.state === "suspended") return;
+      if (!this.can(userId, needed)) return;
+      const heldAutoplay = this.takeQueuedAutoplay();
+      let pending: { entry: Entry; controller: AbortController }[] = [];
+      try {
+        // Yield so an abort can land after autoplay is detached and before we
+        // commit manual queue entries (same window as removeQueuedAutoplay's awaits).
+        await Promise.resolve();
+        throwIfAborted(signal);
+        const available =
+          this.config.queueLimit -
+          this.queue.length -
+          Number(Boolean(this.current));
+        if (tracks.length > available) {
+          this.restoreQueuedAutoplay(heldAutoplay);
+          return {
+            error: available
+              ? `The queue only has room for ${available} more songs.`
+              : "The queue is full.",
+          };
+        }
+        const entries = tracks.map((metadata) => ({
+          ...metadata,
+          id: crypto.randomUUID(),
+          requesterId: userId,
+          status: "preparing",
+        }));
+        pending = entries.map((entry) => {
+          const controller = new AbortController();
+          this.preparations.set(entry.id, controller);
+          this.queue.push(entry);
+          this.store.addTrack({
+            ...entry,
+            sessionId: this.id,
+            status: entry.status,
+          });
+          this.audit.record("track.added", userId, {
+            sessionId: this.id,
+            ...auditTrack(entry),
+          });
+          this.store.incrementUsage("added");
+          return { entry, controller };
+        });
+        await this.render();
+        this.queueChanged();
+        throwIfAborted(signal);
+        return { pending, heldAutoplay };
+      } catch (error) {
+        for (const { entry, controller } of pending) {
+          controller.abort();
+          this.preparations.delete(entry.id);
+          this.queue = this.queue.filter((item) => item !== entry);
+          this.store.removeTrack(entry.id);
+        }
+        this.restoreQueuedAutoplay(heldAutoplay);
+        if (pending.length) {
+          this.queueChanged();
+          await this.render();
+        }
+        throw error;
+      }
+    });
+    if (!committed)
+      return { ok: false as const, error: "Could not add tracks." };
+    if ("error" in committed)
+      return { ok: false as const, error: committed.error };
+    const abortPreparations = () => {
+      for (const { controller } of committed.pending) controller.abort();
+    };
+    const rollback = async () => {
+      abortPreparations();
+      await this.rollbackAgentAdd(committed.pending, committed.heldAutoplay);
+    };
+    if (signal?.aborted) {
+      await rollback();
+      throwIfAborted(signal);
+    }
+    signal?.addEventListener("abort", abortPreparations, { once: true });
+    try {
+      await Promise.all(
+        committed.pending.map(({ entry, controller }) =>
+          this.prepareManual(entry, controller),
+        ),
+      );
+      throwIfAborted(signal);
+      return await this.enqueue(async () => {
+        const remaining = committed.pending
+          .map(({ entry }) => entry)
+          .filter((entry) => this.queue.includes(entry));
+        if (!remaining.length) {
+          this.restoreQueuedAutoplay(committed.heldAutoplay);
+          await this.render();
+          return {
+            ok: false as const,
+            error: "Could not prepare that track.",
+          };
+        }
+        await this.destroyQueuedAutoplay(committed.heldAutoplay);
+        return {
+          ok: true as const,
+          added: remaining.map((track) => ({
+            title: track.title,
+            artist: track.artist,
+          })),
+        };
+      });
+    } catch (error) {
+      await rollback();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", abortPreparations);
+    }
+  }
+
+  async agentRemove(userId: string, trackId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.isParticipantOrManager(userId))
+        return {
+          ok: false as const,
+          error: "Join the huddle before using the player.",
+        };
+      const entry = this.queue.find((track) => track.id === trackId);
+      if (!entry)
+        return { ok: false as const, error: "That track is not in the queue." };
+      if (
+        !this.can(userId, "manage-queue") &&
+        !(entry.requesterId === userId && this.can(userId, "remove-own"))
+      )
+        return {
+          ok: false as const,
+          error: "You do not have permission for that.",
+        };
+      this.queue.splice(this.queue.indexOf(entry), 1);
+      this.preparations.get(entry.id)?.abort();
+      this.store.removeTrack(entry.id);
+      this.audit.record("track.removed", userId, {
+        sessionId: this.id,
+        ...auditTrack(entry),
+      });
+      this.store.incrementUsage("removed");
+      this.queueChanged();
+      if (entry.filePath) await rm(entry.filePath, { force: true });
+      await this.render();
+      this.syncPreloads();
+      this.refreshIdle();
+      this.scheduleAutoplay();
+      return {
+        ok: true as const,
+        removed: { title: entry.title, artist: entry.artist },
+      };
+    });
+  }
+
+  async agentMove(
+    userId: string,
+    trackId: string,
+    options: {
+      direction?: "up" | "down";
+      playNext?: boolean;
+      position?: number;
+    },
+    signal?: AbortSignal,
+  ) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "manage-queue"))
+        return {
+          ok: false as const,
+          error: this.isParticipantOrManager(userId)
+            ? "You do not have permission for that."
+            : "Join the huddle before using the player.",
+        };
+      const index = this.queue.findIndex((track) => track.id === trackId);
+      if (index < 0)
+        return { ok: false as const, error: "That track is not in the queue." };
+      let target = index;
+      if (options.playNext) target = 0;
+      else if (options.position !== undefined) {
+        if (
+          !Number.isSafeInteger(options.position) ||
+          options.position < 1 ||
+          options.position > this.queue.length
+        )
+          return {
+            ok: false as const,
+            error: `Position must be between 1 and ${this.queue.length}.`,
+          };
+        target = options.position - 1;
+      } else if (options.direction === "up") target = index - 1;
+      else if (options.direction === "down") target = index + 1;
+      else
+        return {
+          ok: false as const,
+          error: "Provide direction, playNext, or position.",
+        };
+      if (target < 0 || target >= this.queue.length)
+        return { ok: false as const, error: "Cannot move further that way." };
+      if (target === index)
+        return {
+          ok: true as const,
+          position: index + 1,
+          title: this.queue[index]!.title,
+        };
+      const [entry] = this.queue.splice(index, 1);
+      this.queue.splice(target, 0, entry!);
+      this.audit.record("queue.reordered", userId, {
+        sessionId: this.id,
+        trackId,
+        from: index,
+        to: target,
+        ...(options.playNext ? { reason: "play_next" } : {}),
+      });
+      this.store.incrementUsage("reordered");
+      this.queueChanged();
+      await this.render();
+      this.syncPreloads();
+      return {
+        ok: true as const,
+        position: target + 1,
+        title: entry!.title,
+        artist: entry!.artist,
+      };
+    });
+  }
+
+  async agentClear(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "clear"))
+        return {
+          ok: false as const,
+          error: this.isParticipantOrManager(userId)
+            ? "You do not have permission for that."
+            : "Join the huddle before using the player.",
+        };
+      this.autoplayGeneration++;
+      this.autoplayPending = false;
+      const count = this.queue.length;
+      for (const entry of this.queue) {
+        this.preparations.get(entry.id)?.abort();
+        this.store.removeTrack(entry.id);
+        if (entry.filePath) await rm(entry.filePath, { force: true });
+      }
+      this.queue = [];
+      this.queueChanged();
+      this.audit.record("queue.cleared", userId, {
+        sessionId: this.id,
+        count,
+      });
+      this.store.incrementUsage("cleared");
+      await this.render();
+      this.syncPreloads();
+      this.refreshIdle();
+      this.scheduleAutoplay();
+      return { ok: true as const, cleared: count };
+    });
+  }
+
+  async agentSkip(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "skip"))
+        return {
+          ok: false as const,
+          error: this.isParticipantOrManager(userId)
+            ? "You do not have permission for that."
+            : "Join the huddle before using the player.",
+        };
+      if (!this.current)
+        return { ok: false as const, error: "Nothing is playing." };
+      const skipped = this.current;
+      this.audit.record("track.skipped", userId, {
+        sessionId: this.id,
+        ...auditTrack(skipped),
+      });
+      this.store.incrementUsage("next");
+      this.autoplayRejected = [
+        ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
+        skipped.sourceId,
+      ].slice(-20);
+      await this.advance("skipped");
+      this.scheduleAutoplay();
+      return {
+        ok: true as const,
+        skipped: { title: skipped.title, artist: skipped.artist },
+        nowPlaying: this.current
+          ? { title: this.current.title, artist: this.current.artist }
+          : null,
+      };
+    });
+  }
+
+  async agentPrevious(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "skip"))
+        return {
+          ok: false as const,
+          error: this.isParticipantOrManager(userId)
+            ? "You do not have permission for that."
+            : "Join the huddle before using the player.",
+        };
+      if (this.current && (this.playbackSeconds > 5 || !this.history.length)) {
+        this.audit.record("track.previous", userId, {
+          sessionId: this.id,
+          ...auditTrack(this.current),
+          restarted: true,
+        });
+        this.store.incrementUsage("previous");
+        this.playbackSeconds = 0;
+        this.sendMedia({ type: "seek", seconds: 0 });
+        return {
+          ok: true as const,
+          restarted: true,
+          title: this.current.title,
+          artist: this.current.artist,
+        };
+      }
+      if (!this.history.length)
+        return { ok: false as const, error: "Nothing is playing." };
+      const prior = this.history.pop()!;
+      this.audit.record("track.previous", userId, {
+        sessionId: this.id,
+        ...auditTrack(prior),
+      });
+      this.store.incrementUsage("previous");
+      if (this.current) {
+        this.current.status = "ready";
+        this.queue.unshift(this.current);
+        this.store.setTrack(this.current.id, { status: "ready" });
+      }
+      this.current = undefined;
+      prior.status = "ready";
+      this.queue.unshift(prior);
+      this.store.setTrack(prior.id, { status: "ready" });
+      await this.startNext();
+      const playing = this.current ?? prior;
+      return {
+        ok: true as const,
+        nowPlaying: { title: playing.title, artist: playing.artist },
+      };
+    });
+  }
+
+  async agentToggle(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "pause") || !this.current)
+        return {
+          ok: false as const,
+          error: !this.isParticipantOrManager(userId)
+            ? "Join the huddle before using the player."
+            : !this.can(userId, "pause")
+              ? "You do not have permission for that."
+              : "Nothing is playing.",
+        };
+      this.state = this.state === "paused" ? "playing" : "paused";
+      if (this.state === "paused") this.playbackScrobbling?.pause();
+      else this.playbackScrobbling?.resume();
+      this.sendMedia({ type: this.state === "paused" ? "pause" : "resume" });
+      this.store.setSession(this.id, { status: this.state });
+      this.audit.record(
+        `playback.${this.state === "paused" ? "paused" : "resumed"}`,
+        userId,
+        { sessionId: this.id, trackId: this.current.id },
+      );
+      this.store.incrementUsage(this.state === "paused" ? "paused" : "resumed");
+      await this.render();
+      this.refreshIdle();
+      return { ok: true as const, state: this.state };
+    });
+  }
+
+  async agentSeek(userId: string, seconds: number, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "skip") || !this.current)
+        return {
+          ok: false as const,
+          error: !this.isParticipantOrManager(userId)
+            ? "Join the huddle before using the player."
+            : !this.can(userId, "skip")
+              ? "You do not have permission for that."
+              : "Nothing is playing.",
+        };
+      if (!Number.isFinite(seconds))
+        return { ok: false as const, error: "Seconds must be a number." };
+      const previous = this.playbackSeconds;
+      this.playbackSeconds = Math.max(0, previous + seconds);
+      this.sendMedia({ type: "seek", offset: seconds });
+      this.audit.record("playback.seeked", userId, {
+        sessionId: this.id,
+        trackId: this.current.id,
+        previous,
+        seconds: this.playbackSeconds,
+      });
+      this.store.incrementUsage(seconds > 0 ? "forward" : "back");
+      return {
+        ok: true as const,
+        playbackSeconds: this.playbackSeconds,
+      };
+    });
+  }
+
+  async agentSetVolume(userId: string, percent: number, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "volume"))
+        return {
+          ok: false as const,
+          error: this.isParticipantOrManager(userId)
+            ? "You do not have permission for that."
+            : "Join the huddle before using the player.",
+        };
+      if (!Number.isFinite(percent) || percent < 0 || percent > 100)
+        return {
+          ok: false as const,
+          error: "Volume must be between 0 and 100.",
+        };
+      const previous = this.volume;
+      this.volume = Math.round(percent * 100) / 10_000;
+      this.sendMedia({ type: "volume", value: this.volume });
+      this.store.setSession(this.id, { volume: this.volume });
+      this.audit.record("volume.changed", userId, {
+        sessionId: this.id,
+        previous,
+        volume: this.volume,
+      });
+      this.store.incrementUsage("volume");
+      await this.render();
+      return {
+        ok: true as const,
+        volumePercent: Math.round(this.volume * 100),
+      };
+    });
+  }
+
+  async agentUpdateSettings(
+    userId: string,
+    patch: {
+      displayMode?: DisplayMode;
+      autoplay?: boolean;
+      transitionMode?: TransitionMode;
+      anchorEnabled?: boolean;
+      permissionPreset?: keyof typeof permissionPresets;
+      hostUserId?: string;
+    },
+    signal?: AbortSignal,
+  ) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.isParticipantOrManager(userId) && !this.settingsAdmin(userId))
+        return {
+          ok: false as const,
+          error: "Join the huddle before using the player.",
+        };
+      const changed: string[] = [];
+      if (
+        patch.hostUserId !== undefined ||
+        patch.permissionPreset !== undefined
+      ) {
+        if (!this.settingsAdmin(userId))
+          return {
+            ok: false as const,
+            error: "Only the host can change permissions or transfer host.",
+          };
+      }
+      if (
+        (patch.displayMode !== undefined ||
+          patch.autoplay !== undefined ||
+          patch.transitionMode !== undefined ||
+          patch.anchorEnabled !== undefined) &&
+        !this.can(userId, "configure-settings")
+      )
+        return {
+          ok: false as const,
+          error: "You do not have permission to change settings.",
+        };
+      if (
+        patch.displayMode !== undefined &&
+        !displayModes.includes(patch.displayMode)
+      )
+        return { ok: false as const, error: "Invalid display mode." };
+      if (
+        patch.transitionMode !== undefined &&
+        !transitionModes.includes(patch.transitionMode)
+      )
+        return { ok: false as const, error: "Invalid transition mode." };
+      const permissionPreset =
+        patch.permissionPreset === undefined
+          ? undefined
+          : permissionPresets[
+              patch.permissionPreset as keyof typeof permissionPresets
+            ];
+      if (patch.permissionPreset !== undefined && !permissionPreset)
+        return { ok: false as const, error: "Invalid permission preset." };
+      if (patch.hostUserId !== undefined) {
+        if (patch.hostUserId === this.botUserId)
+          return {
+            ok: false as const,
+            error: "HuddleFM cannot be the host.",
+          };
+        if (!this.participants.has(patch.hostUserId))
+          return {
+            ok: false as const,
+            error: "That user is not in this huddle.",
+          };
+      }
+      if (
+        patch.displayMode !== undefined &&
+        patch.displayMode !== this.displayMode
+      ) {
+        this.displayMode = patch.displayMode;
+        this.sendMedia({ type: "display_mode", mode: patch.displayMode });
+        this.store.setSession(this.id, { displayMode: patch.displayMode });
+        changed.push(`displayMode=${patch.displayMode}`);
+      }
+      if (
+        patch.autoplay !== undefined &&
+        patch.autoplay !== this.autoplayEnabled
+      ) {
+        this.autoplayEnabled = patch.autoplay;
+        this.store.setSession(this.id, { autoplay: patch.autoplay });
+        if (!patch.autoplay) await this.removeQueuedAutoplay();
+        changed.push(`autoplay=${patch.autoplay}`);
+      }
+      if (patch.transitionMode !== undefined) {
+        this.transitionMode = patch.transitionMode;
+        this.sendMedia({
+          type: "transition_mode",
+          mode: patch.transitionMode,
+        });
+        this.store.setSession(this.id, {
+          transitionMode: patch.transitionMode,
+        });
+        changed.push(`transitionMode=${patch.transitionMode}`);
+      }
+      if (
+        patch.anchorEnabled !== undefined &&
+        patch.anchorEnabled !== this.anchorEnabled
+      ) {
+        if (!patch.anchorEnabled) clearTimeout(this.anchorTimer);
+        this.anchorEnabled = patch.anchorEnabled;
+        this.store.setSession(this.id, {
+          anchorEnabled: patch.anchorEnabled,
+        });
+        changed.push(`anchorEnabled=${patch.anchorEnabled}`);
+      }
+      if (permissionPreset) {
+        this.allowed = new Set(permissionPreset);
+        for (const capability of capabilities)
+          this.store.setPermission(
+            this.id,
+            capability,
+            this.allowed.has(capability),
+          );
+        changed.push(`permissions=${patch.permissionPreset}`);
+      }
+      if (patch.hostUserId !== undefined) {
+        this.hostId = patch.hostUserId;
+        this.store.setSession(this.id, { hostId: patch.hostUserId });
+        changed.push(`hostId=${patch.hostUserId}`);
+      }
+      if (changed.length) {
+        this.audit.record("settings.changed", userId, {
+          sessionId: this.id,
+          changed,
+        });
+        this.store.incrementUsage("settings");
+        await this.render();
+      }
+      return {
+        ok: true as const,
+        changed,
+        displayMode: this.displayMode,
+        autoplay: this.autoplayEnabled,
+        transitionMode: this.transitionMode,
+        anchorEnabled: this.anchorEnabled,
+        hostId: this.hostId ?? null,
+        permissions: [...this.allowed],
+      };
+    });
+  }
+
+  async agentClaimHost(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (this.hostId)
+        return { ok: false as const, error: "Host already claimed." };
+      if (userId === this.botUserId || !this.participants.has(userId))
+        return {
+          ok: false as const,
+          error: "Join the huddle before taking over.",
+        };
+      this.hostId = userId;
+      this.store.setSession(this.id, { hostId: userId });
+      this.audit.record("host.claimed", userId, { sessionId: this.id });
+      await this.render();
+      return { ok: true as const, hostId: userId };
+    });
+  }
+
+  async agentEnd(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "end-session"))
+        return {
+          ok: false as const,
+          error: this.isParticipantOrManager(userId)
+            ? "You do not have permission to end this session."
+            : "Join the huddle before using the player.",
+        };
+      await this.end(userId, "ended by agent");
+      return { ok: true as const, ended: true };
+    });
+  }
+
+  agentSetSessionScrobbling(
+    userId: string,
+    enabled: boolean,
+    signal?: AbortSignal,
+  ) {
+    throwIfAborted(signal);
+    if (!this.isParticipantOrManager(userId))
+      return {
+        ok: false as const,
+        error: "Join the huddle before using the player.",
+      };
+    if (!this.scrobbling)
+      return {
+        ok: false as const,
+        error: "Scrobbling is not available on this bot.",
+      };
+    const settings = this.scrobbling.settings(userId, this.id);
+    if (!settings.configured)
+      return {
+        ok: false as const,
+        error:
+          "Connect Last.fm or ListenBrainz in Settings before toggling session scrobbling.",
+      };
+    if (settings.sessionEnabled === enabled)
+      return { ok: true as const, sessionEnabled: enabled, unchanged: true };
+    this.scrobbling.setSessionEnabled(this.id, userId, enabled);
+    if (enabled) this.playbackScrobbling?.sessionEnabled(userId);
+    return { ok: true as const, sessionEnabled: enabled };
+  }
+
   participantIds() {
     return [...this.participants];
   }
@@ -859,6 +1637,9 @@ export class Coordinator {
         );
       });
     } catch (error) {
+      // Agent cancellation owns cleanup via rollbackAgentAdd; skip failure
+      // notices, audits, and queue/store mutation here.
+      if (controller.signal.aborted) return;
       this.logTrackFailure(
         {
           event: "track_preparation_failed",
@@ -1133,17 +1914,55 @@ export class Coordinator {
     }
   }
 
-  private async removeQueuedAutoplay() {
+  private takeQueuedAutoplay() {
     this.autoplayGeneration++;
     this.autoplayPending = false;
     const automatic = this.queue.filter((track) => track.automatic);
     this.queue = this.queue.filter((track) => !track.automatic);
     if (automatic.length) this.queueChanged();
+    return automatic;
+  }
+
+  private restoreQueuedAutoplay(automatic: Entry[]) {
+    if (!automatic.length) return;
+    for (const entry of automatic) {
+      if (this.queue.some((track) => track.id === entry.id)) continue;
+      this.queue.push(entry);
+    }
+    this.queueChanged();
+  }
+
+  private async destroyQueuedAutoplay(automatic: Entry[]) {
     for (const entry of automatic) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
       if (entry.filePath) await rm(entry.filePath, { force: true });
     }
+  }
+
+  private async rollbackAgentAdd(
+    pending: { entry: Entry; controller: AbortController }[],
+    heldAutoplay: Entry[],
+  ) {
+    for (const { controller } of pending) controller.abort();
+    await this.enqueue(async () => {
+      for (const { entry } of pending) {
+        this.preparations.delete(entry.id);
+        if (this.queue.includes(entry)) {
+          this.queue = this.queue.filter((item) => item !== entry);
+          if (entry.filePath) await rm(entry.filePath, { force: true });
+        }
+        // Always drop the staged store row, even if prepareManual already
+        // removed the queue entry before abort cleanup ran.
+        this.store.removeTrack(entry.id);
+      }
+      this.restoreQueuedAutoplay(heldAutoplay);
+      await this.render();
+    });
+  }
+
+  private async removeQueuedAutoplay() {
+    await this.destroyQueuedAutoplay(this.takeQueuedAutoplay());
   }
 
   private async startNext() {
