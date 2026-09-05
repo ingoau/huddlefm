@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { agentConfigured, isBareMention, stripMentions } from "./agent.ts";
+import {
+  agentConfigured,
+  isAgentBusy,
+  isBareMention,
+  stripMentions,
+} from "./agent.ts";
 
 test("isBareMention accepts only the bot mention", () => {
   expect(isBareMention("<@UBOT>", "UBOT")).toBe(true);
@@ -27,4 +32,8 @@ test("agentConfigured reflects OpenRouter credentials", () => {
     if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = previous;
   }
+});
+
+test("isAgentBusy starts false", () => {
+  expect(isAgentBusy("UTEST")).toBe(false);
 });

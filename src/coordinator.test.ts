@@ -2465,3 +2465,66 @@ test("agent can enable and disable session scrobbling when configured", async ()
   await test.coordinator.endFromSlack();
   userStore.close();
 });
+
+test("agentAdd aborts before queue mutation when signal is aborted", async () => {
+  let resolveUrl!: (value: unknown) => void;
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: () =>
+      new Promise((resolve) => {
+        resolveUrl = resolve;
+      }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const controller = new AbortController();
+  const pending = test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+    controller.signal,
+  );
+  await Bun.sleep(10);
+  controller.abort();
+  resolveUrl({
+    sourceId: "song",
+    title: "Song",
+    artist: "Artist",
+    duration: 120,
+  });
+  await expect(pending).rejects.toBeTruthy();
+  const status = test.coordinator.agentStatus("host");
+  expect(status).toMatchObject({ ok: true, queue: [] });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd skips enqueue when aborted after resolve", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    test.coordinator.agentAdd(
+      "host",
+      "https://example.com/song",
+      controller.signal,
+    ),
+  ).rejects.toBeTruthy();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [],
+  });
+  await test.coordinator.endFromSlack();
+});

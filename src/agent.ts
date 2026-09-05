@@ -74,7 +74,8 @@ function agentTools(coordinator: Coordinator, userId: string) {
       description:
         "Get what's playing, the queue, volume, settings, host, and this user's permissions.",
       inputSchema: z.object({}),
-      execute: async () => coordinator.agentStatus(userId),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentStatus(userId, abortSignal),
     }),
     search_tracks: tool({
       description:
@@ -85,7 +86,8 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .min(1)
           .describe("Song, artist, album, playlist name, or media URL"),
       }),
-      execute: async ({ query }) => coordinator.agentSearch(userId, query),
+      execute: async ({ query }, { abortSignal }) =>
+        coordinator.agentSearch(userId, query, abortSignal),
     }),
     add_tracks: tool({
       description:
@@ -96,14 +98,16 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .min(1)
           .describe("Reference value from search_tracks, or a media URL"),
       }),
-      execute: async ({ reference }) => coordinator.agentAdd(userId, reference),
+      execute: async ({ reference }, { abortSignal }) =>
+        coordinator.agentAdd(userId, reference, abortSignal),
     }),
     remove_from_queue: tool({
       description: "Remove a track from the upcoming queue by id.",
       inputSchema: z.object({
         trackId: z.string().min(1).describe("Queue track id from get_status"),
       }),
-      execute: async ({ trackId }) => coordinator.agentRemove(userId, trackId),
+      execute: async ({ trackId }, { abortSignal }) =>
+        coordinator.agentRemove(userId, trackId, abortSignal),
     }),
     move_in_queue: tool({
       description:
@@ -125,33 +129,45 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .optional()
           .describe("1-based queue position"),
       }),
-      execute: async ({ trackId, direction, playNext, position }) =>
-        coordinator.agentMove(userId, trackId, {
-          direction,
-          playNext,
-          position,
-        }),
+      execute: async (
+        { trackId, direction, playNext, position },
+        { abortSignal },
+      ) =>
+        coordinator.agentMove(
+          userId,
+          trackId,
+          {
+            direction,
+            playNext,
+            position,
+          },
+          abortSignal,
+        ),
     }),
     clear_queue: tool({
       description: "Clear all upcoming tracks from the queue.",
       inputSchema: z.object({}),
-      execute: async () => coordinator.agentClear(userId),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentClear(userId, abortSignal),
     }),
     skip: tool({
       description: "Skip to the next track.",
       inputSchema: z.object({}),
-      execute: async () => coordinator.agentSkip(userId),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentSkip(userId, abortSignal),
     }),
     previous: tool({
       description:
         "Go to the previous track, or restart the current track if it has been playing for more than a few seconds.",
       inputSchema: z.object({}),
-      execute: async () => coordinator.agentPrevious(userId),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentPrevious(userId, abortSignal),
     }),
     pause_or_resume: tool({
       description: "Toggle pause and resume for the current track.",
       inputSchema: z.object({}),
-      execute: async () => coordinator.agentToggle(userId),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentToggle(userId, abortSignal),
     }),
     seek: tool({
       description: "Seek relative to the current playback position.",
@@ -160,15 +176,16 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .number()
           .describe("Seconds to move; negative seeks backward"),
       }),
-      execute: async ({ seconds }) => coordinator.agentSeek(userId, seconds),
+      execute: async ({ seconds }, { abortSignal }) =>
+        coordinator.agentSeek(userId, seconds, abortSignal),
     }),
     set_volume: tool({
       description: "Set playback volume as a percentage from 0 to 100.",
       inputSchema: z.object({
         percent: z.number().min(0).max(100),
       }),
-      execute: async ({ percent }) =>
-        coordinator.agentSetVolume(userId, percent),
+      execute: async ({ percent }, { abortSignal }) =>
+        coordinator.agentSetVolume(userId, percent, abortSignal),
     }),
     update_settings: tool({
       description:
@@ -194,12 +211,14 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .optional()
           .describe("Transfer host to this Slack user id"),
       }),
-      execute: async (input) => coordinator.agentUpdateSettings(userId, input),
+      execute: async (input, { abortSignal }) =>
+        coordinator.agentUpdateSettings(userId, input, abortSignal),
     }),
     claim_host: tool({
       description: "Claim host when there is currently no host.",
       inputSchema: z.object({}),
-      execute: async () => coordinator.agentClaimHost(userId),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentClaimHost(userId, abortSignal),
     }),
     set_session_scrobbling: tool({
       description:
@@ -209,15 +228,20 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .boolean()
           .describe("True to scrobble this session, false to disable"),
       }),
-      execute: async ({ enabled }) =>
-        coordinator.agentSetSessionScrobbling(userId, enabled),
+      execute: async ({ enabled }, { abortSignal }) =>
+        coordinator.agentSetSessionScrobbling(userId, enabled, abortSignal),
     }),
     end_session: tool({
       description: "End the listening session and leave the huddle.",
       inputSchema: z.object({}),
-      execute: async () => coordinator.agentEnd(userId),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentEnd(userId, abortSignal),
     }),
   };
+}
+
+export function isAgentBusy(userId: string) {
+  return activeAgentUsers.has(userId);
 }
 
 export async function runAgentCommand(options: {
@@ -225,6 +249,7 @@ export async function runAgentCommand(options: {
   userId: string;
   text: string;
   botUserId: string;
+  timeoutMs?: number;
 }) {
   const prompt = stripMentions(options.text, options.botUserId);
   if (!prompt) return "What should I do with the queue or playback?";
@@ -233,6 +258,7 @@ export async function runAgentCommand(options: {
 
   activeAgentUsers.add(options.userId);
   const startedAt = Date.now();
+  const timeoutMs = options.timeoutMs ?? agentTimeoutMs;
   try {
     const agent = new ToolLoopAgent({
       id: "huddlefm-session",
@@ -248,7 +274,7 @@ Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.j
     });
     const result = await agent.generate({
       prompt,
-      abortSignal: AbortSignal.timeout(agentTimeoutMs),
+      abortSignal: AbortSignal.timeout(timeoutMs),
     });
     const text = result.text?.trim() || "Done.";
     captureAnalytics("agent.completed", {

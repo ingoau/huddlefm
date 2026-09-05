@@ -57,6 +57,12 @@ type Entry = TrackMetadata & {
   fadeOutSeconds?: number;
 };
 
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new DOMException("This operation was aborted", "AbortError");
+}
+
 export class Coordinator {
   readonly id: string;
   readonly participants = new Set<string>();
@@ -525,7 +531,8 @@ export class Coordinator {
     return this.enqueue(() => this.reanchor());
   }
 
-  agentStatus(userId: string) {
+  agentStatus(userId: string, signal?: AbortSignal) {
+    throwIfAborted(signal);
     if (!this.isParticipantOrManager(userId))
       return {
         ok: false as const,
@@ -581,7 +588,8 @@ export class Coordinator {
     };
   }
 
-  async agentSearch(userId: string, query: string) {
+  async agentSearch(userId: string, query: string, signal?: AbortSignal) {
+    throwIfAborted(signal);
     if (!this.isParticipantOrManager(userId))
       return {
         ok: false as const,
@@ -598,6 +606,7 @@ export class Coordinator {
       };
     try {
       const options = await this.tracks.suggestions(query, allowed);
+      throwIfAborted(signal);
       return {
         ok: true as const,
         results: options.map((option) => ({
@@ -606,11 +615,13 @@ export class Coordinator {
         })),
       };
     } catch (error) {
+      throwIfAborted(signal);
       return { ok: false as const, error: message(error) };
     }
   }
 
-  async agentAdd(userId: string, reference: string) {
+  async agentAdd(userId: string, reference: string, signal?: AbortSignal) {
+    throwIfAborted(signal);
     if (!this.isParticipantOrManager(userId))
       return {
         ok: false as const,
@@ -634,6 +645,7 @@ export class Coordinator {
         return { ok: false as const, error: message(urlError) };
       }
     }
+    throwIfAborted(signal);
     const tracks = Array.isArray(selection) ? selection : [selection];
     const needed = Array.isArray(selection) ? "add-bulk" : "add";
     if (!this.can(userId, needed))
@@ -642,6 +654,7 @@ export class Coordinator {
         error: "You do not have permission to add that.",
       };
     const pending = await this.enqueue(async () => {
+      throwIfAborted(signal);
       if (this.state === "ended" || this.state === "suspended") return;
       if (!this.can(userId, needed)) return;
       await this.removeQueuedAutoplay();
@@ -683,11 +696,24 @@ export class Coordinator {
     });
     if (!pending) return { ok: false as const, error: "Could not add tracks." };
     if ("error" in pending) return { ok: false as const, error: pending.error };
-    await Promise.all(
-      pending.pending.map(({ entry, controller }) =>
-        this.prepareManual(entry, controller),
-      ),
-    );
+    const abortPreparations = () => {
+      for (const { controller } of pending.pending) controller.abort();
+    };
+    if (signal?.aborted) {
+      abortPreparations();
+      throwIfAborted(signal);
+    }
+    signal?.addEventListener("abort", abortPreparations, { once: true });
+    try {
+      await Promise.all(
+        pending.pending.map(({ entry, controller }) =>
+          this.prepareManual(entry, controller),
+        ),
+      );
+    } finally {
+      signal?.removeEventListener("abort", abortPreparations);
+    }
+    throwIfAborted(signal);
     return {
       ok: true as const,
       added: tracks.map((track) => ({
@@ -697,8 +723,9 @@ export class Coordinator {
     };
   }
 
-  async agentRemove(userId: string, trackId: string) {
+  async agentRemove(userId: string, trackId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.isParticipantOrManager(userId))
         return {
           ok: false as const,
@@ -744,8 +771,10 @@ export class Coordinator {
       playNext?: boolean;
       position?: number;
     },
+    signal?: AbortSignal,
   ) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "manage-queue"))
         return {
           ok: false as const,
@@ -806,8 +835,9 @@ export class Coordinator {
     });
   }
 
-  async agentClear(userId: string) {
+  async agentClear(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "clear"))
         return {
           ok: false as const,
@@ -838,8 +868,9 @@ export class Coordinator {
     });
   }
 
-  async agentSkip(userId: string) {
+  async agentSkip(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "skip"))
         return {
           ok: false as const,
@@ -871,8 +902,9 @@ export class Coordinator {
     });
   }
 
-  async agentPrevious(userId: string) {
+  async agentPrevious(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "skip"))
         return {
           ok: false as const,
@@ -922,8 +954,9 @@ export class Coordinator {
     });
   }
 
-  async agentToggle(userId: string) {
+  async agentToggle(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "pause") || !this.current)
         return {
           ok: false as const,
@@ -950,8 +983,9 @@ export class Coordinator {
     });
   }
 
-  async agentSeek(userId: string, seconds: number) {
+  async agentSeek(userId: string, seconds: number, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "skip") || !this.current)
         return {
           ok: false as const,
@@ -980,8 +1014,9 @@ export class Coordinator {
     });
   }
 
-  async agentSetVolume(userId: string, percent: number) {
+  async agentSetVolume(userId: string, percent: number, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "volume"))
         return {
           ok: false as const,
@@ -1022,8 +1057,10 @@ export class Coordinator {
       permissionPreset?: keyof typeof permissionPresets;
       hostUserId?: string;
     },
+    signal?: AbortSignal,
   ) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.isParticipantOrManager(userId) && !this.settingsAdmin(userId))
         return {
           ok: false as const,
@@ -1146,8 +1183,9 @@ export class Coordinator {
     });
   }
 
-  async agentClaimHost(userId: string) {
+  async agentClaimHost(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (this.hostId)
         return { ok: false as const, error: "Host already claimed." };
       if (userId === this.botUserId || !this.participants.has(userId))
@@ -1163,8 +1201,9 @@ export class Coordinator {
     });
   }
 
-  async agentEnd(userId: string) {
+  async agentEnd(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
+      throwIfAborted(signal);
       if (!this.can(userId, "end-session"))
         return {
           ok: false as const,
@@ -1177,7 +1216,12 @@ export class Coordinator {
     });
   }
 
-  agentSetSessionScrobbling(userId: string, enabled: boolean) {
+  agentSetSessionScrobbling(
+    userId: string,
+    enabled: boolean,
+    signal?: AbortSignal,
+  ) {
+    throwIfAborted(signal);
     if (!this.isParticipantOrManager(userId))
       return {
         ok: false as const,
