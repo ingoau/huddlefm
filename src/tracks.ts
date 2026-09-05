@@ -42,7 +42,11 @@ async function readLimited(response: Response, limit: number) {
     if (!value) continue;
     total += value.byteLength;
     if (total > limit) {
-      await reader.cancel();
+      try {
+        await reader.cancel();
+      } catch {
+        // Keep the size-limit error even if cancellation fails.
+      }
       throw new TrackError("That link is not supported", {
         detail: "Navidrome share page is too large",
       });

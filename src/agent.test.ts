@@ -18,10 +18,13 @@ test("stripMentions removes bot tags", () => {
 
 test("agentConfigured reflects OpenRouter credentials", () => {
   const previous = process.env.OPENROUTER_API_KEY;
-  delete process.env.OPENROUTER_API_KEY;
-  expect(agentConfigured()).toBe(false);
-  process.env.OPENROUTER_API_KEY = "test-key";
-  expect(agentConfigured()).toBe(true);
-  if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
-  else process.env.OPENROUTER_API_KEY = previous;
+  try {
+    delete process.env.OPENROUTER_API_KEY;
+    expect(agentConfigured()).toBe(false);
+    process.env.OPENROUTER_API_KEY = "test-key";
+    expect(agentConfigured()).toBe(true);
+  } finally {
+    if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previous;
+  }
 });

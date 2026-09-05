@@ -630,8 +630,8 @@ export class Coordinator {
     } catch (error) {
       try {
         selection = await this.tracks.resolveUrl(reference);
-      } catch {
-        return { ok: false as const, error: message(error) };
+      } catch (urlError) {
+        return { ok: false as const, error: message(urlError) };
       }
     }
     const tracks = Array.isArray(selection) ? selection : [selection];
@@ -1164,15 +1164,17 @@ export class Coordinator {
   }
 
   async agentEnd(userId: string) {
-    if (!this.can(userId, "end-session"))
-      return {
-        ok: false as const,
-        error: this.isParticipantOrManager(userId)
-          ? "You do not have permission to end this session."
-          : "Join the huddle before using the player.",
-      };
-    await this.end(userId, "ended by agent");
-    return { ok: true as const, ended: true };
+    return this.enqueue(async () => {
+      if (!this.can(userId, "end-session"))
+        return {
+          ok: false as const,
+          error: this.isParticipantOrManager(userId)
+            ? "You do not have permission to end this session."
+            : "Join the huddle before using the player.",
+        };
+      await this.end(userId, "ended by agent");
+      return { ok: true as const, ended: true };
+    });
   }
 
   agentSetSessionScrobbling(userId: string, enabled: boolean) {

@@ -765,6 +765,30 @@ async function restoreEndedSession(interaction: Interaction) {
   }
 }
 
+async function mentionEphemeral(
+  channelId: string,
+  userId: string,
+  text: string,
+  threadTs?: string,
+  fallbackChannelId?: string,
+) {
+  try {
+    await slackApp.ephemeral(channelId, userId, text, threadTs);
+  } catch (error) {
+    if (!fallbackChannelId || fallbackChannelId === channelId) throw error;
+    log.warn(
+      {
+        event: "mention_ephemeral_fallback",
+        channelId,
+        fallbackChannelId,
+        err: error,
+      },
+      "Mention ephemeral failed in source channel; retrying in companion channel",
+    );
+    await slackApp.ephemeral(fallbackChannelId, userId, text);
+  }
+}
+
 async function joinMentionedHuddle(
   event: Extract<
     import("./slack-huddle.ts").HuddleEvent,
@@ -1098,23 +1122,22 @@ await slackHuddle.start((event) => {
           event.channelId === coordinator.room.sourceChannelId &&
           event.threadTs === coordinator.room.huddleThreadTs;
         if (mentionedInHuddleThread && companionId) {
-          void slackApp
-            .ephemeral(
-              event.channelId,
-              event.userId,
-              `Player controls are in <#${companionId}>. Mention me here with a request to control the session.`,
-              event.threadTs,
-            )
-            .catch((error) =>
-              log.warn(
-                {
-                  event: "companion_mention_hint_failed",
-                  channelId: event.channelId,
-                  err: error,
-                },
-                "Could not send companion channel mention hint",
-              ),
-            );
+          void mentionEphemeral(
+            event.channelId,
+            event.userId,
+            `Player controls are in <#${companionId}>. Mention me here with a request to control the session.`,
+            event.threadTs,
+            companionId,
+          ).catch((error) =>
+            log.warn(
+              {
+                event: "companion_mention_hint_failed",
+                channelId: event.channelId,
+                err: error,
+              },
+              "Could not send companion channel mention hint",
+            ),
+          );
         }
         void coordinator.repost().catch((error) =>
           log.error(
@@ -1128,23 +1151,22 @@ await slackHuddle.start((event) => {
           ),
         );
       } else if (!agentConfigured()) {
-        void slackApp
-          .ephemeral(
-            event.channelId,
-            event.userId,
-            "AI controls aren’t configured. Set OPENROUTER_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
-            event.threadTs,
-          )
-          .catch((error) =>
-            log.warn(
-              {
-                event: "agent_unconfigured_notice_failed",
-                channelId: event.channelId,
-                err: error,
-              },
-              "Could not send agent configuration notice",
-            ),
-          );
+        void mentionEphemeral(
+          event.channelId,
+          event.userId,
+          "AI controls aren’t configured. Set OPENROUTER_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
+          event.threadTs,
+          coordinator.room.companionChannelId,
+        ).catch((error) =>
+          log.warn(
+            {
+              event: "agent_unconfigured_notice_failed",
+              channelId: event.channelId,
+              err: error,
+            },
+            "Could not send agent configuration notice",
+          ),
+        );
       } else {
         void runAgentCommand({
           coordinator,
@@ -1153,11 +1175,12 @@ await slackHuddle.start((event) => {
           botUserId,
         })
           .then((reply) =>
-            slackApp.ephemeral(
+            mentionEphemeral(
               event.channelId,
               event.userId,
               reply,
               event.threadTs,
+              coordinator.room.companionChannelId,
             ),
           )
           .catch((error) =>

@@ -1,6 +1,7 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { ToolLoopAgent, stepCountIs, tool } from "ai";
 import { z } from "zod";
+import { capture as captureAnalytics } from "./analytics.ts";
 import type { Coordinator } from "./coordinator.ts";
 import {
   displayModes,
@@ -12,6 +13,8 @@ import {
 import { logger } from "./logger.ts";
 
 const log = logger.child({ component: "agent" });
+const agentTimeoutMs = 60_000;
+const activeAgentUsers = new Set<string>();
 
 export const agentModel = "google/gemini-3.5-flash-lite";
 
@@ -225,30 +228,48 @@ export async function runAgentCommand(options: {
 }) {
   const prompt = stripMentions(options.text, options.botUserId);
   if (!prompt) return "What should I do with the queue or playback?";
+  if (activeAgentUsers.has(options.userId))
+    return "I'm already handling your last request. Try again in a moment.";
 
-  const agent = new ToolLoopAgent({
-    id: "huddlefm-session",
-    model: openRouterModel(),
-    instructions: `You are HuddleFM, a Slack huddle music bot assistant.
+  activeAgentUsers.add(options.userId);
+  const startedAt = Date.now();
+  try {
+    const agent = new ToolLoopAgent({
+      id: "huddlefm-session",
+      model: openRouterModel(),
+      instructions: `You are HuddleFM, a Slack huddle music bot assistant.
 The user @mentioned you in the huddle thread (player controls may live in a companion channel). Help them control this listening session. Reply briefly; your reply is shown privately to them.
 Use tools for any playback, queue, search, settings, or session scrobbling change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
 Be concise. After taking actions, briefly confirm what changed. Do not invent track ids; search or read status first. Session scrobbling only works after the user has connected Last.fm or ListenBrainz in Settings.
 Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`,
-    tools: agentTools(options.coordinator, options.userId),
-    stopWhen: stepCountIs(10),
-    temperature: 0.2,
-  });
-
-  try {
-    const result = await agent.generate({ prompt });
-    const text = result.text?.trim();
-    return text || "Done.";
+      tools: agentTools(options.coordinator, options.userId),
+      stopWhen: stepCountIs(10),
+      temperature: 0.2,
+    });
+    const result = await agent.generate({
+      prompt,
+      abortSignal: AbortSignal.timeout(agentTimeoutMs),
+    });
+    const text = result.text?.trim() || "Done.";
+    captureAnalytics("agent.completed", {
+      distinctId: options.userId,
+      sessionId: options.coordinator.id,
+      properties: { durationMs: Date.now() - startedAt },
+    });
+    return text;
   } catch (error) {
+    captureAnalytics("agent.failed", {
+      distinctId: options.userId,
+      sessionId: options.coordinator.id,
+      properties: { durationMs: Date.now() - startedAt },
+    });
     log.error(
       { event: "agent_failed", userId: options.userId, err: error },
       "Agent command failed",
     );
     return "I couldn't complete that request. Try again in a moment.";
+  } finally {
+    activeAgentUsers.delete(options.userId);
   }
 }
 
