@@ -31,6 +31,33 @@ export function trackFailureDetail(error: unknown) {
   return error instanceof TrackError ? error.detail : undefined;
 }
 
+async function readLimited(response: Response, limit: number) {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw new TrackError("That link is not supported", {
+        detail: "Navidrome share page is too large",
+      });
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
 // Removed, private, blocked, and unreleased media are everyday conditions, so
 // they get a stable message rather than the extractor's own wording. That
 // wording embeds the source ID ("[youtube] H1FAwIMz-RQ: This video is not

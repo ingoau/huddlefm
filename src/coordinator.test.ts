@@ -2375,3 +2375,33 @@ test("reposts the player on demand when thread anchoring is disabled", async () 
   expect(test.deleted).toEqual([["channel", "1"]]);
   await test.coordinator.endFromSlack();
 });
+
+test("agent controls enforce the same permissions as the Slack UI", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  result.coordinator.memberJoined("listener");
+
+  const denied = await result.coordinator.agentSkip("listener");
+  expect(denied).toEqual({
+    ok: false,
+    error: "You do not have permission for that.",
+  });
+
+  const outsider = await result.coordinator.agentStatus("stranger");
+  expect(outsider).toMatchObject({
+    ok: false,
+    error: "Join the huddle before using the player.",
+  });
+
+  const status = await result.coordinator.agentStatus("host");
+  expect(status).toMatchObject({
+    ok: true,
+    youAreHost: true,
+  });
+
+  const volume = await result.coordinator.agentSetVolume("host", 42);
+  expect(volume).toEqual({ ok: true, volumePercent: 42 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.42 });
+
+  await result.coordinator.endFromSlack();
+});

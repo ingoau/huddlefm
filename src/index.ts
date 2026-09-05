@@ -9,6 +9,7 @@ import {
 import { AuditLog } from "./audit-log.ts";
 import { canvasMarkdown } from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
+import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { safeError } from "./error-message.ts";
@@ -1074,8 +1075,10 @@ await slackHuddle.start((event) => {
           "Could not react to Huddle mention",
         ),
       );
-      void (runtime?.coordinator?.repost() ?? joinMentionedHuddle(event)).catch(
-        (error) =>
+      const bare = isBareMention(event.text, botUserId);
+      const coordinator = runtime?.coordinator;
+      if (!coordinator) {
+        void joinMentionedHuddle(event).catch((error) =>
           log.error(
             {
               event: "mention_action_failed",
@@ -1085,7 +1088,64 @@ await slackHuddle.start((event) => {
             },
             "Could not handle Huddle mention",
           ),
-      );
+        );
+      } else if (bare) {
+        void coordinator.repost().catch((error) =>
+          log.error(
+            {
+              event: "mention_action_failed",
+              channelId: event.channelId,
+              userId: event.userId,
+              err: error,
+            },
+            "Could not handle Huddle mention",
+          ),
+        );
+      } else if (!agentConfigured()) {
+        void slackApp
+          .ephemeral(
+            event.channelId,
+            event.userId,
+            "AI controls aren’t configured. Set AI_GATEWAY_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
+            event.threadTs,
+          )
+          .catch((error) =>
+            log.warn(
+              {
+                event: "agent_unconfigured_notice_failed",
+                channelId: event.channelId,
+                err: error,
+              },
+              "Could not send agent configuration notice",
+            ),
+          );
+      } else {
+        void runAgentCommand({
+          coordinator,
+          userId: event.userId,
+          text: event.text,
+          botUserId,
+        })
+          .then((reply) =>
+            slackApp.ephemeral(
+              event.channelId,
+              event.userId,
+              reply,
+              event.threadTs,
+            ),
+          )
+          .catch((error) =>
+            log.error(
+              {
+                event: "mention_agent_failed",
+                channelId: event.channelId,
+                userId: event.userId,
+                err: error,
+              },
+              "Could not handle agent mention",
+            ),
+          );
+      }
     }
     if (!mentioned) runtime?.coordinator?.threadActivity(event.userId);
     return;
