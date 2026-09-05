@@ -499,7 +499,9 @@ socket.addEventListener("message", async (event) => {
       await new Promise((resolve) => setTimeout(resolve, 220));
       if (change !== transition || currentId !== message.entryId) return;
       title.textContent = message.title;
-      artist.textContent = message.artist;
+      artist.textContent = message.requesterLabel
+        ? `${message.artist} — ${message.requesterLabel}`
+        : message.artist;
       artwork.style.backgroundImage = message.artwork
         ? `url(${JSON.stringify(message.artwork)})`
         : "";
