@@ -1102,7 +1102,7 @@ await slackHuddle.start((event) => {
             .ephemeral(
               event.channelId,
               event.userId,
-              `Player controls are in <#${companionId}>. Mention me here with a request to control the session — replies stay private.`,
+              `Player controls are in <#${companionId}>. Mention me here with a request to control the session.`,
               event.threadTs,
             )
             .catch((error) =>
