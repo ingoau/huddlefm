@@ -117,6 +117,19 @@ test("persists companion channels and cleanup jobs", () => {
       attempts: 0,
     },
   ]);
+  store.activateSession("session", "playing");
+  expect(store.dueSessionMessages(200)).toEqual([]);
+  expect(
+    store.db
+      .query(
+        "SELECT message_cleanup_at, delete_at, next_attempt_at FROM sessions JOIN session_messages ON sessions.id = session_messages.session_id WHERE sessions.id = ?",
+      )
+      .get("session"),
+  ).toEqual({
+    message_cleanup_at: null,
+    delete_at: null,
+    next_attempt_at: null,
+  });
   expect(store.restorableSessions()).toEqual([]);
   expect(store.sessionParticipants("session")).toEqual(["host", "listener"]);
   expect(store.sessionCompanionChannel("session")).toBe("replacement");

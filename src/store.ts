@@ -628,13 +628,24 @@ export class Store {
   }
 
   activateSession(sessionId: string, status: string) {
-    this.db
-      .query(
-        `UPDATE sessions SET
-      status = ?, resume_state = NULL, resume_until = NULL, end_text = NULL,
-      end_blocks = NULL, message_cleanup_at = NULL, updated_at = ? WHERE id = ?`,
-      )
-      .run(status, Date.now(), sessionId);
+    this.db.transaction(() => {
+      this.db
+        .query(
+          `UPDATE sessions SET
+        status = ?, resume_state = NULL, resume_until = NULL, end_text = NULL,
+        end_blocks = NULL, message_cleanup_at = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(status, Date.now(), sessionId);
+      // Restored sessions reuse the end-recap message as the live player.
+      // Cancel any companion-channel deletions scheduled while the session was ended.
+      this.db
+        .query(
+          `UPDATE session_messages
+          SET delete_at = NULL, next_attempt_at = NULL, attempts = 0
+          WHERE session_id = ?`,
+        )
+        .run(sessionId);
+    })();
   }
 
   canvasStats() {

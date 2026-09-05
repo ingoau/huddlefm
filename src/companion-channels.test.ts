@@ -166,6 +166,32 @@ test("cleans tracked members and messages after their deadlines", async () => {
   store.close();
 });
 
+test("keeps companion player messages after a session is restored", async () => {
+  const { store, manager, deleted } = setup();
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "companion",
+    threadTs: "",
+    creatorId: "creator",
+    volume: 0.6,
+  });
+  manager.recordMessage("session", "companion", "player");
+  manager.endSession("session", "companion", ["host"]);
+  manager.recordMessage("session", "companion", "recap");
+  // resume() activates the session and reuses the recap message as the player
+  store.activateSession("session", "playing");
+  manager.recordMessage("session", "companion", "restored-player");
+  const deadline = Date.now() + 10 * 60_000;
+  await (manager as unknown as { cleanup(now: number): Promise<void> }).cleanup(
+    deadline,
+  );
+  expect(deleted).toEqual([]);
+  expect(store.dueSessionMessages(deadline)).toEqual([]);
+  store.close();
+});
+
 test("reinvites a participant who rejoins during an in-flight removal", async () => {
   const store = new Store(":memory:");
   const operations: string[] = [];
