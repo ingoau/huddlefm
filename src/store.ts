@@ -894,6 +894,16 @@ export class Store {
     )?.channelId;
   }
 
+  sourceChannelForCompanion(channelId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT source_channel_id AS sourceChannelId FROM companion_channels WHERE channel_id = ?",
+        )
+        .get(channelId) as { sourceChannelId: string } | null
+    )?.sourceChannelId;
+  }
+
   setCompanionChannel(sourceChannelId: string, channelId: string) {
     const now = Date.now();
     this.db

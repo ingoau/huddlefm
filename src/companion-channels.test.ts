@@ -57,8 +57,8 @@ test("creates and reconciles a companion channel", async () => {
   expect(invited).toEqual(["host", "host", "guest"]);
   expect(removed).toEqual(["stale"]);
   expect(dms).toEqual([
-    "host:I added you to <#companion> so you can control HuddleFM from there.",
-    "guest:I added you to <#companion> so you can control HuddleFM from there.",
+    "host:You invited me to a huddle in <#source>, so I've added you to <#companion> to control the music.",
+    "guest:You joined a huddle in <#source>, so I've added you to <#companion> to control the music.",
   ]);
   store.close();
 });
@@ -69,7 +69,7 @@ test("continues when companion posting restrictions fail", async () => {
   expect(invited).toEqual(["host"]);
   expect(dms).toEqual([
     "host:I couldn’t restrict posting in <#companion>, so anyone in it can post there. You can change this in the channel’s settings.",
-    "host:I added you to <#companion> so you can control HuddleFM from there.",
+    "host:You invited me to a huddle in <#source>, so I've added you to <#companion> to control the music.",
   ]);
   store.close();
 });
@@ -86,7 +86,7 @@ test("forces a companion channel for an accessible source", async () => {
   expect(await manager.prepare("source", "host", true)).toBe("companion");
   expect(invited).toEqual(["host"]);
   expect(dms).toEqual([
-    "host:I added you to <#companion> so you can control HuddleFM from there.",
+    "host:You invited me to a huddle in <#source>, so I've added you to <#companion> to control the music.",
   ]);
   store.close();
 });
@@ -97,13 +97,14 @@ test("DMs a participant when they are added after joining the huddle", async () 
   dms.length = 0;
   await manager.add("companion", "guest");
   expect(dms).toEqual([
-    "guest:I added you to <#companion> so you can control HuddleFM from there.",
+    "guest:You joined a huddle in <#source>, so I've added you to <#companion> to control the music.",
   ]);
   store.close();
 });
 
 test("does not DM a participant who is already in the companion channel", async () => {
   const { store, manager, dms } = setup();
+  store.setCompanionChannel("source", "companion");
   await manager.add("companion", "guest");
   dms.length = 0;
   await manager.add("companion", "guest");
@@ -201,6 +202,7 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
     },
     "bot",
   );
+  store.setCompanionChannel("source", "companion");
   manager.removeLater("companion", "user", 0);
   const cleanup = (
     manager as unknown as { cleanup(now: number): Promise<void> }
@@ -211,7 +213,7 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
   await Promise.all([cleanup, rejoin]);
   expect(operations).toEqual(["kick", "invite", "invite"]);
   expect(dms).toEqual([
-    "user:I added you to <#companion> so you can control HuddleFM from there.",
+    "user:You joined a huddle in <#source>, so I've added you to <#companion> to control the music.",
   ]);
   expect(store.companionRemovalDeadline("companion", "user")).toBeUndefined();
   store.close();

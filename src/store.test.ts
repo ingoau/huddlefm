@@ -81,6 +81,8 @@ test("persists companion channels and cleanup jobs", () => {
   store.setCompanionChannel("source", "companion");
   store.setCompanionChannel("source", "replacement");
   expect(store.companionChannel("source")).toBe("replacement");
+  expect(store.sourceChannelForCompanion("replacement")).toBe("source");
+  expect(store.sourceChannelForCompanion("missing")).toBeUndefined();
 
   store.scheduleCompanionRemoval("replacement", "user", 100);
   expect(store.dueCompanionRemovals(99)).toEqual([]);

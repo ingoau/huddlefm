@@ -6,6 +6,8 @@ import type { Store } from "./store.ts";
 const cleanupDelayMs = 10 * 60_000;
 const log = logger.child({ component: "companion-channels" });
 
+type InviteReason = "host" | "joined";
+
 export class CompanionChannels {
   private timer?: ReturnType<typeof setInterval>;
   private cleaning = false;
@@ -44,7 +46,7 @@ export class CompanionChannels {
     }
     if (!channelId) channelId = await this.create(sourceChannelId);
     await this.restrict(channelId, hostId);
-    await this.add(channelId, hostId).catch((error) => {
+    await this.add(channelId, hostId, "host").catch((error) => {
       this.abortSetup(channelId, [hostId]);
       throw error;
     });
@@ -55,7 +57,7 @@ export class CompanionChannels {
     this.store.clearCompanionChannel(sourceChannelId);
     const channelId = await this.create(sourceChannelId);
     await this.restrict(channelId, hostId);
-    await this.add(channelId, hostId).catch((error) => {
+    await this.add(channelId, hostId, "host").catch((error) => {
       this.abortSetup(channelId, [hostId]);
       throw error;
     });
@@ -104,10 +106,14 @@ export class CompanionChannels {
       );
   }
 
-  async add(channelId: string, userId: string) {
+  async add(
+    channelId: string,
+    userId: string,
+    reason: InviteReason = "joined",
+  ) {
     this.store.cancelCompanionRemoval(channelId, userId);
     await this.serialize(channelId, userId, () =>
-      this.invite(channelId, userId),
+      this.invite(channelId, userId, reason),
     );
   }
 
@@ -172,7 +178,8 @@ export class CompanionChannels {
         job.channelId,
         job.userId,
       );
-      if (current === undefined) await this.invite(job.channelId, job.userId);
+      if (current === undefined)
+        await this.invite(job.channelId, job.userId, "joined");
       else if (current === job.dueAt)
         this.store.completeCompanionRemoval(
           job.channelId,
@@ -198,14 +205,16 @@ export class CompanionChannels {
     return pending;
   }
 
-  private async invite(channelId: string, userId: string) {
+  private async invite(
+    channelId: string,
+    userId: string,
+    reason: InviteReason,
+  ) {
     const invited = await this.slack.inviteToChannel(channelId, userId);
     if (!invited || userId === this.userId) return;
+    const sourceChannelId = this.store.sourceChannelForCompanion(channelId);
     await this.app
-      .dm(
-        userId,
-        `I added you to <#${channelId}> so you can control HuddleFM from there.`,
-      )
+      .dm(userId, inviteNotice(channelId, sourceChannelId, reason))
       .catch((error) => {
         log.warn(
           { event: "invite_notice_failed", channelId, userId, err: error },
@@ -281,6 +290,21 @@ export class CompanionChannels {
       this.cleaning = false;
     });
   }
+}
+
+function inviteNotice(
+  channelId: string,
+  sourceChannelId: string | undefined,
+  reason: InviteReason,
+) {
+  if (sourceChannelId) {
+    if (reason === "host")
+      return `You invited me to a huddle in <#${sourceChannelId}>, so I've added you to <#${channelId}> to control the music.`;
+    return `You joined a huddle in <#${sourceChannelId}>, so I've added you to <#${channelId}> to control the music.`;
+  }
+  if (reason === "host")
+    return `I've added you to <#${channelId}> so you can control the music from there.`;
+  return `I've added you to <#${channelId}> so you can control the music from there.`;
 }
 
 function retryDelay(attempts: number) {
