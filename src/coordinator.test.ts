@@ -76,6 +76,7 @@ function setup(
         hash: `updated-${updatedModals.length}`,
       };
     },
+    userName: (userId: string) => Promise.resolve(`Name ${userId}`),
   } as unknown as SlackAppAdapter;
   const store =
     storeOverride ??
