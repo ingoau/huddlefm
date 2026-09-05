@@ -1106,7 +1106,7 @@ await slackHuddle.start((event) => {
           .ephemeral(
             event.channelId,
             event.userId,
-            "AI controls aren’t configured. Set AI_GATEWAY_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
+            "AI controls aren’t configured. Set OPENROUTER_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
             event.threadTs,
           )
           .catch((error) =>

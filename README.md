@@ -23,7 +23,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 
 Invite the bot to a huddle or ping it in the thread. It will join the huddle and send a UI in the thread to add songs to the queue and control playback. You'll be the host by default. If the UI gets buried by conversation in the thread, mention the bot with nothing else to bring it back to the bottom, or keep it at the bottom by enabling anchor in the settings.
 
-With `AI_GATEWAY_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap Gemini model through the Vercel AI Gateway and the same permissions you already have in the player UI.
+With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap Gemini model through OpenRouter and the same permissions you already have in the player UI.
 
 ## Self hosting
 
@@ -52,7 +52,7 @@ LASTFM_API_KEY=replace-me # Last.fm API key for account linking for scrobbling
 LASTFM_SHARED_SECRET=replace-me # Last.fm shared secret
 POSTHOG_API_KEY=phc_... # Enable PostHog analytics and error tracking
 POSTHOG_HOST=https://us.i.posthog.com # PostHog ingestion host
-AI_GATEWAY_API_KEY=vercel_... # Enables @mention AI controls via Vercel AI Gateway
+OPENROUTER_API_KEY=sk-or-... # Enables @mention AI controls via OpenRouter
 QUEUE_LIMIT=50 # Maximum number of tracks in the queue
 TRACK_DURATION_LIMIT_SECONDS=1200 # Maximum duration of a track in seconds
 TRACK_DOWNLOAD_LIMIT_BYTES=100000000 # Maximum size of a track in bytes

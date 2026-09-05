@@ -16,13 +16,12 @@ test("stripMentions removes bot tags", () => {
   expect(stripMentions("<@UBOT|HuddleFM> skip", "UBOT")).toBe("skip");
 });
 
-test("agentConfigured reflects AI Gateway credentials", () => {
-  const previous = process.env.AI_GATEWAY_API_KEY;
-  delete process.env.AI_GATEWAY_API_KEY;
-  delete process.env.VERCEL_OIDC_TOKEN;
+test("agentConfigured reflects OpenRouter credentials", () => {
+  const previous = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
   expect(agentConfigured()).toBe(false);
-  process.env.AI_GATEWAY_API_KEY = "test-key";
+  process.env.OPENROUTER_API_KEY = "test-key";
   expect(agentConfigured()).toBe(true);
-  if (previous === undefined) delete process.env.AI_GATEWAY_API_KEY;
-  else process.env.AI_GATEWAY_API_KEY = previous;
+  if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
+  else process.env.OPENROUTER_API_KEY = previous;
 });

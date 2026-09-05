@@ -1,3 +1,4 @@
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { ToolLoopAgent, stepCountIs, tool } from "ai";
 import { z } from "zod";
 import type { Coordinator } from "./coordinator.ts";
@@ -28,10 +29,20 @@ export function stripMentions(text: string, botUserId: string) {
 }
 
 export function agentConfigured() {
-  return Boolean(
-    process.env.AI_GATEWAY_API_KEY?.trim() ||
-    process.env.VERCEL_OIDC_TOKEN?.trim(),
-  );
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim());
+}
+
+function openRouterModel() {
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
+  return createOpenRouter({
+    apiKey,
+    compatibility: "strict",
+    headers: {
+      "HTTP-Referer": "https://github.com/ingoau/huddlefm",
+      "X-Title": "HuddleFM",
+    },
+  })(agentModel);
 }
 
 function trackSummary(track: {
@@ -206,7 +217,7 @@ export async function runAgentCommand(options: {
 
   const agent = new ToolLoopAgent({
     id: "huddlefm-session",
-    model: agentModel,
+    model: openRouterModel(),
     instructions: `You are HuddleFM, a Slack huddle music bot assistant.
 The user @mentioned you in the huddle controls thread. Help them control this listening session.
 Use tools for any playback, queue, search, or settings change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
