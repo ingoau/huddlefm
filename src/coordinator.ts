@@ -653,74 +653,109 @@ export class Coordinator {
         ok: false as const,
         error: "You do not have permission to add that.",
       };
-    const pending = await this.enqueue(async () => {
+    const committed = await this.enqueue(async () => {
       throwIfAborted(signal);
       if (this.state === "ended" || this.state === "suspended") return;
       if (!this.can(userId, needed)) return;
-      await this.removeQueuedAutoplay();
-      const available =
-        this.config.queueLimit -
-        this.queue.length -
-        Number(Boolean(this.current));
-      if (tracks.length > available)
-        return {
-          error: available
-            ? `The queue only has room for ${available} more songs.`
-            : "The queue is full.",
-        };
-      const entries = tracks.map((metadata) => ({
-        ...metadata,
-        id: crypto.randomUUID(),
-        requesterId: userId,
-        status: "preparing",
-      }));
-      const pending = entries.map((entry) => {
-        const controller = new AbortController();
-        this.preparations.set(entry.id, controller);
-        this.queue.push(entry);
-        this.store.addTrack({
-          ...entry,
-          sessionId: this.id,
-          status: entry.status,
+      const heldAutoplay = this.takeQueuedAutoplay();
+      let pending: { entry: Entry; controller: AbortController }[] = [];
+      try {
+        // Yield so an abort can land after autoplay is detached and before we
+        // commit manual queue entries (same window as removeQueuedAutoplay's awaits).
+        await Promise.resolve();
+        throwIfAborted(signal);
+        const available =
+          this.config.queueLimit -
+          this.queue.length -
+          Number(Boolean(this.current));
+        if (tracks.length > available) {
+          this.restoreQueuedAutoplay(heldAutoplay);
+          return {
+            error: available
+              ? `The queue only has room for ${available} more songs.`
+              : "The queue is full.",
+          };
+        }
+        const entries = tracks.map((metadata) => ({
+          ...metadata,
+          id: crypto.randomUUID(),
+          requesterId: userId,
+          status: "preparing",
+        }));
+        pending = entries.map((entry) => {
+          const controller = new AbortController();
+          this.preparations.set(entry.id, controller);
+          this.queue.push(entry);
+          this.store.addTrack({
+            ...entry,
+            sessionId: this.id,
+            status: entry.status,
+          });
+          this.audit.record("track.added", userId, {
+            sessionId: this.id,
+            ...auditTrack(entry),
+          });
+          this.store.incrementUsage("added");
+          return { entry, controller };
         });
-        this.audit.record("track.added", userId, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-        });
-        this.store.incrementUsage("added");
-        return { entry, controller };
-      });
-      await this.render();
-      this.queueChanged();
-      return { pending };
+        await this.render();
+        this.queueChanged();
+        throwIfAborted(signal);
+        return { pending, heldAutoplay };
+      } catch (error) {
+        for (const { entry, controller } of pending) {
+          controller.abort();
+          this.preparations.delete(entry.id);
+          this.queue = this.queue.filter((item) => item !== entry);
+          this.store.removeTrack(entry.id);
+        }
+        this.restoreQueuedAutoplay(heldAutoplay);
+        if (pending.length) {
+          this.queueChanged();
+          await this.render();
+        }
+        throw error;
+      }
     });
-    if (!pending) return { ok: false as const, error: "Could not add tracks." };
-    if ("error" in pending) return { ok: false as const, error: pending.error };
+    if (!committed)
+      return { ok: false as const, error: "Could not add tracks." };
+    if ("error" in committed)
+      return { ok: false as const, error: committed.error };
     const abortPreparations = () => {
-      for (const { controller } of pending.pending) controller.abort();
+      for (const { controller } of committed.pending) controller.abort();
+    };
+    const rollback = async () => {
+      abortPreparations();
+      await this.rollbackAgentAdd(committed.pending, committed.heldAutoplay);
     };
     if (signal?.aborted) {
-      abortPreparations();
+      await rollback();
       throwIfAborted(signal);
     }
     signal?.addEventListener("abort", abortPreparations, { once: true });
     try {
       await Promise.all(
-        pending.pending.map(({ entry, controller }) =>
+        committed.pending.map(({ entry, controller }) =>
           this.prepareManual(entry, controller),
         ),
       );
+      throwIfAborted(signal);
+      await this.enqueue(async () => {
+        await this.destroyQueuedAutoplay(committed.heldAutoplay);
+      });
+      return {
+        ok: true as const,
+        added: tracks.map((track) => ({
+          title: track.title,
+          artist: track.artist,
+        })),
+      };
+    } catch (error) {
+      await rollback();
+      throw error;
     } finally {
       signal?.removeEventListener("abort", abortPreparations);
     }
-    throwIfAborted(signal);
-    return {
-      ok: true as const,
-      added: tracks.map((track) => ({
-        title: track.title,
-        artist: track.artist,
-      })),
-    };
   }
 
   async agentRemove(userId: string, trackId: string, signal?: AbortSignal) {
@@ -1854,17 +1889,52 @@ export class Coordinator {
     }
   }
 
-  private async removeQueuedAutoplay() {
+  private takeQueuedAutoplay() {
     this.autoplayGeneration++;
     this.autoplayPending = false;
     const automatic = this.queue.filter((track) => track.automatic);
     this.queue = this.queue.filter((track) => !track.automatic);
     if (automatic.length) this.queueChanged();
+    return automatic;
+  }
+
+  private restoreQueuedAutoplay(automatic: Entry[]) {
+    if (!automatic.length) return;
+    for (const entry of automatic) {
+      if (this.queue.some((track) => track.id === entry.id)) continue;
+      this.queue.push(entry);
+    }
+    this.queueChanged();
+  }
+
+  private async destroyQueuedAutoplay(automatic: Entry[]) {
     for (const entry of automatic) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
       if (entry.filePath) await rm(entry.filePath, { force: true });
     }
+  }
+
+  private async rollbackAgentAdd(
+    pending: { entry: Entry; controller: AbortController }[],
+    heldAutoplay: Entry[],
+  ) {
+    for (const { controller } of pending) controller.abort();
+    await this.enqueue(async () => {
+      for (const { entry } of pending) {
+        this.preparations.delete(entry.id);
+        if (!this.queue.includes(entry)) continue;
+        this.queue = this.queue.filter((item) => item !== entry);
+        this.store.removeTrack(entry.id);
+        if (entry.filePath) await rm(entry.filePath, { force: true });
+      }
+      this.restoreQueuedAutoplay(heldAutoplay);
+      await this.render();
+    });
+  }
+
+  private async removeQueuedAutoplay() {
+    await this.destroyQueuedAutoplay(this.takeQueuedAutoplay());
   }
 
   private async startNext() {

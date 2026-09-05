@@ -2528,3 +2528,152 @@ test("agentAdd skips enqueue when aborted after resolve", async () => {
   });
   await test.coordinator.endFromSlack();
 });
+
+test("agentAdd restores autoplay when aborted during autoplay hold", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: (
+      _track: unknown,
+      _directory: string,
+      _entryId: string,
+      signal?: AbortSignal,
+    ) =>
+      new Promise<string>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () =>
+            reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "queue", [
+    {
+      id: "auto",
+      requesterId: "bot",
+      sourceId: "auto",
+      title: "Auto",
+      artist: "Radio",
+      automatic: true,
+      status: "ready",
+      filePath: "auto.opus",
+    },
+  ]);
+  const controller = new AbortController();
+  const pending = test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+    controller.signal,
+  );
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const queue = Reflect.get(test.coordinator, "queue") as {
+      automatic?: boolean;
+    }[];
+    if (!queue.some((track) => track.automatic)) {
+      controller.abort();
+      break;
+    }
+    await Bun.sleep(1);
+  }
+  await expect(pending).rejects.toBeTruthy();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [
+      expect.objectContaining({
+        id: "auto",
+        title: "Auto",
+        automatic: true,
+      }),
+    ],
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd restores autoplay when aborted during preparation", async () => {
+  const tracks = {
+    resolve: async () => {
+      throw new Error("expired");
+    },
+    resolveUrl: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: (
+      _track: unknown,
+      _directory: string,
+      _entryId: string,
+      signal?: AbortSignal,
+    ) =>
+      new Promise<string>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () =>
+            reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }),
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "queue", [
+    {
+      id: "auto",
+      requesterId: "bot",
+      sourceId: "auto",
+      title: "Auto",
+      artist: "Radio",
+      automatic: true,
+      status: "ready",
+      filePath: "auto.opus",
+    },
+  ]);
+  const controller = new AbortController();
+  const pending = test.coordinator.agentAdd(
+    "host",
+    "https://example.com/song",
+    controller.signal,
+  );
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const queue = Reflect.get(test.coordinator, "queue") as {
+      id: string;
+      automatic?: boolean;
+    }[];
+    if (queue.some((track) => track.id !== "auto" && !track.automatic)) {
+      controller.abort();
+      break;
+    }
+    await Bun.sleep(1);
+  }
+  await expect(pending).rejects.toBeTruthy();
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    ok: true,
+    queue: [
+      expect.objectContaining({
+        id: "auto",
+        title: "Auto",
+        automatic: true,
+      }),
+    ],
+  });
+  await test.coordinator.endFromSlack();
+});
