@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { assertPublicUrl } from "./public-proxy.ts";
 import {
   applyEmbeddedMetadata,
+  embeddedArtworkPath,
+  extractEmbeddedArtwork,
   extractorFailure,
   isExpectedTrackFailure,
   looksLikeFilenameTitle,
@@ -15,6 +17,7 @@ import {
   probeEmbeddedMetadata,
   publicArtworkUrl,
   shouldProbeEmbeddedMetadata,
+  shouldRetainSourceForMetadata,
   TrackCatalog,
   trackFailureDetail,
   transitionData,
@@ -76,6 +79,26 @@ test("detects filename-like titles for direct media links", () => {
       sourceId: "song",
     }),
   ).toBe(false);
+  expect(
+    shouldRetainSourceForMetadata({
+      title: "Volcano Mines",
+      artist: "ConcernedApe",
+      canonicalUrl: "https://example.com/volcano.mp3",
+      sourceId: "volcano",
+    }),
+  ).toBe(true);
+  expect(
+    shouldRetainSourceForMetadata({
+      title: "Volcano Mines",
+      artist: "ConcernedApe",
+      canonicalUrl: "https://example.com/volcano.mp3",
+      sourceId: "volcano",
+      artwork: "https://example.com/cover.jpg",
+    }),
+  ).toBe(false);
+  expect(embeddedArtworkPath("data/media/session/track.opus")).toBe(
+    "data/media/session/track.cover.jpg",
+  );
 });
 
 test("prefers embedded tags over filename metadata", () => {
@@ -181,6 +204,83 @@ test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
         await new Promise<void>((resolve, reject) =>
           proxy.close((error) => (error ? reject(error) : resolve())),
         );
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
+  "extracts embedded album artwork from local audio files",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-cover-"));
+    const coverPath = join(directory, "cover.png");
+    const songPath = join(directory, "song.mp3");
+    const outputPath = join(directory, "song.cover.jpg");
+    try {
+      const cover = Bun.spawnSync([
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=red:s=64x64:d=1",
+        "-frames:v",
+        "1",
+        coverPath,
+      ]);
+      expect(cover.exitCode).toBe(0);
+      const encoded = Bun.spawnSync([
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-i",
+        coverPath,
+        "-map",
+        "0:a",
+        "-map",
+        "1:v",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "64k",
+        "-c:v",
+        "copy",
+        "-disposition:v",
+        "attached_pic",
+        "-metadata",
+        "title=Cover Song",
+        songPath,
+      ]);
+      expect(encoded.exitCode).toBe(0);
+      expect(await extractEmbeddedArtwork(songPath, outputPath)).toBe(
+        outputPath,
+      );
+      expect(await Bun.file(outputPath).exists()).toBe(true);
+      expect((await Bun.file(outputPath).size) > 0).toBe(true);
+      // Files without an attached picture should fail quietly.
+      const plain = join(directory, "plain.mp3");
+      const plainEncoded = Bun.spawnSync([
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "64k",
+        plain,
+      ]);
+      expect(plainEncoded.exitCode).toBe(0);
+      expect(
+        await extractEmbeddedArtwork(plain, join(directory, "none.jpg")),
+      ).toBeUndefined();
+      expect(await Bun.file(join(directory, "none.jpg")).exists()).toBe(false);
+    } finally {
       await rm(directory, { recursive: true, force: true });
     }
   },
