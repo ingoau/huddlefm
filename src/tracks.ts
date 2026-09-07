@@ -4,6 +4,7 @@ import { logger } from "./logger.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
 const log = logger.child({ component: "tracks" });
+const maxEmbeddedArtworkBytes = 5 * 1024 * 1024;
 
 // A track failure that is caused by the media itself, not by a fault in
 // HuddleFM. The message is stable and safe to show in Slack; `detail` keeps the
@@ -1082,13 +1083,17 @@ export async function extractEmbeddedArtwork(
         "1",
         "-c:v",
         "mjpeg",
+        "-fs",
+        String(maxEmbeddedArtworkBytes),
         outputPath,
       ],
       30_000,
       signal,
     );
     if (!(await Bun.file(outputPath).exists())) return;
-    if ((await Bun.file(outputPath).size) <= 0) {
+    // FFmpeg's -fs limit may be exceeded by a small amount while writing.
+    const size = await Bun.file(outputPath).size;
+    if (size <= 0 || size > maxEmbeddedArtworkBytes) {
       await rm(outputPath, { force: true });
       return;
     }
