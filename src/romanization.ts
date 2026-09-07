@@ -1,5 +1,5 @@
 import { containsNonLatin, detectNonLatinLanguage } from "@braccato/core/text";
-import type { Lyric } from "@braccato/core";
+import type { Lyric, LyricPart } from "@braccato/core";
 import { transliterate } from "transliteration";
 import { isJapanese, toRomaji } from "wanakana";
 import { logger } from "./logger.ts";
@@ -247,7 +247,10 @@ export async function enrichLyricsWithRomanization(
     const text = line.words.trim();
     return [{ lineIndex, text, lang: lineLanguage(text) }];
   });
-  if (pending.length === 0) return lines;
+  if (pending.length === 0) {
+    attachTimedRomanizations(lines);
+    return lines;
+  }
 
   const results = new Map<number, string>();
   for (const [lang, group] of groupByLanguage(pending))
@@ -266,6 +269,8 @@ export async function enrichLyricsWithRomanization(
     attached += 1;
   }
 
+  attachTimedRomanizations(lines);
+
   if (attached)
     log.info(
       {
@@ -277,6 +282,49 @@ export async function enrichLyricsWithRomanization(
       "Attached lyric romanizations",
     );
   return lines;
+}
+
+/**
+ * Maps a line romanization onto the sung timeline so Braccato can karaoke-sync
+ * the romanized words with the original line.
+ */
+export function buildTimedRomanization(line: Lyric): LyricPart[] | undefined {
+  const text = line.romanization?.trim();
+  if (!text || line.isInstrumental) return;
+  const tokens = text.match(/\S+/gu);
+  if (!tokens?.length) return;
+
+  const timed = line.parts?.filter((part) => part.durationMs > 0) ?? [];
+  const startTimeMs = timed[0]?.startTimeMs ?? line.startTimeMs;
+  const last = timed.at(-1);
+  const endTimeMs = last
+    ? last.startTimeMs + last.durationMs
+    : line.startTimeMs + line.durationMs;
+  const durationMs = Math.max(0, endTimeMs - startTimeMs);
+  const letters = tokens.reduce((sum, token) => sum + token.length, 0);
+  if (letters === 0) return;
+
+  const parts: LyricPart[] = [];
+  let cursor = 0;
+  for (const [index, token] of tokens.entries()) {
+    const start = startTimeMs + Math.round((durationMs * cursor) / letters);
+    cursor += token.length;
+    const end = startTimeMs + Math.round((durationMs * cursor) / letters);
+    parts.push({
+      startTimeMs: start,
+      durationMs: Math.max(0, end - start),
+      words: index === tokens.length - 1 ? token : `${token} `,
+    });
+  }
+  return parts;
+}
+
+function attachTimedRomanizations(lines: Lyric[]) {
+  for (const line of lines) {
+    if (!line.romanization?.trim() || line.timedRomanization?.length) continue;
+    const timed = buildTimedRomanization(line);
+    if (timed?.length) line.timedRomanization = timed;
+  }
 }
 
 /** True when any line carries a romanization that should be rendered. */

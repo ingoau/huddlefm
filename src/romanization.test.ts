@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Lyric } from "@braccato/core";
 import {
+  buildTimedRomanization,
   enrichLyricsWithRomanization,
   lyricsHaveRomanization,
   type RomanizeFetch,
@@ -256,4 +257,64 @@ test("skips instrumental lines and music-note placeholders", async () => {
   expect(lines[0]!.romanization).toBeUndefined();
   expect(lines[1]!.romanization).toBeUndefined();
   expect(lines[2]!.romanization).toBe("hangeul");
+});
+
+test("maps romanization words onto the sung timeline", () => {
+  const timed = buildTimedRomanization({
+    startTimeMs: 2674,
+    durationMs: 1411,
+    words: "共振で苦しんでし罵倒",
+    romanization: "Kyoushin de kurushindeshi batou",
+    parts: [
+      { startTimeMs: 2674, durationMs: 176, words: "共" },
+      { startTimeMs: 2850, durationMs: 176, words: "振" },
+      { startTimeMs: 3026, durationMs: 177, words: "で" },
+      { startTimeMs: 3203, durationMs: 176, words: "苦" },
+      { startTimeMs: 3379, durationMs: 89, words: "し" },
+      { startTimeMs: 3468, durationMs: 88, words: "ん" },
+      { startTimeMs: 3556, durationMs: 88, words: "で" },
+      { startTimeMs: 3644, durationMs: 88, words: "し" },
+      { startTimeMs: 3732, durationMs: 177, words: "罵" },
+      { startTimeMs: 3909, durationMs: 176, words: "倒" },
+    ],
+  });
+
+  expect(timed?.map((part) => part.words.trim())).toEqual([
+    "Kyoushin",
+    "de",
+    "kurushindeshi",
+    "batou",
+  ]);
+  expect(timed?.[0]!.startTimeMs).toBe(2674);
+  expect(timed!.at(-1)!.startTimeMs + timed!.at(-1)!.durationMs).toBe(
+    3909 + 176,
+  );
+  expect(timed!.some((part) => part.durationMs > 0)).toBe(true);
+});
+
+test("attaches timed romanization when enriching lyrics", async () => {
+  const lines = [
+    line("共振で苦しんでし罵倒", {
+      startTimeMs: 2674,
+      durationMs: 1411,
+      romanization: "Kyoushin de kurushindeshi batou",
+      parts: [
+        { startTimeMs: 2674, durationMs: 352, words: "共振" },
+        { startTimeMs: 3026, durationMs: 177, words: "で" },
+        { startTimeMs: 3203, durationMs: 882, words: "苦しんでし罵倒" },
+      ],
+    }),
+  ];
+
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (() => {
+      throw new Error("should not fetch");
+    }) as RomanizeFetch,
+  });
+
+  expect(lines[0]!.romanization).toBe("Kyoushin de kurushindeshi batou");
+  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
+    ["Kyoushin", "de", "kurushindeshi", "batou"],
+  );
+  expect(lines[0]!.timedRomanization?.[0]!.startTimeMs).toBe(2674);
 });

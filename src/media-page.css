@@ -359,6 +359,11 @@ braccato-lyrics {
   font-size: 18px;
 }
 
+.blyrics-container > .blyrics--line.blyrics--active .blyrics--romanized,
+.blyrics-container > .blyrics--line.blyrics--animating .blyrics--romanized {
+  color: rgb(255 255 255 / 0.78);
+}
+
 .blyrics-container[data-no-lyrics="true"] {
   padding-top: 220px;
   font-size: 26px;
