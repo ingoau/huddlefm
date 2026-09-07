@@ -9,7 +9,6 @@ import {
 import "@braccato/core/element";
 import type { BraccatoLyricsElement } from "@braccato/core/element";
 import type { Lyric } from "@braccato/core";
-import { effectiveDisplayMode } from "./display-mode.ts";
 import type { DisplayMode } from "./store.ts";
 import { volumeGain } from "./volume.ts";
 import "./media-page.css";
@@ -88,7 +87,10 @@ let cameraInputReady = false;
 const camera = Promise.withResolvers<MediaStream>();
 
 async function applyDisplayMode() {
-  const mode = effectiveDisplayMode(preferredDisplayMode, lyricsAvailable);
+  const mode =
+    preferredDisplayMode === "lyrics" && lyricsAvailable === false
+      ? "default"
+      : preferredDisplayMode;
   stage.dataset.displayMode = mode === "lyrics" ? "lyrics" : "default";
   await setCameraEnabled(preferredDisplayMode !== "off");
 }
