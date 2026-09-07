@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertPublicUrl } from "./public-proxy.ts";
@@ -53,6 +54,7 @@ test("detects filename-like titles for direct media links", () => {
       {
         title: "Real Song Title",
         artist: "Known Artist",
+        album: "Known Album",
         canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
         sourceId: "abcdefghijk",
       },
@@ -67,6 +69,23 @@ test("detects filename-like titles for direct media links", () => {
       sourceId: "song",
     }),
   ).toBe(true);
+  expect(
+    metadataLooksWeak({
+      title: "Real Song Title",
+      artist: "Known Artist",
+      canonicalUrl: "https://example.com/song.mp3",
+      sourceId: "song",
+    }),
+  ).toBe(true);
+  expect(
+    metadataLooksWeak({
+      title: "Real Song Title",
+      artist: "Known Artist",
+      album: "Known Album",
+      canonicalUrl: "https://example.com/song.mp3",
+      sourceId: "song",
+    }),
+  ).toBe(false);
 });
 
 test("prefers embedded tags over filename metadata", () => {
@@ -102,10 +121,11 @@ test("prefers embedded tags over filename metadata", () => {
 });
 
 test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
-  "reads embedded tags from local audio files",
+  "reads embedded tags from local files and proxied remote media",
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "huddlefm-tags-"));
     const filePath = join(directory, "fixture.mp3");
+    const proxy = createServer();
     try {
       const encoded = Bun.spawnSync([
         "ffmpeg",
@@ -132,7 +152,45 @@ test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
         artist: "Fixture Artist",
         album: "Fixture Album",
       });
+      const media = await readFile(filePath);
+      const requests: string[] = [];
+      proxy.on("request", (request, response) => {
+        requests.push(request.url ?? "");
+        response.writeHead(200, {
+          "content-length": media.byteLength,
+          "content-type": "audio/mpeg",
+        });
+        response.end(media);
+      });
+      await new Promise<void>((resolve, reject) => {
+        proxy.once("error", reject);
+        proxy.listen(0, "127.0.0.1", resolve);
+      });
+      const address = proxy.address();
+      if (!address || typeof address === "string")
+        throw new Error("Test proxy is not listening");
+      const remote = "http://93.184.216.34/fixture.mp3";
+      expect(await probeEmbeddedMetadata(remote)).toEqual({});
+      expect(requests).toEqual([]);
+      expect(
+        await probeEmbeddedMetadata(
+          remote,
+          undefined,
+          `http://127.0.0.1:${address.port}`,
+        ),
+      ).toMatchObject({
+        title: "Fixture Title",
+        artist: "Fixture Artist",
+        album: "Fixture Album",
+      });
+      expect(requests.map((request) => new URL(request).href)).toEqual([
+        remote,
+      ]);
     } finally {
+      if (proxy.listening)
+        await new Promise<void>((resolve, reject) =>
+          proxy.close((error) => (error ? reject(error) : resolve())),
+        );
       await rm(directory, { recursive: true, force: true });
     }
   },

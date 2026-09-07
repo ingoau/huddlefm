@@ -438,9 +438,10 @@ export class TrackCatalog {
     // Direct files and other generic sources often only expose the filename
     // through yt-dlp; prefer embedded tags when the extractor metadata is thin.
     if (shouldProbeEmbeddedMetadata(track, metadata.extractor)) {
+      if (!this.proxy) throw new Error("Track catalog is not initialized");
       track = applyEmbeddedMetadata(
         track,
-        await probeEmbeddedMetadata(canonicalUrl),
+        await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxy.url),
       );
     }
     if (track.duration && track.duration > this.limits.durationSeconds)
@@ -914,16 +915,23 @@ export function looksLikeFilenameTitle(
 }
 
 export function metadataLooksWeak(
-  track: Pick<TrackMetadata, "title" | "artist" | "canonicalUrl" | "sourceId">,
+  track: Pick<
+    TrackMetadata,
+    "title" | "artist" | "album" | "canonicalUrl" | "sourceId"
+  >,
 ) {
   return (
+    !track.album ||
     track.artist === "Unknown artist" ||
     looksLikeFilenameTitle(track.title, track.canonicalUrl, track.sourceId)
   );
 }
 
 export function shouldProbeEmbeddedMetadata(
-  track: Pick<TrackMetadata, "title" | "artist" | "canonicalUrl" | "sourceId">,
+  track: Pick<
+    TrackMetadata,
+    "title" | "artist" | "album" | "canonicalUrl" | "sourceId"
+  >,
   extractor: unknown,
 ) {
   return (
@@ -971,8 +979,14 @@ export function applyEmbeddedMetadata<T extends TrackMetadata>(
 export async function probeEmbeddedMetadata(
   input: string,
   signal?: AbortSignal,
+  proxyUrl?: string,
 ): Promise<EmbeddedMetadata> {
   try {
+    const remoteUrl = parseHttpUrl(input);
+    if (remoteUrl) {
+      await assertPublicUrl(remoteUrl);
+      if (!proxyUrl) throw new Error("Remote metadata probes require a proxy");
+    }
     const result = await run(
       [
         "ffprobe",
@@ -986,6 +1000,7 @@ export async function probeEmbeddedMetadata(
         "10000000",
         "-probesize",
         "10000000",
+        ...(remoteUrl ? ["-http_proxy", proxyUrl!] : []),
         input,
       ],
       30_000,
