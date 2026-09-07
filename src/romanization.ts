@@ -9,6 +9,7 @@ const log = logger.child({ component: "romanization" });
 const UNISON_TRANSLATE_URL = "https://unison.boidu.dev/translate";
 const BATCH_SEPARATOR = "\n\n;\n\n";
 const MAX_URL_LENGTH = 15_000;
+const ROMANIZATION_TIMEOUT_MS = 12_000;
 const MUSIC_NOTES = /^[\s♪𝅘𝅥𝅮♫♬♩♭♮♯]+$/u;
 
 export type RomanizeFetch = (
@@ -21,6 +22,8 @@ export type RomanizeOptions = {
   signal?: AbortSignal;
   fetch?: RomanizeFetch;
 };
+
+type RomanizeRequestOptions = RomanizeOptions & { signal: AbortSignal };
 
 type PendingLine = {
   lineIndex: number;
@@ -38,7 +41,7 @@ function isSameText(a: string, b: string) {
 }
 
 function isRomanizableLine(line: Lyric) {
-  if (line.isInstrumental || line.romanization) return false;
+  if (line.isInstrumental || line.romanization?.trim()) return false;
   const text = line.words?.trim();
   if (!text || MUSIC_NOTES.test(text)) return false;
   return containsNonLatin(text);
@@ -80,7 +83,7 @@ function groupByLanguage(pending: PendingLine[]) {
 async function romanizeViaUnison(
   items: PendingLine[],
   sourceLanguage: string,
-  options: RomanizeOptions,
+  options: RomanizeRequestOptions,
 ) {
   if (items.length === 0) return new Map<number, string>();
   const fetchImpl = options.fetch ?? fetch;
@@ -93,7 +96,7 @@ async function romanizeViaUnison(
       from: sourceLanguage === "auto" ? undefined : sourceLanguage,
       videoId: options.videoId,
     }),
-    signal: options.signal ?? AbortSignal.timeout(12_000),
+    signal: options.signal,
   });
   if (!response.ok) throw new Error(`Unison translate HTTP ${response.status}`);
   const data = (await response.json()) as {
@@ -113,7 +116,7 @@ async function romanizeViaUnison(
 async function romanizeViaGoogle(
   items: PendingLine[],
   sourceLanguage: string,
-  options: RomanizeOptions,
+  options: RomanizeRequestOptions,
 ) {
   if (items.length === 0) return new Map<number, string>();
   const fetchImpl = options.fetch ?? fetch;
@@ -151,7 +154,7 @@ async function romanizeViaGoogle(
           accept: "application/json",
           "user-agent": "Mozilla/5.0",
         },
-        signal: options.signal ?? AbortSignal.timeout(12_000),
+        signal: options.signal,
       },
     );
     if (!response.ok) continue;
@@ -190,6 +193,11 @@ async function romanizeLanguageGroup(
   options: RomanizeOptions,
   results: Map<number, string>,
 ) {
+  const timeoutSignal = AbortSignal.timeout(ROMANIZATION_TIMEOUT_MS);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeoutSignal])
+    : timeoutSignal;
+  const requestOptions = { ...options, signal };
   const stillNeeded = () =>
     items.filter((item) => !results.has(item.lineIndex));
 
@@ -197,7 +205,7 @@ async function romanizeLanguageGroup(
     for (const [lineIndex, romanization] of await romanizeViaUnison(
       stillNeeded(),
       lang,
-      options,
+      requestOptions,
     ))
       results.set(lineIndex, romanization);
   } catch (error) {
@@ -208,13 +216,13 @@ async function romanizeLanguageGroup(
   }
 
   const missing = stillNeeded();
-  if (missing.length === 0) return;
+  if (missing.length === 0 || signal.aborted) return;
 
   try {
     for (const [lineIndex, romanization] of await romanizeViaGoogle(
       missing,
       lang === "auto" ? "auto" : lang,
-      options,
+      requestOptions,
     ))
       results.set(lineIndex, romanization);
   } catch (error) {

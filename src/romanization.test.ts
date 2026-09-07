@@ -47,6 +47,27 @@ test("keeps provider-supplied romanization", async () => {
   expect(lyricsHaveRomanization(lines)).toBe(true);
 });
 
+test("enriches whitespace-only romanization values", async () => {
+  const lines = [
+    line("안녕하세요", { romanization: "   " }),
+    line("세계", { romanization: "segye" }),
+    line("한글", { isInstrumental: true, romanization: "   " }),
+  ];
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.lines).toEqual(["안녕하세요"]);
+      return new Response(
+        JSON.stringify({ lines: [{ romanization: "annyeonghaseyo" }] }),
+        { status: 200 },
+      );
+    }) as RomanizeFetch,
+  });
+  expect(lines[0]!.romanization).toBe("annyeonghaseyo");
+  expect(lines[1]!.romanization).toBe("segye");
+  expect(lines[2]!.romanization).toBe("   ");
+});
+
 test("uses Unison romanization when available", async () => {
   const lines = [line("你好世界"), line("再见")];
   const urls: string[] = [];
@@ -161,6 +182,46 @@ test("falls back to Google romaji when Unison omits romanization", async () => {
   expect(urls[0]).toContain("unison.boidu.dev/translate");
   expect(urls[1]).toContain("translate.googleapis.com");
   expect(lines[0]!.romanization).toBe("Konnichiwa");
+});
+
+test("shares one timeout signal across sequential providers", async () => {
+  const lines = [line("こんにちは")];
+  const signals: (AbortSignal | null | undefined)[] = [];
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (async (input, init) => {
+      signals.push(init?.signal);
+      if (String(input).includes("unison.boidu.dev"))
+        return new Response(
+          JSON.stringify({ lines: [{ romanization: null }] }),
+          {
+            status: 200,
+          },
+        );
+      return new Response(
+        JSON.stringify([[["こんにちは", "こんにちは", null, "Konnichiwa"]]]),
+        { status: 200 },
+      );
+    }) as RomanizeFetch,
+  });
+  expect(signals).toHaveLength(2);
+  expect(signals[0]).toBe(signals[1]);
+  expect(lines[0]!.romanization).toBe("Konnichiwa");
+});
+
+test("uses local transliteration without trying Google after abort", async () => {
+  const lines = [line("Привет")];
+  const controller = new AbortController();
+  let calls = 0;
+  await enrichLyricsWithRomanization(lines, {
+    signal: controller.signal,
+    fetch: (async () => {
+      calls += 1;
+      controller.abort();
+      throw new DOMException("aborted", "AbortError");
+    }) as RomanizeFetch,
+  });
+  expect(calls).toBe(1);
+  expect(lines[0]!.romanization?.toLowerCase()).toContain("privet");
 });
 
 test("uses local transliteration when remote providers fail", async () => {
