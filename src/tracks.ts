@@ -1,5 +1,5 @@
 import YTMusic from "ytmusic-api";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { logger } from "./logger.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
@@ -139,6 +139,13 @@ export type TrackMetadata = {
   album?: string;
   duration?: number;
   artwork?: string;
+};
+
+export type EmbeddedMetadata = {
+  title?: string;
+  artist?: string;
+  album?: string;
+  duration?: number;
 };
 
 export type TransitionData = {
@@ -411,8 +418,6 @@ export class TrackCatalog {
       throw new TrackError("Playlists are not supported");
     if (metadata.is_live || metadata.live_status === "is_live")
       throw new TrackError("Live streams are not supported");
-    if (metadata.duration && metadata.duration > this.limits.durationSeconds)
-      throw new TrackError("Track exceeds the duration limit");
     if (
       (metadata.filesize ?? metadata.filesize_approx ?? 0) >
       this.limits.downloadBytes
@@ -420,7 +425,7 @@ export class TrackCatalog {
       throw new TrackError("Track exceeds the download limit");
     const canonicalUrl = metadata.webpage_url ?? url.href;
     await assertPublicUrl(new URL(canonicalUrl));
-    const track = {
+    let track: TrackMetadata = {
       sourceInput: url.href,
       canonicalUrl,
       sourceId: String(metadata.id),
@@ -430,6 +435,17 @@ export class TrackCatalog {
       duration: metadata.duration ? Number(metadata.duration) : undefined,
       artwork: await publicArtworkUrl(metadata.thumbnail),
     };
+    // Direct files and other generic sources often only expose the filename
+    // through yt-dlp; prefer embedded tags when the extractor metadata is thin.
+    if (shouldProbeEmbeddedMetadata(track, metadata.extractor)) {
+      if (!this.proxy) throw new Error("Track catalog is not initialized");
+      track = applyEmbeddedMetadata(
+        track,
+        await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxy.url),
+      );
+    }
+    if (track.duration && track.duration > this.limits.durationSeconds)
+      throw new TrackError("Track exceeds the duration limit");
     log.info(
       {
         event: "url_resolved",
@@ -585,12 +601,16 @@ export class TrackCatalog {
     await mkdir(directory, { recursive: true });
     if (signal?.aborted) throw new TrackError("Track preparation cancelled");
     const path = `${directory}/${entryId}.%(ext)s`;
+    // Keep the pre-conversion source when display metadata is still thin so we
+    // can read embedded tags before Opus conversion strips them.
+    const keepSource = metadataLooksWeak(track);
     const download = [
       "--extract-audio",
       "--audio-format",
       "opus",
       "--audio-quality",
       "0",
+      ...(keepSource ? ["--keep-video"] : []),
       ...loudnessNormalizationArgs(this.limits.loudnessNormalization),
       "--no-playlist",
       "--max-filesize",
@@ -628,6 +648,19 @@ export class TrackCatalog {
     if (!filePath || !(await Bun.file(filePath).exists()))
       throw new Error("Extractor produced no playable file");
     try {
+      if (keepSource) {
+        const sourcePath = await retainedSourcePath(filePath);
+        if (sourcePath) {
+          try {
+            applyEmbeddedMetadata(
+              track,
+              await probeEmbeddedMetadata(sourcePath, signal),
+            );
+          } finally {
+            await rm(sourcePath, { force: true });
+          }
+        }
+      }
       const bytes = (await stat(filePath)).size;
       if (bytes > this.limits.downloadBytes)
         throw new TrackError("Track exceeds the download limit");
@@ -650,6 +683,7 @@ export class TrackCatalog {
         throw new Error("Could not verify the downloaded track duration");
       if (duration > this.limits.durationSeconds)
         throw new TrackError("Track exceeds the duration limit");
+      if (!track.duration) track.duration = duration;
       let transition = {
         introSeconds: 0,
         outroSeconds: duration,
@@ -686,6 +720,8 @@ export class TrackCatalog {
           event: "download_completed",
           entryId,
           sourceId: track.sourceId,
+          title: track.title,
+          artist: track.artist,
           bytes,
           durationSeconds: duration,
           ...transition,
@@ -696,6 +732,10 @@ export class TrackCatalog {
       return filePath;
     } catch (error) {
       await rm(filePath, { force: true });
+      const sourcePath = await retainedSourcePath(filePath).catch(
+        () => undefined,
+      );
+      if (sourcePath) await rm(sourcePath, { force: true });
       throw error;
     }
   }
@@ -848,6 +888,155 @@ export async function publicArtworkUrl(value: unknown) {
   } catch {
     return;
   }
+}
+
+const audioFilenamePattern =
+  /\.(mp3|m4a|flac|wav|ogg|opus|aac|wma|aiff?|webm)$/i;
+
+export function looksLikeFilenameTitle(
+  title: string,
+  url: string,
+  sourceId?: string,
+) {
+  const trimmed = title.trim();
+  if (!trimmed || trimmed === "Untitled") return true;
+  if (audioFilenamePattern.test(trimmed)) return true;
+  if (sourceId && trimmed === sourceId) return true;
+  try {
+    const base = decodeURIComponent(
+      new URL(url).pathname.split("/").filter(Boolean).at(-1) ?? "",
+    );
+    if (!base) return false;
+    const stem = base.replace(/\.[^.]+$/, "");
+    return trimmed === base || trimmed === stem;
+  } catch {
+    return false;
+  }
+}
+
+export function metadataLooksWeak(
+  track: Pick<TrackMetadata, "title" | "artist" | "canonicalUrl" | "sourceId">,
+) {
+  return (
+    track.artist === "Unknown artist" ||
+    looksLikeFilenameTitle(track.title, track.canonicalUrl, track.sourceId)
+  );
+}
+
+export function shouldProbeEmbeddedMetadata(
+  track: Pick<TrackMetadata, "title" | "artist" | "canonicalUrl" | "sourceId">,
+  extractor: unknown,
+) {
+  return (
+    String(extractor ?? "").toLowerCase() === "generic" ||
+    metadataLooksWeak(track)
+  );
+}
+
+function tagValue(tags: Record<string, string>, ...keys: string[]) {
+  for (const key of keys) {
+    const exact = tags[key]?.trim();
+    if (exact) return exact;
+  }
+  const lower = new Map(
+    Object.entries(tags).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  for (const key of keys) {
+    const value = lower.get(key.toLowerCase())?.trim();
+    if (value) return value;
+  }
+}
+
+export function applyEmbeddedMetadata<T extends TrackMetadata>(
+  track: T,
+  embedded: EmbeddedMetadata,
+): T {
+  const titleWeak = looksLikeFilenameTitle(
+    track.title,
+    track.canonicalUrl,
+    track.sourceId,
+  );
+  const artistWeak = track.artist === "Unknown artist";
+  if (titleWeak && embedded.title) track.title = embedded.title;
+  if (artistWeak && embedded.artist) track.artist = embedded.artist;
+  if (!track.album && embedded.album) track.album = embedded.album;
+  if (
+    !track.duration &&
+    embedded.duration &&
+    Number.isFinite(embedded.duration)
+  )
+    track.duration = embedded.duration;
+  return track;
+}
+
+export async function probeEmbeddedMetadata(
+  input: string,
+  signal?: AbortSignal,
+  proxyUrl?: string,
+): Promise<EmbeddedMetadata> {
+  try {
+    const remoteUrl = parseHttpUrl(input);
+    if (remoteUrl) {
+      await assertPublicUrl(remoteUrl);
+      if (!proxyUrl) throw new Error("Remote metadata probes require a proxy");
+    }
+    const result = await run(
+      [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "format=duration:format_tags",
+        "-analyzeduration",
+        "10000000",
+        "-probesize",
+        "10000000",
+        ...(remoteUrl ? ["-http_proxy", proxyUrl!] : []),
+        input,
+      ],
+      30_000,
+      signal,
+    );
+    const data = JSON.parse(result.stdout) as {
+      format?: { duration?: string; tags?: Record<string, string> };
+    };
+    const tags = data.format?.tags ?? {};
+    const duration = Number(data.format?.duration);
+    return {
+      title: tagValue(tags, "title", "TITLE", "track"),
+      artist: tagValue(
+        tags,
+        "artist",
+        "ARTIST",
+        "album_artist",
+        "ALBUMARTIST",
+        "albumartist",
+      ),
+      album: tagValue(tags, "album", "ALBUM"),
+      ...(Number.isFinite(duration) && duration > 0 ? { duration } : {}),
+    };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    log.debug(
+      { event: "embedded_metadata_probe_failed", input, err: error },
+      "Could not read embedded media metadata",
+    );
+    return {};
+  }
+}
+
+async function retainedSourcePath(opusPath: string) {
+  const slash = opusPath.lastIndexOf("/");
+  const directory = slash >= 0 ? opusPath.slice(0, slash) : ".";
+  const fileName = slash >= 0 ? opusPath.slice(slash + 1) : opusPath;
+  const prefix = fileName.replace(/\.[^.]+$/, "");
+  const match = (await readdir(directory)).find((name) => {
+    if (name === fileName) return false;
+    return name.startsWith(`${prefix}.`);
+  });
+  return match ? `${directory}/${match}` : undefined;
 }
 
 function option(label: string, value: string) {

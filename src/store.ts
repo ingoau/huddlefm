@@ -1157,6 +1157,11 @@ export class Store {
     fields: {
       status?: string;
       filePath?: string | null;
+      title?: string;
+      artist?: string;
+      album?: string | null;
+      duration?: number | null;
+      artwork?: string | null;
       introSeconds?: number;
       outroSeconds?: number;
       fadeInSeconds?: number;
@@ -1171,6 +1176,26 @@ export class Store {
       this.db
         .query("UPDATE tracks SET file_path = ? WHERE id = ?")
         .run(fields.filePath, id);
+    if (fields.title !== undefined)
+      this.db
+        .query("UPDATE tracks SET title = ? WHERE id = ?")
+        .run(fields.title, id);
+    if (fields.artist !== undefined)
+      this.db
+        .query("UPDATE tracks SET artist = ? WHERE id = ?")
+        .run(fields.artist, id);
+    if (fields.album !== undefined)
+      this.db
+        .query("UPDATE tracks SET album = ? WHERE id = ?")
+        .run(fields.album, id);
+    if (fields.duration !== undefined)
+      this.db
+        .query("UPDATE tracks SET duration = ? WHERE id = ?")
+        .run(fields.duration, id);
+    if (fields.artwork !== undefined)
+      this.db
+        .query("UPDATE tracks SET artwork = ? WHERE id = ?")
+        .run(fields.artwork, id);
     if (fields.introSeconds !== undefined)
       this.db
         .query("UPDATE tracks SET intro_seconds = ? WHERE id = ?")

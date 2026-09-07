@@ -220,6 +220,54 @@ test("creates indexes for recurring session, track, and scrobble queries", () =>
   store.close();
 });
 
+test("updates track display metadata after embedded tags are read", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.addTrack({
+    id: "track",
+    sessionId: "session",
+    requesterId: "user",
+    sourceInput: "https://example.com/song.mp3",
+    canonicalUrl: "https://example.com/song.mp3",
+    sourceId: "song",
+    title: "song",
+    artist: "Unknown artist",
+    status: "preparing",
+  });
+  store.setTrack("track", {
+    status: "ready",
+    title: "Helix One",
+    artist: "SoundHelix",
+    album: "Demos",
+    duration: 120,
+    artwork: "https://example.com/art.jpg",
+  });
+  expect(
+    store.db
+      .query(
+        "SELECT status, title, artist, album, duration, artwork FROM tracks WHERE id = ?",
+      )
+      .get("track"),
+  ).toEqual({
+    status: "ready",
+    title: "Helix One",
+    artist: "SoundHelix",
+    album: "Demos",
+    duration: 120,
+    artwork: "https://example.com/art.jpg",
+  });
+  store.close();
+});
+
 test("creates the recent-track index after migrating legacy databases", () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
   const path = join(directory, "store.sqlite");

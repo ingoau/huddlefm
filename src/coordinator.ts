@@ -2110,6 +2110,11 @@ export class Coordinator {
     this.store.setTrack(entry.id, {
       status: "ready",
       filePath,
+      title: entry.title,
+      artist: entry.artist,
+      album: entry.album ?? null,
+      duration: entry.duration ?? null,
+      artwork: entry.artwork ?? null,
       ...transition,
     });
   }
