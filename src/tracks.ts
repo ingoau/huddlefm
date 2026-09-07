@@ -915,23 +915,16 @@ export function looksLikeFilenameTitle(
 }
 
 export function metadataLooksWeak(
-  track: Pick<
-    TrackMetadata,
-    "title" | "artist" | "album" | "canonicalUrl" | "sourceId"
-  >,
+  track: Pick<TrackMetadata, "title" | "artist" | "canonicalUrl" | "sourceId">,
 ) {
   return (
-    !track.album ||
     track.artist === "Unknown artist" ||
     looksLikeFilenameTitle(track.title, track.canonicalUrl, track.sourceId)
   );
 }
 
 export function shouldProbeEmbeddedMetadata(
-  track: Pick<
-    TrackMetadata,
-    "title" | "artist" | "album" | "canonicalUrl" | "sourceId"
-  >,
+  track: Pick<TrackMetadata, "title" | "artist" | "canonicalUrl" | "sourceId">,
   extractor: unknown,
 ) {
   return (

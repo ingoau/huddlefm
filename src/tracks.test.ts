@@ -54,7 +54,6 @@ test("detects filename-like titles for direct media links", () => {
       {
         title: "Real Song Title",
         artist: "Known Artist",
-        album: "Known Album",
         canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
         sourceId: "abcdefghijk",
       },
@@ -73,15 +72,6 @@ test("detects filename-like titles for direct media links", () => {
     metadataLooksWeak({
       title: "Real Song Title",
       artist: "Known Artist",
-      canonicalUrl: "https://example.com/song.mp3",
-      sourceId: "song",
-    }),
-  ).toBe(true);
-  expect(
-    metadataLooksWeak({
-      title: "Real Song Title",
-      artist: "Known Artist",
-      album: "Known Album",
       canonicalUrl: "https://example.com/song.mp3",
       sourceId: "song",
     }),
