@@ -40,6 +40,14 @@ function isSameText(a: string, b: string) {
   return normalize(a) === normalize(b);
 }
 
+function tidyRomanization(text: string) {
+  return text
+    .replace(/\s+(?=[.,!?])/gu, "")
+    .replace(/(?<=[.,!?])(?=\S)/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 function isRomanizableLine(line: Lyric) {
   if (line.isInstrumental || line.romanization?.trim()) return false;
   const text = line.words?.trim();
@@ -265,7 +273,7 @@ export async function enrichLyricsWithRomanization(
         item.lang === "auto" ? null : item.lang,
       );
     if (!romanization || isSameText(romanization, item.text)) continue;
-    lines[item.lineIndex]!.romanization = romanization;
+    lines[item.lineIndex]!.romanization = tidyRomanization(romanization);
     attached += 1;
   }
 
@@ -321,7 +329,9 @@ export function buildTimedRomanization(line: Lyric): LyricPart[] | undefined {
 
 function attachTimedRomanizations(lines: Lyric[]) {
   for (const line of lines) {
-    if (!line.romanization?.trim() || line.timedRomanization?.length) continue;
+    if (!line.romanization?.trim()) continue;
+    line.romanization = tidyRomanization(line.romanization);
+    if (line.timedRomanization?.length) continue;
     const timed = buildTimedRomanization(line);
     if (timed?.length) line.timedRomanization = timed;
   }

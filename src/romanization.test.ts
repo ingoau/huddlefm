@@ -318,3 +318,20 @@ test("attaches timed romanization when enriching lyrics", async () => {
   );
   expect(lines[0]!.timedRomanization?.[0]!.startTimeMs).toBe(2674);
 });
+
+test("keeps punctuation attached to romanized words", async () => {
+  const lines = [
+    line("Q.更新で降る隕石抹消可？", {
+      romanization: "Q . Kōshin De Furu Inseki Masshō Ka ?",
+    }),
+  ];
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (() => {
+      throw new Error("should not fetch");
+    }) as RomanizeFetch,
+  });
+  expect(lines[0]!.romanization).toBe("Q. Kōshin De Furu Inseki Masshō Ka?");
+  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
+    ["Q.", "Kōshin", "De", "Furu", "Inseki", "Masshō", "Ka?"],
+  );
+});
