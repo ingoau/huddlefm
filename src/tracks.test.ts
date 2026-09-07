@@ -1,15 +1,139 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { assertPublicUrl } from "./public-proxy.ts";
 import {
+  applyEmbeddedMetadata,
   extractorFailure,
   isExpectedTrackFailure,
+  looksLikeFilenameTitle,
+  metadataLooksWeak,
   navidromeShare,
   parseNavidromeShareInfo,
+  probeEmbeddedMetadata,
   publicArtworkUrl,
+  shouldProbeEmbeddedMetadata,
   TrackCatalog,
   trackFailureDetail,
   transitionData,
+  type TrackMetadata,
 } from "./tracks.ts";
+
+test("detects filename-like titles for direct media links", () => {
+  expect(
+    looksLikeFilenameTitle(
+      "SoundHelix-Song-1",
+      "https://example.com/audio/SoundHelix-Song-1.mp3",
+      "SoundHelix-Song-1",
+    ),
+  ).toBe(true);
+  expect(
+    looksLikeFilenameTitle("track.mp3", "https://example.com/files/track.mp3"),
+  ).toBe(true);
+  expect(
+    looksLikeFilenameTitle(
+      "Real Song Title",
+      "https://example.com/audio/SoundHelix-Song-1.mp3",
+    ),
+  ).toBe(false);
+  expect(
+    shouldProbeEmbeddedMetadata(
+      {
+        title: "SoundHelix-Song-1",
+        artist: "Unknown artist",
+        canonicalUrl: "https://example.com/SoundHelix-Song-1.mp3",
+        sourceId: "SoundHelix-Song-1",
+      },
+      "generic",
+    ),
+  ).toBe(true);
+  expect(
+    shouldProbeEmbeddedMetadata(
+      {
+        title: "Real Song Title",
+        artist: "Known Artist",
+        canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
+        sourceId: "abcdefghijk",
+      },
+      "youtube",
+    ),
+  ).toBe(false);
+  expect(
+    metadataLooksWeak({
+      title: "Real Song Title",
+      artist: "Unknown artist",
+      canonicalUrl: "https://example.com/song.mp3",
+      sourceId: "song",
+    }),
+  ).toBe(true);
+});
+
+test("prefers embedded tags over filename metadata", () => {
+  const track: TrackMetadata = applyEmbeddedMetadata(
+    {
+      sourceInput: "https://example.com/SoundHelix-Song-1.mp3",
+      canonicalUrl: "https://example.com/SoundHelix-Song-1.mp3",
+      sourceId: "SoundHelix-Song-1",
+      title: "SoundHelix-Song-1",
+      artist: "Unknown artist",
+    },
+    {
+      title: "Helix One",
+      artist: "SoundHelix",
+      album: "Demos",
+      duration: 120,
+    },
+  );
+  expect(track).toMatchObject({
+    title: "Helix One",
+    artist: "SoundHelix",
+    album: "Demos",
+    duration: 120,
+  });
+  applyEmbeddedMetadata(track, {
+    title: "Ignored",
+    artist: "Also Ignored",
+    album: "Also Ignored",
+  });
+  expect(track.title).toBe("Helix One");
+  expect(track.artist).toBe("SoundHelix");
+  expect(track.album).toBe("Demos");
+});
+
+test("reads embedded tags from local audio files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "huddlefm-tags-"));
+  const filePath = join(directory, "fixture.mp3");
+  try {
+    const encoded = Bun.spawnSync([
+      "ffmpeg",
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:duration=1",
+      "-c:a",
+      "libmp3lame",
+      "-b:a",
+      "64k",
+      "-metadata",
+      "title=Fixture Title",
+      "-metadata",
+      "artist=Fixture Artist",
+      "-metadata",
+      "album=Fixture Album",
+      filePath,
+    ]);
+    expect(encoded.exitCode).toBe(0);
+    expect(await probeEmbeddedMetadata(filePath)).toMatchObject({
+      title: "Fixture Title",
+      artist: "Fixture Artist",
+      album: "Fixture Album",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("gives unplayable media a stable message without the source ID", () => {
   for (const line of [
