@@ -101,39 +101,42 @@ test("prefers embedded tags over filename metadata", () => {
   expect(track.album).toBe("Demos");
 });
 
-test("reads embedded tags from local audio files", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "huddlefm-tags-"));
-  const filePath = join(directory, "fixture.mp3");
-  try {
-    const encoded = Bun.spawnSync([
-      "ffmpeg",
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "sine=frequency=440:duration=1",
-      "-c:a",
-      "libmp3lame",
-      "-b:a",
-      "64k",
-      "-metadata",
-      "title=Fixture Title",
-      "-metadata",
-      "artist=Fixture Artist",
-      "-metadata",
-      "album=Fixture Album",
-      filePath,
-    ]);
-    expect(encoded.exitCode).toBe(0);
-    expect(await probeEmbeddedMetadata(filePath)).toMatchObject({
-      title: "Fixture Title",
-      artist: "Fixture Artist",
-      album: "Fixture Album",
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
+  "reads embedded tags from local audio files",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-tags-"));
+    const filePath = join(directory, "fixture.mp3");
+    try {
+      const encoded = Bun.spawnSync([
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "64k",
+        "-metadata",
+        "title=Fixture Title",
+        "-metadata",
+        "artist=Fixture Artist",
+        "-metadata",
+        "album=Fixture Album",
+        filePath,
+      ]);
+      expect(encoded.exitCode).toBe(0);
+      expect(await probeEmbeddedMetadata(filePath)).toMatchObject({
+        title: "Fixture Title",
+        artist: "Fixture Artist",
+        album: "Fixture Album",
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test("gives unplayable media a stable message without the source ID", () => {
   for (const line of [
