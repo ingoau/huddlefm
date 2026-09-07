@@ -214,6 +214,9 @@ braccato-lyrics {
   --blyrics-scale-transition-duration: 0.6s;
   --blyrics-scroll-timing-offset: 0.6s;
   --blyrics-animate-word-wobble: 0;
+  --blyrics-translated-font-size: 1.45rem;
+  --blyrics-translated-font-weight: 600;
+  --blyrics-translated-opacity: 0.55;
   padding-top: var(--blyrics-padding-top, 40px);
 }
 

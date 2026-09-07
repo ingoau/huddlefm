@@ -6,6 +6,7 @@ import {
   LogLevel,
   MeetingSessionConfiguration,
 } from "amazon-chime-sdk-js";
+import { injectRomanization } from "@braccato/core";
 import "@braccato/core/element";
 import type { BraccatoLyricsElement } from "@braccato/core/element";
 import type { Lyric } from "@braccato/core";
@@ -71,6 +72,7 @@ let handoffTimer: ReturnType<typeof setTimeout> | undefined;
 let fadeTimer: ReturnType<typeof setTimeout> | undefined;
 let lyricPriority = Infinity;
 let transition = 0;
+let renderedLyrics: Lyric[] = [];
 let pendingLyrics:
   | { entryId: string; priority: number; lines: Lyric[]; source: string }
   | undefined;
@@ -100,9 +102,35 @@ async function setDisplayMode(mode: DisplayMode) {
   await applyDisplayMode();
 }
 
+function applyRomanizations(lines: Lyric[]) {
+  const renderer = lyrics.renderer;
+  if (!renderer || lines.length === 0) return;
+  let attached = 0;
+  for (const [index, line] of lines.entries()) {
+    const romanization = line.romanization?.trim();
+    if (!romanization) continue;
+    const lineData = renderer.lines[index];
+    if (!lineData) continue;
+    injectRomanization(
+      document,
+      lineData.lyricElement,
+      lineData,
+      romanization,
+      line.timedRomanization ?? null,
+    );
+    attached += 1;
+  }
+  if (attached)
+    renderer.scheduleLyricPositionUpdate(
+      () => true,
+      () => {},
+    );
+}
+
 lyrics.addEventListener("braccato:lyrics-loaded", (event) => {
   const detail = (event as CustomEvent).detail;
   console.log(`[lyrics] rendered ${detail.lineCount} ${detail.syncType} lines`);
+  applyRomanizations(renderedLyrics);
 });
 lyrics.addEventListener("braccato:error", (event) => {
   const detail = (event as CustomEvent).detail;
@@ -398,6 +426,7 @@ function showLyrics(message: {
 }) {
   if (message.priority >= lyricPriority) return;
   lyricPriority = message.priority;
+  renderedLyrics = message.lines;
   lyrics.lyricsOptions = {};
   lyrics.lyrics = message.lines;
   lyricsAvailable = true;
@@ -407,6 +436,7 @@ function showLyrics(message: {
 }
 
 function clearLyrics() {
+  renderedLyrics = [];
   lyrics.lyricsOptions = {};
   lyrics.lyrics = [];
 }

@@ -1,6 +1,7 @@
 import { parseLRC, parseTTMLContent, PlainParser } from "@braccato/parsers";
 import type { Lyric } from "@braccato/core";
 import { logger } from "./logger.ts";
+import { enrichLyricsWithRomanization } from "./romanization.ts";
 import type { TrackMetadata } from "./tracks.ts";
 
 const log = logger.child({ component: "lyrics" });
@@ -73,12 +74,17 @@ export class LyricsCatalog {
         result.status === "fulfilled" && result.value ? [result.value] : [],
       )
       .sort((a, b) => a.priority - b.priority)[0];
+    if (selected)
+      await enrichLyricsWithRomanization(selected.lines, {
+        videoId: track.sourceId,
+      });
     log.info(
       {
         event: selected ? "found" : "unavailable",
         sourceId: track.sourceId,
         source: selected?.source,
         lines: selected?.lines.length,
+        romanized: selected?.lines.filter((line) => line.romanization).length,
         durationMs: Date.now() - startedAt,
       },
       selected ? "Lyrics found" : "Lyrics unavailable",
