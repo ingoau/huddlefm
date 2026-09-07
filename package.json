@@ -29,6 +29,8 @@
     "pino-roll": "^4.0.0",
     "playwright-core": "1.55.0",
     "posthog-node": "^5.51.4",
+    "transliteration": "^2.6.1",
+    "wanakana": "^5.3.1",
     "ytmusic-api": "5.3.1",
     "zod": "^4.5.4"
   }
