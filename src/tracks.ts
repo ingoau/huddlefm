@@ -148,6 +148,18 @@ export type EmbeddedMetadata = {
   duration?: number;
 };
 
+/** Sidecar cover extracted from embedded tags, next to the prepared audio. */
+export function embeddedArtworkPath(audioPath: string) {
+  return audioPath.replace(/\.[^.]+$/, ".cover.jpg");
+}
+
+export async function removePreparedMedia(filePath: string) {
+  await Promise.all([
+    rm(filePath, { force: true }),
+    rm(embeddedArtworkPath(filePath), { force: true }),
+  ]);
+}
+
 export type TransitionData = {
   introSeconds: number;
   outroSeconds: number;
@@ -601,9 +613,9 @@ export class TrackCatalog {
     await mkdir(directory, { recursive: true });
     if (signal?.aborted) throw new TrackError("Track preparation cancelled");
     const path = `${directory}/${entryId}.%(ext)s`;
-    // Keep the pre-conversion source when display metadata is still thin so we
-    // can read embedded tags before Opus conversion strips them.
-    const keepSource = metadataLooksWeak(track);
+    // Keep the pre-conversion source when display metadata or artwork is still
+    // thin so we can read tags/covers before Opus conversion strips them.
+    const keepSource = shouldRetainSourceForMetadata(track);
     const download = [
       "--extract-audio",
       "--audio-format",
@@ -656,6 +668,13 @@ export class TrackCatalog {
               track,
               await probeEmbeddedMetadata(sourcePath, signal),
             );
+            if (!track.artwork) {
+              await extractEmbeddedArtwork(
+                sourcePath,
+                embeddedArtworkPath(filePath),
+                signal,
+              );
+            }
           } finally {
             await rm(sourcePath, { force: true });
           }
@@ -731,7 +750,7 @@ export class TrackCatalog {
       );
       return filePath;
     } catch (error) {
-      await rm(filePath, { force: true });
+      await removePreparedMedia(filePath);
       const sourcePath = await retainedSourcePath(filePath).catch(
         () => undefined,
       );
@@ -923,6 +942,15 @@ export function metadataLooksWeak(
   );
 }
 
+export function shouldRetainSourceForMetadata(
+  track: Pick<
+    TrackMetadata,
+    "title" | "artist" | "canonicalUrl" | "sourceId" | "artwork"
+  >,
+) {
+  return metadataLooksWeak(track) || !track.artwork;
+}
+
 export function shouldProbeEmbeddedMetadata(
   track: Pick<TrackMetadata, "title" | "artist" | "canonicalUrl" | "sourceId">,
   extractor: unknown,
@@ -1024,6 +1052,54 @@ export async function probeEmbeddedMetadata(
       "Could not read embedded media metadata",
     );
     return {};
+  }
+}
+
+export async function extractEmbeddedArtwork(
+  input: string,
+  outputPath: string,
+  signal?: AbortSignal,
+  proxyUrl?: string,
+) {
+  try {
+    const remoteUrl = parseHttpUrl(input);
+    if (remoteUrl) {
+      await assertPublicUrl(remoteUrl);
+      if (!proxyUrl) throw new Error("Remote artwork extracts require a proxy");
+    }
+    await run(
+      [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+        ...(remoteUrl ? ["-http_proxy", proxyUrl!] : []),
+        "-i",
+        input,
+        "-an",
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "mjpeg",
+        outputPath,
+      ],
+      30_000,
+      signal,
+    );
+    if (!(await Bun.file(outputPath).exists())) return;
+    if ((await Bun.file(outputPath).size) <= 0) {
+      await rm(outputPath, { force: true });
+      return;
+    }
+    return outputPath;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    await rm(outputPath, { force: true }).catch(() => undefined);
+    log.debug(
+      { event: "embedded_artwork_extract_failed", input, err: error },
+      "Could not extract embedded album artwork",
+    );
   }
 }
 

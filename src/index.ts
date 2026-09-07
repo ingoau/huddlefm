@@ -917,7 +917,7 @@ const server = Bun.serve<SocketData>({
       },
     },
   },
-  fetch(request, server) {
+  async fetch(request, server) {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/audio/")) {
       const entryId = url.pathname.slice(7);
@@ -928,6 +928,21 @@ const server = Bun.serve<SocketData>({
       return path
         ? new Response(Bun.file(path), {
             headers: { "cache-control": "no-store" },
+          })
+        : new Response("Not found", { status: 404 });
+    }
+    if (url.pathname.startsWith("/artwork/")) {
+      const entryId = url.pathname.slice(9);
+      const token = url.searchParams.get("token") ?? "";
+      const path = [...runtimes.values()]
+        .find((runtime) => runtime.bootstrap.bridgeToken === token)
+        ?.coordinator?.artworkPath(entryId, token);
+      return path && (await Bun.file(path).exists())
+        ? new Response(Bun.file(path), {
+            headers: {
+              "cache-control": "no-store",
+              "content-type": "image/jpeg",
+            },
           })
         : new Response("Not found", { status: 404 });
     }

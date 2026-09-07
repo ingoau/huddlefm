@@ -1,4 +1,3 @@
-import { rm } from "node:fs/promises";
 import { capture as captureAnalytics } from "./analytics.ts";
 import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
@@ -19,7 +18,9 @@ import {
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
 import {
+  embeddedArtworkPath,
   isExpectedTrackFailure,
+  removePreparedMedia,
   TrackCatalog,
   trackFailureDetail,
   type TrackMetadata,
@@ -796,7 +797,7 @@ export class Coordinator {
       });
       this.store.incrementUsage("removed");
       this.queueChanged();
-      if (entry.filePath) await rm(entry.filePath, { force: true });
+      if (entry.filePath) await removePreparedMedia(entry.filePath);
       await this.render();
       this.syncPreloads();
       this.refreshIdle();
@@ -896,7 +897,7 @@ export class Coordinator {
       for (const entry of this.queue) {
         this.preparations.get(entry.id)?.abort();
         this.store.removeTrack(entry.id);
-        if (entry.filePath) await rm(entry.filePath, { force: true });
+        if (entry.filePath) await removePreparedMedia(entry.filePath);
       }
       this.queue = [];
       this.queueChanged();
@@ -1618,7 +1619,7 @@ export class Coordinator {
         this.preparations.delete(entry.id);
         if (this.state === "suspended") return;
         if (this.state === "ended" || !this.queue.includes(entry))
-          return rm(filePath, { force: true });
+          return removePreparedMedia(filePath);
         this.prepared(entry, filePath);
         if (!this.current) await this.startNext();
         else {
@@ -1859,7 +1860,7 @@ export class Coordinator {
         this.preparations.delete(entry.id);
         if (this.state === "suspended") return false;
         if (this.state === "ended" || !this.queue.includes(entry)) {
-          await rm(filePath, { force: true });
+          await removePreparedMedia(filePath);
           return false;
         }
         this.prepared(entry, filePath);
@@ -1935,7 +1936,7 @@ export class Coordinator {
     for (const entry of automatic) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
-      if (entry.filePath) await rm(entry.filePath, { force: true });
+      if (entry.filePath) await removePreparedMedia(entry.filePath);
     }
   }
 
@@ -1949,7 +1950,7 @@ export class Coordinator {
         this.preparations.delete(entry.id);
         if (this.queue.includes(entry)) {
           this.queue = this.queue.filter((item) => item !== entry);
-          if (entry.filePath) await rm(entry.filePath, { force: true });
+          if (entry.filePath) await removePreparedMedia(entry.filePath);
         }
         // Always drop the staged store row, even if prepareManual already
         // removed the queue entry before abort cleanup ran.
@@ -2041,8 +2042,20 @@ export class Coordinator {
     )?.filePath;
   }
 
+  artworkPath(entryId: string, token: string) {
+    if (token !== this.mediaToken) return;
+    const filePath = [this.current, ...this.queue, ...this.history].find(
+      (entry) => entry?.id === entryId,
+    )?.filePath;
+    return filePath ? embeddedArtworkPath(filePath) : undefined;
+  }
+
   private mediaUrl(entry: Entry) {
     return `http://127.0.0.1:${this.config.port}/audio/${entry.id}?token=${encodeURIComponent(this.mediaToken)}`;
+  }
+
+  private mediaArtworkUrl(entry: Entry) {
+    return `http://127.0.0.1:${this.config.port}/artwork/${entry.id}?token=${encodeURIComponent(this.mediaToken)}`;
   }
 
   private async playMessage(entry: Entry) {
@@ -2051,6 +2064,11 @@ export class Coordinator {
       : entry.requesterId === this.botUserId
         ? undefined
         : `Added by ${await this.slack.userName(entry.requesterId)}`;
+    const localArtwork =
+      entry.filePath &&
+      (await Bun.file(embeddedArtworkPath(entry.filePath)).exists())
+        ? this.mediaArtworkUrl(entry)
+        : undefined;
     return {
       type: "play",
       entryId: entry.id,
@@ -2058,7 +2076,7 @@ export class Coordinator {
       title: entry.title,
       artist: entry.artist,
       album: entry.album,
-      artwork: entry.artwork,
+      artwork: entry.artwork ?? localArtwork,
       duration: entry.duration,
       sourceId: entry.sourceId,
       introSeconds: entry.introSeconds ?? 0,
@@ -2305,7 +2323,7 @@ export class Coordinator {
     });
     this.store.incrementUsage("removed");
     this.queueChanged(interaction);
-    if (entry.filePath) await rm(entry.filePath, { force: true });
+    if (entry.filePath) await removePreparedMedia(entry.filePath);
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
@@ -2374,7 +2392,7 @@ export class Coordinator {
     for (const entry of this.queue) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
-      if (entry.filePath) await rm(entry.filePath, { force: true });
+      if (entry.filePath) await removePreparedMedia(entry.filePath);
     }
     this.queue = [];
     this.queueChanged();
