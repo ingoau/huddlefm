@@ -1,6 +1,7 @@
 import { parseLRC, parseTTMLContent, PlainParser } from "@braccato/parsers";
 import type { Lyric } from "@braccato/core";
 import { logger } from "./logger.ts";
+import { sanitizeInlineLyricRoles } from "./lyric-sanitize.ts";
 import { enrichLyricsWithRomanization } from "./romanization.ts";
 import type { TrackMetadata } from "./tracks.ts";
 
@@ -74,10 +75,12 @@ export class LyricsCatalog {
         result.status === "fulfilled" && result.value ? [result.value] : [],
       )
       .sort((a, b) => a.priority - b.priority)[0];
-    if (selected)
+    if (selected) {
+      sanitizeInlineLyricRoles(selected.lines);
       await enrichLyricsWithRomanization(selected.lines, {
         videoId: track.sourceId,
       });
+    }
     log.info(
       {
         event: selected ? "found" : "unavailable",

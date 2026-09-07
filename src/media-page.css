@@ -359,6 +359,17 @@ braccato-lyrics {
   font-size: 18px;
 }
 
+/* Keep romanization/translation from inheriting karaoke word sweeps. */
+.blyrics--translated,
+.blyrics--romanized,
+.blyrics--romanized .blyrics--word,
+.blyrics--translated .blyrics--word {
+  color: rgb(255 255 255 / 0.38) !important;
+  transform: none !important;
+  animation: none !important;
+  filter: none !important;
+}
+
 .blyrics-container[data-no-lyrics="true"] {
   padding-top: 220px;
   font-size: 26px;
