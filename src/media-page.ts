@@ -9,6 +9,7 @@ import {
 import "@braccato/core/element";
 import type { BraccatoLyricsElement } from "@braccato/core/element";
 import type { Lyric } from "@braccato/core";
+import type { DisplayMode } from "./store.ts";
 import { volumeGain } from "./volume.ts";
 import "./media-page.css";
 
@@ -74,6 +75,8 @@ let pendingLyrics:
   | { entryId: string; priority: number; lines: Lyric[]; source: string }
   | undefined;
 let pendingNoLyrics: string | undefined;
+let preferredDisplayMode: DisplayMode = "default";
+let lyricsAvailable: boolean | undefined;
 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
@@ -83,9 +86,18 @@ let cameraRunning = false;
 let cameraInputReady = false;
 const camera = Promise.withResolvers<MediaStream>();
 
-async function setDisplayMode(mode: "default" | "lyrics" | "off") {
+async function applyDisplayMode() {
+  const mode =
+    preferredDisplayMode === "lyrics" && lyricsAvailable === false
+      ? "default"
+      : preferredDisplayMode;
   stage.dataset.displayMode = mode === "lyrics" ? "lyrics" : "default";
-  await setCameraEnabled(mode !== "off");
+  await setCameraEnabled(preferredDisplayMode !== "off");
+}
+
+async function setDisplayMode(mode: DisplayMode) {
+  preferredDisplayMode = mode;
+  await applyDisplayMode();
 }
 
 lyrics.addEventListener("braccato:lyrics-loaded", (event) => {
@@ -239,6 +251,7 @@ function stop() {
   transition++;
   pendingLyrics = undefined;
   pendingNoLyrics = undefined;
+  lyricsAvailable = undefined;
   stage.classList.remove("changing");
   currentId = undefined;
   nextEntry = undefined;
@@ -247,7 +260,8 @@ function stop() {
   lyricPriority = Infinity;
   for (const [entryId, value] of decks) dispose(entryId, value);
   lyrics.source = null;
-  lyrics.lyrics = [];
+  clearLyrics();
+  void applyDisplayMode();
   title.textContent = "Ready for music";
   artist.textContent = "Waiting for the next track";
   artwork.style.backgroundImage = "";
@@ -386,14 +400,20 @@ function showLyrics(message: {
   lyricPriority = message.priority;
   lyrics.lyricsOptions = {};
   lyrics.lyrics = message.lines;
+  lyricsAvailable = true;
   console.log(
     `[lyrics] received ${message.lines.length} lines from ${message.source}`,
   );
 }
 
-function showNoLyrics() {
-  lyrics.lyricsOptions = { noLyrics: true };
-  lyrics.lyrics = [{ startTimeMs: 0, durationMs: 0, words: "No lyrics found" }];
+function clearLyrics() {
+  lyrics.lyricsOptions = {};
+  lyrics.lyrics = [];
+}
+
+function markLyricsUnavailable() {
+  clearLyrics();
+  lyricsAvailable = false;
 }
 
 function takePendingLyrics() {
@@ -476,6 +496,7 @@ socket.addEventListener("message", async (event) => {
       const change = ++transition;
       pendingLyrics = undefined;
       pendingNoLyrics = undefined;
+      lyricsAvailable = undefined;
       stage.classList.add("changing");
       tone?.stop();
       const alreadyPlaying = currentId === message.entryId;
@@ -508,14 +529,14 @@ socket.addEventListener("message", async (event) => {
       cover.style.backgroundImage = message.artwork
         ? `url(${JSON.stringify(message.artwork)})`
         : "";
-      lyrics.lyricsOptions = {};
-      lyrics.lyrics = [];
+      clearLyrics();
       lyrics.source = player;
       const queuedLyrics = takePendingLyrics();
       if (queuedLyrics && queuedLyrics.entryId === message.entryId)
         showLyrics(queuedLyrics);
-      else if (pendingNoLyrics === message.entryId) showNoLyrics();
+      else if (pendingNoLyrics === message.entryId) markLyricsUnavailable();
       pendingNoLyrics = undefined;
+      await applyDisplayMode();
       requestAnimationFrame(() =>
         requestAnimationFrame(() => stage.classList.remove("changing")),
       );
@@ -526,7 +547,10 @@ socket.addEventListener("message", async (event) => {
       message.priority < lyricPriority
     ) {
       if (stage.classList.contains("changing")) pendingLyrics = message;
-      else showLyrics(message);
+      else {
+        showLyrics(message);
+        await applyDisplayMode();
+      }
     }
     if (
       message.type === "lyrics_unavailable" &&
@@ -534,7 +558,10 @@ socket.addEventListener("message", async (event) => {
     ) {
       if (stage.classList.contains("changing"))
         pendingNoLyrics = message.entryId;
-      else showNoLyrics();
+      else {
+        markLyricsUnavailable();
+        await applyDisplayMode();
+      }
     }
     if (message.type === "pause") {
       cancelTransition();

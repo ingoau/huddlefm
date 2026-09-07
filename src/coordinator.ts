@@ -272,13 +272,12 @@ export class Coordinator {
       if (this.playbackSeconds)
         this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
       if (this.state === "paused") this.sendMedia({ type: "pause" });
-      void this.loadLyrics(this.current).then((lyrics) => {
-        if (this.current && lyrics)
-          this.sendMedia({
-            type: "lyrics",
-            entryId: this.current.id,
-            ...lyrics,
-          });
+      const entry = this.current;
+      void this.loadLyrics(entry).then((lyrics) => {
+        if (this.current !== entry) return;
+        if (lyrics)
+          this.sendMedia({ type: "lyrics", entryId: entry.id, ...lyrics });
+        else this.sendMedia({ type: "lyrics_unavailable", entryId: entry.id });
       });
       this.syncPreloads();
       await this.render();

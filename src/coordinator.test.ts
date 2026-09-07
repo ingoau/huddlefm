@@ -432,6 +432,9 @@ test("suspends with a restart notice and restores playback", async () => {
   expect(second.media).toContainEqual({ type: "seek", seconds: 42 });
   expect(second.media).toContainEqual({ type: "pause" });
   expect(second.media).toContainEqual({ type: "display_mode", mode: "lyrics" });
+  expect(second.media).toContainEqual(
+    expect.objectContaining({ type: "lyrics_unavailable", entryId: "track" }),
+  );
   expect(second.audit).toContainEqual([
     "session.resumed",
     "restorer",
