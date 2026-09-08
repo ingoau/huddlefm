@@ -72,7 +72,7 @@ Bots request the same capability IDs huddle participants can get. The host must 
 | ID                   | Shown to the host as                                  |
 | -------------------- | ----------------------------------------------------- |
 | `add`                | Add songs                                             |
-| `add-bulk`           | Add albums and playlists                              |
+| `add-bulk`           | Add albums, playlists, and link lists                 |
 | `remove-own`         | Remove songs they added                               |
 | `manage-queue`       | Manage queue                                          |
 | `skip`               | Skip songs (also seek and previous)                   |
