@@ -275,12 +275,52 @@ export class SlackAppAdapter {
     return name;
   }
 
-  async dm(userId: string, text: string) {
-    const opened = await this.web.conversations.open({ users: userId });
-    if (!opened.channel?.id)
-      throw new Error("conversations.open returned no channel");
-    await this.web.chat.postMessage({ channel: opened.channel.id, text });
-    log.debug({ event: "dm_posted", userId }, "Slack direct message posted");
+  async dm(
+    userId: string,
+    text: string,
+    options?: {
+      threadTs?: string;
+      channelId?: string;
+      blocks?: unknown[];
+    },
+  ) {
+    const channelId =
+      options?.channelId ??
+      (await this.web.conversations.open({ users: userId })).channel?.id;
+    if (!channelId) throw new Error("conversations.open returned no channel");
+    await this.web.chat.postMessage({
+      channel: channelId,
+      text,
+      thread_ts: options?.threadTs,
+      blocks: options?.blocks as never,
+    });
+    log.debug(
+      {
+        event: "dm_posted",
+        userId,
+        channelId,
+        threadTs: options?.threadTs,
+      },
+      "Slack direct message posted",
+    );
+  }
+
+  async replaceOriginal(responseUrl: string, text: string, blocks?: unknown[]) {
+    const response = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        replace_original: true,
+        text,
+        ...(blocks ? { blocks } : {}),
+      }),
+    });
+    if (!response.ok)
+      throw new Error(`response_url replace failed: ${response.status}`);
+    log.debug(
+      { event: "original_response_replaced" },
+      "Slack original response replaced",
+    );
   }
 
   async channelMembers(channel: string) {

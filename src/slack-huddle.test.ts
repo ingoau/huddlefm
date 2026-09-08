@@ -155,6 +155,52 @@ test("normalizes thread text for private websocket mentions", () => {
   });
 });
 
+test("normalizes top-level DMs including bot messages", () => {
+  expect(
+    normalizeRealtimeEvent({
+      type: "message",
+      channel: "D123",
+      channel_type: "im",
+      ts: "2.0",
+      user: "U123",
+      text: '{"v":1,"type":"skip"}',
+    }),
+  ).toEqual({
+    type: "DirectMessage",
+    channelId: "D123",
+    messageTs: "2.0",
+    userId: "U123",
+    text: '{"v":1,"type":"skip"}',
+  });
+  expect(
+    normalizeRealtimeEvent({
+      type: "message",
+      subtype: "bot_message",
+      channel: "D456",
+      ts: "3.0",
+      bot_id: "B123",
+      text: '{"v":1,"type":"status"}',
+    }),
+  ).toEqual({
+    type: "DirectMessage",
+    channelId: "D456",
+    messageTs: "3.0",
+    userId: "B123",
+    botId: "B123",
+    text: '{"v":1,"type":"status"}',
+  });
+  expect(
+    normalizeRealtimeEvent({
+      type: "message",
+      channel: "D123",
+      thread_ts: "1.0",
+      ts: "2.0",
+      user: "U123",
+      text: "reply",
+    }),
+  ).toBeUndefined();
+});
+
 test("only accepts active Huddle thread roots", () => {
   const active = {
     ok: true,

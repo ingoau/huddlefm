@@ -42,6 +42,7 @@ export function loadConfig() {
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID,
     excludedUserIds: parseIds(process.env.EXCLUDED_USER_IDS),
+    integrationUserIds: parseIds(process.env.INTEGRATION_USER_IDS),
     forcedCompanionChannelIds: parseIds(
       process.env.FORCE_COMPANION_CHANNEL_IDS,
     ),
