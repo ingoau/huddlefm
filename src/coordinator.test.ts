@@ -2879,9 +2879,11 @@ test("integration control requires host approval and grants without huddle membe
   );
   expect(JSON.parse(String(volumeEvent?.[1]))).toMatchObject({
     type: "event",
+    channel: "channel",
     event: "volume.changed",
     payload: { volumePercent: 20 },
   });
+  expect(JSON.parse(String(volumeEvent?.[1])).sessionId).toBeUndefined();
   expect(volumeEvent?.[0]).toBe("Ubot2");
   expect(
     test.dms.some(

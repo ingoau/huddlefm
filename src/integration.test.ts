@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   eventGroup,
+  integrationEventMessage,
   isAllowlisted,
   mapAgentError,
   parseIntegrationActionValue,
@@ -184,4 +185,18 @@ test("wraps agent results with replyTo and does not parse action values loosely"
     requestId: "r",
   });
   expect(parseIntegrationActionValue("session")).toBeUndefined();
+  expect(
+    JSON.parse(
+      integrationEventMessage("C123", "track.started", {
+        title: "Song",
+        artist: "Artist",
+      }),
+    ),
+  ).toEqual({
+    v: 1,
+    type: "event",
+    channel: "C123",
+    event: "track.started",
+    payload: { title: "Song", artist: "Artist" },
+  });
 });
