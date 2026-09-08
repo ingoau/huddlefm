@@ -94,11 +94,13 @@ Subscribe in `request_control`. Events are top-level DMs (not threaded):
 {
   "v": 1,
   "type": "event",
-  "sessionId": "...",
+  "channel": "C123",
   "event": "track.started",
   "payload": { "id": "...", "title": "...", "artist": "..." }
 }
 ```
+
+`channel` is the same value you sent in `request_control`. Include it on later commands when you hold more than one grant.
 
 | Subscription     | Events                                                                      |
 | ---------------- | --------------------------------------------------------------------------- |

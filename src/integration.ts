@@ -187,14 +187,14 @@ export function integrationReply(
 }
 
 export function integrationEventMessage(
-  sessionId: string,
+  channel: string,
   event: string,
   payload: Record<string, unknown> = {},
 ) {
   return JSON.stringify({
     v: 1,
     type: "event",
-    sessionId,
+    channel,
     event,
     payload,
   });

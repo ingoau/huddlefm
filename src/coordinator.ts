@@ -119,6 +119,7 @@ export class Coordinator {
     {
       permissions: Set<string>;
       events: Set<string>;
+      channel: string;
       dmChannelId: string;
       requestTs: string;
       requestId: string;
@@ -1857,6 +1858,7 @@ export class Coordinator {
     this.integrations.set(pending.userId, {
       permissions: new Set(pending.permissions),
       events: new Set(pending.events),
+      channel: pending.channel,
       dmChannelId: pending.dmChannelId,
       requestTs: pending.requestTs,
       requestId: pending.id,
@@ -1931,9 +1933,9 @@ export class Coordinator {
   ) {
     const group = eventGroup(event);
     if (!group) return;
-    const text = integrationEventMessage(this.id, event, payload);
     for (const [userId, grant] of this.integrations) {
       if (!grant.events.has(group)) continue;
+      const text = integrationEventMessage(grant.channel, event, payload);
       void this.slack
         .dm(userId, text, { channelId: grant.dmChannelId })
         .catch((error) =>
