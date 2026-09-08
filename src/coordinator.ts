@@ -1711,12 +1711,23 @@ export class Coordinator {
         type: command.type,
         error: "session_inactive",
       });
-    const result = await this.runIntegrationCommand(userId, command);
-    return this.slack.dm(
-      userId,
-      wrapIntegrationResult(command.type, requestTs, result),
-      { channelId: dmChannelId, threadTs: requestTs },
-    );
+    try {
+      const result = await this.runIntegrationCommand(userId, command);
+      return this.slack.dm(
+        userId,
+        wrapIntegrationResult(command.type, requestTs, result),
+        { channelId: dmChannelId, threadTs: requestTs },
+      );
+    } catch (error) {
+      return this.slack.dm(
+        userId,
+        wrapIntegrationResult(command.type, requestTs, {
+          ok: false,
+          error: message(error),
+        }),
+        { channelId: dmChannelId, threadTs: requestTs },
+      );
+    }
   }
 
   private async runIntegrationCommand(

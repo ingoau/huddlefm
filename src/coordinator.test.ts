@@ -2981,6 +2981,67 @@ test("integration decline and revoke notify the bot in the request thread", asyn
   await test.coordinator.endFromSlack();
 });
 
+test("integration command replies stay in the request thread when an agent method throws", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["skip"],
+      events: ["track"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value: requestValue(test.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "skip" },
+    "13.0",
+    "Dbot",
+  );
+  expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
+    v: 1,
+    replyTo: "13.0",
+    ok: false,
+    type: "skip",
+    error: "nothing_playing",
+  });
+  expect(test.dms.at(-1)?.[2]).toEqual({ channelId: "Dbot", threadTs: "13.0" });
+
+  test.coordinator.agentSkip = async () => {
+    throw new Error("media page crashed");
+  };
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "skip" },
+    "14.0",
+    "Dbot",
+  );
+  expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
+    v: 1,
+    replyTo: "14.0",
+    ok: false,
+    type: "skip",
+    error: "failed",
+    message: "media page crashed",
+  });
+  expect(test.dms.at(-1)?.[2]).toEqual({ channelId: "Dbot", threadTs: "14.0" });
+  await test.coordinator.endFromSlack();
+});
+
 test("unknown session targeting does not list other sessions", async () => {
   const test = setup();
   await test.coordinator.start();
