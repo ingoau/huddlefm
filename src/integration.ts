@@ -1,5 +1,5 @@
 import { capabilities, displayModes, transitionModes } from "./store.ts";
-import { permissionLabels, plain } from "./coordinator-ui.ts";
+import { confirm, permissionLabels, plain } from "./coordinator-ui.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 
 export const integrationEvents = [
@@ -339,6 +339,49 @@ export function integrationGrantedBlocks(options: {
         },
       ],
     },
+  ];
+}
+
+export function integrationSettingsBlocks(options: {
+  sessionId: string;
+  grants: { userId: string; requestId: string; permissions: string[] }[];
+}) {
+  if (!options.grants.length) return [];
+  return [
+    { type: "header", block_id: "integrations", text: plain("Integrations") },
+    ...options.grants.flatMap((grant) => {
+      const permissions = permissionLabelList(grant.permissions)
+        .map((label) => `• ${label}`)
+        .join("\n");
+      return [
+        {
+          type: "section",
+          block_id: `integration_${grant.userId}`,
+          text: {
+            type: "mrkdwn",
+            text: `<@${grant.userId}> has control of this session.\n${permissions || "• None"}`,
+          },
+        },
+        {
+          type: "actions",
+          block_id: `integration_actions_${grant.userId}`,
+          elements: [
+            {
+              type: "button",
+              action_id: "integration_revoke",
+              text: plain("Revoke"),
+              style: "danger",
+              value: integrationActionValue(options.sessionId, grant.requestId),
+              confirm: confirm(
+                "Revoke control?",
+                `This stops <@${grant.userId}> from controlling this session.`,
+                "Revoke",
+              ),
+            },
+          ],
+        },
+      ];
+    }),
   ];
 }
 

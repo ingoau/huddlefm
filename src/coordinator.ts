@@ -48,6 +48,7 @@ import {
   integrationGrantTimeoutMs,
   integrationReply,
   integrationRequestBlocks,
+  integrationSettingsBlocks,
   parseIntegrationActionValue,
   sessionMatchesChannel,
   wrapIntegrationResult,
@@ -1914,6 +1915,12 @@ export class Coordinator {
           `Revoked <@${userId}>'s control of this session.`,
         )
         .catch(() => {});
+    if (interaction.viewId && interaction.viewHash)
+      await this.slack.updateModal(
+        interaction.viewId,
+        interaction.viewHash,
+        this.settingsView(interaction.userId),
+      );
   }
 
   private replyIntegration(
@@ -3490,6 +3497,18 @@ export class Coordinator {
                 },
               },
             ]
+          : []),
+        ...(admin
+          ? integrationSettingsBlocks({
+              sessionId: this.id,
+              grants: [...this.integrations.entries()].map(
+                ([userId, grant]) => ({
+                  userId,
+                  requestId: grant.requestId,
+                  permissions: [...grant.permissions],
+                }),
+              ),
+            })
           : []),
         { type: "header", text: plain("User settings") },
         ...(settings.configured
