@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Lyric } from "@braccato/core";
 import {
+  buildTimedRomanization,
   enrichLyricsWithRomanization,
   lyricsHaveRomanization,
   type RomanizeFetch,
@@ -256,4 +257,121 @@ test("skips instrumental lines and music-note placeholders", async () => {
   expect(lines[0]!.romanization).toBeUndefined();
   expect(lines[1]!.romanization).toBeUndefined();
   expect(lines[2]!.romanization).toBe("hangeul");
+});
+
+test("maps romanization words onto the sung timeline", () => {
+  const timed = buildTimedRomanization({
+    startTimeMs: 2674,
+    durationMs: 1411,
+    words: "共振で苦しんでし罵倒",
+    romanization: "Kyoushin de kurushindeshi batou",
+    parts: [
+      { startTimeMs: 2674, durationMs: 176, words: "共" },
+      { startTimeMs: 2850, durationMs: 176, words: "振" },
+      { startTimeMs: 3026, durationMs: 177, words: "で" },
+      { startTimeMs: 3203, durationMs: 176, words: "苦" },
+      { startTimeMs: 3379, durationMs: 89, words: "し" },
+      { startTimeMs: 3468, durationMs: 88, words: "ん" },
+      { startTimeMs: 3556, durationMs: 88, words: "で" },
+      { startTimeMs: 3644, durationMs: 88, words: "し" },
+      { startTimeMs: 3732, durationMs: 177, words: "罵" },
+      { startTimeMs: 3909, durationMs: 176, words: "倒" },
+    ],
+  });
+
+  expect(timed?.map((part) => part.words.trim())).toEqual([
+    "Kyoushin",
+    "de",
+    "kurushindeshi",
+    "batou",
+  ]);
+  expect(timed?.[0]!.startTimeMs).toBe(2674);
+  expect(timed!.at(-1)!.startTimeMs + timed!.at(-1)!.durationMs).toBe(
+    3909 + 176,
+  );
+  expect(timed!.some((part) => part.durationMs > 0)).toBe(true);
+});
+
+test("attaches timed romanization when enriching lyrics", async () => {
+  const lines = [
+    line("共振で苦しんでし罵倒", {
+      startTimeMs: 2674,
+      durationMs: 1411,
+      romanization: "Kyoushin de kurushindeshi batou",
+      parts: [
+        { startTimeMs: 2674, durationMs: 352, words: "共振" },
+        { startTimeMs: 3026, durationMs: 177, words: "で" },
+        { startTimeMs: 3203, durationMs: 882, words: "苦しんでし罵倒" },
+      ],
+    }),
+  ];
+
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (() => {
+      throw new Error("should not fetch");
+    }) as RomanizeFetch,
+  });
+
+  expect(lines[0]!.romanization).toBe("Kyoushin de kurushindeshi batou");
+  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
+    ["Kyoushin", "de", "kurushindeshi", "batou"],
+  );
+  expect(lines[0]!.timedRomanization?.[0]!.startTimeMs).toBe(2674);
+});
+
+test("keeps punctuation attached to romanized words", async () => {
+  const lines = [
+    line("Q.更新で降る隕石抹消可？", {
+      romanization: "Q . Kōshin De Furu Inseki Masshō Ka ?",
+    }),
+  ];
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (() => {
+      throw new Error("should not fetch");
+    }) as RomanizeFetch,
+  });
+  expect(lines[0]!.romanization).toBe("Q. Kōshin De Furu Inseki Masshō Ka?");
+  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
+    ["Q.", "Kōshin", "De", "Furu", "Inseki", "Masshō", "Ka?"],
+  );
+});
+
+test("keeps consecutive punctuation in one romanization token", async () => {
+  const lines = [line("本当?!", { romanization: "Hontō ? !" })];
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (() => {
+      throw new Error("should not fetch");
+    }) as RomanizeFetch,
+  });
+
+  expect(lines[0]!.romanization).toBe("Hontō?!");
+  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
+    ["Hontō?!"],
+  );
+});
+
+test("maps romanization timing around silent gaps", () => {
+  const timed = buildTimedRomanization({
+    startTimeMs: 1000,
+    durationMs: 600,
+    words: "你好",
+    romanization: "ni hao",
+    parts: [
+      { startTimeMs: 1000, durationMs: 100, words: "你" },
+      { startTimeMs: 1500, durationMs: 100, words: "好" },
+    ],
+  });
+
+  expect(timed).toEqual([
+    { startTimeMs: 1000, durationMs: 80, words: "ni " },
+    { startTimeMs: 1080, durationMs: 20, words: "h" },
+    { startTimeMs: 1500, durationMs: 100, words: "ao" },
+  ]);
+  expect(timed?.map((part) => part.words).join("")).toBe("ni hao");
+  expect(
+    timed?.every((part) => {
+      const end = part.startTimeMs + part.durationMs;
+      return end <= 1100 || part.startTimeMs >= 1500;
+    }),
+  ).toBe(true);
 });
