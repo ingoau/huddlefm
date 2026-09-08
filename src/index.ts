@@ -25,6 +25,11 @@ import {
   verifySlackIdentity,
   type ChimeBootstrap,
 } from "./slack-huddle.ts";
+import {
+  integrationReply,
+  isAllowlisted,
+  parseIntegrationMessage,
+} from "./integration.ts";
 import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
 
@@ -182,6 +187,99 @@ function coordinatorFor(interaction: Interaction) {
   return [...runtimes.values()].find((runtime) =>
     runtime.coordinator?.handles(interaction),
   )?.coordinator;
+}
+
+function activeCoordinators() {
+  return [...runtimes.values()].flatMap((runtime) =>
+    runtime.coordinator ? [runtime.coordinator] : [],
+  );
+}
+
+async function handleIntegrationDm(event: {
+  userId: string;
+  botId?: string;
+  channelId: string;
+  messageTs: string;
+  text: string;
+}) {
+  if (event.userId === botUserId) return;
+  if (!isAllowlisted(config.integrationUserIds, event.userId, event.botId))
+    return;
+  const parsed = parseIntegrationMessage(event.text);
+  if (!parsed.ok) {
+    if (parsed.error === "ignored") return;
+    const { ok: _ok, error, ...rest } = parsed;
+    await slackApp.dm(
+      event.userId,
+      integrationReply(event.messageTs, { ok: false, error, ...rest }),
+      { channelId: event.channelId, threadTs: event.messageTs },
+    );
+    return;
+  }
+  const coordinators = activeCoordinators();
+  const command = parsed.command;
+  if (command.type === "request_control") {
+    const coordinator = coordinators.find((session) =>
+      session.ownsChannel(command.channel!),
+    );
+    if (!coordinator) {
+      await slackApp.dm(
+        event.userId,
+        integrationReply(event.messageTs, {
+          ok: false,
+          error: "session_not_found",
+        }),
+        { channelId: event.channelId, threadTs: event.messageTs },
+      );
+      return;
+    }
+    await coordinator.handleIntegrationCommand(
+      event.userId,
+      command,
+      event.messageTs,
+      event.channelId,
+    );
+    return;
+  }
+  const granted = coordinators.filter((session) =>
+    session.hasGrant(event.userId),
+  );
+  const coordinator = command.channel
+    ? coordinators.find(
+        (session) =>
+          session.ownsChannel(command.channel!) &&
+          session.hasGrant(event.userId),
+      )
+    : granted.length === 1
+      ? granted[0]
+      : undefined;
+  if (!coordinator) {
+    const error =
+      command.channel &&
+      coordinators.some((session) => session.ownsChannel(command.channel!))
+        ? "not_granted"
+        : command.channel
+          ? "session_not_found"
+          : granted.length > 1
+            ? "channel_required"
+            : "not_granted";
+    await slackApp.dm(
+      event.userId,
+      integrationReply(event.messageTs, {
+        ok: false,
+        type: command.type,
+        error,
+      }),
+      { channelId: event.channelId, threadTs: event.messageTs },
+    );
+    return;
+  }
+  await coordinator.handleIntegrationCommand(
+    event.userId,
+    command,
+    event.messageTs,
+    event.channelId,
+  );
 }
 
 function runtimeForCall(callId: string) {
@@ -1074,6 +1172,19 @@ slackApp.onAction = (interaction) =>
     : coordinatorFor(interaction)?.action(interaction);
 await slackApp.start();
 await slackHuddle.start((event) => {
+  if (event.type === "DirectMessage") {
+    void handleIntegrationDm(event).catch((error) =>
+      log.warn(
+        {
+          event: "integration_dm_failed",
+          userId: event.userId,
+          err: error,
+        },
+        "Could not handle integration DM",
+      ),
+    );
+    return;
+  }
   if (event.type === "HuddleInvited") {
     log.info(
       {

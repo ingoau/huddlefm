@@ -6,6 +6,7 @@ import type { SlackAppAdapter } from "./slack-app.ts";
 import { Store, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
+import { parseIntegrationActionValue } from "./integration.ts";
 
 function setup(
   tracks = {} as TrackCatalog,
@@ -36,6 +37,8 @@ function setup(
   const updatedModals: [unknown, unknown, unknown][] = [];
   const ephemeral: string[] = [];
   const ephemeralCalls: unknown[][] = [];
+  const dms: unknown[][] = [];
+  const replacements: unknown[][] = [];
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
   const suspensions: unknown[] = [];
@@ -77,6 +80,12 @@ function setup(
       };
     },
     userName: (userId: string) => Promise.resolve(`Name ${userId}`),
+    dm: async (...args: unknown[]) => {
+      dms.push(args);
+    },
+    replaceOriginal: async (...args: unknown[]) => {
+      replacements.push(args);
+    },
   } as unknown as SlackAppAdapter;
   const store =
     storeOverride ??
@@ -159,6 +168,8 @@ function setup(
     updatedModals,
     ephemeral,
     ephemeralCalls,
+    dms,
+    replacements,
     sessions,
     permissions,
     suspensions,
@@ -2741,5 +2752,300 @@ test("agentUpdateSettings validates the full patch before mutating", async () =>
   });
   expect(test.sessions).not.toContainEqual({ displayMode: "lyrics" });
   expect(test.sessions).not.toContainEqual({ autoplay: true });
+  await test.coordinator.endFromSlack();
+});
+
+function requestValue(calls: unknown[][]) {
+  const blocks = calls.at(-1)?.[4] as {
+    elements?: { action_id?: string; value?: string }[];
+  }[];
+  const accept = blocks
+    ?.flatMap((block) => block.elements ?? [])
+    .find((element) => element.action_id === "integration_accept");
+  return accept?.value ?? "";
+}
+
+test("integration control requires host approval and grants without huddle membership", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["pause", "skip"],
+      events: ["playback.state", "track"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  expect(test.ephemeralCalls[0]?.[1]).toBe("host");
+  const prompt = JSON.stringify(test.ephemeralCalls[0]?.[4]);
+  expect(prompt).toContain("Pause or resume");
+  expect(prompt).toContain("Skip songs");
+  expect(prompt).not.toContain('"pause"');
+  expect(test.updates.flat().join("")).not.toContain("Controlling:");
+
+  const denied = await test.coordinator.agentSkip("Ubot");
+  expect(denied).toMatchObject({
+    ok: false,
+    error: "Join the huddle before using the player.",
+  });
+
+  const value = requestValue(test.ephemeralCalls);
+  expect(parseIntegrationActionValue(value)?.sessionId).toBe(
+    test.coordinator.id,
+  );
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "guest",
+    actionId: "integration_accept",
+    value,
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://hooks.slack.com/actions/test",
+  });
+  expect(test.ephemeral.at(-1)).toBe("Only the host can approve that.");
+
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value,
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://hooks.slack.com/actions/test",
+  });
+  const accepted = test.dms.find((args) =>
+    String(args[1]).includes("grant_accepted"),
+  );
+  expect(accepted?.[2]).toEqual({ channelId: "Dbot", threadTs: "9.0" });
+  expect(JSON.parse(String(accepted?.[1]))).toMatchObject({
+    v: 1,
+    replyTo: "9.0",
+    ok: true,
+    type: "grant_accepted",
+    permissions: ["pause", "skip"],
+    events: ["playback.state", "track"],
+  });
+  expect(JSON.parse(String(accepted?.[1])).hostId).toBeUndefined();
+  expect(JSON.stringify(test.updates.at(-1))).toContain("Controlling: <@Ubot>");
+
+  expect(await test.coordinator.agentSkip("Ubot")).toMatchObject({
+    ok: false,
+    error: "Nothing is playing.",
+  });
+  expect(await test.coordinator.agentSetVolume("Ubot", 20)).toMatchObject({
+    ok: false,
+    error: "You do not have permission for that.",
+  });
+
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot2",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["volume"],
+      events: ["volume"],
+    },
+    "10.0",
+    "Dbot2",
+  );
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value: requestValue(test.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(JSON.stringify(test.updates.at(-1))).toContain("<@Ubot>");
+  expect(JSON.stringify(test.updates.at(-1))).toContain("<@Ubot2>");
+  expect(await test.coordinator.agentSetVolume("Ubot2", 20)).toEqual({
+    ok: true,
+    volumePercent: 20,
+  });
+  const volumeEvent = test.dms.find((args) =>
+    String(args[1]).includes("volume.changed"),
+  );
+  expect(JSON.parse(String(volumeEvent?.[1]))).toMatchObject({
+    type: "event",
+    event: "volume.changed",
+    payload: { volumePercent: 20 },
+  });
+  expect(volumeEvent?.[0]).toBe("Ubot2");
+  expect(
+    test.dms.some(
+      (args) =>
+        String(args[0]) === "Ubot" &&
+        String(args[1]).includes("volume.changed"),
+    ),
+  ).toBe(false);
+
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "release_control" },
+    "11.0",
+    "Dbot",
+  );
+  const afterRelease = JSON.stringify(test.updates.at(-1));
+  expect(afterRelease).not.toContain("<@Ubot>");
+  expect(afterRelease).toContain("<@Ubot2>");
+  await test.coordinator.endFromSlack();
+});
+
+test("integration decline and revoke notify the bot in the request thread", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["pause"],
+      events: ["playback.state"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  const value = requestValue(test.ephemeralCalls);
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_decline",
+    value,
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://example.com/response",
+  });
+  expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
+    type: "grant_declined",
+    replyTo: "9.0",
+  });
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["pause"],
+      events: ["playback.state"],
+    },
+    "12.0",
+    "Dbot",
+  );
+  const granted = requestValue(test.ephemeralCalls);
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value: granted,
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://example.com/response",
+  });
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_revoke",
+    value: granted,
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://example.com/response",
+  });
+  expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
+    type: "grant_revoked",
+    replyTo: "12.0",
+  });
+  expect(await test.coordinator.agentToggle("Ubot")).toMatchObject({
+    ok: false,
+    error: "Join the huddle before using the player.",
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("integration command replies stay in the request thread when an agent method throws", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["skip"],
+      events: ["track"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value: requestValue(test.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "skip" },
+    "13.0",
+    "Dbot",
+  );
+  expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
+    v: 1,
+    replyTo: "13.0",
+    ok: false,
+    type: "skip",
+    error: "nothing_playing",
+  });
+  expect(test.dms.at(-1)?.[2]).toEqual({ channelId: "Dbot", threadTs: "13.0" });
+
+  test.coordinator.agentSkip = async () => {
+    throw new Error("media page crashed");
+  };
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "skip" },
+    "14.0",
+    "Dbot",
+  );
+  expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
+    v: 1,
+    replyTo: "14.0",
+    ok: false,
+    type: "skip",
+    error: "failed",
+    message: "media page crashed",
+  });
+  expect(test.dms.at(-1)?.[2]).toEqual({ channelId: "Dbot", threadTs: "14.0" });
+  await test.coordinator.endFromSlack();
+});
+
+test("unknown session targeting does not list other sessions", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  expect(test.coordinator.ownsChannel("missing")).toBe(false);
+  expect(test.coordinator.ownsChannel("channel")).toBe(true);
   await test.coordinator.endFromSlack();
 });

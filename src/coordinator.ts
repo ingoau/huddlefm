@@ -41,6 +41,18 @@ import {
   sectionBlocks,
   songCount,
 } from "./coordinator-ui.ts";
+import {
+  eventGroup,
+  integrationEventMessage,
+  integrationGrantedBlocks,
+  integrationGrantTimeoutMs,
+  integrationReply,
+  integrationRequestBlocks,
+  parseIntegrationActionValue,
+  sessionMatchesChannel,
+  wrapIntegrationResult,
+  type IntegrationCommand,
+} from "./integration.ts";
 
 const endRestoreMs = 2 * 60_000;
 const searchDebounceMs = 300;
@@ -102,6 +114,29 @@ export class Coordinator {
   private lastSearch = new Map<string, number>();
   private playbackScrobbling?: PlaybackScrobbler;
   private log = logger.child({ component: "coordinator" });
+  private integrations = new Map<
+    string,
+    {
+      permissions: Set<string>;
+      events: Set<string>;
+      dmChannelId: string;
+      requestTs: string;
+      requestId: string;
+    }
+  >();
+  private pendingIntegrations = new Map<
+    string,
+    {
+      id: string;
+      userId: string;
+      permissions: string[];
+      events: string[];
+      dmChannelId: string;
+      requestTs: string;
+      channel: string;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
 
   constructor(
     readonly room: JoinedHuddle,
@@ -391,6 +426,8 @@ export class Coordinator {
     )
       return true;
     if (interaction.value === this.id) return true;
+    const action = parseIntegrationActionValue(interaction.value);
+    if (action?.sessionId === this.id) return true;
     try {
       return JSON.parse(interaction.metadata || "{}").sessionId === this.id;
     } catch {
@@ -421,6 +458,8 @@ export class Coordinator {
         }
         return;
       }
+      if (this.isIntegrationAction(interaction.actionId))
+        return this.integrationAction(interaction);
       if (!this.isParticipantOrManager(interaction.userId))
         return this.rejectNonParticipant(interaction);
       if (interaction.type === "view_submission") {
@@ -533,13 +572,14 @@ export class Coordinator {
 
   agentStatus(userId: string, signal?: AbortSignal) {
     throwIfAborted(signal);
-    if (!this.isParticipantOrManager(userId))
+    if (!this.canUsePlayer(userId))
       return {
         ok: false as const,
         error: "Join the huddle before using the player.",
       };
     const capabilities = [...this.allowed];
     const host = this.hostId === userId || userId === this.config.managerUserId;
+    const grant = this.integrations.get(userId);
     const scrobbling = this.scrobbling?.settings(userId, this.id);
     return {
       ok: true as const,
@@ -554,9 +594,11 @@ export class Coordinator {
       youAreHost: host,
       yourCapabilities: host
         ? "all (host/manager)"
-        : capabilities.length
-          ? capabilities
-          : [],
+        : grant
+          ? [...grant.permissions]
+          : capabilities.length
+            ? capabilities
+            : [],
       nowPlaying: this.current
         ? {
             id: this.current.id,
@@ -590,7 +632,7 @@ export class Coordinator {
 
   async agentSearch(userId: string, query: string, signal?: AbortSignal) {
     throwIfAborted(signal);
-    if (!this.isParticipantOrManager(userId))
+    if (!this.canUsePlayer(userId))
       return {
         ok: false as const,
         error: "Join the huddle before using the player.",
@@ -622,7 +664,7 @@ export class Coordinator {
 
   async agentAdd(userId: string, reference: string, signal?: AbortSignal) {
     throwIfAborted(signal);
-    if (!this.isParticipantOrManager(userId))
+    if (!this.canUsePlayer(userId))
       return {
         ok: false as const,
         error: "Join the huddle before using the player.",
@@ -694,6 +736,11 @@ export class Coordinator {
           this.audit.record("track.added", userId, {
             sessionId: this.id,
             ...auditTrack(entry),
+          });
+          this.notifyIntegrations("queue.added", {
+            id: entry.id,
+            title: entry.title,
+            artist: entry.artist,
           });
           this.store.incrementUsage("added");
           return { entry, controller };
@@ -772,7 +819,7 @@ export class Coordinator {
   async agentRemove(userId: string, trackId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.isParticipantOrManager(userId))
+      if (!this.canUsePlayer(userId))
         return {
           ok: false as const,
           error: "Join the huddle before using the player.",
@@ -794,6 +841,11 @@ export class Coordinator {
       this.audit.record("track.removed", userId, {
         sessionId: this.id,
         ...auditTrack(entry),
+      });
+      this.notifyIntegrations("queue.removed", {
+        id: entry.id,
+        title: entry.title,
+        artist: entry.artist,
       });
       this.store.incrementUsage("removed");
       this.queueChanged();
@@ -824,7 +876,7 @@ export class Coordinator {
       if (!this.can(userId, "manage-queue"))
         return {
           ok: false as const,
-          error: this.isParticipantOrManager(userId)
+          error: this.canUsePlayer(userId)
             ? "You do not have permission for that."
             : "Join the huddle before using the player.",
         };
@@ -868,6 +920,11 @@ export class Coordinator {
         to: target,
         ...(options.playNext ? { reason: "play_next" } : {}),
       });
+      this.notifyIntegrations("queue.reordered", {
+        trackId,
+        from: index,
+        to: target,
+      });
       this.store.incrementUsage("reordered");
       this.queueChanged();
       await this.render();
@@ -887,7 +944,7 @@ export class Coordinator {
       if (!this.can(userId, "clear"))
         return {
           ok: false as const,
-          error: this.isParticipantOrManager(userId)
+          error: this.canUsePlayer(userId)
             ? "You do not have permission for that."
             : "Join the huddle before using the player.",
         };
@@ -905,6 +962,7 @@ export class Coordinator {
         sessionId: this.id,
         count,
       });
+      this.notifyIntegrations("queue.cleared", { count });
       this.store.incrementUsage("cleared");
       await this.render();
       this.syncPreloads();
@@ -920,7 +978,7 @@ export class Coordinator {
       if (!this.can(userId, "skip"))
         return {
           ok: false as const,
-          error: this.isParticipantOrManager(userId)
+          error: this.canUsePlayer(userId)
             ? "You do not have permission for that."
             : "Join the huddle before using the player.",
         };
@@ -930,6 +988,11 @@ export class Coordinator {
       this.audit.record("track.skipped", userId, {
         sessionId: this.id,
         ...auditTrack(skipped),
+      });
+      this.notifyIntegrations("track.skipped", {
+        id: skipped.id,
+        title: skipped.title,
+        artist: skipped.artist,
       });
       this.store.incrementUsage("next");
       this.autoplayRejected = [
@@ -954,7 +1017,7 @@ export class Coordinator {
       if (!this.can(userId, "skip"))
         return {
           ok: false as const,
-          error: this.isParticipantOrManager(userId)
+          error: this.canUsePlayer(userId)
             ? "You do not have permission for that."
             : "Join the huddle before using the player.",
         };
@@ -1003,30 +1066,56 @@ export class Coordinator {
   async agentToggle(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "pause") || !this.current)
-        return {
-          ok: false as const,
-          error: !this.isParticipantOrManager(userId)
-            ? "Join the huddle before using the player."
-            : !this.can(userId, "pause")
-              ? "You do not have permission for that."
-              : "Nothing is playing.",
-        };
-      this.state = this.state === "paused" ? "playing" : "paused";
-      if (this.state === "paused") this.playbackScrobbling?.pause();
-      else this.playbackScrobbling?.resume();
-      this.sendMedia({ type: this.state === "paused" ? "pause" : "resume" });
-      this.store.setSession(this.id, { status: this.state });
-      this.audit.record(
-        `playback.${this.state === "paused" ? "paused" : "resumed"}`,
+      return this.applyPause(
         userId,
-        { sessionId: this.id, trackId: this.current.id },
+        this.state === "paused" ? "playing" : "paused",
       );
-      this.store.incrementUsage(this.state === "paused" ? "paused" : "resumed");
-      await this.render();
-      this.refreshIdle();
-      return { ok: true as const, state: this.state };
     });
+  }
+
+  async agentPause(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      return this.applyPause(userId, "paused");
+    });
+  }
+
+  async agentResume(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      return this.applyPause(userId, "playing");
+    });
+  }
+
+  private async applyPause(userId: string, next: "paused" | "playing") {
+    if (!this.can(userId, "pause") || !this.current)
+      return {
+        ok: false as const,
+        error: !this.canUsePlayer(userId)
+          ? "Join the huddle before using the player."
+          : !this.can(userId, "pause")
+            ? "You do not have permission for that."
+            : "Nothing is playing.",
+      };
+    if (this.state === next) return { ok: true as const, state: this.state };
+    this.state = next;
+    if (this.state === "paused") this.playbackScrobbling?.pause();
+    else this.playbackScrobbling?.resume();
+    this.sendMedia({ type: this.state === "paused" ? "pause" : "resume" });
+    this.store.setSession(this.id, { status: this.state });
+    this.audit.record(
+      `playback.${this.state === "paused" ? "paused" : "resumed"}`,
+      userId,
+      { sessionId: this.id, trackId: this.current.id },
+    );
+    this.store.incrementUsage(this.state === "paused" ? "paused" : "resumed");
+    this.notifyIntegrations(
+      this.state === "paused" ? "playback.paused" : "playback.resumed",
+      { state: this.state },
+    );
+    await this.render();
+    this.refreshIdle();
+    return { ok: true as const, state: this.state };
   }
 
   async agentSeek(userId: string, seconds: number, signal?: AbortSignal) {
@@ -1035,7 +1124,7 @@ export class Coordinator {
       if (!this.can(userId, "skip") || !this.current)
         return {
           ok: false as const,
-          error: !this.isParticipantOrManager(userId)
+          error: !this.canUsePlayer(userId)
             ? "Join the huddle before using the player."
             : !this.can(userId, "skip")
               ? "You do not have permission for that."
@@ -1066,7 +1155,7 @@ export class Coordinator {
       if (!this.can(userId, "volume"))
         return {
           ok: false as const,
-          error: this.isParticipantOrManager(userId)
+          error: this.canUsePlayer(userId)
             ? "You do not have permission for that."
             : "Join the huddle before using the player.",
         };
@@ -1085,6 +1174,9 @@ export class Coordinator {
         volume: this.volume,
       });
       this.store.incrementUsage("volume");
+      this.notifyIntegrations("volume.changed", {
+        volumePercent: Math.round(this.volume * 100),
+      });
       await this.render();
       return {
         ok: true as const,
@@ -1107,7 +1199,7 @@ export class Coordinator {
   ) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.isParticipantOrManager(userId) && !this.settingsAdmin(userId))
+      if (!this.canUsePlayer(userId) && !this.settingsAdmin(userId))
         return {
           ok: false as const,
           error: "Join the huddle before using the player.",
@@ -1264,7 +1356,7 @@ export class Coordinator {
       if (!this.can(userId, "end-session"))
         return {
           ok: false as const,
-          error: this.isParticipantOrManager(userId)
+          error: this.canUsePlayer(userId)
             ? "You do not have permission to end this session."
             : "Join the huddle before using the player.",
         };
@@ -1406,6 +1498,7 @@ export class Coordinator {
         sessionId: this.id,
         resumeUntil,
       });
+      this.dropIntegrations("session.suspended");
       this.sendMedia({ type: "leave" });
       await Promise.all([this.leaveMedia(), notice]);
       this.log.info(
@@ -1424,8 +1517,17 @@ export class Coordinator {
     return next;
   }
 
+  ownsChannel(channel: string) {
+    return sessionMatchesChannel(this.room, channel);
+  }
+
+  hasGrant(userId: string) {
+    return this.integrations.has(userId);
+  }
+
   private can(userId: string, capability: string) {
     if (this.isExcluded(userId)) return false;
+    if (this.integrations.get(userId)?.permissions.has(capability)) return true;
     return (
       userId === this.config.managerUserId ||
       (this.participants.has(userId) &&
@@ -1472,6 +1574,393 @@ export class Coordinator {
       !this.isExcluded(userId) &&
       (userId === this.config.managerUserId || this.participants.has(userId))
     );
+  }
+
+  private canUsePlayer(userId: string) {
+    return this.isParticipantOrManager(userId) || this.integrations.has(userId);
+  }
+
+  async requestIntegrationControl(options: {
+    userId: string;
+    channel: string;
+    permissions: string[];
+    events: string[];
+    dmChannelId: string;
+    requestTs: string;
+  }) {
+    if (this.state === "ended" || this.state === "suspended")
+      return this.replyIntegration(options, {
+        ok: false,
+        error: "session_inactive",
+      });
+    if (!this.hostId)
+      return this.replyIntegration(options, {
+        ok: false,
+        error: "no_host",
+        message: "This session has no host to approve the request.",
+      });
+    const existing = this.pendingIntegrations.get(options.userId);
+    if (existing) {
+      clearTimeout(existing.timer);
+      this.pendingIntegrations.delete(options.userId);
+    }
+    const requestId = crypto.randomUUID();
+    const pending = {
+      id: requestId,
+      userId: options.userId,
+      permissions: options.permissions,
+      events: options.events,
+      dmChannelId: options.dmChannelId,
+      requestTs: options.requestTs,
+      channel: options.channel,
+      timer: setTimeout(() => {
+        const current = this.pendingIntegrations.get(options.userId);
+        if (current?.id !== requestId) return;
+        this.pendingIntegrations.delete(options.userId);
+        void this.replyIntegration(options, {
+          ok: true,
+          type: "grant_expired",
+        }).catch((error) =>
+          this.log.warn(
+            { event: "integration_expire_notify_failed", err: error },
+            "Could not notify expired integration request",
+          ),
+        );
+      }, integrationGrantTimeoutMs),
+    };
+    this.pendingIntegrations.set(options.userId, pending);
+    const text = `<@${options.userId}> wants to control this session.`;
+    const blocks = integrationRequestBlocks({
+      sessionId: this.id,
+      requestId,
+      userId: options.userId,
+      channel: options.channel,
+      permissions: options.permissions,
+      events: options.events,
+    });
+    try {
+      await this.slack.ephemeral(
+        this.room.uiChannelId,
+        this.hostId,
+        text,
+        this.room.uiThreadTs,
+        blocks,
+      );
+    } catch (error) {
+      try {
+        await this.slack.dm(this.hostId, text, { blocks });
+      } catch (fallbackError) {
+        clearTimeout(pending.timer);
+        this.pendingIntegrations.delete(options.userId);
+        this.log.warn(
+          {
+            event: "integration_prompt_failed",
+            err: fallbackError ?? error,
+          },
+          "Could not prompt host for integration control",
+        );
+        return this.replyIntegration(options, {
+          ok: false,
+          error: "host_unreachable",
+        });
+      }
+    }
+  }
+
+  async handleIntegrationCommand(
+    userId: string,
+    command: IntegrationCommand,
+    requestTs: string,
+    dmChannelId: string,
+  ) {
+    const target = { userId, dmChannelId, requestTs };
+    if (command.type === "request_control")
+      return this.requestIntegrationControl({
+        userId,
+        channel: command.channel!,
+        permissions: command.permissions ?? [],
+        events: command.events ?? [],
+        dmChannelId,
+        requestTs,
+      });
+    if (command.type === "release_control") {
+      const grant = this.integrations.get(userId);
+      if (!grant)
+        return this.replyIntegration(target, {
+          ok: false,
+          type: "release_control",
+          error: "not_granted",
+        });
+      this.integrations.delete(userId);
+      await this.render();
+      return this.replyIntegration(target, {
+        ok: true,
+        type: "release_control",
+        released: true,
+      });
+    }
+    if (!this.integrations.has(userId))
+      return this.replyIntegration(target, {
+        ok: false,
+        type: command.type,
+        error: "not_granted",
+      });
+    if (this.state === "ended" || this.state === "suspended")
+      return this.replyIntegration(target, {
+        ok: false,
+        type: command.type,
+        error: "session_inactive",
+      });
+    try {
+      const result = await this.runIntegrationCommand(userId, command);
+      return this.slack.dm(
+        userId,
+        wrapIntegrationResult(command.type, requestTs, result),
+        { channelId: dmChannelId, threadTs: requestTs },
+      );
+    } catch (error) {
+      return this.slack.dm(
+        userId,
+        wrapIntegrationResult(command.type, requestTs, {
+          ok: false,
+          error: message(error),
+        }),
+        { channelId: dmChannelId, threadTs: requestTs },
+      );
+    }
+  }
+
+  private async runIntegrationCommand(
+    userId: string,
+    command: IntegrationCommand,
+  ) {
+    switch (command.type) {
+      case "status":
+        return this.integrationStatus(userId);
+      case "search":
+        if (!command.query)
+          return { ok: false as const, error: "query is required." };
+        return this.agentSearch(userId, command.query);
+      case "add":
+        if (!command.reference)
+          return { ok: false as const, error: "reference is required." };
+        return this.agentAdd(userId, command.reference);
+      case "remove":
+        if (!command.trackId)
+          return { ok: false as const, error: "trackId is required." };
+        return this.agentRemove(userId, command.trackId);
+      case "move":
+        if (!command.trackId)
+          return { ok: false as const, error: "trackId is required." };
+        return this.agentMove(userId, command.trackId, {
+          direction: command.direction,
+          playNext: command.playNext,
+          position: command.position,
+        });
+      case "clear":
+        return this.agentClear(userId);
+      case "skip":
+        return this.agentSkip(userId);
+      case "previous":
+        return this.agentPrevious(userId);
+      case "toggle":
+        return this.agentToggle(userId);
+      case "pause":
+        return this.agentPause(userId);
+      case "resume":
+        return this.agentResume(userId);
+      case "seek":
+        if (typeof command.seconds !== "number")
+          return { ok: false as const, error: "seconds is required." };
+        return this.agentSeek(userId, command.seconds);
+      case "volume":
+        if (typeof command.percent !== "number")
+          return { ok: false as const, error: "percent is required." };
+        return this.agentSetVolume(userId, command.percent);
+      case "settings":
+        return this.agentUpdateSettings(userId, {
+          displayMode: command.displayMode,
+          autoplay: command.autoplay,
+          transitionMode: command.transitionMode,
+          anchorEnabled: command.anchorEnabled,
+        });
+      case "end":
+        return this.agentEnd(userId);
+      default:
+        return { ok: false as const, error: "unknown_type" };
+    }
+  }
+
+  private integrationStatus(userId: string) {
+    const status = this.agentStatus(userId);
+    if (!status.ok) return status;
+    return {
+      ok: true as const,
+      state: status.state,
+      volumePercent: status.volumePercent,
+      playbackSeconds: status.playbackSeconds,
+      displayMode: status.displayMode,
+      autoplay: status.autoplay,
+      transitionMode: status.transitionMode,
+      anchorEnabled: status.anchorEnabled,
+      yourCapabilities: status.yourCapabilities,
+      nowPlaying: status.nowPlaying,
+      queue: status.queue,
+      queueLimit: status.queueLimit,
+    };
+  }
+
+  private isIntegrationAction(actionId: string) {
+    return (
+      actionId === "integration_accept" ||
+      actionId === "integration_decline" ||
+      actionId === "integration_revoke"
+    );
+  }
+
+  private async integrationAction(interaction: Interaction) {
+    const parsed = parseIntegrationActionValue(interaction.value);
+    if (!parsed) return;
+    if (
+      interaction.userId !== this.hostId &&
+      interaction.userId !== this.config.managerUserId
+    )
+      return this.notice(interaction.userId, "Only the host can approve that.");
+    if (interaction.actionId === "integration_revoke")
+      return this.revokeIntegration(parsed.requestId, interaction);
+    const pending = [...this.pendingIntegrations.values()].find(
+      (request) => request.id === parsed.requestId,
+    );
+    if (!pending)
+      return this.notice(
+        interaction.userId,
+        "That control request is no longer pending.",
+      );
+    if (interaction.actionId === "integration_decline") {
+      clearTimeout(pending.timer);
+      this.pendingIntegrations.delete(pending.userId);
+      await this.replyIntegration(pending, {
+        ok: true,
+        type: "grant_declined",
+      });
+      if (interaction.responseUrl)
+        await this.slack
+          .replaceOriginal(
+            interaction.responseUrl,
+            `Declined <@${pending.userId}>'s control request.`,
+          )
+          .catch(() => {});
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingIntegrations.delete(pending.userId);
+    this.integrations.set(pending.userId, {
+      permissions: new Set(pending.permissions),
+      events: new Set(pending.events),
+      dmChannelId: pending.dmChannelId,
+      requestTs: pending.requestTs,
+      requestId: pending.id,
+    });
+    const status = this.integrationStatus(pending.userId);
+    await this.replyIntegration(pending, {
+      ok: true,
+      type: "grant_accepted",
+      permissions: pending.permissions,
+      events: pending.events,
+      ...(status.ok ? status : {}),
+    });
+    await this.render();
+    if (interaction.responseUrl)
+      await this.slack
+        .replaceOriginal(
+          interaction.responseUrl,
+          `Granted <@${pending.userId}> control of this session.`,
+          integrationGrantedBlocks({
+            sessionId: this.id,
+            requestId: pending.id,
+            userId: pending.userId,
+            permissions: pending.permissions,
+          }),
+        )
+        .catch(() => {});
+  }
+
+  private async revokeIntegration(requestId: string, interaction: Interaction) {
+    const entry = [...this.integrations.entries()].find(
+      ([, grant]) => grant.requestId === requestId,
+    );
+    if (!entry)
+      return this.notice(
+        interaction.userId,
+        "That bot is no longer controlling this session.",
+      );
+    const [userId, grant] = entry;
+    this.integrations.delete(userId);
+    await this.replyIntegration(
+      {
+        userId,
+        dmChannelId: grant.dmChannelId,
+        requestTs: grant.requestTs,
+      },
+      { ok: true, type: "grant_revoked" },
+    );
+    await this.render();
+    if (interaction.responseUrl)
+      await this.slack
+        .replaceOriginal(
+          interaction.responseUrl,
+          `Revoked <@${userId}>'s control of this session.`,
+        )
+        .catch(() => {});
+  }
+
+  private replyIntegration(
+    target: { userId: string; dmChannelId: string; requestTs: string },
+    body: Record<string, unknown>,
+  ) {
+    return this.slack.dm(
+      target.userId,
+      integrationReply(target.requestTs, body),
+      { channelId: target.dmChannelId, threadTs: target.requestTs },
+    );
+  }
+
+  private notifyIntegrations(
+    event: string,
+    payload: Record<string, unknown> = {},
+  ) {
+    const group = eventGroup(event);
+    if (!group) return;
+    const text = integrationEventMessage(this.id, event, payload);
+    for (const [userId, grant] of this.integrations) {
+      if (!grant.events.has(group)) continue;
+      void this.slack
+        .dm(userId, text, { channelId: grant.dmChannelId })
+        .catch((error) =>
+          this.log.warn(
+            {
+              event: "integration_event_failed",
+              userId,
+              integrationEvent: event,
+              err: error,
+            },
+            "Could not send integration event",
+          ),
+        );
+    }
+  }
+
+  private dropIntegrations(event: "session.ended" | "session.suspended") {
+    this.notifyIntegrations(event);
+    for (const pending of this.pendingIntegrations.values()) {
+      clearTimeout(pending.timer);
+      void this.replyIntegration(pending, {
+        ok: true,
+        type: "grant_expired",
+      }).catch(() => {});
+    }
+    this.pendingIntegrations.clear();
+    this.integrations.clear();
   }
 
   private isExcluded(userId: string) {
@@ -1566,6 +2055,11 @@ export class Coordinator {
         this.audit.record("track.added", interaction.userId, {
           sessionId: this.id,
           ...auditTrack(entry),
+        });
+        this.notifyIntegrations("queue.added", {
+          id: entry.id,
+          title: entry.title,
+          artist: entry.artist,
         });
         this.store.incrementUsage("added");
         return { entry, controller };
@@ -1783,6 +2277,12 @@ export class Coordinator {
             seedSourceIds: seeds,
             ...auditTrack(entry),
           });
+          this.notifyIntegrations("queue.added", {
+            id: entry.id,
+            title: entry.title,
+            artist: entry.artist,
+            automatic: true,
+          });
           await this.render();
           this.queueChanged();
           return { entry, controller };
@@ -1972,6 +2472,7 @@ export class Coordinator {
       this.current = undefined;
       this.state = "ready";
       this.sendMedia({ type: "stop" });
+      this.notifyIntegrations("playback.ready", { state: "ready" });
       await this.render();
       this.log.info({ event: "queue_idle" }, "No playable track in queue");
       return this.refreshIdle();
@@ -1988,6 +2489,12 @@ export class Coordinator {
       sessionId: this.id,
       ...auditTrack(next),
     });
+    this.notifyIntegrations("track.started", {
+      id: next.id,
+      title: next.title,
+      artist: next.artist,
+    });
+    this.notifyIntegrations("playback.playing", { state: "playing" });
     this.log.info(
       {
         event: "track_started",
@@ -2167,17 +2674,30 @@ export class Coordinator {
       this.current.status = played ? "played" : "failed";
       if (played) this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
-      if (reason === "track_ended" || reason === "transition")
+      if (reason === "track_ended" || reason === "transition") {
         this.audit.record("track.finished", undefined, {
           sessionId: this.id,
           ...auditTrack(this.current),
         });
-      if (reason === "track_error" || reason === "stalled")
+        this.notifyIntegrations("track.finished", {
+          id: this.current.id,
+          title: this.current.title,
+          artist: this.current.artist,
+        });
+      }
+      if (reason === "track_error" || reason === "stalled") {
         this.audit.record("track.failed", undefined, {
           sessionId: this.id,
           ...auditTrack(this.current),
           reason,
         });
+        this.notifyIntegrations("track.failed", {
+          id: this.current.id,
+          title: this.current.title,
+          artist: this.current.artist,
+          reason,
+        });
+      }
     }
     this.store.setSession(this.id, { listenedSeconds: this.listenedSeconds });
     this.current = undefined;
@@ -2195,6 +2715,11 @@ export class Coordinator {
     this.audit.record("track.skipped", interaction.userId, {
       sessionId: this.id,
       ...auditTrack(skipped),
+    });
+    this.notifyIntegrations("track.skipped", {
+      id: skipped.id,
+      title: skipped.title,
+      artist: skipped.artist,
     });
     this.store.incrementUsage("next");
     this.autoplayRejected = [
@@ -2268,6 +2793,10 @@ export class Coordinator {
       { sessionId: this.id, trackId: this.current.id },
     );
     this.store.incrementUsage(this.state === "paused" ? "paused" : "resumed");
+    this.notifyIntegrations(
+      this.state === "paused" ? "playback.paused" : "playback.resumed",
+      { state: this.state },
+    );
     await this.render();
     this.refreshIdle();
   }
@@ -2287,6 +2816,9 @@ export class Coordinator {
       volume: this.volume,
     });
     this.store.incrementUsage("volume");
+    this.notifyIntegrations("volume.changed", {
+      volumePercent: Math.round(this.volume * 100),
+    });
     await this.render();
   }
 
@@ -2321,6 +2853,11 @@ export class Coordinator {
       sessionId: this.id,
       ...auditTrack(entry),
     });
+    this.notifyIntegrations("queue.removed", {
+      id: entry.id,
+      title: entry.title,
+      artist: entry.artist,
+    });
     this.store.incrementUsage("removed");
     this.queueChanged(interaction);
     if (entry.filePath) await removePreparedMedia(entry.filePath);
@@ -2352,6 +2889,11 @@ export class Coordinator {
       from: index,
       to: target,
     });
+    this.notifyIntegrations("queue.reordered", {
+      trackId: interaction.value,
+      from: index,
+      to: target,
+    });
     this.store.incrementUsage("reordered");
     this.queueChanged(interaction);
     await this.render();
@@ -2378,6 +2920,11 @@ export class Coordinator {
       to: 0,
       reason: "play_next",
     });
+    this.notifyIntegrations("queue.reordered", {
+      trackId: interaction.value,
+      from: index,
+      to: 0,
+    });
     this.store.incrementUsage("reordered");
     this.queueChanged(interaction);
     await this.render();
@@ -2400,6 +2947,7 @@ export class Coordinator {
       sessionId: this.id,
       count,
     });
+    this.notifyIntegrations("queue.cleared", { count });
     this.store.incrementUsage("cleared");
     await this.render();
     this.syncPreloads();
@@ -2548,6 +3096,11 @@ export class Coordinator {
       this.queue.splice(to, 0, entry);
       this.audit.record("queue.reordered", interaction.userId, {
         sessionId: this.id,
+        trackId: entry.id,
+        from,
+        to,
+      });
+      this.notifyIntegrations("queue.reordered", {
         trackId: entry.id,
         from,
         to,
@@ -3619,7 +4172,11 @@ export class Coordinator {
             elements: [
               {
                 type: "mrkdwn",
-                text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}`,
+                text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
+                  this.integrations.size
+                    ? ` · Controlling: ${[...this.integrations.keys()].map((id) => `<@${id}>`).join(", ")}`
+                    : ""
+                }`,
               },
             ],
           },
@@ -3931,6 +4488,7 @@ export class Coordinator {
       tracksPlayed: this.history.length,
       listenedSeconds: this.listenedSeconds,
     });
+    this.dropIntegrations("session.ended");
     this.sessionChanged();
     this.sendMedia({ type: "leave" });
     await this.leaveMedia();

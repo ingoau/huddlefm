@@ -64,7 +64,15 @@ export type HuddleEvent =
   | { type: "ChannelLeft"; channelId: string }
   | { type: "ChannelMemberJoined"; channelId: string; userId: string }
   | { type: "ChannelMemberLeft"; channelId: string; userId: string }
-  | { type: "HuddleEnded"; callId: string };
+  | { type: "HuddleEnded"; callId: string }
+  | {
+      type: "DirectMessage";
+      channelId: string;
+      messageTs: string;
+      userId: string;
+      text: string;
+      botId?: string;
+    };
 
 function object(value: unknown, name: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -648,20 +656,44 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
       ...(freeWilly ? { freeWilly } : {}),
     };
   }
-  if (
-    event.type === "message" &&
-    !event.subtype &&
-    event.thread_ts &&
-    event.user
-  ) {
-    return {
-      type: "ThreadActivity",
-      channelId: text(event.channel, "message.channel"),
-      threadTs: text(event.thread_ts, "message.thread_ts"),
-      messageTs: text(event.ts, "message.ts"),
-      userId: text(event.user, "message.user"),
-      text: typeof event.text === "string" ? event.text : "",
-    };
+  if (event.type === "message") {
+    const subtype =
+      typeof event.subtype === "string" ? event.subtype : undefined;
+    const channelId =
+      typeof event.channel === "string" ? event.channel : undefined;
+    const im =
+      event.channel_type === "im" ||
+      (typeof channelId === "string" && channelId.startsWith("D"));
+    if (im) {
+      if (event.thread_ts) return;
+      if (subtype && subtype !== "bot_message") return;
+      const userId =
+        typeof event.user === "string"
+          ? event.user
+          : typeof event.bot_id === "string"
+            ? event.bot_id
+            : undefined;
+      if (userId && channelId && typeof event.ts === "string")
+        return {
+          type: "DirectMessage",
+          channelId,
+          messageTs: event.ts,
+          userId,
+          text: typeof event.text === "string" ? event.text : "",
+          ...(typeof event.bot_id === "string" ? { botId: event.bot_id } : {}),
+        };
+      return;
+    }
+    if (!subtype && event.thread_ts && event.user) {
+      return {
+        type: "ThreadActivity",
+        channelId: text(event.channel, "message.channel"),
+        threadTs: text(event.thread_ts, "message.thread_ts"),
+        messageTs: text(event.ts, "message.ts"),
+        userId: text(event.user, "message.user"),
+        text: typeof event.text === "string" ? event.text : "",
+      };
+    }
   }
   if (event.type === "sh_room_leave") {
     const room = event.room as Record<string, unknown> | undefined;
