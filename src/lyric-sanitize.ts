@@ -7,14 +7,15 @@ import { containsNonLatin, detectNonLatinLanguage } from "@braccato/core/text";
  * treats those as sung parts, so Japanese, Chinese, and spaced romaji get
  * concatenated into one lyric line.
  *
- * Untimed role spans typically parse as `{ startTimeMs: 0, durationMs: 0 }`
- * after the real syllables. The `#text` path can instead inherit the previous
- * syllable's end time with `durationMs: 0`.
+ * Role metadata is intentionally required here. Zero-duration parts can also
+ * be meaningful punctuation or separators, so timing alone cannot identify an
+ * AMLL role span.
  */
-function isOrphanedRolePart(part: LyricPart, sawTimedPart: boolean) {
-  if (!sawTimedPart || part.durationMs !== 0) return false;
-  if (part.startTimeMs === 0) return true;
-  return Boolean(part.words.trim());
+function isOrphanedRolePart(part: LyricPart) {
+  const role = (part as LyricPart & { role?: unknown }).role;
+  return (
+    part.durationMs === 0 && (role === "x-translation" || role === "x-roman")
+  );
 }
 
 function isLatinRomanization(text: string) {
@@ -34,11 +35,8 @@ export function sanitizeInlineLyricRoles(lines: Lyric[]) {
 
     const sung: LyricPart[] = [];
     const orphaned: LyricPart[] = [];
-    let sawTimedPart = false;
-
     for (const part of line.parts) {
-      if (part.durationMs > 0) sawTimedPart = true;
-      if (isOrphanedRolePart(part, sawTimedPart)) orphaned.push(part);
+      if (isOrphanedRolePart(part)) orphaned.push(part);
       else sung.push(part);
     }
 

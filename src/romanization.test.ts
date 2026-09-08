@@ -335,3 +335,43 @@ test("keeps punctuation attached to romanized words", async () => {
     ["Q.", "Kōshin", "De", "Furu", "Inseki", "Masshō", "Ka?"],
   );
 });
+
+test("keeps consecutive punctuation in one romanization token", async () => {
+  const lines = [line("本当?!", { romanization: "Hontō ? !" })];
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (() => {
+      throw new Error("should not fetch");
+    }) as RomanizeFetch,
+  });
+
+  expect(lines[0]!.romanization).toBe("Hontō?!");
+  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
+    ["Hontō?!"],
+  );
+});
+
+test("maps romanization timing around silent gaps", () => {
+  const timed = buildTimedRomanization({
+    startTimeMs: 1000,
+    durationMs: 600,
+    words: "你好",
+    romanization: "ni hao",
+    parts: [
+      { startTimeMs: 1000, durationMs: 100, words: "你" },
+      { startTimeMs: 1500, durationMs: 100, words: "好" },
+    ],
+  });
+
+  expect(timed).toEqual([
+    { startTimeMs: 1000, durationMs: 80, words: "ni " },
+    { startTimeMs: 1080, durationMs: 20, words: "h" },
+    { startTimeMs: 1500, durationMs: 100, words: "ao" },
+  ]);
+  expect(timed?.map((part) => part.words).join("")).toBe("ni hao");
+  expect(
+    timed?.every((part) => {
+      const end = part.startTimeMs + part.durationMs;
+      return end <= 1100 || part.startTimeMs >= 1500;
+    }),
+  ).toBe(true);
+});
