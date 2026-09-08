@@ -267,6 +267,7 @@ export async function runAgentCommand(options: {
 The user @mentioned you in the huddle thread (player controls may live in a companion channel). Help them control this listening session. Reply briefly; your reply is shown privately to them.
 Use tools for any playback, queue, search, settings, or session scrobbling change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
 Be concise. After taking actions, briefly confirm what changed. Do not invent track ids; search or read status first. Session scrobbling only works after the user has connected Last.fm or ListenBrainz in Settings.
+Do not use emojis.
 Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`,
       tools: agentTools(options.coordinator, options.userId),
       stopWhen: stepCountIs(10),
