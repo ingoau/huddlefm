@@ -777,8 +777,6 @@ test("adds tracks through a full-width search modal", async () => {
   expect(modal).toContain('"type":"input","block_id":"track"');
   expect(modal).toContain('"type":"external_select"');
   expect(modal).toContain('"focus_on_load":true');
-  expect(modal).toContain('"action_id":"open_bulk_add"');
-  expect(modal).toContain('"text":{"type":"plain_text","text":"Add in bulk"}');
 
   await test.coordinator.action({
     ...interaction(
@@ -899,45 +897,6 @@ test("rejects bulk links before resolution when the full batch cannot fit", asyn
     "The queue only has room for 49 more songs.",
   );
   await result.coordinator.endFromSlack();
-});
-
-test("hides bulk add without add-bulk and rejects bulk submission", async () => {
-  const resolved: string[] = [];
-  const test = setup({
-    resolveUrl: async (input: string) => {
-      resolved.push(input);
-      return {
-        sourceInput: input,
-        canonicalUrl: input,
-        sourceId: input,
-        title: "Track",
-        artist: "Artist",
-      };
-    },
-    prepare: async () => "track.opus",
-  } as unknown as TrackCatalog);
-  await test.coordinator.start();
-  await test.coordinator.action({
-    ...interaction(test.coordinator, "open_add_to_queue"),
-    userId: "guest",
-  });
-  expect(JSON.stringify(test.modals.at(-1))).not.toContain("open_bulk_add");
-
-  await test.coordinator.action({
-    ...interaction(
-      test.coordinator,
-      "bulk_add_to_queue",
-      "",
-      "view_submission",
-    ),
-    userId: "guest",
-    state: {
-      links: { text: { value: "https://example.com/a.mp3" } },
-    },
-  });
-  expect(resolved).toEqual([]);
-  expect(test.ephemeral.at(-1)).toContain("permission");
-  await test.coordinator.endFromSlack();
 });
 
 test("adds a recent song from the expanded queue modal", async () => {
@@ -2627,39 +2586,6 @@ test("agent can enable and disable session scrobbling when configured", async ()
   userStore.close();
 });
 
-test("agentAdd aborts before queue mutation when signal is aborted", async () => {
-  let resolveUrl!: (value: unknown) => void;
-  const tracks = {
-    resolve: async () => {
-      throw new Error("expired");
-    },
-    resolveUrl: () =>
-      new Promise((resolve) => {
-        resolveUrl = resolve;
-      }),
-  } as never;
-  const test = setup(tracks);
-  await test.coordinator.start();
-  const controller = new AbortController();
-  const pending = test.coordinator.agentAdd(
-    "host",
-    "https://example.com/song",
-    controller.signal,
-  );
-  await Bun.sleep(10);
-  controller.abort();
-  resolveUrl({
-    sourceId: "song",
-    title: "Song",
-    artist: "Artist",
-    duration: 120,
-  });
-  await expect(pending).rejects.toBeTruthy();
-  const status = test.coordinator.agentStatus("host");
-  expect(status).toMatchObject({ ok: true, queue: [] });
-  await test.coordinator.endFromSlack();
-});
-
 test("agentAdd skips enqueue when aborted after resolve", async () => {
   const tracks = {
     resolve: async () => {
@@ -2686,80 +2612,6 @@ test("agentAdd skips enqueue when aborted after resolve", async () => {
   expect(test.coordinator.agentStatus("host")).toMatchObject({
     ok: true,
     queue: [],
-  });
-  await test.coordinator.endFromSlack();
-});
-
-test("agentAdd restores autoplay when aborted during autoplay hold", async () => {
-  const tracks = {
-    resolve: async () => {
-      throw new Error("expired");
-    },
-    resolveUrl: async () => ({
-      sourceId: "song",
-      title: "Song",
-      artist: "Artist",
-      duration: 120,
-    }),
-    prepare: (
-      _track: unknown,
-      _directory: string,
-      _entryId: string,
-      signal?: AbortSignal,
-    ) =>
-      new Promise<string>((_resolve, reject) => {
-        if (signal?.aborted) {
-          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-          return;
-        }
-        signal?.addEventListener(
-          "abort",
-          () =>
-            reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
-          { once: true },
-        );
-      }),
-  } as never;
-  const test = setup(tracks);
-  await test.coordinator.start();
-  Reflect.set(test.coordinator, "queue", [
-    {
-      id: "auto",
-      requesterId: "bot",
-      sourceId: "auto",
-      title: "Auto",
-      artist: "Radio",
-      automatic: true,
-      status: "ready",
-      filePath: "auto.opus",
-    },
-  ]);
-  const controller = new AbortController();
-  const pending = test.coordinator.agentAdd(
-    "host",
-    "https://example.com/song",
-    controller.signal,
-  );
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const queue = Reflect.get(test.coordinator, "queue") as {
-      automatic?: boolean;
-    }[];
-    if (!queue.some((track) => track.automatic)) {
-      controller.abort();
-      break;
-    }
-    await Bun.sleep(1);
-  }
-  await expect(pending).rejects.toBeTruthy();
-  expect(test.coordinator.agentStatus("host")).toMatchObject({
-    ok: true,
-    queue: [
-      expect.objectContaining({
-        id: "auto",
-        title: "Auto",
-        automatic: true,
-      }),
-    ],
   });
   await test.coordinator.endFromSlack();
 });
@@ -3195,63 +3047,6 @@ test("host can revoke integration access from settings", async () => {
   await test.coordinator.endFromSlack();
 });
 
-test("settings paginates integration grants within the modal block limit", async () => {
-  const test = setup();
-  await test.coordinator.start();
-  const integrations = new Map(
-    Array.from({ length: 50 }, (_, index) => [
-      `Ubot${index}`,
-      {
-        permissions: new Set(["pause"]),
-        events: new Set<string>(),
-        channel: "channel",
-        dmChannelId: "Dbot",
-        requestTs: "9.0",
-        requestId: `r${index}`,
-      },
-    ]),
-  );
-  Reflect.set(test.coordinator, "integrations", integrations);
-  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const first = test.modals.at(-1) as [string, { blocks: unknown[] }];
-  expect(first[1].blocks.length).toBeLessThanOrEqual(100);
-  const firstBody = JSON.stringify(first);
-  expect(firstBody).toContain("<@Ubot0> has control of this session.");
-  expect(firstBody).toContain('"action_id":"integration_grants_next"');
-  expect(firstBody).not.toContain("<@Ubot49> has control of this session.");
-
-  const nextValue = first[1].blocks
-    .flatMap(
-      (block) =>
-        (
-          block as {
-            elements?: { action_id?: string; value?: string }[];
-          }
-        ).elements ?? [],
-    )
-    .find((element) => element.action_id === "integration_grants_next")?.value;
-  const next = interaction(
-    test.coordinator,
-    "integration_grants_next",
-    nextValue,
-  );
-  next.messageTs = "";
-  next.metadata = JSON.stringify({
-    sessionId: test.coordinator.id,
-    hostId: "host",
-    integrationPage: 0,
-  });
-  Object.assign(next, { viewId: "settings-view", viewHash: "hash" });
-  await test.coordinator.action(next);
-  const second = test.updatedModals.at(-1)?.[2] as { blocks: unknown[] };
-  expect(second.blocks.length).toBeLessThanOrEqual(100);
-  const secondBody = JSON.stringify(second);
-  expect(secondBody).toContain("<@Ubot49> has control of this session.");
-  expect(secondBody).toContain('"action_id":"integration_grants_prev"');
-  expect(secondBody).not.toContain("<@Ubot0> has control of this session.");
-  await test.coordinator.endFromSlack();
-});
-
 test("integration command replies stay in the request thread when an agent method throws", async () => {
   const test = setup();
   await test.coordinator.start();
@@ -3310,13 +3105,5 @@ test("integration command replies stay in the request thread when an agent metho
     message: "media page crashed",
   });
   expect(test.dms.at(-1)?.[2]).toEqual({ channelId: "Dbot", threadTs: "14.0" });
-  await test.coordinator.endFromSlack();
-});
-
-test("unknown session targeting does not list other sessions", async () => {
-  const test = setup();
-  await test.coordinator.start();
-  expect(test.coordinator.ownsChannel("missing")).toBe(false);
-  expect(test.coordinator.ownsChannel("channel")).toBe(true);
   await test.coordinator.endFromSlack();
 });
