@@ -3048,6 +3048,63 @@ test("host can revoke integration access from settings", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("settings paginates integration grants within the modal block limit", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const integrations = new Map(
+    Array.from({ length: 50 }, (_, index) => [
+      `Ubot${index}`,
+      {
+        permissions: new Set(["pause"]),
+        events: new Set<string>(),
+        channel: "channel",
+        dmChannelId: "Dbot",
+        requestTs: "9.0",
+        requestId: `r${index}`,
+      },
+    ]),
+  );
+  Reflect.set(test.coordinator, "integrations", integrations);
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const first = test.modals.at(-1) as [string, { blocks: unknown[] }];
+  expect(first[1].blocks.length).toBeLessThanOrEqual(100);
+  const firstBody = JSON.stringify(first);
+  expect(firstBody).toContain("<@Ubot0> has control of this session.");
+  expect(firstBody).toContain('"action_id":"integration_grants_next"');
+  expect(firstBody).not.toContain("<@Ubot49> has control of this session.");
+
+  const nextValue = first[1].blocks
+    .flatMap(
+      (block) =>
+        (
+          block as {
+            elements?: { action_id?: string; value?: string }[];
+          }
+        ).elements ?? [],
+    )
+    .find((element) => element.action_id === "integration_grants_next")?.value;
+  const next = interaction(
+    test.coordinator,
+    "integration_grants_next",
+    nextValue,
+  );
+  next.messageTs = "";
+  next.metadata = JSON.stringify({
+    sessionId: test.coordinator.id,
+    hostId: "host",
+    integrationPage: 0,
+  });
+  Object.assign(next, { viewId: "settings-view", viewHash: "hash" });
+  await test.coordinator.action(next);
+  const second = test.updatedModals.at(-1)?.[2] as { blocks: unknown[] };
+  expect(second.blocks.length).toBeLessThanOrEqual(100);
+  const secondBody = JSON.stringify(second);
+  expect(secondBody).toContain("<@Ubot49> has control of this session.");
+  expect(secondBody).toContain('"action_id":"integration_grants_prev"');
+  expect(secondBody).not.toContain("<@Ubot0> has control of this session.");
+  await test.coordinator.endFromSlack();
+});
+
 test("integration command replies stay in the request thread when an agent method throws", async () => {
   const test = setup();
   await test.coordinator.start();

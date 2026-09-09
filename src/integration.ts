@@ -342,47 +342,130 @@ export function integrationGrantedBlocks(options: {
   ];
 }
 
+export const slackModalBlockLimit = 100;
+const integrationGrantBlockCount = 2;
+
+export function integrationSettingsPageValue(sessionId: string, page: number) {
+  return JSON.stringify({ sessionId, page });
+}
+
+export function parseIntegrationSettingsPage(value: string) {
+  try {
+    const parsed = JSON.parse(value) as {
+      sessionId?: unknown;
+      page?: unknown;
+    };
+    if (
+      typeof parsed.sessionId === "string" &&
+      typeof parsed.page === "number" &&
+      Number.isInteger(parsed.page) &&
+      parsed.page >= 0
+    )
+      return { sessionId: parsed.sessionId, page: parsed.page };
+  } catch {
+    return;
+  }
+}
+
 export function integrationSettingsBlocks(options: {
   sessionId: string;
   grants: { userId: string; requestId: string; permissions: string[] }[];
+  maxBlocks?: number;
+  page?: number;
 }) {
   if (!options.grants.length) return [];
-  return [
-    { type: "header", block_id: "integrations", text: plain("Integrations") },
-    ...options.grants.flatMap((grant) => {
-      const permissions = permissionLabelList(grant.permissions)
-        .map((label) => `• ${label}`)
-        .join("\n");
-      return [
-        {
-          type: "section",
-          block_id: `integration_${grant.userId}`,
-          text: {
-            type: "mrkdwn",
-            text: `<@${grant.userId}> has control of this session.\n${permissions || "• None"}`,
+  const maxBlocks = Math.max(
+    2 + integrationGrantBlockCount,
+    options.maxBlocks ?? slackModalBlockLimit,
+  );
+  const header = (text: string) => ({
+    type: "header" as const,
+    block_id: "integrations",
+    text: plain(text),
+  });
+  if (1 + options.grants.length * integrationGrantBlockCount <= maxBlocks)
+    return [
+      header("Integrations"),
+      ...integrationGrantBlocks(options.sessionId, options.grants),
+    ];
+  const pageSize = Math.max(
+    1,
+    Math.floor((maxBlocks - 2) / integrationGrantBlockCount),
+  );
+  const pageCount = Math.ceil(options.grants.length / pageSize);
+  const page = Math.min(Math.max(0, options.page ?? 0), pageCount - 1);
+  const start = page * pageSize;
+  const slice = options.grants.slice(start, start + pageSize);
+  const elements = [
+    ...(page > 0
+      ? [
+          {
+            type: "button" as const,
+            action_id: "integration_grants_prev",
+            text: plain("Previous"),
+            value: integrationSettingsPageValue(options.sessionId, page - 1),
           },
-        },
-        {
-          type: "actions",
-          block_id: `integration_actions_${grant.userId}`,
-          elements: [
-            {
-              type: "button",
-              action_id: "integration_revoke",
-              text: plain("Revoke"),
-              style: "danger",
-              value: integrationActionValue(options.sessionId, grant.requestId),
-              confirm: confirm(
-                "Revoke control?",
-                `This stops <@${grant.userId}> from controlling this session.`,
-                "Revoke",
-              ),
-            },
-          ],
-        },
-      ];
-    }),
+        ]
+      : []),
+    ...(page < pageCount - 1
+      ? [
+          {
+            type: "button" as const,
+            action_id: "integration_grants_next",
+            text: plain("Next"),
+            value: integrationSettingsPageValue(options.sessionId, page + 1),
+          },
+        ]
+      : []),
   ];
+  return [
+    header(`Integrations (${page + 1}/${pageCount})`),
+    ...integrationGrantBlocks(options.sessionId, slice),
+    {
+      type: "actions",
+      block_id: "integration_grants_page",
+      elements,
+    },
+  ];
+}
+
+function integrationGrantBlocks(
+  sessionId: string,
+  grants: { userId: string; requestId: string; permissions: string[] }[],
+) {
+  return grants.flatMap((grant) => {
+    const permissions = permissionLabelList(grant.permissions)
+      .map((label) => `• ${label}`)
+      .join("\n");
+    return [
+      {
+        type: "section",
+        block_id: `integration_${grant.userId}`,
+        text: {
+          type: "mrkdwn",
+          text: `<@${grant.userId}> has control of this session.\n${permissions || "• None"}`,
+        },
+      },
+      {
+        type: "actions",
+        block_id: `integration_actions_${grant.userId}`,
+        elements: [
+          {
+            type: "button",
+            action_id: "integration_revoke",
+            text: plain("Revoke"),
+            style: "danger",
+            value: integrationActionValue(sessionId, grant.requestId),
+            confirm: confirm(
+              "Revoke control?",
+              `This stops <@${grant.userId}> from controlling this session.`,
+              "Revoke",
+            ),
+          },
+        ],
+      },
+    ];
+  });
 }
 
 export function wrapIntegrationResult(
