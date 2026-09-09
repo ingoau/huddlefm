@@ -21,6 +21,7 @@ import {
   embeddedArtworkPath,
   isExpectedTrackFailure,
   removePreparedMedia,
+  parseBulkLinkList,
   TrackCatalog,
   trackFailureDetail,
   type TrackMetadata,
@@ -449,6 +450,8 @@ export class Coordinator {
     );
     if (interaction.actionId === "add_track_to_queue")
       return this.add(interaction);
+    if (interaction.actionId === "bulk_add_to_queue")
+      return this.bulkAddLinks(interaction);
     const currentId = this.current?.id;
     return this.enqueue(async () => {
       if (interaction.type === "view_closed") {
@@ -479,6 +482,7 @@ export class Coordinator {
         );
       const handlers: Record<string, () => Promise<void> | void> = {
         open_add_to_queue: () => this.addModal(interaction),
+        open_bulk_add: () => this.openBulkAdd(interaction),
         remove_queue_track: () => this.remove(interaction),
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
@@ -2970,6 +2974,7 @@ export class Coordinator {
       interaction.userId,
       recentTrackLimit,
     );
+    const canBulk = this.can(interaction.userId, "add-bulk");
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
       callback_id: "add_track_to_queue",
@@ -3012,8 +3017,170 @@ export class Coordinator {
               },
             ]
           : []),
+        ...(canBulk
+          ? [
+              {
+                type: "actions",
+                block_id: "bulk_add",
+                elements: [
+                  {
+                    type: "button",
+                    action_id: "open_bulk_add",
+                    text: plain("Add in bulk"),
+                  },
+                ],
+              },
+            ]
+          : []),
       ],
     });
+  }
+
+  private async openBulkAdd(interaction: Interaction) {
+    if (!interaction.viewId) return;
+    if (!(await this.require(interaction, "add-bulk"))) return;
+    await this.slack.updateModal(
+      interaction.viewId,
+      interaction.viewHash,
+      this.bulkAddView(),
+    );
+  }
+
+  private bulkAddView() {
+    return {
+      type: "modal",
+      callback_id: "bulk_add_to_queue",
+      private_metadata: JSON.stringify({ sessionId: this.id }),
+      title: plain("Add in bulk"),
+      submit: plain("Add"),
+      close: plain("Cancel"),
+      blocks: [
+        {
+          type: "input",
+          block_id: "links",
+          label: plain("Track links"),
+          hint: plain(
+            "One HTTP(S) link per line. Blank lines and # comments are ignored.",
+          ),
+          element: {
+            type: "plain_text_input",
+            action_id: "text",
+            multiline: true,
+            focus_on_load: true,
+            placeholder: plain(
+              "https://example.com/a.mp3\nhttps://example.com/b.mp3",
+            ),
+          },
+        },
+      ],
+    };
+  }
+
+  private async bulkAddLinks(interaction: Interaction) {
+    const text = interaction.state.links?.text?.value ?? "";
+    const { links, invalid } = parseBulkLinkList(text);
+    if (invalid.length) {
+      await this.notice(
+        interaction.userId,
+        `Not a valid HTTP(S) link: ${invalid[0]}`,
+      );
+      return;
+    }
+    if (!links.length) {
+      await this.notice(
+        interaction.userId,
+        "Paste at least one track link (one per line).",
+      );
+      return;
+    }
+    const accepted = await this.enqueue(async () => {
+      if (this.state === "ended" || this.state === "suspended") return false;
+      if (!(await this.require(interaction, "add-bulk"))) return false;
+      const available =
+        this.config.queueLimit -
+        this.queue.length -
+        Number(Boolean(this.current));
+      if (links.length > available) {
+        await this.notice(
+          interaction.userId,
+          available
+            ? `The queue only has room for ${available} more songs.`
+            : "The queue is full.",
+        );
+        return false;
+      }
+      return true;
+    });
+    if (!accepted) return;
+    const tracks: TrackMetadata[] = [];
+    for (const link of links) {
+      try {
+        tracks.push(await this.tracks.resolveUrl(link));
+      } catch (error) {
+        return this.notice(
+          interaction.userId,
+          `Could not add ${link}: ${message(error)}`,
+        );
+      }
+    }
+    const pending = await this.enqueue(async () => {
+      if (
+        this.state === "ended" ||
+        this.state === "suspended" ||
+        !(await this.require(interaction, "add-bulk"))
+      )
+        return;
+      await this.removeQueuedAutoplay();
+      const available =
+        this.config.queueLimit -
+        this.queue.length -
+        Number(Boolean(this.current));
+      if (tracks.length > available) {
+        await this.notice(
+          interaction.userId,
+          available
+            ? `The queue only has room for ${available} more songs.`
+            : "The queue is full.",
+        );
+        return;
+      }
+      const entries = tracks.map((metadata) => ({
+        ...metadata,
+        id: crypto.randomUUID(),
+        requesterId: interaction.userId,
+        status: "preparing",
+      }));
+      const pending = entries.map((entry) => {
+        const controller = new AbortController();
+        this.preparations.set(entry.id, controller);
+        this.queue.push(entry);
+        this.store.addTrack({
+          ...entry,
+          sessionId: this.id,
+          status: entry.status,
+        });
+        this.audit.record("track.added", interaction.userId, {
+          sessionId: this.id,
+          ...auditTrack(entry),
+        });
+        this.notifyIntegrations("queue.added", {
+          id: entry.id,
+          title: entry.title,
+          artist: entry.artist,
+        });
+        this.store.incrementUsage("added");
+        return { entry, controller };
+      });
+      await this.render();
+      this.queueChanged();
+      return pending;
+    });
+    if (!pending) return;
+    await Promise.all(
+      pending.map(({ entry, controller }) =>
+        this.prepareManual(entry, controller),
+      ),
+    );
   }
 
   private async queueModal(interaction: Interaction) {

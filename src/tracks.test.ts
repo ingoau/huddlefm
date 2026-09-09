@@ -13,6 +13,7 @@ import {
   looksLikeFilenameTitle,
   metadataLooksWeak,
   navidromeShare,
+  parseBulkLinkList,
   parseNavidromeShareInfo,
   probeEmbeddedMetadata,
   publicArtworkUrl,
@@ -23,6 +24,25 @@ import {
   transitionData,
   type TrackMetadata,
 } from "./tracks.ts";
+
+test("parses bulk link lists with comments and blank lines", () => {
+  expect(
+    parseBulkLinkList(`
+# weekend mix
+https://music.example.com/a.mp3
+
+https://music.example.com/b.flac
+not a url
+ftp://music.example.com/c.mp3
+`),
+  ).toEqual({
+    links: [
+      "https://music.example.com/a.mp3",
+      "https://music.example.com/b.flac",
+    ],
+    invalid: ["not a url", "ftp://music.example.com/c.mp3"],
+  });
+});
 
 test("detects filename-like titles for direct media links", () => {
   expect(

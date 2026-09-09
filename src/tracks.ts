@@ -1138,6 +1138,19 @@ function parseHttpUrl(input: string) {
   }
 }
 
+/** One absolute HTTP(S) URL per line; blank lines and `#` comments are ignored. */
+export function parseBulkLinkList(text: string) {
+  const links: string[] = [];
+  const invalid: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (parseHttpUrl(line)) links.push(line);
+    else invalid.push(line);
+  }
+  return { links, invalid };
+}
+
 function youtubePlaylistId(url: URL) {
   const host = url.hostname.toLowerCase();
   if (

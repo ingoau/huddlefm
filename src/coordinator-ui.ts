@@ -2,7 +2,7 @@ import { safeError } from "./error-message.ts";
 
 export const permissionLabels = {
   add: "Add songs",
-  "add-bulk": "Add albums and playlists",
+  "add-bulk": "Add albums, playlists, and link lists",
   "remove-own": "Remove songs they added",
   "manage-queue": "Manage queue",
   skip: "Skip songs",

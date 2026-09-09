@@ -777,6 +777,8 @@ test("adds tracks through a full-width search modal", async () => {
   expect(modal).toContain('"type":"input","block_id":"track"');
   expect(modal).toContain('"type":"external_select"');
   expect(modal).toContain('"focus_on_load":true');
+  expect(modal).toContain('"action_id":"open_bulk_add"');
+  expect(modal).toContain('"text":{"type":"plain_text","text":"Add in bulk"}');
 
   await test.coordinator.action({
     ...interaction(
@@ -790,6 +792,151 @@ test("adds tracks through a full-width search modal", async () => {
     },
   });
   expect(resolved).toBe("track-reference");
+  await test.coordinator.endFromSlack();
+});
+
+test("opens bulk link paste from the add modal and enqueues each URL", async () => {
+  const resolved: string[] = [];
+  const test = setup({
+    resolveUrl: async (input: string) => {
+      resolved.push(input);
+      return {
+        sourceInput: input,
+        canonicalUrl: input,
+        sourceId: input,
+        title: input.split("/").at(-1) ?? "Track",
+        artist: "Artist",
+      };
+    },
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await test.coordinator.start();
+
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  expect(JSON.stringify(test.modals[0])).toContain(
+    '"action_id":"open_bulk_add"',
+  );
+
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "open_bulk_add"),
+    messageTs: "",
+    viewId: "view-1",
+    viewHash: "hash-1",
+  });
+  const bulk = JSON.stringify(test.updatedModals.at(-1));
+  expect(bulk).toContain('"callback_id":"bulk_add_to_queue"');
+  expect(bulk).toContain('"multiline":true');
+  expect(bulk).toContain('"block_id":"links"');
+
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: {
+      links: {
+        text: {
+          value:
+            "# playlist\nhttps://example.com/a.mp3\n\nhttps://example.com/b.mp3\n",
+        },
+      },
+    },
+  });
+  expect(resolved).toEqual([
+    "https://example.com/a.mp3",
+    "https://example.com/b.mp3",
+  ]);
+  expect(Reflect.get(test.coordinator, "current")).toMatchObject({
+    canonicalUrl: "https://example.com/a.mp3",
+  });
+  expect(Reflect.get(test.coordinator, "queue")).toEqual([
+    expect.objectContaining({ canonicalUrl: "https://example.com/b.mp3" }),
+  ]);
+  await test.coordinator.endFromSlack();
+});
+
+test("rejects bulk links before resolution when the full batch cannot fit", async () => {
+  const resolved: string[] = [];
+  const result = setup({
+    resolveUrl: async (input: string) => {
+      resolved.push(input);
+      throw new Error("should not resolve");
+    },
+  } as unknown as TrackCatalog);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [
+    {
+      id: "autoplay",
+      requesterId: "bot",
+      sourceId: "autoplay",
+      title: "Autoplay",
+      artist: "Artist",
+      automatic: true,
+      status: "ready",
+    },
+  ]);
+
+  const links = Array.from(
+    { length: 50 },
+    (_, index) => `https://example.com/${index}.mp3`,
+  );
+  await result.coordinator.action({
+    ...interaction(
+      result.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: { links: { text: { value: links.join("\n") } } },
+  });
+
+  expect(resolved).toEqual([]);
+  expect(result.ephemeral.at(-1)).toBe(
+    "The queue only has room for 49 more songs.",
+  );
+  await result.coordinator.endFromSlack();
+});
+
+test("hides bulk add without add-bulk and rejects bulk submission", async () => {
+  const resolved: string[] = [];
+  const test = setup({
+    resolveUrl: async (input: string) => {
+      resolved.push(input);
+      return {
+        sourceInput: input,
+        canonicalUrl: input,
+        sourceId: input,
+        title: "Track",
+        artist: "Artist",
+      };
+    },
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await test.coordinator.start();
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "open_add_to_queue"),
+    userId: "guest",
+  });
+  expect(JSON.stringify(test.modals.at(-1))).not.toContain("open_bulk_add");
+
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    userId: "guest",
+    state: {
+      links: { text: { value: "https://example.com/a.mp3" } },
+    },
+  });
+  expect(resolved).toEqual([]);
+  expect(test.ephemeral.at(-1)).toContain("permission");
   await test.coordinator.endFromSlack();
 });
 
@@ -1493,7 +1640,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
   ).toBeTrue();
   expect(modal).toContain('"value":"configure-settings"');
   expect(modal).toContain(
-    '"text":{"type":"plain_text","text":"Add albums and playlists"},"value":"add-bulk"',
+    '"text":{"type":"plain_text","text":"Add albums, playlists, and link lists"},"value":"add-bulk"',
   );
 
   const enable = interaction(
