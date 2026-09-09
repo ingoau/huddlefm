@@ -309,6 +309,31 @@ braccato-lyrics {
   white-space: normal;
 }
 
+/*
+ * Long unbroken tokens (scat lines, etc.) get a .blyrics-word-highlight clone for
+ * the karaoke swipe. Braccato keeps those words as `display: inline` so they can
+ * wrap, but absolute children then resolve `width: 100%` against a tiny inline
+ * fragment (~one wbr chunk). The highlight stacks that clone into a narrow
+ * column over the real line. Make the timed word a wrapping box first so the
+ * overlay matches the laid-out width.
+ */
+.blyrics-word-group-long .blyrics--word {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.blyrics-word-group-long .blyrics-word-highlight {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+}
+
+/* Line-synced mode already fades word color; the highlight clone only adds
+ * a second visible layer once the swipe animation leaves it opaque. */
+.blyrics-container[data-sync="synced"] .blyrics-word-highlight {
+  display: none !important;
+}
+
 .blyrics--word {
   transform: translateY(3px);
   transition: transform calc(var(--blyrics-duration, 0ms) + 200ms)
