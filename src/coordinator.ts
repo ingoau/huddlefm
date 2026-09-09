@@ -3095,7 +3095,21 @@ export class Coordinator {
     }
     const accepted = await this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return false;
-      return this.require(interaction, "add-bulk");
+      if (!(await this.require(interaction, "add-bulk"))) return false;
+      const available =
+        this.config.queueLimit -
+        this.queue.length -
+        Number(Boolean(this.current));
+      if (links.length > available) {
+        await this.notice(
+          interaction.userId,
+          available
+            ? `The queue only has room for ${available} more songs.`
+            : "The queue is full.",
+        );
+        return false;
+      }
+      return true;
     });
     if (!accepted) return;
     const tracks: TrackMetadata[] = [];

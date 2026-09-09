@@ -859,6 +859,48 @@ test("opens bulk link paste from the add modal and enqueues each URL", async () 
   await test.coordinator.endFromSlack();
 });
 
+test("rejects bulk links before resolution when the full batch cannot fit", async () => {
+  const resolved: string[] = [];
+  const result = setup({
+    resolveUrl: async (input: string) => {
+      resolved.push(input);
+      throw new Error("should not resolve");
+    },
+  } as unknown as TrackCatalog);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [
+    {
+      id: "autoplay",
+      requesterId: "bot",
+      sourceId: "autoplay",
+      title: "Autoplay",
+      artist: "Artist",
+      automatic: true,
+      status: "ready",
+    },
+  ]);
+
+  const links = Array.from(
+    { length: 50 },
+    (_, index) => `https://example.com/${index}.mp3`,
+  );
+  await result.coordinator.action({
+    ...interaction(
+      result.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: { links: { text: { value: links.join("\n") } } },
+  });
+
+  expect(resolved).toEqual([]);
+  expect(result.ephemeral.at(-1)).toBe(
+    "The queue only has room for 49 more songs.",
+  );
+  await result.coordinator.endFromSlack();
+});
+
 test("hides bulk add without add-bulk and rejects bulk submission", async () => {
   const resolved: string[] = [];
   const test = setup({
