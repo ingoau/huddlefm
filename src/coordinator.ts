@@ -3307,7 +3307,10 @@ export class Coordinator {
 
   private async integrationGrantsPage(interaction: Interaction) {
     if (!this.settingsAdmin(interaction.userId))
-      return this.notice(interaction.userId, "Only the host can approve that.");
+      return this.notice(
+        interaction.userId,
+        "Only the host can manage integrations.",
+      );
     const parsed = parseIntegrationSettingsPage(interaction.value);
     if (!parsed || parsed.sessionId !== this.id) return;
     if (interaction.viewId)
