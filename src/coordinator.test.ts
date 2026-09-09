@@ -3130,6 +3130,128 @@ test("integration decline and revoke notify the bot in the request thread", asyn
   await test.coordinator.endFromSlack();
 });
 
+test("host can revoke integration access from settings", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["pause", "skip"],
+      events: ["playback.state"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  const granted = requestValue(test.ephemeralCalls);
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value: granted,
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+
+  const guestOpen = interaction(test.coordinator, "open_settings");
+  guestOpen.userId = "guest";
+  await test.coordinator.action(guestOpen);
+  expect(JSON.stringify(test.modals.at(-1))).not.toContain(
+    '"block_id":"integrations"',
+  );
+  expect(JSON.stringify(test.modals.at(-1))).not.toContain(
+    '"action_id":"integration_revoke"',
+  );
+
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const hostSettings = JSON.stringify(test.modals.at(-1));
+  expect(hostSettings).toContain('"block_id":"integrations"');
+  expect(hostSettings).toContain("<@Ubot> has control of this session.");
+  expect(hostSettings).toContain("Pause or resume");
+  expect(hostSettings).toContain('"action_id":"integration_revoke"');
+
+  const revoke = interaction(test.coordinator, "integration_revoke", granted);
+  revoke.messageTs = "";
+  revoke.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  Object.assign(revoke, { viewId: "settings-view", viewHash: "hash" });
+  await test.coordinator.action(revoke);
+  expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
+    type: "grant_revoked",
+    replyTo: "9.0",
+  });
+  expect(test.updatedModals.at(-1)?.[0]).toBe("settings-view");
+  expect(JSON.stringify(test.updatedModals.at(-1)?.[2])).not.toContain(
+    '"block_id":"integrations"',
+  );
+  expect(JSON.stringify(test.updates.at(-1))).not.toContain("Controlling:");
+  expect(await test.coordinator.agentToggle("Ubot")).toMatchObject({
+    ok: false,
+    error: "Join the huddle before using the player.",
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("settings paginates integration grants within the modal block limit", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const integrations = new Map(
+    Array.from({ length: 50 }, (_, index) => [
+      `Ubot${index}`,
+      {
+        permissions: new Set(["pause"]),
+        events: new Set<string>(),
+        channel: "channel",
+        dmChannelId: "Dbot",
+        requestTs: "9.0",
+        requestId: `r${index}`,
+      },
+    ]),
+  );
+  Reflect.set(test.coordinator, "integrations", integrations);
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const first = test.modals.at(-1) as [string, { blocks: unknown[] }];
+  expect(first[1].blocks.length).toBeLessThanOrEqual(100);
+  const firstBody = JSON.stringify(first);
+  expect(firstBody).toContain("<@Ubot0> has control of this session.");
+  expect(firstBody).toContain('"action_id":"integration_grants_next"');
+  expect(firstBody).not.toContain("<@Ubot49> has control of this session.");
+
+  const nextValue = first[1].blocks
+    .flatMap(
+      (block) =>
+        (
+          block as {
+            elements?: { action_id?: string; value?: string }[];
+          }
+        ).elements ?? [],
+    )
+    .find((element) => element.action_id === "integration_grants_next")?.value;
+  const next = interaction(
+    test.coordinator,
+    "integration_grants_next",
+    nextValue,
+  );
+  next.messageTs = "";
+  next.metadata = JSON.stringify({
+    sessionId: test.coordinator.id,
+    hostId: "host",
+    integrationPage: 0,
+  });
+  Object.assign(next, { viewId: "settings-view", viewHash: "hash" });
+  await test.coordinator.action(next);
+  const second = test.updatedModals.at(-1)?.[2] as { blocks: unknown[] };
+  expect(second.blocks.length).toBeLessThanOrEqual(100);
+  const secondBody = JSON.stringify(second);
+  expect(secondBody).toContain("<@Ubot49> has control of this session.");
+  expect(secondBody).toContain('"action_id":"integration_grants_prev"');
+  expect(secondBody).not.toContain("<@Ubot0> has control of this session.");
+  await test.coordinator.endFromSlack();
+});
+
 test("integration command replies stay in the request thread when an agent method throws", async () => {
   const test = setup();
   await test.coordinator.start();

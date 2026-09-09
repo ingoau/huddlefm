@@ -2,12 +2,16 @@ import { expect, test } from "bun:test";
 import {
   eventGroup,
   integrationEventMessage,
+  integrationSettingsBlocks,
+  integrationSettingsPageValue,
   isAllowlisted,
   mapAgentError,
   parseIntegrationActionValue,
   parseIntegrationMessage,
+  parseIntegrationSettingsPage,
   permissionLabelList,
   sessionMatchesChannel,
+  slackModalBlockLimit,
   wrapIntegrationResult,
 } from "./integration.ts";
 
@@ -199,4 +203,72 @@ test("wraps agent results with replyTo and does not parse action values loosely"
     event: "track.started",
     payload: { title: "Song", artist: "Artist" },
   });
+});
+
+test("settings blocks list granted bots with revoke actions", () => {
+  expect(integrationSettingsBlocks({ sessionId: "s", grants: [] })).toEqual([]);
+  const blocks = integrationSettingsBlocks({
+    sessionId: "s",
+    grants: [
+      { userId: "Ubot", requestId: "r1", permissions: ["pause", "skip"] },
+      { userId: "Ubot2", requestId: "r2", permissions: ["volume"] },
+    ],
+  });
+  expect(JSON.stringify(blocks)).toContain('"block_id":"integrations"');
+  expect(JSON.stringify(blocks)).toContain("<@Ubot> has control");
+  expect(JSON.stringify(blocks)).toContain("<@Ubot2> has control");
+  expect(JSON.stringify(blocks)).toContain("Pause or resume");
+  expect(JSON.stringify(blocks)).toContain("Change volume");
+  expect(JSON.stringify(blocks)).not.toContain('"pause"');
+  expect(
+    parseIntegrationActionValue(
+      (
+        blocks.find(
+          (block) => block.block_id === "integration_actions_Ubot",
+        ) as {
+          elements: { value: string }[];
+        }
+      ).elements[0]!.value,
+    ),
+  ).toEqual({ sessionId: "s", requestId: "r1" });
+});
+
+test("paginates grants so each page stays within the modal block limit", () => {
+  const grants = Array.from({ length: 50 }, (_, index) => ({
+    userId: `Ubot${index}`,
+    requestId: `r${index}`,
+    permissions: ["pause"],
+  }));
+  const maxBlocks = 80;
+  expect(1 + grants.length * 2).toBeGreaterThan(slackModalBlockLimit);
+  expect(1 + grants.length * 2).toBeGreaterThan(maxBlocks);
+  const seen = new Set<string>();
+  for (let page = 0; page < 20; page++) {
+    const blocks = integrationSettingsBlocks({
+      sessionId: "s",
+      grants,
+      maxBlocks,
+      page,
+    });
+    expect(blocks.length).toBeLessThanOrEqual(maxBlocks);
+    const body = JSON.stringify(blocks);
+    for (const grant of grants)
+      if (body.includes(`<@${grant.userId}>`)) seen.add(grant.userId);
+    if (page === 0) {
+      expect(body).toContain('"action_id":"integration_grants_next"');
+      expect(body).not.toContain('"action_id":"integration_grants_prev"');
+      expect(
+        parseIntegrationSettingsPage(integrationSettingsPageValue("s", 1)),
+      ).toEqual({
+        sessionId: "s",
+        page: 1,
+      });
+    }
+    if (!body.includes('"action_id":"integration_grants_next"')) {
+      expect(page).toBeGreaterThan(0);
+      expect(body).toContain('"action_id":"integration_grants_prev"');
+      break;
+    }
+  }
+  expect(seen.size).toBe(grants.length);
 });

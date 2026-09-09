@@ -33,7 +33,7 @@ A valid request has no immediate success reply. The host gets an ephemeral promp
 }
 ```
 
-`grant_accepted` also includes the same fields as `status`. `grant_declined` and `grant_expired` use the same thread. `grant_revoked` is sent if the host later revokes that grant.
+`grant_accepted` also includes the same fields as `status`. `grant_declined` and `grant_expired` use the same thread. `grant_revoked` is sent if the host later revokes that grant from the approval prompt or Settings.
 
 A second `request_control` from the same bot replaces its pending request.
 

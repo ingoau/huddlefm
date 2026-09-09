@@ -49,7 +49,10 @@ import {
   integrationGrantTimeoutMs,
   integrationReply,
   integrationRequestBlocks,
+  integrationSettingsBlocks,
   parseIntegrationActionValue,
+  parseIntegrationSettingsPage,
+  slackModalBlockLimit,
   sessionMatchesChannel,
   wrapIntegrationResult,
   type IntegrationCommand,
@@ -506,6 +509,8 @@ export class Coordinator {
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
+        integration_grants_prev: () => this.integrationGrantsPage(interaction),
+        integration_grants_next: () => this.integrationGrantsPage(interaction),
       };
       await handlers[interaction.actionId]?.();
     });
@@ -1918,6 +1923,12 @@ export class Coordinator {
           `Revoked <@${userId}>'s control of this session.`,
         )
         .catch(() => {});
+    if (interaction.viewId && interaction.viewHash)
+      await this.slack.updateModal(
+        interaction.viewId,
+        interaction.viewHash,
+        this.settingsViewFor(interaction),
+      );
   }
 
   private replyIntegration(
@@ -3441,11 +3452,43 @@ export class Coordinator {
     }
     await this.slack.modal(
       interaction.triggerId,
-      this.settingsView(interaction.userId),
+      this.settingsViewFor(interaction),
     );
   }
 
-  private settingsView(userId: string) {
+  private settingsViewFor(interaction: Interaction, page?: number) {
+    return this.settingsView(
+      interaction.userId,
+      page ?? this.integrationSettingsPage(interaction),
+    );
+  }
+
+  private integrationSettingsPage(interaction: Interaction) {
+    try {
+      const page = JSON.parse(interaction.metadata || "{}").integrationPage;
+      return Number.isInteger(page) && page > 0 ? page : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async integrationGrantsPage(interaction: Interaction) {
+    if (!this.settingsAdmin(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "Only the host can manage integrations.",
+      );
+    const parsed = parseIntegrationSettingsPage(interaction.value);
+    if (!parsed || parsed.sessionId !== this.id) return;
+    if (interaction.viewId)
+      await this.slack.updateModal(
+        interaction.viewId,
+        interaction.viewHash,
+        this.settingsViewFor(interaction, parsed.page),
+      );
+  }
+
+  private settingsView(userId: string, integrationPage = 0) {
     const settings = this.scrobbling?.settings(userId, this.id) ?? {
       lastFmAvailable: false,
       lastFmConnected: false,
@@ -3461,369 +3504,386 @@ export class Coordinator {
     const canChangeVolume = this.can(userId, "volume");
     const canConfigure = this.can(userId, "configure-settings");
     const canEnd = this.can(userId, "end-session");
-    return {
-      type: "modal",
-      callback_id: "save_settings",
-      private_metadata: JSON.stringify({
-        sessionId: this.id,
-        hostId: this.hostId,
-      }),
-      title: plain("HuddleFM settings"),
-      submit: plain("Save"),
-      close: plain("Cancel"),
-      blocks: [
-        { type: "header", text: plain("Session") },
-        ...(canChangeVolume
-          ? [
-              {
-                type: "input",
-                block_id: "volume",
-                label: plain("Volume (%)"),
-                element: {
-                  type: "plain_text_input",
-                  action_id: "percent",
-                  initial_value: String(Math.round(this.volume * 10_000) / 100),
+    const sessionBlocks = [
+      { type: "header", text: plain("Session") },
+      ...(canChangeVolume
+        ? [
+            {
+              type: "input",
+              block_id: "volume",
+              label: plain("Volume (%)"),
+              element: {
+                type: "plain_text_input",
+                action_id: "percent",
+                initial_value: String(Math.round(this.volume * 10_000) / 100),
+              },
+            },
+          ]
+        : []),
+      ...(canConfigure
+        ? [
+            {
+              type: "input",
+              block_id: "display",
+              label: plain("Display mode"),
+              element: {
+                type: "static_select",
+                action_id: "mode",
+                options: displayModes.map((mode) => ({
+                  text: plain(mode[0]!.toUpperCase() + mode.slice(1)),
+                  value: mode,
+                })),
+                initial_option: {
+                  text: plain(
+                    this.displayMode[0]!.toUpperCase() +
+                      this.displayMode.slice(1),
+                  ),
+                  value: this.displayMode,
                 },
               },
-            ]
-          : []),
-        ...(canConfigure
-          ? [
-              {
-                type: "input",
-                block_id: "display",
-                label: plain("Display mode"),
-                element: {
-                  type: "static_select",
-                  action_id: "mode",
-                  options: displayModes.map((mode) => ({
-                    text: plain(mode[0]!.toUpperCase() + mode.slice(1)),
-                    value: mode,
-                  })),
-                  initial_option: {
-                    text: plain(
-                      this.displayMode[0]!.toUpperCase() +
-                        this.displayMode.slice(1),
-                    ),
-                    value: this.displayMode,
-                  },
+            },
+            {
+              type: "input",
+              block_id: "autoplay",
+              optional: true,
+              label: plain("Autoplay"),
+              hint: plain("Play recommendations when queue is empty"),
+              element: {
+                type: "checkboxes",
+                action_id: "enabled",
+                options: [{ text: plain("Enabled"), value: "enabled" }],
+                initial_options: this.autoplayEnabled
+                  ? [{ text: plain("Enabled"), value: "enabled" }]
+                  : [],
+              },
+            },
+            {
+              type: "input",
+              block_id: "transition",
+              label: plain("Transitions"),
+              element: {
+                type: "static_select",
+                action_id: "mode",
+                options: transitionModes.map((mode) => ({
+                  text: plain(
+                    mode === "none"
+                      ? "Disabled"
+                      : mode === "adaptive"
+                        ? "Adaptive crossfade"
+                        : mode[0]!.toUpperCase() + mode.slice(1),
+                  ),
+                  value: mode,
+                })),
+                initial_option: {
+                  text: plain(
+                    this.transitionMode === "none"
+                      ? "Disabled"
+                      : this.transitionMode === "adaptive"
+                        ? "Adaptive crossfade"
+                        : this.transitionMode[0]!.toUpperCase() +
+                          this.transitionMode.slice(1),
+                  ),
+                  value: this.transitionMode,
                 },
               },
-              {
-                type: "input",
-                block_id: "autoplay",
-                optional: true,
-                label: plain("Autoplay"),
-                hint: plain("Play recommendations when queue is empty"),
-                element: {
-                  type: "checkboxes",
-                  action_id: "enabled",
-                  options: [{ text: plain("Enabled"), value: "enabled" }],
-                  initial_options: this.autoplayEnabled
-                    ? [{ text: plain("Enabled"), value: "enabled" }]
-                    : [],
-                },
-              },
-              {
-                type: "input",
-                block_id: "transition",
-                label: plain("Transitions"),
-                element: {
-                  type: "static_select",
-                  action_id: "mode",
-                  options: transitionModes.map((mode) => ({
-                    text: plain(
-                      mode === "none"
-                        ? "Disabled"
-                        : mode === "adaptive"
-                          ? "Adaptive crossfade"
-                          : mode[0]!.toUpperCase() + mode.slice(1),
-                    ),
-                    value: mode,
-                  })),
-                  initial_option: {
-                    text: plain(
-                      this.transitionMode === "none"
-                        ? "Disabled"
-                        : this.transitionMode === "adaptive"
-                          ? "Adaptive crossfade"
-                          : this.transitionMode[0]!.toUpperCase() +
-                            this.transitionMode.slice(1),
-                    ),
-                    value: this.transitionMode,
-                  },
-                },
-              },
-              {
-                type: "input",
-                block_id: "anchor",
-                optional: true,
-                label: plain("Thread position"),
-                element: {
-                  type: "checkboxes",
-                  action_id: "enabled",
-                  options: [
-                    {
-                      text: plain("Keep player at bottom of thread"),
-                      value: "enabled",
-                    },
-                  ],
-                  initial_options: this.anchorEnabled
-                    ? [
-                        {
-                          text: plain("Keep player at bottom of thread"),
-                          value: "enabled",
-                        },
-                      ]
-                    : [],
-                },
-              },
-            ]
-          : []),
-        ...(canEnd
-          ? [
-              {
-                type: "actions",
-                block_id: "session_actions",
-                elements: [
+            },
+            {
+              type: "input",
+              block_id: "anchor",
+              optional: true,
+              label: plain("Thread position"),
+              element: {
+                type: "checkboxes",
+                action_id: "enabled",
+                options: [
                   {
-                    type: "button",
-                    action_id: "end_session",
-                    text: plain("End session"),
-                    style: "danger",
-                    value: this.id,
-                    confirm: confirm(
-                      "End playback?",
-                      "This stops playback and ends the session.",
-                      "End",
-                    ),
+                    text: plain("Keep player at bottom of thread"),
+                    value: "enabled",
                   },
                 ],
+                initial_options: this.anchorEnabled
+                  ? [
+                      {
+                        text: plain("Keep player at bottom of thread"),
+                        value: "enabled",
+                      },
+                    ]
+                  : [],
               },
-            ]
-          : []),
-        ...(admin
-          ? [
-              { type: "header", text: plain("Permissions") },
-              {
-                type: "input",
-                block_id: "host",
-                optional: true,
-                label: plain("Transfer host"),
-                element: {
-                  type: "users_select",
-                  action_id: "user",
-                  ...(this.hostId ? { initial_user: this.hostId } : {}),
+            },
+          ]
+        : []),
+      ...(canEnd
+        ? [
+            {
+              type: "actions",
+              block_id: "session_actions",
+              elements: [
+                {
+                  type: "button",
+                  action_id: "end_session",
+                  text: plain("End session"),
+                  style: "danger",
+                  value: this.id,
+                  confirm: confirm(
+                    "End playback?",
+                    "This stops playback and ends the session.",
+                    "End",
+                  ),
                 },
+              ],
+            },
+          ]
+        : []),
+      ...(admin
+        ? [
+            { type: "header", text: plain("Permissions") },
+            {
+              type: "input",
+              block_id: "host",
+              optional: true,
+              label: plain("Transfer host"),
+              element: {
+                type: "users_select",
+                action_id: "user",
+                ...(this.hostId ? { initial_user: this.hostId } : {}),
               },
-              {
-                type: "input",
-                block_id: "permission_preset",
-                optional: true,
-                label: plain("Apply permission preset"),
-                hint: plain("Saving overwrites the custom permissions below."),
-                element: {
-                  type: "static_select",
-                  action_id: "selected",
-                  placeholder: plain("Choose a preset"),
-                  options: (
-                    [
-                      ["default", "Default"],
-                      ["host-only", "Host only"],
-                      ["collaborative", "Collaborative"],
-                      ["communism", "Communism"],
-                    ] satisfies [string, string][]
-                  ).map(([value, label]) => ({ text: plain(label), value })),
-                },
+            },
+            {
+              type: "input",
+              block_id: "permission_preset",
+              optional: true,
+              label: plain("Apply permission preset"),
+              hint: plain("Saving overwrites the custom permissions below."),
+              element: {
+                type: "static_select",
+                action_id: "selected",
+                placeholder: plain("Choose a preset"),
+                options: (
+                  [
+                    ["default", "Default"],
+                    ["host-only", "Host only"],
+                    ["collaborative", "Collaborative"],
+                    ["communism", "Communism"],
+                  ] satisfies [string, string][]
+                ).map(([value, label]) => ({ text: plain(label), value })),
               },
-              {
-                type: "input",
-                block_id: "permissions",
-                optional: true,
-                label: plain("Everyone else may"),
-                element: {
-                  type: "checkboxes",
-                  action_id: "selected",
-                  options: capabilities.map((value) => ({
+            },
+            {
+              type: "input",
+              block_id: "permissions",
+              optional: true,
+              label: plain("Everyone else may"),
+              element: {
+                type: "checkboxes",
+                action_id: "selected",
+                options: capabilities.map((value) => ({
+                  text: plain(permissionLabels[value]),
+                  value,
+                })),
+                initial_options: capabilities
+                  .filter((value) => this.allowed.has(value))
+                  .map((value) => ({
                     text: plain(permissionLabels[value]),
                     value,
                   })),
-                  initial_options: capabilities
-                    .filter((value) => this.allowed.has(value))
-                    .map((value) => ({
-                      text: plain(permissionLabels[value]),
-                      value,
-                    })),
+              },
+            },
+          ]
+        : []),
+    ];
+    const userBlocks = [
+      { type: "header", text: plain("User settings") },
+      ...(settings.configured
+        ? [
+            {
+              type: "input",
+              block_id: "scrobbling_mode",
+              label: plain("Scrobbling mode"),
+              hint: plain("Sets the default for each Huddle"),
+              element: {
+                type: "static_select",
+                action_id: "mode",
+                options: scrobblingModes.map((mode) => ({
+                  text: plain(
+                    mode === "ask"
+                      ? "Ask every time"
+                      : mode[0]!.toUpperCase() + mode.slice(1),
+                  ),
+                  value: mode,
+                })),
+                initial_option: {
+                  text: plain(
+                    settings.mode === "ask"
+                      ? "Ask every time"
+                      : settings.mode[0]!.toUpperCase() +
+                          settings.mode.slice(1),
+                  ),
+                  value: settings.mode,
                 },
               },
-            ]
-          : []),
-        { type: "header", text: plain("User settings") },
-        ...(settings.configured
-          ? [
-              {
-                type: "input",
-                block_id: "scrobbling_mode",
-                label: plain("Scrobbling mode"),
-                hint: plain("Sets the default for each Huddle"),
-                element: {
-                  type: "static_select",
-                  action_id: "mode",
-                  options: scrobblingModes.map((mode) => ({
-                    text: plain(
-                      mode === "ask"
-                        ? "Ask every time"
-                        : mode[0]!.toUpperCase() + mode.slice(1),
-                    ),
-                    value: mode,
-                  })),
-                  initial_option: {
-                    text: plain(
-                      settings.mode === "ask"
-                        ? "Ask every time"
-                        : settings.mode[0]!.toUpperCase() +
-                            settings.mode.slice(1),
-                    ),
-                    value: settings.mode,
-                  },
+            },
+            {
+              type: "actions",
+              block_id: "session_scrobbling",
+              elements: [
+                {
+                  type: "button",
+                  action_id: "toggle_session_scrobbling",
+                  text: plain(
+                    `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
+                  ),
+                  value: this.id,
                 },
-              },
-              {
-                type: "actions",
-                block_id: "session_scrobbling",
-                elements: [
-                  {
-                    type: "button",
-                    action_id: "toggle_session_scrobbling",
-                    text: plain(
-                      `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
-                    ),
-                    value: this.id,
-                  },
-                ],
-              },
-            ]
-          : []),
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: settings.lastFmConnected
-              ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
-              : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
-          },
+              ],
+            },
+          ]
+        : []),
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: settings.lastFmConnected
+            ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
+            : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
         },
-        ...(settings.lastFmConnected
-          ? [
-              {
-                type: "input",
-                block_id: "lastfm_scrobbling",
-                optional: true,
-                label: plain("Last.fm scrobbling"),
-                element: {
-                  type: "checkboxes",
-                  action_id: "enabled",
-                  options: [{ text: plain("Enabled"), value: "enabled" }],
-                  initial_options: settings.lastFmEnabled
-                    ? [{ text: plain("Enabled"), value: "enabled" }]
-                    : [],
-                },
+      },
+      ...(settings.lastFmConnected
+        ? [
+            {
+              type: "input",
+              block_id: "lastfm_scrobbling",
+              optional: true,
+              label: plain("Last.fm scrobbling"),
+              element: {
+                type: "checkboxes",
+                action_id: "enabled",
+                options: [{ text: plain("Enabled"), value: "enabled" }],
+                initial_options: settings.lastFmEnabled
+                  ? [{ text: plain("Enabled"), value: "enabled" }]
+                  : [],
               },
+            },
+            {
+              type: "actions",
+              block_id: "lastfm_actions",
+              elements: [
+                {
+                  type: "button",
+                  action_id: "disconnect_lastfm",
+                  text: plain("Disconnect"),
+                  style: "danger",
+                  value: this.id,
+                  confirm: confirm(
+                    "Disconnect Last.fm?",
+                    "This removes your saved Last.fm login.",
+                    "Disconnect",
+                  ),
+                },
+              ],
+            },
+          ]
+        : settings.lastFmAvailable
+          ? [
               {
                 type: "actions",
                 block_id: "lastfm_actions",
                 elements: [
                   {
                     type: "button",
-                    action_id: "disconnect_lastfm",
-                    text: plain("Disconnect"),
-                    style: "danger",
+                    action_id: "connect_lastfm",
+                    text: plain("Log in to Last.fm"),
                     value: this.id,
-                    confirm: confirm(
-                      "Disconnect Last.fm?",
-                      "This removes your saved Last.fm login.",
-                      "Disconnect",
-                    ),
-                  },
-                ],
-              },
-            ]
-          : settings.lastFmAvailable
-            ? [
-                {
-                  type: "actions",
-                  block_id: "lastfm_actions",
-                  elements: [
-                    {
-                      type: "button",
-                      action_id: "connect_lastfm",
-                      text: plain("Log in to Last.fm"),
-                      value: this.id,
-                    },
-                  ],
-                },
-              ]
-            : []),
-        {
-          type: "input",
-          block_id: "listenbrainz_scrobbling",
-          optional: true,
-          label: plain("ListenBrainz scrobbling"),
-          hint: plain(
-            settings.listenBrainzConnected
-              ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
-              : "Uses your ListenBrainz user token",
-          ),
-          element: {
-            type: "checkboxes",
-            action_id: "enabled",
-            options: [{ text: plain("Enabled"), value: "enabled" }],
-            initial_options: settings.listenBrainzEnabled
-              ? [{ text: plain("Enabled"), value: "enabled" }]
-              : [],
-          },
-        },
-        {
-          type: "input",
-          block_id: "listenbrainz_token",
-          optional: true,
-          label: plain("ListenBrainz API key / user token"),
-          hint: plain(
-            settings.listenBrainzConnected
-              ? "Leave blank to keep the saved token"
-              : "Find it in ListenBrainz settings",
-          ),
-          element: {
-            type: "plain_text_input",
-            action_id: "value",
-            placeholder: plain(
-              settings.listenBrainzConnected ? "Saved" : "Paste token",
-            ),
-          },
-        },
-        ...(settings.listenBrainzConnected
-          ? [
-              {
-                type: "actions",
-                block_id: "listenbrainz_actions",
-                elements: [
-                  {
-                    type: "button",
-                    action_id: "disconnect_listenbrainz",
-                    text: plain("Remove token"),
-                    style: "danger",
-                    value: this.id,
-                    confirm: confirm(
-                      "Remove ListenBrainz token?",
-                      "This disables ListenBrainz scrobbling and removes your saved token.",
-                      "Remove",
-                    ),
                   },
                 ],
               },
             ]
           : []),
-      ],
+      {
+        type: "input",
+        block_id: "listenbrainz_scrobbling",
+        optional: true,
+        label: plain("ListenBrainz scrobbling"),
+        hint: plain(
+          settings.listenBrainzConnected
+            ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
+            : "Uses your ListenBrainz user token",
+        ),
+        element: {
+          type: "checkboxes",
+          action_id: "enabled",
+          options: [{ text: plain("Enabled"), value: "enabled" }],
+          initial_options: settings.listenBrainzEnabled
+            ? [{ text: plain("Enabled"), value: "enabled" }]
+            : [],
+        },
+      },
+      {
+        type: "input",
+        block_id: "listenbrainz_token",
+        optional: true,
+        label: plain("ListenBrainz API key / user token"),
+        hint: plain(
+          settings.listenBrainzConnected
+            ? "Leave blank to keep the saved token"
+            : "Find it in ListenBrainz settings",
+        ),
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          placeholder: plain(
+            settings.listenBrainzConnected ? "Saved" : "Paste token",
+          ),
+        },
+      },
+      ...(settings.listenBrainzConnected
+        ? [
+            {
+              type: "actions",
+              block_id: "listenbrainz_actions",
+              elements: [
+                {
+                  type: "button",
+                  action_id: "disconnect_listenbrainz",
+                  text: plain("Remove token"),
+                  style: "danger",
+                  value: this.id,
+                  confirm: confirm(
+                    "Remove ListenBrainz token?",
+                    "This disables ListenBrainz scrobbling and removes your saved token.",
+                    "Remove",
+                  ),
+                },
+              ],
+            },
+          ]
+        : []),
+    ];
+    const integrationBlocks = admin
+      ? integrationSettingsBlocks({
+          sessionId: this.id,
+          grants: [...this.integrations.entries()].map(([userId, grant]) => ({
+            userId,
+            requestId: grant.requestId,
+            permissions: [...grant.permissions],
+          })),
+          maxBlocks:
+            slackModalBlockLimit - sessionBlocks.length - userBlocks.length,
+          page: integrationPage,
+        })
+      : [];
+    return {
+      type: "modal",
+      callback_id: "save_settings",
+      private_metadata: JSON.stringify({
+        sessionId: this.id,
+        hostId: this.hostId,
+        integrationPage,
+      }),
+      title: plain("HuddleFM settings"),
+      submit: plain("Save"),
+      close: plain("Cancel"),
+      blocks: [...sessionBlocks, ...integrationBlocks, ...userBlocks],
     };
   }
 
@@ -3905,7 +3965,7 @@ export class Coordinator {
         await this.slack.updateModal(
           interaction.previousViewId,
           undefined,
-          this.settingsView(interaction.userId),
+          this.settingsViewFor(interaction),
         );
       this.playbackScrobbling?.settingsEnabled(interaction.userId);
     } catch (error) {
@@ -3931,7 +3991,7 @@ export class Coordinator {
       await this.slack.updateModal(
         interaction.viewId,
         interaction.viewHash,
-        this.settingsView(interaction.userId),
+        this.settingsViewFor(interaction),
       );
   }
 
@@ -3942,7 +4002,7 @@ export class Coordinator {
       await this.slack.updateModal(
         interaction.viewId,
         interaction.viewHash,
-        this.settingsView(interaction.userId),
+        this.settingsViewFor(interaction),
       );
   }
 
@@ -3959,7 +4019,7 @@ export class Coordinator {
       await this.slack.updateModal(
         interaction.viewId,
         interaction.viewHash,
-        this.settingsView(interaction.userId),
+        this.settingsViewFor(interaction),
       );
     else
       await this.notice(
