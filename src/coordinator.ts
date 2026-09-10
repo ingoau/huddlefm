@@ -741,19 +741,12 @@ export class Coordinator {
         // commit manual queue entries (same window as removeQueuedAutoplay's awaits).
         await Promise.resolve();
         throwIfAborted(signal);
-        const available =
-          this.config.queueLimit -
-          this.queue.length -
-          Number(Boolean(this.current));
-        if (tracks.length > available) {
+        const fit = this.fitBatchToQueue(tracks);
+        if ("error" in fit) {
           this.restoreQueuedAutoplay(heldAutoplay);
-          return {
-            error: available
-              ? `The queue only has room for ${available} more songs.`
-              : "The queue is full.",
-          };
+          return { error: fit.error };
         }
-        const entries = tracks.map((metadata) => ({
+        const entries = fit.items.map((metadata) => ({
           ...metadata,
           id: crypto.randomUUID(),
           requesterId: userId,
@@ -783,7 +776,7 @@ export class Coordinator {
         await this.render();
         this.queueChanged();
         throwIfAborted(signal);
-        return { pending, heldAutoplay };
+        return { pending, heldAutoplay, omitted: fit.omitted };
       } catch (error) {
         for (const { entry, controller } of pending) {
           controller.abort();
@@ -841,6 +834,7 @@ export class Coordinator {
             title: track.title,
             artist: track.artist,
           })),
+          ...(committed.omitted ? { omitted: committed.omitted } : {}),
         };
       });
     } catch (error) {
@@ -2108,20 +2102,12 @@ export class Coordinator {
       )
         return;
       await this.removeQueuedAutoplay();
-      const available =
-        this.config.queueLimit -
-        this.queue.length -
-        Number(Boolean(this.current));
-      if (tracks.length > available) {
-        await this.notice(
-          interaction.userId,
-          available
-            ? `The queue only has room for ${available} more songs.`
-            : "The queue is full.",
-        );
+      const fit = this.fitBatchToQueue(tracks);
+      if ("error" in fit) {
+        await this.notice(interaction.userId, fit.error);
         return;
       }
-      const entries = tracks.map((metadata) => ({
+      const entries = fit.items.map((metadata) => ({
         ...metadata,
         id: crypto.randomUUID(),
         requesterId: interaction.userId,
@@ -2150,11 +2136,16 @@ export class Coordinator {
       });
       await this.render();
       this.queueChanged();
-      return pending;
+      return { pending, omitted: fit.omitted, total: tracks.length };
     });
     if (!pending) return;
+    if (pending.omitted)
+      await this.notice(
+        interaction.userId,
+        `Added ${pending.total - pending.omitted} of ${pending.total} songs; the rest did not fit.`,
+      );
     await Promise.all(
-      pending.map(({ entry, controller }) =>
+      pending.pending.map(({ entry, controller }) =>
         this.prepareManual(entry, controller),
       ),
     );
@@ -3250,6 +3241,25 @@ export class Coordinator {
     };
   }
 
+  private availableQueueSlots() {
+    return (
+      this.config.queueLimit - this.queue.length - Number(Boolean(this.current))
+    );
+  }
+
+  /** Truncate multi-track adds to remaining capacity; reject only when full. */
+  private fitBatchToQueue<T>(
+    items: T[],
+  ): { items: T[]; omitted: number } | { error: string } {
+    const available = this.availableQueueSlots();
+    if (available <= 0) return { error: "The queue is full." };
+    if (items.length <= available) return { items, omitted: 0 };
+    return {
+      items: items.slice(0, available),
+      omitted: items.length - available,
+    };
+  }
+
   private async bulkAddLinks(interaction: Interaction) {
     const text = interaction.state.links?.text?.value ?? "";
     const { links, invalid } = parseBulkLinkList(text);
@@ -3267,27 +3277,20 @@ export class Coordinator {
       );
       return;
     }
-    const accepted = await this.enqueue(async () => {
-      if (this.state === "ended" || this.state === "suspended") return false;
-      if (!(await this.require(interaction, "add-bulk"))) return false;
-      const available =
-        this.config.queueLimit -
-        this.queue.length -
-        Number(Boolean(this.current));
-      if (links.length > available) {
-        await this.notice(
-          interaction.userId,
-          available
-            ? `The queue only has room for ${available} more songs.`
-            : "The queue is full.",
-        );
-        return false;
+    const capacity = await this.enqueue(async () => {
+      if (this.state === "ended" || this.state === "suspended") return;
+      if (!(await this.require(interaction, "add-bulk"))) return;
+      const available = this.availableQueueSlots();
+      if (available <= 0) {
+        await this.notice(interaction.userId, "The queue is full.");
+        return;
       }
-      return true;
+      return available;
     });
-    if (!accepted) return;
+    if (!capacity) return;
+    const selectedLinks = links.slice(0, capacity);
     const tracks: TrackMetadata[] = [];
-    for (const link of links) {
+    for (const link of selectedLinks) {
       try {
         tracks.push(await this.tracks.resolveUrl(link));
       } catch (error) {
@@ -3305,20 +3308,12 @@ export class Coordinator {
       )
         return;
       await this.removeQueuedAutoplay();
-      const available =
-        this.config.queueLimit -
-        this.queue.length -
-        Number(Boolean(this.current));
-      if (tracks.length > available) {
-        await this.notice(
-          interaction.userId,
-          available
-            ? `The queue only has room for ${available} more songs.`
-            : "The queue is full.",
-        );
+      const fit = this.fitBatchToQueue(tracks);
+      if ("error" in fit) {
+        await this.notice(interaction.userId, fit.error);
         return;
       }
-      const entries = tracks.map((metadata) => ({
+      const entries = fit.items.map((metadata) => ({
         ...metadata,
         id: crypto.randomUUID(),
         requesterId: interaction.userId,
@@ -3347,11 +3342,20 @@ export class Coordinator {
       });
       await this.render();
       this.queueChanged();
-      return pending;
+      return {
+        pending,
+        omitted: links.length - fit.items.length,
+        total: links.length,
+      };
     });
     if (!pending) return;
+    if (pending.omitted)
+      await this.notice(
+        interaction.userId,
+        `Added ${pending.total - pending.omitted} of ${pending.total} songs; the rest did not fit.`,
+      );
     await Promise.all(
-      pending.map(({ entry, controller }) =>
+      pending.pending.map(({ entry, controller }) =>
         this.prepareManual(entry, controller),
       ),
     );
