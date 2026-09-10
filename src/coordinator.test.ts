@@ -2277,6 +2277,78 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("a late-prepared autoplay track still queues the following recommendation", async () => {
+  const ids = {
+    a: "aaaaaaaaaaa",
+    c: "ccccccccccc",
+    d: "ddddddddddd",
+  };
+  const preparing = new Map<string, () => void>();
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: ids.a,
+      title: "A",
+      artist: "Artist",
+    }),
+    upNextIds: async () => [ids.c, ids.d],
+    resolveVideoId: async (id: string) => ({
+      sourceInput: `https://music.youtube.com/watch?v=${id}`,
+      canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+      sourceId: id,
+      title: id,
+      artist: "Radio",
+    }),
+    prepare: async (track: { sourceId: string }) => {
+      if (track.sourceId !== ids.a)
+        await new Promise<void>((resolve) => {
+          preparing.set(track.sourceId, resolve);
+        });
+      return `${track.sourceId}.opus`;
+    },
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+  };
+  await result.coordinator.action(enable);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  await until(() => preparing.has(ids.c));
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  preparing.get(ids.c)!();
+  await until(() =>
+    result.media.some(
+      (value) =>
+        (value as { type?: string; sourceId?: string }).type === "play" &&
+        (value as { sourceId?: string }).sourceId === ids.c,
+    ),
+  );
+  await until(() => preparing.has(ids.d));
+  expect(
+    result.audit.filter(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  ).toHaveLength(2);
+  preparing.get(ids.d)?.();
+  await result.coordinator.endFromSlack();
+});
+
 test("player shows autoplay search while the next song is being chosen", async () => {
   const ids = { a: "aaaaaaaaaaa", c: "ccccccccccc" };
   let release!: () => void;
