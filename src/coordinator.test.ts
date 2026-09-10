@@ -3931,3 +3931,43 @@ test("user settings persist huddle mix opt-out", async () => {
   await test.coordinator.endFromSlack();
   userStore.close();
 });
+
+test("settings selects offer an initial option Slack can match", async () => {
+  const store = new Store(":memory:");
+  const scrobbling = new ScrobbleDispatcher(store, {});
+  store.setListenBrainzToken("host", "token", "listener");
+  const test = setup(undefined, undefined, undefined, scrobbling);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const view = (test.modals.at(-1) as unknown[])[1] as {
+    blocks: { block_id?: string; element?: Record<string, unknown> }[];
+  };
+  const selects = view.blocks.filter(
+    (block) => block.element?.type === "static_select",
+  );
+  expect(selects.map((block) => block.block_id)).toEqual([
+    "display",
+    "autoplay",
+    "transition",
+    "permission_preset",
+    "scrobbling_mode",
+  ]);
+  for (const block of selects) {
+    const element = block.element as {
+      options: unknown[];
+      initial_option?: unknown;
+    };
+    // permission_preset intentionally opens unselected; every other select
+    // preselects the current value.
+    if (block.block_id === "permission_preset") {
+      expect(element.initial_option).toBeUndefined();
+      continue;
+    }
+    expect(element.initial_option).toBeDefined();
+    // Slack rejects the view with invalid_arguments unless initial_option is
+    // an exact copy of one of the options, descriptions included.
+    expect(element.options).toContainEqual(element.initial_option);
+  }
+  await test.coordinator.endFromSlack();
+  store.close();
+});

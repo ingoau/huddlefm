@@ -39,6 +39,20 @@ export function plain(text: string) {
   return { type: "plain_text", text: text.slice(0, 150) };
 }
 
+export function staticSelect<Option extends { value: string }>(
+  actionId: string,
+  options: Option[],
+  selected: string,
+) {
+  const initial = options.find((option) => option.value === selected);
+  return {
+    type: "static_select",
+    action_id: actionId,
+    options,
+    ...(initial ? { initial_option: initial } : {}),
+  };
+}
+
 export function icon(text: string) {
   return { ...plain(text), emoji: true };
 }
