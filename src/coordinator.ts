@@ -3591,10 +3591,13 @@ export class Coordinator {
             current.hash,
             this.queueView(current.userId),
           );
-          if (this.queueViews.get(viewId) === current && view)
+          // A successful update always leaves the cached hash a version
+          // behind, so an update Slack answered without a view drops it
+          // rather than keeping one that is now certain to conflict.
+          if (this.queueViews.get(viewId) === current)
             this.queueViews.set(viewId, {
               userId: current.userId,
-              hash: view.hash,
+              hash: view?.hash,
             });
         } catch (error) {
           // A failed update leaves the cached hash behind the real view, so
