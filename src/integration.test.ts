@@ -128,6 +128,22 @@ test("parses a valid request_control and command with optional channel", () => {
     ok: true,
     command: { type: "settings", autoplay: true },
   });
+  expect(
+    parseIntegrationMessage(
+      JSON.stringify({ v: 1, type: "settings", loopMode: "queue" }),
+    ),
+  ).toEqual({
+    ok: true,
+    command: { type: "settings", loopMode: "queue" },
+  });
+  expect(
+    parseIntegrationMessage(
+      JSON.stringify({ v: 1, type: "settings", loop: "track" }),
+    ),
+  ).toEqual({
+    ok: true,
+    command: { type: "settings", loopMode: "track" },
+  });
 });
 
 test("matches sessions by source, UI, or companion channel", () => {

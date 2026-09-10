@@ -571,6 +571,19 @@ socket.addEventListener("message", async (event) => {
         requestAnimationFrame(() => stage.classList.remove("changing")),
       );
     }
+    if (message.type === "replay" && currentId === message.entryId) {
+      cancelTransition();
+      const current = decks.get(message.entryId);
+      if (!current) return;
+      const player = current.audio;
+      const intro = Number(message.introSeconds) || 0;
+      player.currentTime = intro;
+      const now = audioContext.currentTime;
+      current.gain.gain.cancelScheduledValues(now);
+      current.gain.gain.setValueAtTime(1, now);
+      await player.play();
+      send("playing", { entryId: message.entryId });
+    }
     if (
       message.type === "lyrics" &&
       currentId === message.entryId &&

@@ -416,6 +416,7 @@ test("suspends with a restart notice and restores playback", async () => {
     state: "paused",
     volume: 0.4,
     autoplay: "off",
+    loopMode: "off",
     transitionMode: "none",
     displayMode: "lyrics",
     anchorEnabled: true,
@@ -1786,6 +1787,9 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(modal).toContain('"value":"related"');
   expect(modal).toContain('"value":"huddle"');
   expect(modal).toContain("Huddle mix");
+  expect(modal).toContain('"block_id":"loop"');
+  expect(modal).toContain('"value":"track"');
+  expect(modal).toContain('"value":"queue"');
   expect(modal).toContain("Include my listening in Huddle mix");
   expect(modal).toContain(
     '"block_id":"transition","label":{"type":"plain_text","text":"Transitions"}',
@@ -1801,6 +1805,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     '"block_id":"volume"',
     '"block_id":"display"',
     '"block_id":"autoplay"',
+    '"block_id":"loop"',
     '"block_id":"transition"',
     '"block_id":"anchor"',
     '"block_id":"session_actions"',
@@ -1871,6 +1876,167 @@ test("autoplay defaults off and host settings persist both toggle states", async
     type: "transition_mode",
     mode: "adaptive",
   });
+
+  const loop = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  loop.state = {
+    loop: { mode: { selected_option: { value: "track" } } },
+  };
+  await result.coordinator.action(loop);
+  expect(result.sessions).toContainEqual({ loopMode: "track" });
+  await result.coordinator.endFromSlack();
+});
+
+test("track loop replays the current song without advancing", async () => {
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: value,
+      canonicalUrl: value,
+      sourceId: value.includes("b") ? "bbbbbbbbbbb" : "aaaaaaaaaaa",
+      title: value.includes("b") ? "B" : "A",
+      artist: "Artist",
+      duration: 100,
+    }),
+    prepare: async (metadata: { sourceId: string }) =>
+      `${metadata.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await Bun.sleep(0);
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://b"),
+  );
+  await Bun.sleep(0);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    loop: { mode: { selected_option: { value: "track" } } },
+  };
+  await result.coordinator.action(enable);
+  const preload = result.media.findLast(
+    (value) => (value as { type?: string }).type === "preload",
+  ) as { nextEntryId?: string };
+  expect(preload.nextEntryId).toBeUndefined();
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  expect(result.media).toContainEqual({
+    type: "replay",
+    entryId: first,
+    introSeconds: 0,
+  });
+  const plays = result.media.filter(
+    (value) => (value as { type?: string }).type === "play",
+  );
+  expect(plays).toHaveLength(1);
+  expect(
+    (
+      result.media.findLast(
+        (value) => (value as { type?: string }).type === "play",
+      ) as { entryId: string }
+    ).entryId,
+  ).toBe(first);
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    nowPlaying: expect.objectContaining({ title: "A" }),
+    queue: [expect.objectContaining({ title: "B" })],
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("queue loop rotates finished tracks to the end", async () => {
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: value,
+      canonicalUrl: value,
+      sourceId: value.includes("b") ? "bbbbbbbbbbb" : "aaaaaaaaaaa",
+      title: value.includes("b") ? "B" : "A",
+      artist: "Artist",
+      duration: 100,
+    }),
+    prepare: async (metadata: { sourceId: string }) =>
+      `${metadata.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await Bun.sleep(0);
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://b"),
+  );
+  await Bun.sleep(0);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    loop: { mode: { selected_option: { value: "queue" } } },
+  };
+  await result.coordinator.action(enable);
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  const status = result.coordinator.agentStatus("host");
+  expect(status).toMatchObject({
+    nowPlaying: expect.objectContaining({ title: "B" }),
+    queue: [expect.objectContaining({ title: "A" })],
+  });
+  expect((status as { queue: { id: string }[] }).queue[0]!.id).not.toBe(first);
+  await result.coordinator.endFromSlack();
+});
+
+test("track loop suppresses autoplay recommendations", async () => {
+  let recommendations = 0;
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: "aaaaaaaaaaa",
+      title: "A",
+      artist: "Artist",
+    }),
+    prepare: async () => "a.opus",
+    upNextIds: async () => (recommendations++, ["bbbbbbbbbbb"]),
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  await Bun.sleep(0);
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    autoplay: { mode: { selected_option: { value: "related" } } },
+    loop: { mode: { selected_option: { value: "track" } } },
+  };
+  await result.coordinator.action(enable);
+  await Bun.sleep(10);
+  expect(recommendations).toBe(0);
   await result.coordinator.endFromSlack();
 });
 
@@ -1900,7 +2066,7 @@ test("delegated users only see and save settings they can configure", async () =
   await test.coordinator.action(open);
   const modal = JSON.stringify(test.modals.at(-1));
   expect(modal).toContain('"text":"Session"');
-  for (const block of ["volume", "display", "autoplay", "anchor"])
+  for (const block of ["volume", "display", "autoplay", "loop", "anchor"])
     expect(modal).toContain(`"block_id":"${block}"`);
   for (const block of [
     "session_actions",

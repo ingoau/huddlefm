@@ -6,10 +6,12 @@ import type { Coordinator } from "./coordinator.ts";
 import {
   autoplayModes,
   displayModes,
+  loopModes,
   permissionPresets,
   transitionModes,
   type AutoplayMode,
   type DisplayMode,
+  type LoopMode,
   type TransitionMode,
 } from "./store.ts";
 import { logger } from "./logger.ts";
@@ -191,7 +193,7 @@ function agentTools(coordinator: Coordinator, userId: string) {
     }),
     update_settings: tool({
       description:
-        "Change session settings the user is allowed to configure (display, autoplay, transitions, keep-player-at-bottom, permission preset, or host).",
+        "Change session settings the user is allowed to configure (display, autoplay, loop, transitions, keep-player-at-bottom, permission preset, or host).",
       inputSchema: z.object({
         displayMode: z.enum(displayModes).optional(),
         autoplay: z.boolean().optional(),
@@ -199,6 +201,10 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .enum(autoplayModes)
           .optional()
           .describe("off, related (YouTube up-next), or huddle mix"),
+        loopMode: z
+          .enum(loopModes)
+          .optional()
+          .describe("off, track (repeat current song), or queue (cycle queue)"),
         transitionMode: z.enum(transitionModes).optional(),
         anchorEnabled: z
           .boolean()
@@ -315,7 +321,7 @@ The user @mentioned you in the huddle thread (player controls may live in a comp
 Use tools for any playback, queue, search, settings, or session scrobbling change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
 Be concise. After taking actions, briefly confirm what changed. Do not invent track ids; search or read status first. Session scrobbling only works after the user has connected Last.fm or ListenBrainz in Settings.
 Do not use emojis.
-Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`,
+Display modes: ${displayModes.join(", ")}. Loop modes: ${loopModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`,
       tools: agentTools(options.coordinator, options.userId),
       stopWhen: stepCountIs(10),
       temperature: 0.2,
@@ -354,6 +360,7 @@ export type AgentSettingsPatch = {
   displayMode?: DisplayMode;
   autoplay?: boolean;
   autoplayMode?: AutoplayMode;
+  loopMode?: LoopMode;
   transitionMode?: TransitionMode;
   anchorEnabled?: boolean;
   permissionPreset?: keyof typeof permissionPresets;
