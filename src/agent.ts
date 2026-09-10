@@ -252,9 +252,13 @@ export async function runAgentCommand(options: {
   timeoutMs?: number;
 }) {
   const prompt = stripMentions(options.text, options.botUserId);
-  if (!prompt) return "What should I do with the queue or playback?";
+  if (!prompt)
+    return { ok: false, text: "What should I do with the queue or playback?" };
   if (activeAgentUsers.has(options.userId))
-    return "I'm already handling your last request. Try again in a moment.";
+    return {
+      ok: false,
+      text: "I'm already handling your last request. Try again in a moment.",
+    };
 
   activeAgentUsers.add(options.userId);
   const startedAt = Date.now();
@@ -283,7 +287,7 @@ Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.j
       sessionId: options.coordinator.id,
       properties: { durationMs: Date.now() - startedAt },
     });
-    return text;
+    return { ok: true, text };
   } catch (error) {
     captureAnalytics("agent.failed", {
       distinctId: options.userId,
@@ -294,7 +298,10 @@ Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.j
       { event: "agent_failed", userId: options.userId, err: error },
       "Agent command failed",
     );
-    return "I couldn't complete that request. Try again in a moment.";
+    return {
+      ok: false,
+      text: "I couldn't complete that request. Try again in a moment.",
+    };
   } finally {
     activeAgentUsers.delete(options.userId);
   }

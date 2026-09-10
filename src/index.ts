@@ -887,6 +887,44 @@ async function mentionEphemeral(
   }
 }
 
+// Acknowledge a mention with 👀 right away, then swap that for ✅ or ❌ once the
+// requested action settles. Only the first outcome reported is recorded.
+function mentionReaction(channelId: string, messageTs: string) {
+  const acknowledged = slackHuddle
+    .react(channelId, messageTs, "eyes")
+    .catch((error) =>
+      log.warn(
+        { event: "mention_reaction_failed", channelId, err: error },
+        "Could not react to Huddle mention",
+      ),
+    );
+  let settled = false;
+  return (succeeded: boolean) => {
+    if (settled) return;
+    settled = true;
+    void acknowledged
+      .then(async () => {
+        await slackHuddle.unreact(channelId, messageTs, "eyes");
+        await slackHuddle.react(
+          channelId,
+          messageTs,
+          succeeded ? "white_check_mark" : "x",
+        );
+      })
+      .catch((error) =>
+        log.warn(
+          {
+            event: "mention_outcome_reaction_failed",
+            channelId,
+            succeeded,
+            err: error,
+          },
+          "Could not mark the Huddle mention outcome",
+        ),
+      );
+  };
+}
+
 async function joinMentionedHuddle(
   event: Extract<
     import("./slack-huddle.ts").HuddleEvent,
@@ -904,15 +942,16 @@ async function joinMentionedHuddle(
       "This isn’t an active Huddle thread.",
       event.threadTs,
     );
-    return;
+    return false;
   }
   if (
     joiningChannels.has(event.channelId) ||
     joiningCalls.has(callId) ||
     runtimeForCall(callId)
   )
-    return;
+    return true;
   await joinHuddle(event.channelId, event.userId, callId);
+  return true;
 }
 
 const server = Bun.serve<SocketData>({
@@ -1217,30 +1256,24 @@ await slackHuddle.start((event) => {
     const mentioned =
       event.userId !== botUserId && event.text.includes(`<@${botUserId}>`);
     if (mentioned) {
-      void slackHuddle.react(event.channelId, event.messageTs).catch((error) =>
-        log.warn(
-          {
-            event: "mention_reaction_failed",
-            channelId: event.channelId,
-            err: error,
-          },
-          "Could not react to Huddle mention",
-        ),
-      );
+      const settleMention = mentionReaction(event.channelId, event.messageTs);
       const bare = isBareMention(event.text, botUserId);
       const coordinator = runtime?.coordinator;
       if (!coordinator) {
-        void joinMentionedHuddle(event).catch((error) =>
-          log.error(
-            {
-              event: "mention_action_failed",
-              channelId: event.channelId,
-              userId: event.userId,
-              err: error,
-            },
-            "Could not handle Huddle mention",
-          ),
-        );
+        void joinMentionedHuddle(event)
+          .then((joined) => settleMention(joined))
+          .catch((error) => {
+            settleMention(false);
+            log.error(
+              {
+                event: "mention_action_failed",
+                channelId: event.channelId,
+                userId: event.userId,
+                err: error,
+              },
+              "Could not handle Huddle mention",
+            );
+          });
       } else if (bare) {
         const companionId = coordinator.room.companionChannelId;
         const mentionedInHuddleThread =
@@ -1265,18 +1298,23 @@ await slackHuddle.start((event) => {
             ),
           );
         }
-        void coordinator.repost().catch((error) =>
-          log.error(
-            {
-              event: "mention_action_failed",
-              channelId: event.channelId,
-              userId: event.userId,
-              err: error,
-            },
-            "Could not handle Huddle mention",
-          ),
-        );
+        void coordinator
+          .repost()
+          .then(() => settleMention(true))
+          .catch((error) => {
+            settleMention(false);
+            log.error(
+              {
+                event: "mention_action_failed",
+                channelId: event.channelId,
+                userId: event.userId,
+                err: error,
+              },
+              "Could not handle Huddle mention",
+            );
+          });
       } else if (!agentConfigured()) {
+        settleMention(false);
         void mentionEphemeral(
           event.channelId,
           event.userId,
@@ -1300,16 +1338,18 @@ await slackHuddle.start((event) => {
           text: event.text,
           botUserId,
         })
-          .then((reply) =>
-            mentionEphemeral(
+          .then((reply) => {
+            settleMention(reply.ok);
+            return mentionEphemeral(
               event.channelId,
               event.userId,
-              reply,
+              reply.text,
               event.threadTs,
               coordinator.room.companionChannelId,
-            ),
-          )
-          .catch((error) =>
+            );
+          })
+          .catch((error) => {
+            settleMention(false);
             log.error(
               {
                 event: "mention_agent_failed",
@@ -1318,8 +1358,8 @@ await slackHuddle.start((event) => {
                 err: error,
               },
               "Could not handle agent mention",
-            ),
-          );
+            );
+          });
       }
     }
     if (!mentioned) runtime?.coordinator?.threadActivity(event.userId);
