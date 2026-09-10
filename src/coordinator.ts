@@ -1,7 +1,11 @@
 import { capture as captureAnalytics } from "./analytics.ts";
 import type { AuditLog } from "./audit-log.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
-import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
+import {
+  slackErrorCode,
+  type Interaction,
+  type SlackAppAdapter,
+} from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
 import {
   capabilities,
@@ -3593,7 +3597,20 @@ export class Coordinator {
               hash: view.hash,
             });
         } catch (error) {
-          this.log.error(
+          // A failed update leaves the cached hash behind the real view, so
+          // it is dropped and the next refresh updates whichever version
+          // Slack holds. A view Slack has forgotten can never be refreshed
+          // again, so it leaves the cache and is not reported as a fault.
+          const gone = slackErrorCode(error) === "not_found";
+          if (this.queueViews.get(viewId) === current) {
+            if (gone) this.queueViews.delete(viewId);
+            else
+              this.queueViews.set(viewId, {
+                userId: current.userId,
+                hash: undefined,
+              });
+          }
+          this.log[gone ? "warn" : "error"](
             { event: "queue_modal_update_failed", viewId, err: error },
             "Could not update queue modal",
           );

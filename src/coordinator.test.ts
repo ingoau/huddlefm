@@ -37,6 +37,7 @@ function setup(
   const modals: unknown[] = [];
   const pushedModals: unknown[] = [];
   const updatedModals: [unknown, unknown, unknown][] = [];
+  const modalUpdateFailures: unknown[] = [];
   const ephemeral: string[] = [];
   const ephemeralCalls: unknown[][] = [];
   const dms: unknown[][] = [];
@@ -76,6 +77,8 @@ function setup(
     },
     updateModal: async (...args: [unknown, unknown, unknown]) => {
       updatedModals.push(args);
+      const failure = modalUpdateFailures.shift();
+      if (failure) throw failure;
       return {
         id: String(args[0]),
         hash: `updated-${updatedModals.length}`,
@@ -169,6 +172,7 @@ function setup(
     modals,
     pushedModals,
     updatedModals,
+    modalUpdateFailures,
     ephemeral,
     ephemeralCalls,
     dms,
@@ -338,6 +342,60 @@ test("keeps open queue modals current until they close", async () => {
   await Bun.sleep(110);
   await until(() => result.updatedModals.length === 3);
   expect(result.updatedModals.at(-1)?.[0]).toBe("view-2");
+  await result.coordinator.endFromSlack();
+});
+
+test("refreshes a queue dialog again after a failed update", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const open = interaction(result.coordinator, "view_full_queue");
+  await result.coordinator.action(open);
+  const queueChanged = Reflect.get(result.coordinator, "queueChanged").bind(
+    result.coordinator,
+  );
+
+  result.modalUpdateFailures.push(
+    Object.assign(new Error("An API error occurred: hash_conflict"), {
+      data: { error: "hash_conflict" },
+    }),
+  );
+  queueChanged();
+  await until(() => result.updatedModals.length === 1);
+  expect(result.updatedModals[0]?.[1]).toBe("hash-1");
+
+  queueChanged();
+  await until(() => result.updatedModals.length === 2);
+  expect(result.updatedModals[1]?.[0]).toBe("view-1");
+  expect(result.updatedModals[1]?.[1]).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("forgets a queue dialog Slack no longer holds", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "view_full_queue"),
+  );
+  const queueChanged = Reflect.get(result.coordinator, "queueChanged").bind(
+    result.coordinator,
+  );
+
+  result.modalUpdateFailures.push(
+    Object.assign(new Error("An API error occurred: not_found"), {
+      data: { error: "not_found" },
+    }),
+  );
+  queueChanged();
+  await until(() => result.updatedModals.length === 1);
+  await until(
+    () =>
+      (Reflect.get(result.coordinator, "queueViews") as Map<string, unknown>)
+        .size === 0,
+  );
+
+  queueChanged();
+  await Bun.sleep(110);
+  expect(result.updatedModals).toHaveLength(1);
   await result.coordinator.endFromSlack();
 });
 
