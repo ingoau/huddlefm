@@ -3280,7 +3280,9 @@ export class Coordinator {
     const capacity = await this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return;
       if (!(await this.require(interaction, "add-bulk"))) return;
-      const available = this.availableQueueSlots();
+      const available =
+        this.availableQueueSlots() +
+        this.queue.filter((track) => track.automatic).length;
       if (available <= 0) {
         await this.notice(interaction.userId, "The queue is full.");
         return;

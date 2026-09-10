@@ -909,6 +909,72 @@ test("truncates bulk links to remaining queue capacity before resolution", async
   await result.coordinator.endFromSlack();
 });
 
+test("bulk links use capacity reclaimed from queued autoplay", async () => {
+  const resolved: string[] = [];
+  const result = setup({
+    resolveUrl: async (input: string) => {
+      resolved.push(input);
+      return {
+        sourceInput: input,
+        canonicalUrl: input,
+        sourceId: input,
+        title: "Track",
+        artist: "Artist",
+      };
+    },
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "current", {
+    id: "now",
+    requesterId: "host",
+    sourceId: "now",
+    title: "Now",
+    artist: "Artist",
+    status: "ready",
+  });
+  Reflect.set(result.coordinator, "queue", [
+    ...Array.from({ length: 47 }, (_, index) => ({
+      id: `queued-${index}`,
+      requesterId: "host",
+      sourceId: `queued-${index}`,
+      title: `Queued ${index}`,
+      artist: "Artist",
+      status: "ready",
+    })),
+    {
+      id: "autoplay",
+      requesterId: "bot",
+      sourceId: "autoplay",
+      title: "Autoplay",
+      artist: "Radio",
+      automatic: true,
+      status: "ready",
+    },
+  ]);
+
+  const links = [
+    "https://example.com/first.mp3",
+    "https://example.com/second.mp3",
+  ];
+  await result.coordinator.action({
+    ...interaction(
+      result.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: { links: { text: { value: links.join("\n") } } },
+  });
+
+  expect(resolved).toEqual(links);
+  expect(Reflect.get(result.coordinator, "queue")).toHaveLength(49);
+  expect(Reflect.get(result.coordinator, "queue")).not.toContainEqual(
+    expect.objectContaining({ automatic: true }),
+  );
+  await result.coordinator.endFromSlack();
+});
+
 test("truncates album adds to remaining queue capacity", async () => {
   const album = Array.from({ length: 5 }, (_, index) => ({
     sourceInput: `https://example.com/${index}`,
