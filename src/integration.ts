@@ -1,4 +1,9 @@
-import { capabilities, displayModes, transitionModes } from "./store.ts";
+import {
+  autoplayModes,
+  capabilities,
+  displayModes,
+  transitionModes,
+} from "./store.ts";
 import { confirm, permissionLabels, plain } from "./coordinator-ui.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 
@@ -64,6 +69,7 @@ export type IntegrationCommand = {
   percent?: number;
   displayMode?: (typeof displayModes)[number];
   autoplay?: boolean;
+  autoplayMode?: (typeof autoplayModes)[number];
   transitionMode?: (typeof transitionModes)[number];
   anchorEnabled?: boolean;
 };
@@ -160,6 +166,16 @@ export function parseIntegrationMessage(text: string): IntegrationParseResult {
   )
     command.displayMode = body.displayMode as (typeof displayModes)[number];
   if (typeof body.autoplay === "boolean") command.autoplay = body.autoplay;
+  if (
+    typeof body.autoplay === "string" &&
+    autoplayModes.includes(body.autoplay as (typeof autoplayModes)[number])
+  )
+    command.autoplayMode = body.autoplay as (typeof autoplayModes)[number];
+  if (
+    typeof body.autoplayMode === "string" &&
+    autoplayModes.includes(body.autoplayMode as (typeof autoplayModes)[number])
+  )
+    command.autoplayMode = body.autoplayMode as (typeof autoplayModes)[number];
   if (
     typeof body.transitionMode === "string" &&
     transitionModes.includes(

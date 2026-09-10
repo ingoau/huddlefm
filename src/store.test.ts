@@ -25,14 +25,14 @@ test("persists session and permission defaults", () => {
       .get(),
   ).toEqual({
     status: "ready",
-    autoplay: 0,
+    autoplay: "off",
     transition_mode: "none",
     display_mode: "default",
     anchor_enabled: 0,
   });
-  store.setSession("session", { autoplay: true });
+  store.setSession("session", { autoplay: "related" });
   expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({
-    autoplay: 1,
+    autoplay: "related",
   });
   store.setSession("session", { transitionMode: "gapless" });
   expect(store.db.query("SELECT transition_mode FROM sessions").get()).toEqual({
@@ -336,7 +336,7 @@ test("restores suspended sessions for three minutes", () => {
     status: "played",
   });
   store.setSession("session", {
-    autoplay: true,
+    autoplay: "related",
     transitionMode: "gapless",
     playbackSeconds: 42,
     listenedSeconds: 84,
@@ -364,7 +364,7 @@ test("restores suspended sessions for three minutes", () => {
       state: "paused",
       playbackSeconds: 42,
       listenedSeconds: 84,
-      autoplay: true,
+      autoplay: "related",
       transitionMode: "gapless",
       displayMode: "lyrics",
       anchorEnabled: false,
@@ -682,6 +682,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
   expect(store.getUserScrobbling("user")).toEqual({
     lastFmEnabled: false,
     listenBrainzEnabled: false,
+    huddleMixOptIn: true,
     mode: "always",
   });
   store.setLastFmPending("user", "pending", 10);
@@ -695,6 +696,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     listenBrainzUsername: "musicbrainz-user",
     listenBrainzToken: "lb-token",
     listenBrainzEnabled: true,
+    huddleMixOptIn: true,
     mode: "always",
   });
   store.disconnectListenBrainz("user");
@@ -703,6 +705,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     lastFmSessionKey: "session-key",
     lastFmEnabled: true,
     listenBrainzEnabled: false,
+    huddleMixOptIn: true,
     mode: "always",
   });
   const track = {
@@ -744,5 +747,58 @@ test("persists scrobbling mode and per-session overrides", () => {
   expect(store.getSessionScrobbling("session", "user")).toBe(true);
   store.setSessionScrobbling("session", "user", false);
   expect(store.getSessionScrobbling("session", "user")).toBe(false);
+  store.close();
+});
+
+test("migrates integer autoplay flags to off and related", () => {
+  const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
+  const path = join(directory, "store.sqlite");
+  const legacy = new Database(path, { create: true });
+  const now = Date.now();
+  legacy.run(`CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    huddle_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    creator_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    volume REAL NOT NULL DEFAULT 0.6,
+    autoplay INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    resume_until INTEGER
+  )`);
+  legacy
+    .query(
+      `INSERT INTO sessions (id, huddle_id, call_id, channel_id, thread_ts, creator_id, status, autoplay, created_at, updated_at)
+      VALUES (?, 'h', 'c', 'ch', '1', 'u', 'ready', ?, ?, ?)`,
+    )
+    .run("on", 1, now, now);
+  legacy
+    .query(
+      `INSERT INTO sessions (id, huddle_id, call_id, channel_id, thread_ts, creator_id, status, autoplay, created_at, updated_at)
+      VALUES (?, 'h', 'c', 'ch', '1', 'u', 'ready', ?, ?, ?)`,
+    )
+    .run("off", 0, now, now);
+  legacy.close();
+  const store = new Store(path);
+  expect(
+    store.db.query("SELECT id, autoplay FROM sessions ORDER BY id").all(),
+  ).toEqual([
+    { id: "off", autoplay: "off" },
+    { id: "on", autoplay: "related" },
+  ]);
+  store.close();
+  rmSync(directory, { recursive: true });
+});
+
+test("persists huddle mix opt-in per Slack user", () => {
+  const store = new Store(":memory:");
+  expect(store.getUserScrobbling("user").huddleMixOptIn).toBe(true);
+  store.setHuddleMixOptIn("user", false);
+  expect(store.getUserScrobbling("user").huddleMixOptIn).toBe(false);
+  store.setHuddleMixOptIn("user", true);
+  expect(store.getUserScrobbling("user").huddleMixOptIn).toBe(true);
   store.close();
 });

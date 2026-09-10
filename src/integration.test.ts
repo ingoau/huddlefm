@@ -112,6 +112,22 @@ test("parses a valid request_control and command with optional channel", () => {
     ok: true,
     command: { type: "skip", channel: "C123" },
   });
+  expect(
+    parseIntegrationMessage(
+      JSON.stringify({ v: 1, type: "settings", autoplay: "huddle" }),
+    ),
+  ).toEqual({
+    ok: true,
+    command: { type: "settings", autoplayMode: "huddle" },
+  });
+  expect(
+    parseIntegrationMessage(
+      JSON.stringify({ v: 1, type: "settings", autoplay: true }),
+    ),
+  ).toEqual({
+    ok: true,
+    command: { type: "settings", autoplay: true },
+  });
 });
 
 test("matches sessions by source, UI, or companion channel", () => {

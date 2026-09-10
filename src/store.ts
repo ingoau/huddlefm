@@ -32,6 +32,22 @@ export type TransitionMode = (typeof transitionModes)[number];
 export const scrobblingModes = ["always", "ask", "disabled"] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
 
+export const autoplayModes = ["off", "related", "huddle"] as const;
+export type AutoplayMode = (typeof autoplayModes)[number];
+
+export function parseAutoplayMode(value: unknown): AutoplayMode {
+  if (value === true || value === 1 || value === "1" || value === "related")
+    return "related";
+  if (value === "huddle") return "huddle";
+  return "off";
+}
+
+export const autoplayModeLabels: Record<AutoplayMode, string> = {
+  off: "Off",
+  related: "Related",
+  huddle: "Huddle mix",
+};
+
 export const recentTrackLimit = 100;
 
 export const usageLabels = {
@@ -100,7 +116,7 @@ export type SavedSession = {
   hostId?: string;
   state: string;
   volume: number;
-  autoplay: boolean;
+  autoplay: AutoplayMode;
   transitionMode: TransitionMode;
   displayMode: DisplayMode;
   anchorEnabled: boolean;
@@ -122,6 +138,7 @@ export type UserScrobbling = {
   listenBrainzUsername?: string;
   listenBrainzToken?: string;
   listenBrainzEnabled: boolean;
+  huddleMixOptIn: boolean;
   mode: ScrobblingMode;
 };
 
@@ -166,7 +183,7 @@ export class Store {
         host_id TEXT,
         status TEXT NOT NULL,
         volume REAL NOT NULL DEFAULT 0.6,
-        autoplay INTEGER NOT NULL DEFAULT 0,
+        autoplay TEXT NOT NULL DEFAULT 'off',
         transition_mode TEXT NOT NULL DEFAULT 'none',
         resume_state TEXT,
         resume_until INTEGER,
@@ -217,6 +234,7 @@ export class Store {
         listenbrainz_username TEXT,
         listenbrainz_token TEXT,
         listenbrainz_enabled INTEGER NOT NULL DEFAULT 0,
+        huddle_mix_opt_in INTEGER NOT NULL DEFAULT 1,
         mode TEXT NOT NULL DEFAULT 'always',
         updated_at INTEGER NOT NULL
       );
@@ -289,7 +307,8 @@ export class Store {
       CREATE INDEX IF NOT EXISTS session_messages_due
         ON session_messages(next_attempt_at);
     `);
-    this.ensureColumn("sessions", "autoplay", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'");
+    this.migrateAutoplayModes();
     this.ensureColumn(
       "sessions",
       "transition_mode",
@@ -345,6 +364,11 @@ export class Store {
       "user_scrobbling",
       "mode",
       "TEXT NOT NULL DEFAULT 'always'",
+    );
+    this.ensureColumn(
+      "user_scrobbling",
+      "huddle_mix_opt_in",
+      "INTEGER NOT NULL DEFAULT 1",
     );
   }
 
@@ -481,7 +505,7 @@ export class Store {
       status?: string;
       hostId?: string | null;
       volume?: number;
-      autoplay?: boolean;
+      autoplay?: AutoplayMode;
       transitionMode?: TransitionMode;
       playbackSeconds?: number;
       listenedSeconds?: number;
@@ -504,7 +528,7 @@ export class Store {
     if (fields.autoplay !== undefined)
       this.db
         .query("UPDATE sessions SET autoplay = ?, updated_at = ? WHERE id = ?")
-        .run(fields.autoplay ? 1 : 0, Date.now(), sessionId);
+        .run(fields.autoplay, Date.now(), sessionId);
     if (fields.transitionMode !== undefined)
       this.db
         .query(
@@ -835,7 +859,7 @@ export class Store {
           ...(row.host_id ? { hostId: String(row.host_id) } : {}),
           state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
-          autoplay: Boolean(row.autoplay),
+          autoplay: parseAutoplayMode(row.autoplay),
           transitionMode: transitionModes.includes(
             row.transition_mode as TransitionMode,
           )
@@ -1235,6 +1259,7 @@ export class Store {
       return {
         lastFmEnabled: false,
         listenBrainzEnabled: false,
+        huddleMixOptIn: true,
         mode: "always",
       };
     return {
@@ -1258,6 +1283,10 @@ export class Store {
         ? { listenBrainzToken: String(row.listenbrainz_token) }
         : {}),
       listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
+      huddleMixOptIn:
+        row.huddle_mix_opt_in === undefined
+          ? true
+          : Boolean(row.huddle_mix_opt_in),
       mode: scrobblingModes.includes(row.mode as ScrobblingMode)
         ? (row.mode as ScrobblingMode)
         : "always",
@@ -1289,6 +1318,15 @@ export class Store {
         ON CONFLICT (session_id, user_id) DO UPDATE SET enabled = excluded.enabled`,
       )
       .run(sessionId, userId, enabled ? 1 : 0);
+  }
+
+  setHuddleMixOptIn(userId: string, enabled: boolean) {
+    this.ensureUserScrobbling(userId);
+    this.db
+      .query(
+        "UPDATE user_scrobbling SET huddle_mix_opt_in = ?, updated_at = ? WHERE user_id = ?",
+      )
+      .run(enabled ? 1 : 0, Date.now(), userId);
   }
 
   setLastFmPending(userId: string, token: string, startedAt: number) {
@@ -1445,6 +1483,25 @@ export class Store {
 
   close() {
     this.db.close();
+  }
+
+  private migrateAutoplayModes() {
+    const done = this.db
+      .query("SELECT 1 FROM data_migrations WHERE name = ?")
+      .get("autoplay-modes-v1");
+    if (done) return;
+    this.db
+      .query(
+        `UPDATE sessions SET autoplay = CASE
+          WHEN autoplay IN (1, '1', 'related') THEN 'related'
+          WHEN autoplay = 'huddle' THEN 'huddle'
+          ELSE 'off'
+        END`,
+      )
+      .run();
+    this.db
+      .query("INSERT INTO data_migrations (name, completed_at) VALUES (?, ?)")
+      .run("autoplay-modes-v1", Date.now());
   }
 
   private ensureColumn(table: string, column: string, definition: string) {

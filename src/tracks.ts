@@ -131,6 +131,22 @@ export const loudnessNormalizationArgs = (enabled = false) =>
       ]
     : [];
 
+export function isYoutubeVideoId(id: string) {
+  return /^[a-zA-Z0-9_-]{11}$/.test(id);
+}
+
+export function normalizeToken(value: string) {
+  return value
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function normalizeArtist(value: string) {
+  return normalizeToken(value);
+}
+
 export type TrackMetadata = {
   sourceInput: string;
   canonicalUrl: string;
@@ -474,19 +490,59 @@ export class TrackCatalog {
   }
 
   async upNextIds(videoId: string) {
+    return (await this.upNextTracks(videoId)).map((track) => track.sourceId);
+  }
+
+  async upNextTracks(videoId: string): Promise<TrackMetadata[]> {
     const results: unknown = await this.music.getUpNexts(videoId);
     if (!Array.isArray(results)) return [];
     return results.flatMap((result) => {
       if (!result || typeof result !== "object") return [];
-      const id = (result as { videoId?: unknown }).videoId;
-      return typeof id === "string" && /^[a-zA-Z0-9_-]{11}$/.test(id)
-        ? [id]
-        : [];
+      const row = result as {
+        videoId?: unknown;
+        title?: unknown;
+        artists?: { name?: unknown };
+        duration?: unknown;
+        thumbnails?: { url?: string }[];
+      };
+      const id = row.videoId;
+      if (typeof id !== "string" || !isYoutubeVideoId(id)) return [];
+      const title = typeof row.title === "string" ? row.title : "Untitled";
+      const artist =
+        typeof row.artists?.name === "string"
+          ? row.artists.name
+          : "Unknown artist";
+      return [
+        {
+          sourceInput: `https://music.youtube.com/watch?v=${id}`,
+          canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+          sourceId: id,
+          title,
+          artist,
+          duration: typeof row.duration === "number" ? row.duration : undefined,
+          artwork: artworkUrl(row.thumbnails?.at(-1)?.url),
+        } satisfies TrackMetadata,
+      ];
     });
   }
 
+  async searchSong(title: string, artist: string) {
+    const query = `${title} ${artist}`.trim();
+    if (!query) return;
+    const songs = await this.music.searchSongs(query);
+    if (!Array.isArray(songs) || !songs.length) return;
+    const needle = normalizeArtist(artist);
+    const match =
+      songs.find((song) => {
+        const name = normalizeArtist(song.artist?.name ?? "");
+        return name && (name.includes(needle) || needle.includes(name));
+      }) ?? songs[0];
+    if (!match?.videoId || !isYoutubeVideoId(match.videoId)) return;
+    return songMetadata(match);
+  }
+
   resolveVideoId(videoId: string) {
-    if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId))
+    if (!isYoutubeVideoId(videoId))
       throw new Error("Invalid YouTube Music video ID");
     return this.resolveUrl(`https://music.youtube.com/watch?v=${videoId}`);
   }
