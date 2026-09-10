@@ -482,6 +482,44 @@ test("only accepts video IDs from getUpNexts runtime data", async () => {
   ]);
 });
 
+test("searchSong prefers an artist match from YouTube Music results", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  Reflect.set(catalog, "music", {
+    searchSongs: async (query: string) => {
+      expect(query).toBe("Karma Police Radiohead");
+      return [
+        {
+          videoId: "otherothero",
+          name: "Karma Police",
+          artist: { name: "Cover Band" },
+          thumbnails: [],
+        },
+        {
+          videoId: "abcdefghijk",
+          name: "Karma Police",
+          artist: { name: "Radiohead" },
+          album: { name: "OK Computer" },
+          duration: 261,
+          thumbnails: [{ url: "art" }],
+        },
+      ];
+    },
+  });
+  expect(await catalog.searchSong("Karma Police", "Radiohead")).toEqual({
+    sourceInput: "https://music.youtube.com/watch?v=abcdefghijk",
+    canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
+    sourceId: "abcdefghijk",
+    title: "Karma Police",
+    artist: "Radiohead",
+    album: "OK Computer",
+    duration: 261,
+    artwork: "art",
+  });
+});
+
 test("offers and expands albums only for bulk searches", async () => {
   const catalog = new TrackCatalog({
     durationSeconds: 1_200,

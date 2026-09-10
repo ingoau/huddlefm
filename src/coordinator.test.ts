@@ -7,6 +7,7 @@ import { Store, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
+import { RecommendationCatalog } from "./recommendations.ts";
 
 function setup(
   tracks = {} as TrackCatalog,
@@ -27,6 +28,7 @@ function setup(
   storeOverride?: Store,
   excludedUserIds = new Set<string>(),
   lyricsOverride?: LyricsCatalog,
+  recommendations?: import("./recommendations.ts").RecommendationCatalog,
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -156,6 +158,7 @@ function setup(
     () => sessionChanges.push({}),
     () => {},
     (...args) => recordedMessages.push(args),
+    recommendations,
   );
   return {
     coordinator,
@@ -412,7 +415,7 @@ test("suspends with a restart notice and restores playback", async () => {
     hostId: "host",
     state: "paused",
     volume: 0.4,
-    autoplay: false,
+    autoplay: "off",
     transitionMode: "none",
     displayMode: "lyrics",
     anchorEnabled: true,
@@ -1610,6 +1613,10 @@ test("autoplay defaults off and host settings persist both toggle states", async
   );
   const modal = JSON.stringify(result.modals.at(-1));
   expect(modal).toContain('"block_id":"autoplay"');
+  expect(modal).toContain('"value":"related"');
+  expect(modal).toContain('"value":"huddle"');
+  expect(modal).toContain("Huddle mix");
+  expect(modal).toContain("Include my listening in Huddle mix");
   expect(modal).toContain(
     '"block_id":"transition","label":{"type":"plain_text","text":"Transitions"}',
   );
@@ -1651,11 +1658,11 @@ test("autoplay defaults off and host settings persist both toggle states", async
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   await until(() => recommendations === 1);
-  expect(result.sessions).toContainEqual({ autoplay: true });
+  expect(result.sessions).toContainEqual({ autoplay: "related" });
 
   const disable = interaction(
     result.coordinator,
@@ -1665,10 +1672,10 @@ test("autoplay defaults off and host settings persist both toggle states", async
   );
   disable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [] } },
+    autoplay: { mode: { selected_option: { value: "off" } } },
   };
   await result.coordinator.action(disable);
-  expect(result.sessions).toContainEqual({ autoplay: false });
+  expect(result.sessions).toContainEqual({ autoplay: "off" });
 
   const transition = interaction(
     result.coordinator,
@@ -1745,7 +1752,7 @@ test("delegated users only see and save settings they can configure", async () =
   save.state = {
     volume: { percent: { value: "25" } },
     display: { mode: { selected_option: { value: "lyrics" } } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
     host: { user: { selected_user: "guest" } },
     permissions: { selected: { selected_options: [{ value: "end-session" }] } },
@@ -1753,7 +1760,7 @@ test("delegated users only see and save settings they can configure", async () =
   await test.coordinator.action(save);
   expect(test.sessions).toContainEqual({ volume: 0.25 });
   expect(test.sessions).toContainEqual({ displayMode: "lyrics" });
-  expect(test.sessions).toContainEqual({ autoplay: true });
+  expect(test.sessions).toContainEqual({ autoplay: "related" });
   expect(test.sessions).toContainEqual({ anchorEnabled: true });
   expect(test.sessions).not.toContainEqual({ hostId: "guest" });
   expect(test.permissions).toEqual([]);
@@ -1938,6 +1945,7 @@ test("user settings remove saved scrobbling credentials", async () => {
   expect(userStore.getUserScrobbling("host")).toEqual({
     lastFmEnabled: false,
     listenBrainzEnabled: false,
+    huddleMixOptIn: true,
     mode: "always",
   });
   await test.coordinator.endFromSlack();
@@ -2017,7 +2025,7 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   const first = (
@@ -2089,7 +2097,7 @@ test("autoplay favors recommendations shared by recent manual tracks", async () 
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   for (const sourceId of [ids.a, ids.b]) {
@@ -2145,7 +2153,7 @@ test("skipping a manual track plays the queued autoplay recommendation", async (
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   await until(
@@ -2222,7 +2230,7 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   await until(
@@ -2317,7 +2325,7 @@ test("player shows autoplay search while the next song is being chosen", async (
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   await Bun.sleep(150);
@@ -2359,7 +2367,7 @@ test("failed recommendation lookup leaves the session running", async () => {
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   await until(() =>
@@ -2405,7 +2413,7 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
   );
   enable.state = {
     volume: { percent: { value: "60" } },
-    autoplay: { enabled: { selected_options: [{ value: "enabled" }] } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
   await until(() =>
@@ -2880,7 +2888,7 @@ test("agentUpdateSettings validates the full patch before mutating", async () =>
   expect(test.coordinator.agentStatus("host")).toMatchObject({
     ok: true,
     displayMode: "default",
-    autoplay: false,
+    autoplay: "off",
   });
   const result = await test.coordinator.agentUpdateSettings("host", {
     displayMode: "lyrics",
@@ -2894,11 +2902,11 @@ test("agentUpdateSettings validates the full patch before mutating", async () =>
   expect(test.coordinator.agentStatus("host")).toMatchObject({
     ok: true,
     displayMode: "default",
-    autoplay: false,
+    autoplay: "off",
     hostId: "host",
   });
   expect(test.sessions).not.toContainEqual({ displayMode: "lyrics" });
-  expect(test.sessions).not.toContainEqual({ autoplay: true });
+  expect(test.sessions).not.toContainEqual({ autoplay: "related" });
   await test.coordinator.endFromSlack();
 });
 
@@ -3319,4 +3327,317 @@ test("unknown session targeting does not list other sessions", async () => {
   expect(test.coordinator.ownsChannel("missing")).toBe(false);
   expect(test.coordinator.ownsChannel("channel")).toBe(true);
   await test.coordinator.endFromSlack();
+});
+
+test("huddle mix autoplay uses compiled past additions when YouTube up next is empty", async () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "previous",
+    huddleId: "previous",
+    callId: "previous",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.addTrack({
+    id: "past-host",
+    sessionId: "previous",
+    requesterId: "host",
+    sourceInput: "https://music.youtube.com/watch?v=hostpick001",
+    canonicalUrl: "https://music.youtube.com/watch?v=hostpick001",
+    sourceId: "hostpick001",
+    title: "Host Favorite",
+    artist: "Shared Band",
+    status: "played",
+  });
+  store.addTrack({
+    id: "past-guest",
+    sessionId: "previous",
+    requesterId: "guest",
+    sourceInput: "https://music.youtube.com/watch?v=hostpick001",
+    canonicalUrl: "https://music.youtube.com/watch?v=hostpick001",
+    sourceId: "hostpick001",
+    title: "Host Favorite",
+    artist: "Shared Band",
+    status: "played",
+  });
+  const recTracks = {
+    searchSong: async () => ({
+      sourceInput: "https://music.youtube.com/watch?v=mixpick0001",
+      canonicalUrl: "https://music.youtube.com/watch?v=mixpick0001",
+      sourceId: "mixpick0001",
+      title: "Mix Pick",
+      artist: "Shared Band",
+    }),
+    upNextTracks: async () => [],
+  };
+  const catalog = new RecommendationCatalog(store, recTracks);
+  const result = setup(
+    {
+      ...recTracks,
+      resolve: async () => ({
+        sourceInput: "https://example.com/a",
+        canonicalUrl: "https://example.com/a",
+        sourceId: "aaaaaaaaaaa",
+        title: "A",
+        artist: "Artist",
+      }),
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    store,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await result.coordinator.start();
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+  };
+  await result.coordinator.action(enable);
+  await until(() =>
+    result.audit.some(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  );
+  expect(JSON.stringify(result.updates)).toContain("Autoplay recommendation");
+  expect(JSON.stringify(result.audit)).toContain('"autoplayMode":"huddle"');
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("prefetches personal recommendations on start and join", async () => {
+  const requested: string[][] = [];
+  const catalog = {
+    prefetchUsers(ids: Iterable<string>) {
+      requested.push([...ids].sort());
+    },
+    userRecommendations() {
+      return [];
+    },
+    recommendation() {
+      return undefined;
+    },
+    autoplayCandidates: async () => [],
+  } as unknown as RecommendationCatalog;
+  const test = setup(
+    {} as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  expect(requested[0]).toEqual(["guest", "host"]);
+  test.coordinator.memberJoined("listener");
+  expect(requested.at(-1)).toEqual(["listener"]);
+  await test.coordinator.endFromSlack();
+});
+
+test("add modal omits recommendations when the cache is empty", async () => {
+  const catalog = {
+    prefetchUsers() {},
+    userRecommendations() {
+      return [];
+    },
+  } as unknown as RecommendationCatalog;
+  const test = setup(
+    {} as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  expect(JSON.stringify(test.modals[0])).not.toContain(
+    '"block_id":"recommend"',
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("add modal shows cached personal recommendations", async () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "previous",
+    huddleId: "previous",
+    callId: "previous",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.addTrack({
+    id: "past-host",
+    sessionId: "previous",
+    requesterId: "host",
+    sourceInput: "https://music.youtube.com/watch?v=hostseed001",
+    canonicalUrl: "https://music.youtube.com/watch?v=hostseed001",
+    sourceId: "hostseed001",
+    title: "Seed",
+    artist: "Band",
+    status: "played",
+  });
+  const recTracks = {
+    searchSong: async () => undefined,
+    upNextTracks: async () => [
+      {
+        sourceInput: "https://music.youtube.com/watch?v=foryou00001",
+        canonicalUrl: "https://music.youtube.com/watch?v=foryou00001",
+        sourceId: "foryou00001",
+        title: "For You",
+        artist: "Band",
+      },
+    ],
+  };
+  const catalog = new RecommendationCatalog(store, recTracks);
+  let resolved = false;
+  const test = setup(
+    {
+      ...recTracks,
+      resolve: async () => ((resolved = true), {}),
+      prepare: async () => "track.opus",
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    store,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await catalog.prefetchUser("host");
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  const modal = JSON.stringify(test.modals[0]);
+  expect(modal).toContain('"block_id":"recommend"');
+  expect(modal).toContain("For You — Band");
+  const recId = catalog.userRecommendations("host")[0]?.id;
+  expect(recId).toBeTruthy();
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "add_track_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: {
+      recommend: {
+        selection: { selected_option: { value: recId } },
+      },
+    },
+  });
+  expect(resolved).toBeFalse();
+  expect(
+    store.db
+      .query("SELECT title FROM tracks WHERE session_id = ?")
+      .all(test.coordinator.id),
+  ).toEqual([{ title: "For You" }]);
+  await test.coordinator.endFromSlack();
+  store.close();
+});
+
+test("opted-out listeners still see personal recommendations", async () => {
+  const store = new Store(":memory:");
+  store.setHuddleMixOptIn("host", false);
+  store.createSession({
+    id: "previous",
+    huddleId: "previous",
+    callId: "previous",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.addTrack({
+    id: "past-host",
+    sessionId: "previous",
+    requesterId: "host",
+    sourceInput: "https://music.youtube.com/watch?v=hostseed001",
+    canonicalUrl: "https://music.youtube.com/watch?v=hostseed001",
+    sourceId: "hostseed001",
+    title: "Seed",
+    artist: "Band",
+    status: "played",
+  });
+  const recTracks = {
+    searchSong: async () => undefined,
+    upNextTracks: async () => [
+      {
+        sourceInput: "https://music.youtube.com/watch?v=foryou00001",
+        canonicalUrl: "https://music.youtube.com/watch?v=foryou00001",
+        sourceId: "foryou00001",
+        title: "For You",
+        artist: "Band",
+      },
+    ],
+  };
+  const catalog = new RecommendationCatalog(store, recTracks);
+  const test = setup(
+    recTracks as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    store,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await catalog.prefetchUser("host");
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  expect(JSON.stringify(test.modals[0])).toContain('"block_id":"recommend"');
+  expect(JSON.stringify(test.modals[0])).toContain("For You — Band");
+  await test.coordinator.endFromSlack();
+  store.close();
+});
+
+test("user settings persist huddle mix opt-out", async () => {
+  const userStore = new Store(":memory:");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling);
+  await test.coordinator.start();
+  expect(userStore.getUserScrobbling("host").huddleMixOptIn).toBe(true);
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    huddle_mix: { enabled: { selected_options: [] } },
+  };
+  await test.coordinator.action(save);
+  expect(userStore.getUserScrobbling("host").huddleMixOptIn).toBe(false);
+  await test.coordinator.endFromSlack();
+  userStore.close();
 });

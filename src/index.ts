@@ -32,6 +32,7 @@ import {
 } from "./integration.ts";
 import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
+import { RecommendationCatalog } from "./recommendations.ts";
 
 const resumeTtlMs = 3 * 60_000;
 const log = logger.child({ component: "app" });
@@ -103,6 +104,7 @@ await Promise.all(
 );
 const catalog = new TrackCatalog(config);
 const lyrics = new LyricsCatalog();
+const recommendations = new RecommendationCatalog(store, catalog, config);
 const slackApp = new SlackAppAdapter(config);
 const audit = new AuditLog(
   "data/audit.jsonl",
@@ -528,6 +530,7 @@ async function joinHuddle(
         if (joined.companionChannelId === postedChannelId)
           companions.recordMessage(sessionId, postedChannelId, messageTs);
       },
+      recommendations,
     ));
     try {
       if (restored) await coordinator.resume(resumeActorId);

@@ -11,6 +11,10 @@ import {
   scrobblingModes,
   Store,
   transitionModes,
+  autoplayModes,
+  autoplayModeLabels,
+  parseAutoplayMode,
+  type AutoplayMode,
   type DisplayMode,
   type SavedSession,
   type ScrobblingMode,
@@ -57,6 +61,10 @@ import {
   wrapIntegrationResult,
   type IntegrationCommand,
 } from "./integration.ts";
+import {
+  RecommendationCatalog,
+  type PlayableRecommendation,
+} from "./recommendations.ts";
 
 const endRestoreMs = 2 * 60_000;
 const searchDebounceMs = 300;
@@ -80,6 +88,19 @@ function throwIfAborted(signal?: AbortSignal) {
   throw new DOMException("This operation was aborted", "AbortError");
 }
 
+function recommendationSourceLabel(track: PlayableRecommendation) {
+  const names = track.sources.map((source) =>
+    source === "lastfm"
+      ? "Last.fm"
+      : source === "listenbrainz"
+        ? "ListenBrainz"
+        : source === "similar" || source === "related"
+          ? "Similar"
+          : "HuddleFM",
+  );
+  return [...new Set(names)].join(" · ") || "Recommended";
+}
+
 export class Coordinator {
   readonly id: string;
   readonly participants = new Set<string>();
@@ -91,11 +112,12 @@ export class Coordinator {
   private listenedSeconds = 0;
   private volume: number;
   private displayMode: DisplayMode = "default";
-  private autoplayEnabled = false;
+  private autoplayMode: AutoplayMode = "off";
   private transitionMode: TransitionMode = "none";
   private autoplayGeneration = 0;
   private autoplayPending = false;
   private autoplayRejected: string[] = [];
+  private autoplayRejectedArtists: string[] = [];
   private anchorEnabled = false;
   private revision = 0;
   private uiTs = "";
@@ -179,6 +201,7 @@ export class Coordinator {
       _channelId: string,
       _messageTs: string,
     ) => {},
+    private recommendations?: RecommendationCatalog,
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
@@ -203,7 +226,7 @@ export class Coordinator {
       this.state = restored.state;
       this.playbackSeconds = restored.playbackSeconds;
       this.listenedSeconds = restored.listenedSeconds ?? 0;
-      this.autoplayEnabled = restored.autoplay;
+      this.autoplayMode = restored.autoplay;
       this.transitionMode = restored.transitionMode;
       this.displayMode = restored.displayMode;
       this.anchorEnabled = restored.anchorEnabled;
@@ -256,6 +279,7 @@ export class Coordinator {
     await Promise.all(
       [...this.participants].map((userId) => this.promptScrobbling(userId)),
     );
+    this.prefetchRecommendations();
     this.audit.record("session.started", this.hostId, {
       sessionId: this.id,
       huddleId: this.room.huddleId,
@@ -301,6 +325,7 @@ export class Coordinator {
     this.sendMedia({ type: "volume", value: this.volume });
     this.sendMedia({ type: "display_mode", mode: this.displayMode });
     this.sendMedia({ type: "transition_mode", mode: this.transitionMode });
+    this.prefetchRecommendations();
     if (!this.current) await this.startNext();
     else {
       this.playbackScrobbling?.start(
@@ -597,7 +622,7 @@ export class Coordinator {
       volumePercent: Math.round(this.volume * 100),
       playbackSeconds: this.playbackSeconds,
       displayMode: this.displayMode,
-      autoplay: this.autoplayEnabled,
+      autoplay: this.autoplayMode,
       transitionMode: this.transitionMode,
       anchorEnabled: this.anchorEnabled,
       hostId: this.hostId ?? null,
@@ -1009,6 +1034,7 @@ export class Coordinator {
         ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
         skipped.sourceId,
       ].slice(-20);
+      this.rejectAutoplayArtist(skipped.artist);
       await this.advance("skipped");
       this.scheduleAutoplay();
       return {
@@ -1200,6 +1226,7 @@ export class Coordinator {
     patch: {
       displayMode?: DisplayMode;
       autoplay?: boolean;
+      autoplayMode?: AutoplayMode;
       transitionMode?: TransitionMode;
       anchorEnabled?: boolean;
       permissionPreset?: keyof typeof permissionPresets;
@@ -1228,6 +1255,7 @@ export class Coordinator {
       if (
         (patch.displayMode !== undefined ||
           patch.autoplay !== undefined ||
+          patch.autoplayMode !== undefined ||
           patch.transitionMode !== undefined ||
           patch.anchorEnabled !== undefined) &&
         !this.can(userId, "configure-settings")
@@ -1276,13 +1304,20 @@ export class Coordinator {
         changed.push(`displayMode=${patch.displayMode}`);
       }
       if (
-        patch.autoplay !== undefined &&
-        patch.autoplay !== this.autoplayEnabled
-      ) {
-        this.autoplayEnabled = patch.autoplay;
-        this.store.setSession(this.id, { autoplay: patch.autoplay });
-        if (!patch.autoplay) await this.removeQueuedAutoplay();
-        changed.push(`autoplay=${patch.autoplay}`);
+        patch.autoplayMode !== undefined &&
+        !autoplayModes.includes(patch.autoplayMode)
+      )
+        return { ok: false as const, error: "Invalid autoplay mode." };
+      const nextAutoplay =
+        patch.autoplayMode ??
+        (patch.autoplay === undefined
+          ? undefined
+          : parseAutoplayMode(patch.autoplay));
+      if (nextAutoplay !== undefined && nextAutoplay !== this.autoplayMode) {
+        this.autoplayMode = nextAutoplay;
+        this.store.setSession(this.id, { autoplay: nextAutoplay });
+        if (nextAutoplay === "off") await this.removeQueuedAutoplay();
+        changed.push(`autoplay=${nextAutoplay}`);
       }
       if (patch.transitionMode !== undefined) {
         this.transitionMode = patch.transitionMode;
@@ -1328,12 +1363,13 @@ export class Coordinator {
         });
         this.store.incrementUsage("settings");
         await this.render();
+        this.scheduleAutoplay();
       }
       return {
         ok: true as const,
         changed,
         displayMode: this.displayMode,
-        autoplay: this.autoplayEnabled,
+        autoplay: this.autoplayMode,
         transitionMode: this.transitionMode,
         anchorEnabled: this.anchorEnabled,
         hostId: this.hostId ?? null,
@@ -1433,6 +1469,7 @@ export class Coordinator {
     this.participants.add(userId);
     this.playbackScrobbling?.memberJoined(userId);
     void this.promptScrobbling(userId);
+    this.prefetchRecommendations(userId);
     this.refreshIdle();
     this.log.info(
       { event: "member_joined", userId, participants: this.participants.size },
@@ -1791,6 +1828,7 @@ export class Coordinator {
         return this.agentUpdateSettings(userId, {
           displayMode: command.displayMode,
           autoplay: command.autoplay,
+          autoplayMode: command.autoplayMode,
           transitionMode: command.transitionMode,
           anchorEnabled: command.anchorEnabled,
         });
@@ -1984,6 +2022,28 @@ export class Coordinator {
     return this.config.excludedUserIds.has(userId);
   }
 
+  private autoplayOn() {
+    return this.autoplayMode !== "off";
+  }
+
+  private listenerIds() {
+    return [...this.participants].filter(
+      (id) => id !== this.botUserId && !this.isExcluded(id),
+    );
+  }
+
+  private prefetchRecommendations(userId?: string) {
+    this.recommendations?.prefetchUsers(userId ? [userId] : this.listenerIds());
+  }
+
+  private rejectAutoplayArtist(artist: string) {
+    const name = firstArtist(artist);
+    this.autoplayRejectedArtists = [
+      ...this.autoplayRejectedArtists.filter((value) => value !== name),
+      name,
+    ].slice(-20);
+  }
+
   private rejectNonParticipant(interaction: Interaction) {
     this.audit.record("action.denied", interaction.userId, {
       sessionId: this.id,
@@ -2000,10 +2060,14 @@ export class Coordinator {
     const searchValue =
       interaction.state.track?.selection?.selected_option?.value ??
       interaction.value;
-    const recentId = searchValue
+    const recommendId = searchValue
       ? undefined
-      : interaction.state.recent?.selection?.selected_option?.value;
-    const value = searchValue || recentId;
+      : interaction.state.recommend?.selection?.selected_option?.value;
+    const recentId =
+      searchValue || recommendId
+        ? undefined
+        : interaction.state.recent?.selection?.selected_option?.value;
+    const value = searchValue || recommendId || recentId;
     if (!value) return;
     const accepted = await this.enqueue(async () => {
       if (this.state === "ended" || this.state === "suspended") return false;
@@ -2022,12 +2086,15 @@ export class Coordinator {
     if (!accepted) return;
     let selection: TrackMetadata | TrackMetadata[];
     try {
-      selection = recentId
-        ? (this.store
-            .recentTracks(interaction.userId, recentTrackLimit)
-            .find((track) => track.id === recentId) ??
+      selection = recommendId
+        ? (this.recommendations?.recommendation(recommendId) ??
           (await this.tracks.resolve(value)))
-        : await this.tracks.resolve(value);
+        : recentId
+          ? (this.store
+              .recentTracks(interaction.userId, recentTrackLimit)
+              .find((track) => track.id === recentId) ??
+            (await this.tracks.resolve(value)))
+          : await this.tracks.resolve(value);
     } catch (error) {
       return this.notice(interaction.userId, message(error));
     }
@@ -2195,15 +2262,15 @@ export class Coordinator {
   }
 
   private scheduleAutoplay() {
-    const context = this.current?.sourceId ?? this.history.at(-1)?.sourceId;
+    const context =
+      this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "";
     const seeds = [this.current, ...[...this.history].reverse()]
       .flatMap((track) => (track && !track.automatic ? [track.sourceId] : []))
       .filter((id, index, all) => all.indexOf(id) === index)
       .slice(0, 3);
+    const huddleMix = this.autoplayMode === "huddle" && this.recommendations;
     if (
-      !context ||
-      !seeds.length ||
-      !this.autoplayEnabled ||
+      !this.autoplayOn() ||
       this.autoplayPending ||
       this.state === "ended" ||
       this.state === "suspended" ||
@@ -2213,6 +2280,8 @@ export class Coordinator {
         this.config.queueLimit
     )
       return;
+    if (this.autoplayMode === "related" && (!context || !seeds.length)) return;
+    if (this.autoplayMode === "huddle" && !huddleMix) return;
     const generation = this.autoplayGeneration;
     this.autoplayPending = true;
     this.queueRender();
@@ -2230,40 +2299,76 @@ export class Coordinator {
   ) {
     const startedAt = Date.now();
     this.log.debug(
-      { event: "autoplay_recommendation_started", seeds: seeds.length },
+      {
+        event: "autoplay_recommendation_started",
+        mode: this.autoplayMode,
+        seeds: seeds.length,
+      },
       "Finding autoplay recommendation",
     );
     try {
-      const recommendations = await Promise.all(
-        seeds.map((seed) => this.tracks.upNextIds(seed).catch(() => [])),
-      );
-      const ranked = new Map<
-        string,
-        { id: string; seedCount: number; score: number }
-      >();
-      for (const ids of recommendations)
-        [...new Set(ids)].forEach((id, rank) => {
-          const candidate = ranked.get(id) ?? { id, seedCount: 0, score: 0 };
-          candidate.seedCount++;
-          candidate.score += 1 / (rank + 1);
-          ranked.set(id, candidate);
-        });
-      const ids = [...ranked.values()]
-        .sort((a, b) => b.seedCount - a.seedCount || b.score - a.score)
-        .map(({ id }) => id);
       const excluded = new Set([
         this.current?.sourceId,
         ...this.queue.map((track) => track.sourceId),
         ...this.history.slice(-20).map((track) => track.sourceId),
         ...this.autoplayRejected,
       ]);
+      const ranked = new Map<
+        string,
+        {
+          id: string;
+          seedCount: number;
+          score: number;
+          metadata?: TrackMetadata;
+        }
+      >();
+      if (this.autoplayMode === "related") {
+        const recommendations = await Promise.all(
+          seeds.map((seed) => this.tracks.upNextIds(seed).catch(() => [])),
+        );
+        for (const ids of recommendations)
+          [...new Set(ids)].forEach((id, rank) => {
+            const candidate = ranked.get(id) ?? { id, seedCount: 0, score: 0 };
+            candidate.seedCount++;
+            candidate.score += 1 / (rank + 1);
+            ranked.set(id, candidate);
+          });
+      } else if (this.recommendations) {
+        const extras = await this.recommendations.autoplayCandidates({
+          userIds: this.listenerIds(),
+          nowPlaying: this.current ?? this.history.at(-1),
+          recent: [
+            ...this.history.slice(-20),
+            ...(this.current ? [this.current] : []),
+          ],
+          exclude: excluded,
+          skipped: {
+            sourceIds: this.autoplayRejected,
+            artists: this.autoplayRejectedArtists,
+            tracks: this.history.slice(-20),
+          },
+        });
+        for (const extra of extras) {
+          ranked.set(extra.sourceId, {
+            id: extra.sourceId,
+            seedCount: extra.seedCount,
+            score: extra.score,
+            metadata: extra.metadata,
+          });
+        }
+      }
+      const ids = [...ranked.values()]
+        .sort((a, b) => b.seedCount - a.seedCount || b.score - a.score)
+        .map(({ id }) => id);
       for (const id of ids) {
         if (excluded.has(id)) continue;
-        let metadata: TrackMetadata;
-        try {
-          metadata = await this.tracks.resolveVideoId(id);
-        } catch {
-          continue;
+        let metadata = ranked.get(id)?.metadata;
+        if (!metadata) {
+          try {
+            metadata = await this.tracks.resolveVideoId(id);
+          } catch {
+            continue;
+          }
         }
         const pending = await this.enqueue(async () => {
           if (!this.canAddAutoplay(context, generation)) return;
@@ -2292,6 +2397,7 @@ export class Coordinator {
           this.audit.record("track.autoplay_added", undefined, {
             sessionId: this.id,
             seedSourceIds: seeds,
+            autoplayMode: this.autoplayMode,
             ...auditTrack(entry),
           });
           this.notifyIntegrations("queue.added", {
@@ -2351,11 +2457,12 @@ export class Coordinator {
 
   private canAddAutoplay(context: string, generation: number) {
     return (
-      this.autoplayEnabled &&
+      this.autoplayOn() &&
       generation === this.autoplayGeneration &&
       this.state !== "ended" &&
       this.state !== "suspended" &&
-      (this.current?.sourceId ?? this.history.at(-1)?.sourceId) === context &&
+      (this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "") ===
+        context &&
       !this.queue.some((track) => !track.automatic) &&
       !this.queue.some((track) => track.automatic) &&
       this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit
@@ -2743,6 +2850,7 @@ export class Coordinator {
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
     ].slice(-20);
+    this.rejectAutoplayArtist(skipped.artist);
     await this.advance("skipped");
     this.scheduleAutoplay();
   }
@@ -2985,6 +3093,16 @@ export class Coordinator {
       interaction.userId,
       recentTrackLimit,
     );
+    const recommended = this.recommendations?.userRecommendations(
+      interaction.userId,
+      [
+        this.current?.sourceId,
+        ...this.queue.map((track) => track.sourceId),
+        ...this.history.slice(-20).map((track) => track.sourceId),
+        ...this.autoplayRejected,
+      ],
+    );
+    this.prefetchRecommendations(interaction.userId);
     const canBulk = this.can(interaction.userId, "add-bulk");
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
@@ -2997,7 +3115,7 @@ export class Coordinator {
         {
           type: "input",
           block_id: "track",
-          optional: Boolean(recent.length),
+          optional: Boolean(recent.length || recommended?.length),
           label: plain("Song, album, playlist, or link"),
           element: {
             type: "external_select",
@@ -3007,6 +3125,37 @@ export class Coordinator {
             focus_on_load: true,
           },
         },
+        ...(recommended?.length
+          ? [
+              {
+                type: "input",
+                block_id: "recommend",
+                optional: true,
+                label: plain("Recommended for you"),
+                hint: plain(
+                  "From Last.fm, ListenBrainz, and songs you've added",
+                ),
+                element: {
+                  type: "static_select",
+                  action_id: "selection",
+                  placeholder: plain("Choose a recommendation"),
+                  options: recommended.map((track) => ({
+                    text: plain(
+                      `${track.title} — ${track.artist}`.slice(0, 75),
+                    ),
+                    value: track.id,
+                    ...(track.sources.length
+                      ? {
+                          description: plain(
+                            recommendationSourceLabel(track).slice(0, 75),
+                          ),
+                        }
+                      : {}),
+                  })),
+                },
+              },
+            ]
+          : []),
         ...(recent.length
           ? [
               {
@@ -3495,6 +3644,7 @@ export class Coordinator {
       lastFmEnabled: false,
       listenBrainzConnected: false,
       listenBrainzEnabled: false,
+      huddleMixOptIn: true,
       mode: "always" as const,
       configured: false,
       enabledIntegration: false,
@@ -3547,14 +3697,25 @@ export class Coordinator {
               block_id: "autoplay",
               optional: true,
               label: plain("Autoplay"),
-              hint: plain("Play recommendations when queue is empty"),
+              hint: plain("Play recommendations when the queue is empty"),
               element: {
-                type: "checkboxes",
-                action_id: "enabled",
-                options: [{ text: plain("Enabled"), value: "enabled" }],
-                initial_options: this.autoplayEnabled
-                  ? [{ text: plain("Enabled"), value: "enabled" }]
-                  : [],
+                type: "static_select",
+                action_id: "mode",
+                options: autoplayModes.map((mode) => ({
+                  text: plain(autoplayModeLabels[mode]),
+                  value: mode,
+                  description: plain(
+                    mode === "related"
+                      ? "Continue from songs requested in this huddle"
+                      : mode === "huddle"
+                        ? "Mix what people in this huddle listen to"
+                        : "Do not queue recommendations",
+                  ),
+                })),
+                initial_option: {
+                  text: plain(autoplayModeLabels[this.autoplayMode]),
+                  value: this.autoplayMode,
+                },
               },
             },
             {
@@ -3694,6 +3855,33 @@ export class Coordinator {
     ];
     const userBlocks = [
       { type: "header", text: plain("User settings") },
+      {
+        type: "input",
+        block_id: "huddle_mix",
+        optional: true,
+        label: plain("Huddle mix"),
+        hint: plain(
+          "Last.fm, ListenBrainz, and songs you've added. Only used while you're in the huddle, and never shown as yours.",
+        ),
+        element: {
+          type: "checkboxes",
+          action_id: "enabled",
+          options: [
+            {
+              text: plain("Include my listening in Huddle mix"),
+              value: "enabled",
+            },
+          ],
+          initial_options: settings.huddleMixOptIn
+            ? [
+                {
+                  text: plain("Include my listening in Huddle mix"),
+                  value: "enabled",
+                },
+              ]
+            : [],
+        },
+      },
       ...(settings.configured
         ? [
             {
@@ -4057,7 +4245,7 @@ export class Coordinator {
     const previous = {
       hostId: this.hostId,
       volume: this.volume,
-      autoplay: this.autoplayEnabled,
+      autoplay: this.autoplayMode,
       transitionMode: this.transitionMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
@@ -4086,16 +4274,13 @@ export class Coordinator {
         this.sendMedia({ type: "display_mode", mode: displayMode });
         this.store.setSession(this.id, { displayMode });
       }
-      const autoplayState = interaction.state.autoplay?.enabled;
-      if (autoplayState) {
-        const autoplayEnabled =
-          autoplayState.selected_options?.some(
-            (option) => option.value === "enabled",
-          ) ?? false;
-        if (autoplayEnabled !== this.autoplayEnabled) {
-          this.autoplayEnabled = autoplayEnabled;
-          this.store.setSession(this.id, { autoplay: autoplayEnabled });
-          if (!autoplayEnabled) await this.removeQueuedAutoplay();
+      const autoplayMode = interaction.state.autoplay?.mode?.selected_option
+        ?.value as AutoplayMode | undefined;
+      if (autoplayMode && autoplayModes.includes(autoplayMode)) {
+        if (autoplayMode !== this.autoplayMode) {
+          this.autoplayMode = autoplayMode;
+          this.store.setSession(this.id, { autoplay: autoplayMode });
+          if (autoplayMode === "off") await this.removeQueuedAutoplay();
         }
       }
       const transitionMode = interaction.state.transition?.mode?.selected_option
@@ -4152,6 +4337,14 @@ export class Coordinator {
           ?.value as ScrobblingMode | undefined;
         if (mode && scrobblingModes.includes(mode))
           this.scrobbling.setMode(interaction.userId, mode);
+        const huddleMixState = interaction.state.huddle_mix?.enabled;
+        if (huddleMixState) {
+          const optedIn =
+            huddleMixState.selected_options?.some(
+              (option) => option.value === "enabled",
+            ) ?? false;
+          this.scrobbling.setHuddleMixOptIn(interaction.userId, optedIn);
+        }
         const lastFmState = interaction.state.lastfm_scrobbling?.enabled;
         if (lastFmState) {
           const enabled =
@@ -4204,7 +4397,7 @@ export class Coordinator {
       previous,
       hostId: this.hostId,
       volume: this.volume,
-      autoplay: this.autoplayEnabled,
+      autoplay: this.autoplayMode,
       displayMode: this.displayMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],

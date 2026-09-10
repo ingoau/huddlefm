@@ -4,9 +4,11 @@ import { z } from "zod";
 import { capture as captureAnalytics } from "./analytics.ts";
 import type { Coordinator } from "./coordinator.ts";
 import {
+  autoplayModes,
   displayModes,
   permissionPresets,
   transitionModes,
+  type AutoplayMode,
   type DisplayMode,
   type TransitionMode,
 } from "./store.ts";
@@ -193,6 +195,10 @@ function agentTools(coordinator: Coordinator, userId: string) {
       inputSchema: z.object({
         displayMode: z.enum(displayModes).optional(),
         autoplay: z.boolean().optional(),
+        autoplayMode: z
+          .enum(autoplayModes)
+          .optional()
+          .describe("off, related (YouTube up-next), or huddle mix"),
         transitionMode: z.enum(transitionModes).optional(),
         anchorEnabled: z
           .boolean()
@@ -303,6 +309,7 @@ Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.j
 export type AgentSettingsPatch = {
   displayMode?: DisplayMode;
   autoplay?: boolean;
+  autoplayMode?: AutoplayMode;
   transitionMode?: TransitionMode;
   anchorEnabled?: boolean;
   permissionPreset?: keyof typeof permissionPresets;

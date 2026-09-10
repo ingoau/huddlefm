@@ -76,6 +76,7 @@ export class ScrobbleDispatcher {
       listenBrainzConnected,
       listenBrainzUsername: value.listenBrainzUsername,
       listenBrainzEnabled: value.listenBrainzEnabled,
+      huddleMixOptIn: value.huddleMixOptIn !== false,
       mode: value.mode,
       configured: lastFmConnected || listenBrainzConnected,
       enabledIntegration:
@@ -100,6 +101,14 @@ export class ScrobbleDispatcher {
       properties: { mode },
     });
     this.syncAnalyticsUser(userId);
+  }
+
+  setHuddleMixOptIn(userId: string, enabled: boolean) {
+    this.store.setHuddleMixOptIn(userId, enabled);
+    log.info(
+      { event: "huddle_mix_opt_in_changed", userId, enabled },
+      "Huddle mix opt-in changed",
+    );
   }
 
   sessionEnabled(sessionId: string, userId: string) {
