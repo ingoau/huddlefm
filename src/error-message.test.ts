@@ -15,3 +15,13 @@ test("redacts credentials without mangling ordinary token messages", () => {
     "That user token is invalid",
   );
 });
+
+test("redacts the key identifier from a provider console URL", () => {
+  const text = redactSecrets(
+    "You requested up to 65536 tokens. To increase, visit https://openrouter.ai/workspaces/default/keys/0123456789abcdef0123456789abcdef and adjust the key's monthly limit",
+  );
+
+  expect(text).not.toContain("0123456789abcdef");
+  expect(text).toContain("https://openrouter.ai/workspaces/default/keys/");
+  expect(text).toContain("You requested up to 65536 tokens");
+});

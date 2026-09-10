@@ -12,7 +12,8 @@ export function redactSecrets(text: string) {
     .replace(
       /["']?\b(token|cookie|JoinToken|api[_-]?key|session[_-]?key)\b["']?\s*[=:]\s*["']?[^\s,}"']+/gi,
       "$1=[redacted]",
-    );
+    )
+    .replace(/(https?:\/\/\S*?\/keys\/)[A-Za-z0-9_-]{16,}/gi, "$1[redacted]");
 }
 
 export function safeError(error: unknown) {

@@ -3,6 +3,7 @@ import { ToolLoopAgent, stepCountIs, tool } from "ai";
 import { z } from "zod";
 import { capture as captureAnalytics } from "./analytics.ts";
 import type { Coordinator } from "./coordinator.ts";
+import { errorMessage } from "./error-message.ts";
 import {
   autoplayModes,
   displayModes,
@@ -16,6 +17,13 @@ import { logger } from "./logger.ts";
 
 const log = logger.child({ component: "agent" });
 const agentTimeoutMs = 60_000;
+/**
+ * Replies are a line or two, so this only needs room for tool call arguments
+ * and the model's reasoning. Without it the provider reserves the model's full
+ * output ceiling, and OpenRouter rejects every request once the key's
+ * remaining credit can no longer afford that reservation.
+ */
+const agentMaxOutputTokens = 2_048;
 const activeAgentUsers = new Set<string>();
 
 export const agentModel = "google/gemini-3.5-flash-lite";
@@ -246,6 +254,27 @@ function agentTools(coordinator: Coordinator, userId: string) {
   };
 }
 
+type AgentFailureReason = "credit_limit" | "timeout" | "error";
+
+/** Tell apart the failures that need their own reply and their own analytics. */
+export function agentFailureReason(error: unknown): AgentFailureReason {
+  if (/requires more credits|fewer max_tokens/i.test(errorMessage(error)))
+    return "credit_limit";
+  if (
+    error instanceof Error &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  )
+    return "timeout";
+  return "error";
+}
+
+const agentFailureReplies: Record<AgentFailureReason, string> = {
+  credit_limit:
+    "I'm out of AI credit, so I can't answer mentions right now. The player buttons still work.",
+  timeout: "That took me too long. Try again, or use the player buttons.",
+  error: "I couldn't complete that request. Try again in a moment.",
+};
+
 export function isAgentBusy(userId: string) {
   return activeAgentUsers.has(userId);
 }
@@ -319,6 +348,7 @@ Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.j
       tools: agentTools(options.coordinator, options.userId),
       stopWhen: stepCountIs(10),
       temperature: 0.2,
+      maxOutputTokens: agentMaxOutputTokens,
     });
     const result = await agent.generate({
       prompt,
@@ -328,23 +358,24 @@ Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.j
     captureAnalytics(reply.ok ? "agent.completed" : "agent.failed", {
       distinctId: options.userId,
       sessionId: options.coordinator.id,
-      properties: { durationMs: Date.now() - startedAt },
+      properties: {
+        durationMs: Date.now() - startedAt,
+        ...(reply.ok ? {} : { reason: "tool_error" }),
+      },
     });
     return reply;
   } catch (error) {
+    const reason = agentFailureReason(error);
     captureAnalytics("agent.failed", {
       distinctId: options.userId,
       sessionId: options.coordinator.id,
-      properties: { durationMs: Date.now() - startedAt },
+      properties: { durationMs: Date.now() - startedAt, reason },
     });
     log.error(
-      { event: "agent_failed", userId: options.userId, err: error },
+      { event: "agent_failed", userId: options.userId, reason, err: error },
       "Agent command failed",
     );
-    return {
-      ok: false,
-      text: "I couldn't complete that request. Try again in a moment.",
-    };
+    return { ok: false, text: agentFailureReplies[reason] };
   } finally {
     activeAgentUsers.delete(options.userId);
   }
