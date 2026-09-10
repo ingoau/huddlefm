@@ -885,7 +885,7 @@ export class Coordinator {
       });
       this.store.incrementUsage("removed");
       this.queueChanged();
-      if (entry.filePath) await removePreparedMedia(entry.filePath);
+      await this.releaseMedia(entry);
       await this.render();
       this.syncPreloads();
       this.refreshIdle();
@@ -986,13 +986,14 @@ export class Coordinator {
         };
       this.autoplayGeneration++;
       this.autoplayPending = false;
-      const count = this.queue.length;
-      for (const entry of this.queue) {
+      const cleared = this.queue;
+      const count = cleared.length;
+      this.queue = [];
+      for (const entry of cleared) {
         this.preparations.get(entry.id)?.abort();
         this.store.removeTrack(entry.id);
-        if (entry.filePath) await removePreparedMedia(entry.filePath);
       }
-      this.queue = [];
+      await this.releaseMedia(...cleared);
       this.queueChanged();
       this.audit.record("queue.cleared", userId, {
         sessionId: this.id,
@@ -2583,12 +2584,30 @@ export class Coordinator {
     this.queueChanged();
   }
 
+  /**
+   * Drops the prepared media of entries that just left the session. Queue loop
+   * hands a finished track's file to its fresh copy, so a file outlives the
+   * entry being dropped whenever another entry still plays it.
+   */
+  private async releaseMedia(...dropped: Entry[]) {
+    const paths = new Set(
+      dropped
+        .map((entry) => entry.filePath)
+        .filter((filePath): filePath is string => Boolean(filePath)),
+    );
+    if (!paths.size) return;
+    for (const entry of [this.current, ...this.queue, ...this.history])
+      if (entry && entry.filePath && !dropped.includes(entry))
+        paths.delete(entry.filePath);
+    await Promise.all([...paths].map((path) => removePreparedMedia(path)));
+  }
+
   private async destroyQueuedAutoplay(automatic: Entry[]) {
     for (const entry of automatic) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
-      if (entry.filePath) await removePreparedMedia(entry.filePath);
     }
+    await this.releaseMedia(...automatic);
   }
 
   private async rollbackAgentAdd(
@@ -2885,7 +2904,15 @@ export class Coordinator {
           reason,
         });
       }
-      if (natural && this.loopMode === "queue" && played) {
+      // A copy needs the finished track's prepared file: nothing schedules
+      // preparation for an entry pushed straight onto the queue, so a copy
+      // without one could never become playable.
+      if (
+        natural &&
+        this.loopMode === "queue" &&
+        played &&
+        this.current.filePath
+      ) {
         const finished = this.current;
         const looping: Entry = {
           sourceInput: finished.sourceInput,
@@ -3104,7 +3131,7 @@ export class Coordinator {
     });
     this.store.incrementUsage("removed");
     this.queueChanged(interaction);
-    if (entry.filePath) await removePreparedMedia(entry.filePath);
+    await this.releaseMedia(entry);
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
@@ -3179,13 +3206,14 @@ export class Coordinator {
     if (!(await this.require(interaction, "clear"))) return;
     this.autoplayGeneration++;
     this.autoplayPending = false;
-    const count = this.queue.length;
-    for (const entry of this.queue) {
+    const cleared = this.queue;
+    const count = cleared.length;
+    this.queue = [];
+    for (const entry of cleared) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
-      if (entry.filePath) await removePreparedMedia(entry.filePath);
     }
-    this.queue = [];
+    await this.releaseMedia(...cleared);
     this.queueChanged();
     this.audit.record("queue.cleared", interaction.userId, {
       sessionId: this.id,
@@ -3847,10 +3875,9 @@ export class Coordinator {
               optional: true,
               label: plain("Loop"),
               hint: plain("Repeat the current track or cycle the queue"),
-              element: {
-                type: "static_select",
-                action_id: "mode",
-                options: loopModes.map((mode) => ({
+              element: staticSelect(
+                "mode",
+                loopModes.map((mode) => ({
                   text: plain(loopModeLabels[mode]),
                   value: mode,
                   description: plain(
@@ -3861,11 +3888,8 @@ export class Coordinator {
                         : "Do not repeat",
                   ),
                 })),
-                initial_option: {
-                  text: plain(loopModeLabels[this.loopMode]),
-                  value: this.loopMode,
-                },
-              },
+                this.loopMode,
+              ),
             },
             {
               type: "input",

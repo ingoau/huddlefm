@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { LyricsCatalog } from "./lyrics.ts";
@@ -2003,6 +2005,82 @@ test("queue loop rotates finished tracks to the end", async () => {
   });
   expect((status as { queue: { id: string }[] }).queue[0]!.id).not.toBe(first);
   await result.coordinator.endFromSlack();
+});
+
+test("queue loop keeps the shared media file until the last copy goes", async () => {
+  const directory = `${tmpdir()}/huddlefm-loop-${crypto.randomUUID()}`;
+  await mkdir(directory, { recursive: true });
+  const filePath = `${directory}/a.opus`;
+  await Bun.write(filePath, "audio");
+  const tracks = {
+    resolve: async (value: string) => {
+      const letter = value.slice(-1);
+      return {
+        sourceInput: value,
+        canonicalUrl: value,
+        sourceId: letter.repeat(11),
+        title: letter.toUpperCase(),
+        artist: "Artist",
+        duration: 100,
+      };
+    },
+    prepare: async (metadata: { sourceId: string }) =>
+      `${directory}/${metadata.sourceId[0]}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await Bun.sleep(0);
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://b"),
+  );
+  await Bun.sleep(0);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = { loop: { mode: { selected_option: { value: "queue" } } } };
+  await result.coordinator.action(enable);
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+
+  // The looped copy shares the finished track's prepared file, so removing it
+  // must not delete the file the history entry still plays.
+  const copy = (
+    result.coordinator.agentStatus("host") as { queue: { id: string }[] }
+  ).queue[0]!.id;
+  expect(copy).not.toBe(first);
+  expect(await result.coordinator.agentRemove("host", copy)).toMatchObject({
+    ok: true,
+  });
+  expect(await Bun.file(filePath).exists()).toBe(true);
+
+  // An entry that is the only holder of its file still releases it.
+  await Bun.write(`${directory}/c.opus`, "audio");
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://c"),
+  );
+  await Bun.sleep(0);
+  const solo = (
+    result.coordinator.agentStatus("host") as {
+      queue: { id: string; title: string }[];
+    }
+  ).queue.find((entry) => entry.title === "C")!.id;
+  expect(await result.coordinator.agentRemove("host", solo)).toMatchObject({
+    ok: true,
+  });
+  expect(await Bun.file(`${directory}/c.opus`).exists()).toBe(false);
+
+  await result.coordinator.endFromSlack();
+  await rm(directory, { recursive: true, force: true });
 });
 
 test("track loop suppresses autoplay recommendations", async () => {
@@ -4114,6 +4192,7 @@ test("settings selects offer an initial option Slack can match", async () => {
   expect(selects.map((block) => block.block_id)).toEqual([
     "display",
     "autoplay",
+    "loop",
     "transition",
     "permission_preset",
     "scrobbling_mode",

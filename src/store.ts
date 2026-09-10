@@ -884,9 +884,7 @@ export class Store {
           state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
           autoplay: parseAutoplayMode(row.autoplay),
-          loopMode: loopModes.includes(row.loop_mode as LoopMode)
-            ? (row.loop_mode as LoopMode)
-            : "off",
+          loopMode: parseLoopMode(row.loop_mode),
           transitionMode: transitionModes.includes(
             row.transition_mode as TransitionMode,
           )
