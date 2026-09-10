@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  agentCommandResult,
   agentConfigured,
   isAgentBusy,
   isBareMention,
@@ -36,4 +37,21 @@ test("agentConfigured reflects OpenRouter credentials", () => {
 
 test("isAgentBusy starts false", () => {
   expect(isAgentBusy("UTEST")).toBe(false);
+});
+
+test("agentCommandResult fails when a coordinator tool reports an error", () => {
+  expect(
+    agentCommandResult({
+      text: "Skipped the current track.",
+      steps: [
+        {
+          toolResults: [
+            {
+              output: { ok: false, error: "Nothing is playing." },
+            },
+          ],
+        },
+      ],
+    }),
+  ).toEqual({ ok: false, text: "Nothing is playing." });
 });

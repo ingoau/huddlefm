@@ -904,7 +904,18 @@ function mentionReaction(channelId: string, messageTs: string) {
     settled = true;
     void acknowledged
       .then(async () => {
-        await slackHuddle.unreact(channelId, messageTs, "eyes");
+        try {
+          await slackHuddle.unreact(channelId, messageTs, "eyes");
+        } catch (error) {
+          log.warn(
+            {
+              event: "mention_acknowledgement_cleanup_failed",
+              channelId,
+              err: error,
+            },
+            "Could not remove the Huddle mention acknowledgement",
+          );
+        }
         await slackHuddle.react(
           channelId,
           messageTs,

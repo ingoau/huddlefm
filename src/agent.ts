@@ -244,6 +244,43 @@ export function isAgentBusy(userId: string) {
   return activeAgentUsers.has(userId);
 }
 
+type AgentGeneration = {
+  readonly text?: string;
+  readonly steps: ReadonlyArray<{
+    readonly toolResults: ReadonlyArray<{ readonly output: unknown }>;
+  }>;
+};
+
+function isFailedToolOutcome(
+  output: unknown,
+): output is { ok: false; error: unknown } {
+  return (
+    typeof output === "object" &&
+    output !== null &&
+    "ok" in output &&
+    output.ok === false &&
+    "error" in output
+  );
+}
+
+export function agentCommandResult(result: AgentGeneration) {
+  const failedToolOutcome = result.steps
+    .flatMap((step) => step.toolResults)
+    .map((toolResult) => toolResult.output)
+    .find(isFailedToolOutcome);
+  if (failedToolOutcome) {
+    const error = failedToolOutcome.error;
+    return {
+      ok: false as const,
+      text:
+        typeof error === "string" && error.trim()
+          ? error
+          : "I couldn't complete that request. Try again in a moment.",
+    };
+  }
+  return { ok: true as const, text: result.text?.trim() || "Done." };
+}
+
 export async function runAgentCommand(options: {
   coordinator: Coordinator;
   userId: string;
@@ -281,13 +318,13 @@ Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.j
       prompt,
       abortSignal: AbortSignal.timeout(timeoutMs),
     });
-    const text = result.text?.trim() || "Done.";
-    captureAnalytics("agent.completed", {
+    const reply = agentCommandResult(result);
+    captureAnalytics(reply.ok ? "agent.completed" : "agent.failed", {
       distinctId: options.userId,
       sessionId: options.coordinator.id,
       properties: { durationMs: Date.now() - startedAt },
     });
-    return { ok: true, text };
+    return reply;
   } catch (error) {
     captureAnalytics("agent.failed", {
       distinctId: options.userId,
