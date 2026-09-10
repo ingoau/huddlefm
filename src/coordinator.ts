@@ -2285,18 +2285,30 @@ export class Coordinator {
     const generation = this.autoplayGeneration;
     this.autoplayPending = true;
     this.queueRender();
-    void this.recommend(context, seeds, generation).finally(() => {
-      if (generation !== this.autoplayGeneration) return;
-      this.autoplayPending = false;
-      this.queueRender();
-    });
+    // If the current song ends before this recommendation is prepared,
+    // startNext() runs inside recommend() while autoplayPending is still true
+    // and would otherwise skip queueing the following track.
+    void (async () => {
+      let added = false;
+      let currentGeneration = false;
+      try {
+        added = await this.recommend(context, seeds, generation);
+      } finally {
+        currentGeneration = generation === this.autoplayGeneration;
+        if (currentGeneration) {
+          this.autoplayPending = false;
+          this.queueRender();
+        }
+      }
+      if (added && currentGeneration) this.scheduleAutoplay();
+    })();
   }
 
   private async recommend(
     context: string,
     seeds: string[],
     generation: number,
-  ) {
+  ): Promise<boolean> {
     const startedAt = Date.now();
     this.log.debug(
       {
@@ -2410,7 +2422,7 @@ export class Coordinator {
           this.queueChanged();
           return { entry, controller };
         });
-        if (pending === undefined) return;
+        if (pending === undefined) return false;
         if (pending === false) continue;
         if (await this.prepareAutoplay(pending.entry, pending.controller)) {
           this.log.info(
@@ -2422,9 +2434,9 @@ export class Coordinator {
             },
             "Autoplay recommendation added",
           );
-          return;
+          return true;
         }
-        if (!this.canAddAutoplay(context, generation)) return;
+        if (!this.canAddAutoplay(context, generation)) return false;
       }
       this.audit.record("autoplay.recommendation_failed", undefined, {
         sessionId: this.id,
@@ -2438,6 +2450,7 @@ export class Coordinator {
         },
         "No usable autoplay recommendation found",
       );
+      return false;
     } catch (error) {
       this.audit.record("autoplay.recommendation_failed", undefined, {
         sessionId: this.id,
@@ -2452,6 +2465,7 @@ export class Coordinator {
         error,
         "Autoplay recommendation failed",
       );
+      return false;
     }
   }
 
