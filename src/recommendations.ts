@@ -3,6 +3,7 @@ import { logger } from "./logger.ts";
 import type { Store } from "./store.ts";
 import {
   isYoutubeVideoId,
+  normalizeToken,
   type TrackCatalog,
   type TrackMetadata,
 } from "./tracks.ts";
@@ -69,14 +70,6 @@ type CacheEntry<T> = {
   inflight?: Promise<T>;
 };
 
-export function normalizeToken(value: string) {
-  return value
-    .normalize("NFKD")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
 export function trackKey(title: string, artist: string) {
   return `${normalizeToken(artist)}\0${normalizeToken(title)}`;
 }
@@ -110,10 +103,10 @@ export function mergeTaste(tracks: TasteContribution[]): ScoredTrack[] {
       existing.sources.push(track.source);
     if (!existing.sourceId && track.sourceId) {
       existing.sourceId = track.sourceId;
-      existing.sourceInput = track.sourceInput;
-      existing.canonicalUrl = track.canonicalUrl;
-      existing.artwork = track.artwork;
-      existing.duration = track.duration;
+      existing.sourceInput ??= track.sourceInput;
+      existing.canonicalUrl ??= track.canonicalUrl;
+      existing.artwork ??= track.artwork;
+      existing.duration ??= track.duration;
     }
   }
   for (const item of byKey.values())
@@ -380,6 +373,8 @@ export class RecommendationCatalog {
       new Set(recent.map((track) => track.sourceId)),
       userRecLimit,
     );
+    for (const previous of this.userRecs.get(userId)?.value ?? [])
+      this.playable.delete(previous.id);
     const recs = resolved.map((candidate) => {
       const id = `rec_${crypto.randomUUID()}`;
       this.playable.set(id, candidate.metadata);

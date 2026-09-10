@@ -135,12 +135,16 @@ export function isYoutubeVideoId(id: string) {
   return /^[a-zA-Z0-9_-]{11}$/.test(id);
 }
 
-function normalizeArtist(value: string) {
+export function normalizeToken(value: string) {
   return value
     .normalize("NFKD")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+function normalizeArtist(value: string) {
+  return normalizeToken(value);
 }
 
 export type TrackMetadata = {

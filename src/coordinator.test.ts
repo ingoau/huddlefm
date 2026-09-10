@@ -3489,6 +3489,10 @@ test("huddle mix autoplay uses compiled past additions when YouTube up next is e
   );
   expect(JSON.stringify(result.updates)).toContain("Autoplay recommendation");
   expect(JSON.stringify(result.audit)).toContain('"autoplayMode":"huddle"');
+  expect(Reflect.get(result.coordinator, "current")).toMatchObject({
+    sourceId: "hostpick001",
+    automatic: true,
+  });
   await result.coordinator.endFromSlack();
   store.close();
 });

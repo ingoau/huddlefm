@@ -37,6 +37,35 @@ test("mergeTaste boosts tracks shared by more than one listener", () => {
   expect(ranked[0]!.score).toBeGreaterThan(ranked[1]!.score);
 });
 
+test("mergeTaste keeps artwork when a later contribution adds a source id", () => {
+  const ranked = mergeTaste([
+    {
+      userId: "a",
+      weight: 1,
+      source: "lastfm",
+      title: "Song",
+      artist: "Band",
+      artwork: "https://example.com/art.jpg",
+      duration: 180,
+    },
+    {
+      userId: "b",
+      weight: 1,
+      source: "huddlefm",
+      title: "Song",
+      artist: "Band",
+      sourceId: "video123456",
+      sourceInput: "https://music.youtube.com/watch?v=video123456",
+      canonicalUrl: "https://music.youtube.com/watch?v=video123456",
+    },
+  ]);
+  expect(ranked[0]).toMatchObject({
+    sourceId: "video123456",
+    artwork: "https://example.com/art.jpg",
+    duration: 180,
+  });
+});
+
 test("skip penalties lower exact tracks and skipped artists", () => {
   const ranked = applySkipPenalties(
     mergeTaste([
@@ -66,7 +95,9 @@ test("huddle mix omits opted-out listeners and survives a Last.fm failure", asyn
   addPastTrack(store, "host", "Host Song", "Host Artist", "hosthosthos");
   addPastTrack(store, "guest", "Guest Song", "Guest Artist", "guestguestg");
   store.setHuddleMixOptIn("guest", false);
+  store.connectLastFm("host", "last-user", "session-key");
   const searched: string[] = [];
+  const lastFmCalls: string[] = [];
   const catalog = new RecommendationCatalog(
     store,
     {
@@ -85,6 +116,7 @@ test("huddle mix omits opted-out listeners and survives a Last.fm failure", asyn
     { lastFmApiKey: "key" },
     (async (input) => {
       const url = String(input);
+      lastFmCalls.push(url);
       if (
         url.includes("user.getTopTracks") ||
         url.includes("user.getRecentTracks")
@@ -100,6 +132,13 @@ test("huddle mix omits opted-out listeners and survives a Last.fm failure", asyn
     "Host Song",
   ]);
   expect(searched.join(" ")).not.toContain("Guest Song");
+  expect(
+    lastFmCalls.some(
+      (url) =>
+        url.includes("user.getTopTracks") ||
+        url.includes("user.getRecentTracks"),
+    ),
+  ).toBe(true);
   store.close();
 });
 
@@ -169,6 +208,17 @@ test("personal recommendations exclude songs the user already added", async () =
   expect(recs.some((track) => track.title === "Already Added")).toBe(false);
   expect(recs.some((track) => track.title === "Fresh Pick")).toBe(true);
   expect(catalog.recommendation(recs[0]!.id)?.title).toBe("Fresh Pick");
+  const cache = Reflect.get(catalog, "userRecs") as Map<
+    string,
+    { value: { id: string }[]; expires: number }
+  >;
+  const previousId = recs[0]!.id;
+  cache.get("host")!.expires = 0;
+  await catalog.prefetchUser("host");
+  const next = catalog.userRecommendations("host")[0];
+  expect(next?.id).not.toBe(previousId);
+  expect(catalog.recommendation(previousId)).toBeUndefined();
+  expect(catalog.recommendation(next!.id)?.title).toBe("Fresh Pick");
   store.close();
 });
 
