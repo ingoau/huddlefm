@@ -178,6 +178,13 @@ const kickSettledErrors = new Set([
   "is_archived",
 ]);
 
+// Reaction removal outcomes that already leave the reaction off the message.
+const unreactSettledErrors = new Set([
+  "no_reaction",
+  "message_not_found",
+  "channel_not_found",
+]);
+
 export function companionChannelName(channelId: string, suffix?: string) {
   return `huddlefm-${channelId.toLowerCase()}${suffix ? `-${suffix}` : ""}`;
 }
@@ -484,15 +491,27 @@ export class SlackHuddleAdapter {
     return activeHuddleCallId(replies, threadTs);
   }
 
-  async react(channelId: string, messageTs: string) {
+  async react(channelId: string, messageTs: string, name: string) {
     const result = await this.api("reactions.add", {
       channel: channelId,
       timestamp: messageTs,
-      name: "thumbup",
+      name,
     });
     if (result.ok !== true && result.error !== "already_reacted")
       throw new Error(
         `reactions.add failed: ${String(result.error ?? "unknown_error")}`,
+      );
+  }
+
+  async unreact(channelId: string, messageTs: string, name: string) {
+    const result = await this.api("reactions.remove", {
+      channel: channelId,
+      timestamp: messageTs,
+      name,
+    });
+    if (result.ok !== true && !unreactSettledErrors.has(String(result.error)))
+      throw new Error(
+        `reactions.remove failed: ${String(result.error ?? "unknown_error")}`,
       );
   }
 
