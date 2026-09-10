@@ -48,6 +48,7 @@ import {
   safeAuditError,
   sectionBlocks,
   songCount,
+  staticSelect,
 } from "./coordinator-ui.ts";
 import {
   eventGroup,
@@ -3809,21 +3810,14 @@ export class Coordinator {
               type: "input",
               block_id: "display",
               label: plain("Display mode"),
-              element: {
-                type: "static_select",
-                action_id: "mode",
-                options: displayModes.map((mode) => ({
+              element: staticSelect(
+                "mode",
+                displayModes.map((mode) => ({
                   text: plain(mode[0]!.toUpperCase() + mode.slice(1)),
                   value: mode,
                 })),
-                initial_option: {
-                  text: plain(
-                    this.displayMode[0]!.toUpperCase() +
-                      this.displayMode.slice(1),
-                  ),
-                  value: this.displayMode,
-                },
-              },
+                this.displayMode,
+              ),
             },
             {
               type: "input",
@@ -3831,10 +3825,9 @@ export class Coordinator {
               optional: true,
               label: plain("Autoplay"),
               hint: plain("Play recommendations when the queue is empty"),
-              element: {
-                type: "static_select",
-                action_id: "mode",
-                options: autoplayModes.map((mode) => ({
+              element: staticSelect(
+                "mode",
+                autoplayModes.map((mode) => ({
                   text: plain(autoplayModeLabels[mode]),
                   value: mode,
                   description: plain(
@@ -3845,11 +3838,8 @@ export class Coordinator {
                         : "Do not queue recommendations",
                   ),
                 })),
-                initial_option: {
-                  text: plain(autoplayModeLabels[this.autoplayMode]),
-                  value: this.autoplayMode,
-                },
-              },
+                this.autoplayMode,
+              ),
             },
             {
               type: "input",
@@ -3881,10 +3871,9 @@ export class Coordinator {
               type: "input",
               block_id: "transition",
               label: plain("Transitions"),
-              element: {
-                type: "static_select",
-                action_id: "mode",
-                options: transitionModes.map((mode) => ({
+              element: staticSelect(
+                "mode",
+                transitionModes.map((mode) => ({
                   text: plain(
                     mode === "none"
                       ? "Disabled"
@@ -3894,18 +3883,8 @@ export class Coordinator {
                   ),
                   value: mode,
                 })),
-                initial_option: {
-                  text: plain(
-                    this.transitionMode === "none"
-                      ? "Disabled"
-                      : this.transitionMode === "adaptive"
-                        ? "Adaptive crossfade"
-                        : this.transitionMode[0]!.toUpperCase() +
-                          this.transitionMode.slice(1),
-                  ),
-                  value: this.transitionMode,
-                },
-              },
+                this.transitionMode,
+              ),
             },
             {
               type: "input",
@@ -4048,10 +4027,9 @@ export class Coordinator {
               block_id: "scrobbling_mode",
               label: plain("Scrobbling mode"),
               hint: plain("Sets the default for each Huddle"),
-              element: {
-                type: "static_select",
-                action_id: "mode",
-                options: scrobblingModes.map((mode) => ({
+              element: staticSelect(
+                "mode",
+                scrobblingModes.map((mode) => ({
                   text: plain(
                     mode === "ask"
                       ? "Ask every time"
@@ -4059,16 +4037,8 @@ export class Coordinator {
                   ),
                   value: mode,
                 })),
-                initial_option: {
-                  text: plain(
-                    settings.mode === "ask"
-                      ? "Ask every time"
-                      : settings.mode[0]!.toUpperCase() +
-                          settings.mode.slice(1),
-                  ),
-                  value: settings.mode,
-                },
-              },
+                settings.mode,
+              ),
             },
             {
               type: "actions",
