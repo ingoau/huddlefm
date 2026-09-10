@@ -488,7 +488,7 @@ export class SlackHuddleAdapter {
     const result = await this.api("reactions.add", {
       channel: channelId,
       timestamp: messageTs,
-      name: "thumbup",
+      name: "eyes",
     });
     if (result.ok !== true && result.error !== "already_reacted")
       throw new Error(
