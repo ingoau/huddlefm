@@ -862,26 +862,30 @@ test("opens bulk link paste from the add modal and enqueues each URL", async () 
   await test.coordinator.endFromSlack();
 });
 
-test("rejects bulk links before resolution when the full batch cannot fit", async () => {
+test("truncates bulk links to remaining queue capacity before resolution", async () => {
   const resolved: string[] = [];
   const result = setup({
     resolveUrl: async (input: string) => {
       resolved.push(input);
-      throw new Error("should not resolve");
+      return {
+        sourceInput: input,
+        canonicalUrl: input,
+        sourceId: input,
+        title: "Track",
+        artist: "Artist",
+      };
     },
+    prepare: async () => "track.opus",
   } as unknown as TrackCatalog);
   await result.coordinator.start();
-  Reflect.set(result.coordinator, "queue", [
-    {
-      id: "autoplay",
-      requesterId: "bot",
-      sourceId: "autoplay",
-      title: "Autoplay",
-      artist: "Artist",
-      automatic: true,
-      status: "ready",
-    },
-  ]);
+  Reflect.set(result.coordinator, "current", {
+    id: "now",
+    requesterId: "host",
+    sourceId: "now",
+    title: "Now",
+    artist: "Artist",
+    status: "ready",
+  });
 
   const links = Array.from(
     { length: 50 },
@@ -897,11 +901,177 @@ test("rejects bulk links before resolution when the full batch cannot fit", asyn
     state: { links: { text: { value: links.join("\n") } } },
   });
 
-  expect(resolved).toEqual([]);
+  expect(resolved).toEqual(links.slice(0, 49));
+  expect(Reflect.get(result.coordinator, "queue")).toHaveLength(49);
   expect(result.ephemeral.at(-1)).toBe(
-    "The queue only has room for 49 more songs.",
+    "Added 49 of 50 songs; the rest did not fit.",
   );
   await result.coordinator.endFromSlack();
+});
+
+test("bulk links use capacity reclaimed from queued autoplay", async () => {
+  const resolved: string[] = [];
+  const result = setup({
+    resolveUrl: async (input: string) => {
+      resolved.push(input);
+      return {
+        sourceInput: input,
+        canonicalUrl: input,
+        sourceId: input,
+        title: "Track",
+        artist: "Artist",
+      };
+    },
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "current", {
+    id: "now",
+    requesterId: "host",
+    sourceId: "now",
+    title: "Now",
+    artist: "Artist",
+    status: "ready",
+  });
+  Reflect.set(result.coordinator, "queue", [
+    ...Array.from({ length: 47 }, (_, index) => ({
+      id: `queued-${index}`,
+      requesterId: "host",
+      sourceId: `queued-${index}`,
+      title: `Queued ${index}`,
+      artist: "Artist",
+      status: "ready",
+    })),
+    {
+      id: "autoplay",
+      requesterId: "bot",
+      sourceId: "autoplay",
+      title: "Autoplay",
+      artist: "Radio",
+      automatic: true,
+      status: "ready",
+    },
+  ]);
+
+  const links = [
+    "https://example.com/first.mp3",
+    "https://example.com/second.mp3",
+  ];
+  await result.coordinator.action({
+    ...interaction(
+      result.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: { links: { text: { value: links.join("\n") } } },
+  });
+
+  expect(resolved).toEqual(links);
+  expect(Reflect.get(result.coordinator, "queue")).toHaveLength(49);
+  expect(Reflect.get(result.coordinator, "queue")).not.toContainEqual(
+    expect.objectContaining({ automatic: true }),
+  );
+  await result.coordinator.endFromSlack();
+});
+
+test("truncates album adds to remaining queue capacity", async () => {
+  const album = Array.from({ length: 5 }, (_, index) => ({
+    sourceInput: `https://example.com/${index}`,
+    canonicalUrl: `https://example.com/${index}`,
+    sourceId: `song-${index}`,
+    title: `Song ${index}`,
+    artist: "Artist",
+  }));
+  const test = setup({
+    resolve: async () => album,
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    id: "now",
+    requesterId: "host",
+    sourceId: "now",
+    title: "Now",
+    artist: "Artist",
+    status: "ready",
+  });
+  Reflect.set(
+    test.coordinator,
+    "queue",
+    Array.from({ length: 48 }, (_, index) => ({
+      id: `queued-${index}`,
+      requesterId: "host",
+      sourceId: `queued-${index}`,
+      title: `Queued ${index}`,
+      artist: "Artist",
+      status: "ready",
+    })),
+  );
+
+  await test.coordinator.action(
+    interaction(test.coordinator, "add_track_to_queue", "bulkref_album"),
+  );
+
+  const queue = Reflect.get(test.coordinator, "queue") as { title: string }[];
+  expect(queue.map((track) => track.title)).toEqual([
+    ...Array.from({ length: 48 }, (_, index) => `Queued ${index}`),
+    "Song 0",
+  ]);
+  expect(test.ephemeral.at(-1)).toBe(
+    "Added 1 of 5 songs; the rest did not fit.",
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("rejects adds when the queue is completely full", async () => {
+  const test = setup({
+    resolve: async () => [
+      {
+        sourceInput: "https://example.com/a",
+        canonicalUrl: "https://example.com/a",
+        sourceId: "a",
+        title: "A",
+        artist: "Artist",
+      },
+      {
+        sourceInput: "https://example.com/b",
+        canonicalUrl: "https://example.com/b",
+        sourceId: "b",
+        title: "B",
+        artist: "Artist",
+      },
+    ],
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    id: "now",
+    requesterId: "host",
+    sourceId: "now",
+    title: "Now",
+    artist: "Artist",
+    status: "ready",
+  });
+  Reflect.set(
+    test.coordinator,
+    "queue",
+    Array.from({ length: 49 }, (_, index) => ({
+      id: `queued-${index}`,
+      requesterId: "host",
+      sourceId: `queued-${index}`,
+      title: `Queued ${index}`,
+      artist: "Artist",
+      status: "ready",
+    })),
+  );
+
+  await test.coordinator.action(
+    interaction(test.coordinator, "add_track_to_queue", "bulkref_album"),
+  );
+  expect(test.ephemeral.at(-1)).toBe("The queue is full.");
+  expect(Reflect.get(test.coordinator, "queue")).toHaveLength(49);
+  await test.coordinator.endFromSlack();
 });
 
 test("hides bulk add without add-bulk and rejects bulk submission", async () => {
@@ -2951,6 +3121,50 @@ test("agentAdd reports failure when preparation removes the track", async () => 
     ok: true,
     queue: [],
   });
+  await test.coordinator.endFromSlack();
+});
+
+test("agentAdd truncates albums to remaining queue capacity", async () => {
+  const album = Array.from({ length: 4 }, (_, index) => ({
+    sourceInput: `https://example.com/${index}`,
+    canonicalUrl: `https://example.com/${index}`,
+    sourceId: `song-${index}`,
+    title: `Song ${index}`,
+    artist: "Artist",
+  }));
+  const test = setup({
+    resolve: async () => album,
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog);
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    id: "now",
+    requesterId: "host",
+    sourceId: "now",
+    title: "Now",
+    artist: "Artist",
+    status: "ready",
+  });
+  Reflect.set(
+    test.coordinator,
+    "queue",
+    Array.from({ length: 48 }, (_, index) => ({
+      id: `queued-${index}`,
+      requesterId: "host",
+      sourceId: `queued-${index}`,
+      title: `Queued ${index}`,
+      artist: "Artist",
+      status: "ready",
+    })),
+  );
+
+  const result = await test.coordinator.agentAdd("host", "bulkref_album");
+  expect(result).toMatchObject({
+    ok: true,
+    added: [{ title: "Song 0", artist: "Artist" }],
+    omitted: 3,
+  });
+  expect(Reflect.get(test.coordinator, "queue")).toHaveLength(49);
   await test.coordinator.endFromSlack();
 });
 
