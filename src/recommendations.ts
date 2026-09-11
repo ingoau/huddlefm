@@ -41,6 +41,7 @@ const tracksPerSimilarArtist = 3;
 const listenBrainzFetchCount = 100;
 const listenBrainzSampleCount = 25;
 const recentAddLimit = 25;
+const knownHistoryLimit = 1000;
 
 // Huddle mix autoplay.
 const mixCandidateLimit = 12;
@@ -147,8 +148,28 @@ type CacheEntry<T> = {
   dirty?: boolean;
 };
 
+// Keys match "the same song" across services, so featured-artist credits
+// are dropped from both halves: Last.fm's "STAY (with Justin Bieber)" by
+// The Kid LAROI is ListenBrainz's "STAY" by The Kid LAROI & Justin Bieber.
 export function trackKey(title: string, artist: string) {
-  return `${normalizeToken(artist)}\0${normalizeToken(title)}`;
+  return `${normalizeToken(primaryArtist(artist))}\0${normalizeToken(stripCredits(title))}`;
+}
+
+const creditPattern =
+  /\s*[([]\s*(?:feat|ft|featuring|with)\.?\s[^)\]]*[)\]]|\s+(?:feat|ft|featuring)\.?\s.*$/i;
+
+export function stripCredits(title: string) {
+  return title.replace(creditPattern, "").trim() || title;
+}
+
+export function primaryArtist(artist: string) {
+  return (
+    artist
+      .split(
+        /\s*(?:,|&|\+|\bx\b|\band\b|\bwith\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*/i,
+      )[0]
+      ?.trim() || artist
+  );
 }
 
 export function mergeTaste(tracks: TasteContribution[]): ScoredTrack[] {
@@ -563,9 +584,11 @@ export class RecommendationCatalog {
       ...lastFm.contributions,
       ...listenBrainz.contributions,
     ];
-    const known = new Set(
-      contributions.map((track) => trackKey(track.title, track.artist)),
-    );
+    const known = new Set([
+      ...contributions.map((track) => trackKey(track.title, track.artist)),
+      ...lastFm.known,
+      ...listenBrainz.known,
+    ]);
     const artists = new Map<string, TasteArtist>();
     for (const artist of [...lastFm.artists, ...listenBrainz.artists]) {
       const key = normalizeToken(artist.name);
@@ -868,7 +891,7 @@ export class RecommendationCatalog {
 
   private async lastFmTaste(userId: string, username?: string) {
     if (!this.config.lastFmApiKey || !username) return emptyProfile();
-    const [top, recent, artists] = await Promise.all([
+    const [top, recent, artists, allTime] = await Promise.all([
       this.lastFm("user.getTopTracks", {
         user: username,
         period: "3month",
@@ -880,7 +903,20 @@ export class RecommendationCatalog {
         period: "3month",
         limit: String(artistSeedWindow),
       }).catch(() => undefined),
+      // Everything the listener has ever played much, so Discover does not
+      // suggest it; this only feeds the known set, never the scoring.
+      this.lastFm("user.getTopTracks", {
+        user: username,
+        period: "overall",
+        limit: String(knownHistoryLimit),
+      }).catch(() => undefined),
     ]);
+    const known = asArray(
+      (allTime?.toptracks as { track?: unknown })?.track,
+    ).flatMap((row) => {
+      const track = lastFmTrack(row);
+      return track ? [trackKey(track.title, track.artist)] : [];
+    });
     const topTracks = asArray(
       (top.toptracks as { track?: unknown })?.track,
     ).flatMap((row) => {
@@ -913,6 +949,7 @@ export class RecommendationCatalog {
     return {
       ...emptyProfile(),
       contributions: [...topTracks, ...recentTracks],
+      known: new Set(known),
       artists: topArtists,
     };
   }
@@ -1016,24 +1053,35 @@ export class RecommendationCatalog {
     if (!username) return emptyProfile();
     const headers = token ? { authorization: `Token ${token}` } : undefined;
     const user = encodeURIComponent(username);
-    const [listens, stats, artists, recommendations] = await Promise.all([
-      this.json(
-        `${listenBrainzEndpoint}/user/${user}/listens?count=50`,
-        headers,
-      ).catch(() => undefined),
-      this.json(
-        `${listenBrainzEndpoint}/stats/user/${user}/recordings?range=quarter`,
-        headers,
-      ).catch(() => undefined),
-      this.json(
-        `${listenBrainzEndpoint}/stats/user/${user}/artists?range=quarter&count=${artistSeedWindow}`,
-        headers,
-      ).catch(() => undefined),
-      this.json(
-        `${listenBrainzEndpoint}/cf/recommendation/user/${user}/recording?count=${listenBrainzFetchCount}`,
-        headers,
-      ).catch(() => undefined),
-    ]);
+    const [listens, stats, artists, recommendations, allTime] =
+      await Promise.all([
+        this.json(
+          `${listenBrainzEndpoint}/user/${user}/listens?count=50`,
+          headers,
+        ).catch(() => undefined),
+        this.json(
+          `${listenBrainzEndpoint}/stats/user/${user}/recordings?range=quarter`,
+          headers,
+        ).catch(() => undefined),
+        this.json(
+          `${listenBrainzEndpoint}/stats/user/${user}/artists?range=quarter&count=${artistSeedWindow}`,
+          headers,
+        ).catch(() => undefined),
+        this.json(
+          `${listenBrainzEndpoint}/cf/recommendation/user/${user}/recording?count=${listenBrainzFetchCount}`,
+          headers,
+        ).catch(() => undefined),
+        this.json(
+          `${listenBrainzEndpoint}/stats/user/${user}/recordings?range=all_time&count=${knownHistoryLimit}`,
+          headers,
+        ).catch(() => undefined),
+      ]);
+    const known = asArray(
+      (allTime?.payload as { recordings?: unknown })?.recordings,
+    ).flatMap((row) => {
+      const track = listenBrainzTrack(row);
+      return track ? [trackKey(track.title, track.artist)] : [];
+    });
     const recent = asArray(
       (listens?.payload as { listens?: unknown })?.listens,
     ).flatMap((row) => {
@@ -1088,7 +1136,7 @@ export class RecommendationCatalog {
     });
     return {
       contributions: [...recent, ...top],
-      known: new Set<string>(),
+      known: new Set(known),
       artists: topArtists,
       listenBrainz: mbids,
     };

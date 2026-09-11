@@ -889,6 +889,78 @@ test("trackKey ignores punctuation and case", () => {
   );
 });
 
+test("trackKey matches the same song across featured-artist credit styles", () => {
+  const key = trackKey("STAY", "The Kid LAROI");
+  expect(trackKey("STAY (with Justin Bieber)", "The Kid LAROI")).toBe(key);
+  expect(trackKey("STAY", "The Kid LAROI & Justin Bieber")).toBe(key);
+  expect(
+    trackKey("STAY feat. Justin Bieber", "The Kid LAROI, Justin Bieber"),
+  ).toBe(key);
+  expect(trackKey("Tommy Lee [ft. Post Malone]", "Tyla Yaweh")).toBe(
+    trackKey("Tommy Lee", "Tyla Yaweh"),
+  );
+  expect(trackKey("Feat", "Band")).toBe(trackKey("feat", "band"));
+  expect(trackKey("Song (Remix)", "Band")).not.toBe(trackKey("Song", "Band"));
+});
+
+test("all-time history keeps old favourites out of Discover without scoring them", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": () => ({
+        toptracks: { track: [] },
+      }),
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+    }),
+  );
+  // The 3-month call and the all-time call share a method name; answer by
+  // period instead.
+  Reflect.set(catalog, "request", (async (input: string) => {
+    const url = new URL(String(input));
+    const method = url.searchParams.get("method");
+    const period = url.searchParams.get("period");
+    if (method === "user.getTopTracks" && period === "overall")
+      return Response.json({
+        toptracks: {
+          track: [{ name: "Old Flame", artist: { name: "Band" } }],
+        },
+      });
+    if (method === "user.getTopTracks")
+      return Response.json({
+        toptracks: {
+          track: [{ name: "Seed", artist: { name: "Band" }, playcount: "5" }],
+        },
+      });
+    if (method === "track.getSimilar")
+      return Response.json({
+        similartracks: {
+          track: [
+            { name: "Old Flame (with Guest)", artist: { name: "Band" } },
+            { name: "Truly New", artist: { name: "Other" } },
+          ],
+        },
+      });
+    return Response.json({});
+  }) as typeof fetch);
+  await catalog.prefetchUser("host");
+  const recs = catalog.userRecommendations("host");
+  expect(recs.discover.map((t) => t.title)).toEqual(["Truly New"]);
+  expect(recs.favourites.map((t) => t.title).sort()).toEqual([
+    "Old Flame (with Guest)",
+    "Seed",
+  ]);
+  store.close();
+});
+
 function fakeSong(title: string, artist: string) {
   const id = title
     .replace(/[^a-zA-Z0-9]/g, "")
