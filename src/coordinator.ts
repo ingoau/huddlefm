@@ -33,6 +33,7 @@ import {
   isExpectedTrackFailure,
   removePreparedMedia,
   parseBulkLinkList,
+  normalizeToken,
   TrackCatalog,
   trackFailureDetail,
   type TrackMetadata,
@@ -81,6 +82,9 @@ type Entry = TrackMetadata & {
   id: string;
   requesterId: string;
   automatic?: boolean;
+  // Autoplay provenance; not persisted.
+  discovery?: boolean;
+  listenerIds?: string[];
   status: string;
   filePath?: string;
   lyrics?: Promise<LyricsPayload | undefined>;
@@ -97,6 +101,8 @@ function throwIfAborted(signal?: AbortSignal) {
 }
 
 const autoplayDiscoveryEvery = 4;
+const autoplayDiscoveryMaxInterval = 16;
+const autoplayCreditWindow = 10;
 
 function recommendationSourceLabel(track: PlayableRecommendation) {
   const names = track.sources.map((source) =>
@@ -126,7 +132,13 @@ export class Coordinator {
   private loopMode: LoopMode = "off";
   private transitionMode: TransitionMode = "none";
   private autoplayGeneration = 0;
-  private autoplayPicks = 0;
+  // Discovery turns come every `autoplayDiscoveryInterval` picks; a skipped
+  // discovery backs the interval off, one that plays through restores it.
+  private autoplayDiscoveryInterval = autoplayDiscoveryEvery;
+  private autoplaySinceDiscovery = 0;
+  // Listeners whose taste fed each of the last few autoplay picks, so the
+  // mix can favour whoever has been underserved.
+  private autoplayCredits: string[][] = [];
   private autoplayPending = false;
   private autoplayRejected: string[] = [];
   private autoplayRejectedArtists: string[] = [];
@@ -1039,11 +1051,7 @@ export class Coordinator {
         artist: skipped.artist,
       });
       this.store.incrementUsage("next");
-      this.autoplayRejected = [
-        ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
-        skipped.sourceId,
-      ].slice(-20);
-      this.rejectAutoplayArtist(skipped.artist);
+      this.rejectSkipped(skipped, userId);
       await this.advance("skipped");
       this.scheduleAutoplay();
       return {
@@ -2067,6 +2075,40 @@ export class Coordinator {
     ].slice(-20);
   }
 
+  // A skip keeps the track and artist out of this session's autoplay, pushes
+  // them down in the skipper's own recommendations, and, for a discovery,
+  // makes the next discovery turn wait longer.
+  private rejectSkipped(skipped: Entry, userId: string) {
+    this.autoplayRejected = [
+      ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
+      skipped.sourceId,
+    ].slice(-20);
+    this.rejectAutoplayArtist(skipped.artist);
+    this.recommendations?.penalize(userId, skipped);
+    if (skipped.discovery)
+      this.autoplayDiscoveryInterval = Math.min(
+        autoplayDiscoveryMaxInterval,
+        this.autoplayDiscoveryInterval * 2,
+      );
+  }
+
+  // How many tracks in a row the current artist has had, counting back
+  // through history from the current track.
+  private artistRun() {
+    const artistOf = (track: Entry) =>
+      normalizeToken(firstArtist(track.artist));
+    const current = this.current ?? this.history.at(-1);
+    if (!current) return 0;
+    const artist = artistOf(current);
+    let run = 1;
+    const previous = this.current ? this.history : this.history.slice(0, -1);
+    for (let index = previous.length - 1; index >= 0; index--) {
+      if (artistOf(previous[index]!) !== artist) break;
+      run++;
+    }
+    return run;
+  }
+
   private rejectNonParticipant(interaction: Interaction) {
     this.audit.record("action.denied", interaction.userId, {
       sessionId: this.id,
@@ -2355,6 +2397,7 @@ export class Coordinator {
           seedCount: number;
           score: number;
           discovery?: boolean;
+          listenerIds?: string[];
           metadata?: TrackMetadata;
         }
       >();
@@ -2373,8 +2416,10 @@ export class Coordinator {
         // Every few picks, lead with something nobody in the huddle has
         // listened to so the mix is not only shared favourites.
         const discover =
-          this.autoplayPicks % autoplayDiscoveryEvery ===
-          autoplayDiscoveryEvery - 1;
+          this.autoplaySinceDiscovery >= this.autoplayDiscoveryInterval - 1;
+        const credited: Record<string, number> = {};
+        for (const listener of this.autoplayCredits.flat())
+          credited[listener] = (credited[listener] ?? 0) + 1;
         const extras = await this.recommendations.autoplayCandidates({
           userIds: this.listenerIds(),
           nowPlaying: this.current ?? this.history.at(-1),
@@ -2389,6 +2434,8 @@ export class Coordinator {
             tracks: this.history.slice(-20),
           },
           discover,
+          credited,
+          artistRun: this.artistRun(),
         });
         // The catalog has already ordered these.
         extras.forEach((extra, index) => {
@@ -2397,6 +2444,7 @@ export class Coordinator {
             seedCount: 0,
             score: -index,
             discovery: extra.discovery,
+            listenerIds: extra.listenerIds,
             metadata: extra.metadata,
           });
         });
@@ -2407,6 +2455,7 @@ export class Coordinator {
       for (const id of ids) {
         if (excluded.has(id)) continue;
         const discovery = ranked.get(id)?.discovery ?? false;
+        const listenerIds = ranked.get(id)?.listenerIds ?? [];
         let metadata = ranked.get(id)?.metadata;
         if (!metadata) {
           try {
@@ -2424,11 +2473,13 @@ export class Coordinator {
             ...this.autoplayRejected,
           ]);
           if (currentIds.has(metadata.sourceId)) return false;
-          const entry = {
+          const entry: Entry = {
             ...metadata,
             id: crypto.randomUUID(),
             requesterId: this.botUserId,
             automatic: true,
+            discovery,
+            listenerIds,
             status: "preparing",
           };
           const controller = new AbortController();
@@ -2458,13 +2509,18 @@ export class Coordinator {
         if (pending === undefined) return false;
         if (pending === false) continue;
         if (await this.prepareAutoplay(pending.entry, pending.controller)) {
-          this.autoplayPicks++;
+          if (discovery) this.autoplaySinceDiscovery = 0;
+          else this.autoplaySinceDiscovery++;
+          this.autoplayCredits = [...this.autoplayCredits, listenerIds].slice(
+            -autoplayCreditWindow,
+          );
           this.log.info(
             {
               event: "autoplay_recommendation_added",
               entryId: pending.entry.id,
               sourceId: pending.entry.sourceId,
               discovery,
+              listenerIds,
               durationMs: Date.now() - startedAt,
             },
             "Autoplay recommendation added",
@@ -2856,6 +2912,8 @@ export class Coordinator {
           ? (this.current.outroSeconds ?? this.current.duration)
           : this.current.duration;
       const natural = reason === "track_ended" || reason === "transition";
+      if (natural && this.current.discovery)
+        this.autoplayDiscoveryInterval = autoplayDiscoveryEvery;
       if (natural && end) {
         this.playbackScrobbling?.position(end);
         this.listenedSeconds += Math.max(0, end - this.playbackSeconds);
@@ -3013,11 +3071,7 @@ export class Coordinator {
       artist: skipped.artist,
     });
     this.store.incrementUsage("next");
-    this.autoplayRejected = [
-      ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
-      skipped.sourceId,
-    ].slice(-20);
-    this.rejectAutoplayArtist(skipped.artist);
+    this.rejectSkipped(skipped, interaction.userId);
     await this.advance("skipped");
     this.scheduleAutoplay();
   }
