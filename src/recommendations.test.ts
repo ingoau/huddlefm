@@ -826,6 +826,63 @@ test("similar tracks are weighted by Last.fm match rather than rank", async () =
   store.close();
 });
 
+test("ListenBrainz recommendations ask for artist metadata and route heard ones to favourites", async () => {
+  const store = new Store(":memory:");
+  store.setListenBrainzToken("host", "", "lb-user");
+  const urls: string[] = [];
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { random: sequence() },
+    (async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("/cf/recommendation/"))
+        return Response.json({
+          payload: {
+            mbids: [
+              {
+                recording_mbid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                score: 1.4,
+                latest_listened_at: "2026-09-01T00:00:00.000Z",
+              },
+              {
+                recording_mbid: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                score: 1.1,
+                latest_listened_at: null,
+              },
+            ],
+          },
+        });
+      if (url.includes("/metadata/recording/"))
+        return Response.json({
+          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa": {
+            recording: { name: "Heard It" },
+            artist: { name: "Band & Friend", artists: [{ name: "Band" }] },
+            release: { name: "Album" },
+          },
+          "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb": {
+            recording: { name: "Brand New" },
+            artist: { name: "Stranger", artists: [{ name: "Stranger" }] },
+          },
+        });
+      return Response.json({ payload: {} });
+    }) as typeof fetch,
+  );
+  await catalog.prefetchUser("host");
+  const metadata = urls.find((url) => url.includes("/metadata/recording/"));
+  expect(metadata).toContain("inc=artist%20release");
+  const recs = catalog.userRecommendations("host");
+  expect(recs.discover.map((t) => t.title)).toEqual(["Brand New"]);
+  expect(recs.favourites.map((t) => t.title)).toEqual(["Heard It"]);
+  expect(recs.discover[0]?.sources).toEqual(["listenbrainz"]);
+  store.close();
+});
+
 test("trackKey ignores punctuation and case", () => {
   expect(trackKey("Karma Police!", "Radiohead")).toBe(
     trackKey("karma police", "RADIOHEAD"),

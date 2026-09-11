@@ -113,7 +113,15 @@ type TasteProfile = {
   contributions: TasteContribution[];
   known: Set<string>;
   artists: TasteArtist[];
-  listenBrainz: { mbid: string; score: number }[];
+  listenBrainz: ListenBrainzRecommendation[];
+};
+
+// ListenBrainz says whether the listener has already heard a recommended
+// recording, which is a stronger "known" signal than our own history.
+type ListenBrainzRecommendation = {
+  mbid: string;
+  score: number;
+  listened: boolean;
 };
 
 type PoolTrack = {
@@ -640,7 +648,8 @@ export class RecommendationCatalog {
           contributionFromMetadata(track, userId, "related", 2.2),
         ),
     ];
-    const isKnown = (track: TasteTrack) =>
+    const isKnown = (track: TasteTrack & { listened?: boolean }) =>
+      track.listened === true ||
       profile.known.has(trackKey(track.title, track.artist));
     const discoverRanked = mergeTaste(
       discovered.filter((track) => !isKnown(track)),
@@ -1072,7 +1081,10 @@ export class RecommendationCatalog {
       );
       if (!/^[0-9a-f-]{36}$/i.test(mbid)) return [];
       const score = Number((row as { score?: unknown }).score ?? 0);
-      return [{ mbid, score: Number.isFinite(score) ? score : 0 }];
+      const listened = Boolean(
+        (row as { latest_listened_at?: unknown }).latest_listened_at,
+      );
+      return [{ mbid, score: Number.isFinite(score) ? score : 0, listened }];
     });
     return {
       contributions: [...recent, ...top],
@@ -1086,8 +1098,8 @@ export class RecommendationCatalog {
   // its list each build so the pool keeps moving, and weight by its score.
   private async listenBrainzRecommendations(
     userId: string,
-    recommendations: { mbid: string; score: number }[],
-  ): Promise<TasteContribution[]> {
+    recommendations: ListenBrainzRecommendation[],
+  ): Promise<(TasteContribution & { listened: boolean })[]> {
     if (!recommendations.length) return [];
     const best = Math.max(...recommendations.map((row) => row.score), 0);
     const weightOf = (score: number, index: number) =>
@@ -1110,7 +1122,7 @@ export class RecommendationCatalog {
         ? { authorization: `Token ${settings.listenBrainzToken}` }
         : undefined;
       const result = await this.json(
-        `${listenBrainzEndpoint}/metadata/recording/?recording_mbids=${missing.map(encodeURIComponent).join(",")}`,
+        `${listenBrainzEndpoint}/metadata/recording/?recording_mbids=${missing.map(encodeURIComponent).join(",")}&inc=artist%20release`,
         headers,
       ).catch(() => undefined);
       const rows =
@@ -1126,7 +1138,15 @@ export class RecommendationCatalog {
     return picked.flatMap((row) => {
       const track = this.recordings.get(row.mbid)?.value;
       return track
-        ? [{ userId, source: "listenbrainz", weight: row.weight, ...track }]
+        ? [
+            {
+              userId,
+              source: "listenbrainz",
+              weight: row.weight,
+              listened: row.listened,
+              ...track,
+            },
+          ]
         : [];
     });
   }
