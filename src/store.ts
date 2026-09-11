@@ -374,6 +374,9 @@ export class Store {
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.db.run(`CREATE INDEX IF NOT EXISTS tracks_requester_recent
       ON tracks(requester_id, automatic, created_at DESC)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS tracks_played_title_artist
+      ON tracks(title COLLATE NOCASE, artist COLLATE NOCASE, created_at DESC)
+      WHERE status = 'played'`);
     this.ensureColumn("tracks", "queue_position", "INTEGER");
     this.ensureColumn("tracks", "intro_seconds", "REAL");
     this.ensureColumn("tracks", "outro_seconds", "REAL");
