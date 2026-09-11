@@ -838,3 +838,133 @@ test("finds conservative fade lengths from track loudness", () => {
     fadeOutSeconds: 3.75,
   });
 });
+
+test("popularTracks combines home quick picks with a featured hits playlist", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  const browsed: string[] = [];
+  Reflect.set(catalog, "music", {
+    getHomeSections: async () => [
+      {
+        title: "Quick picks",
+        contents: [
+          {
+            type: "SONG",
+            videoId: "OZNOBP0B3_I",
+            name: "Somewhere Only We Know",
+            artist: { name: "Keane", artistId: "x" },
+            album: { name: "Hopes and Fears", albumId: "y" },
+            duration: null,
+            thumbnails: [{ url: "https://i.ytimg.com/vi/OZNOBP0B3_I/a.jpg" }],
+          },
+          { type: "SONG", videoId: "bad", name: "Broken" },
+        ],
+      },
+      {
+        title: "New & trending",
+        contents: [
+          { type: "PLAYLIST", name: "phonk 2026", playlistId: "RDCLAK5uy_a" },
+          {
+            type: "PLAYLIST",
+            name: "Top 100 Music Videos Global",
+            playlistId: "PL4fGSI1pDJn5kI81J1fYWK5eZRl1zJ5kM",
+          },
+        ],
+      },
+      {
+        title: "All-time hits",
+        contents: [
+          {
+            type: "PLAYLIST",
+            name: "Pop's Biggest Hits",
+            playlistId: "RDCLAK5uy_b",
+          },
+          { type: "ALBUM", name: "Not a playlist", albumId: "z" },
+        ],
+      },
+    ],
+    getPlaylistVideos: async (id: string) => {
+      browsed.push(id);
+      return [
+        {
+          type: "VIDEO",
+          videoId: "ic8j13piAhQ",
+          name: "Cruel Summer",
+          artist: { name: "Taylor Swift", artistId: "t" },
+          duration: 180,
+          thumbnails: [{ url: "https://i.ytimg.com/vi/ic8j13piAhQ/hq.jpg" }],
+        },
+        // Already in the quick picks.
+        {
+          type: "VIDEO",
+          videoId: "OZNOBP0B3_I",
+          name: "Somewhere Only We Know",
+          artist: { name: "Keane", artistId: "x" },
+          duration: 237,
+          thumbnails: [],
+        },
+      ];
+    },
+  });
+  const tracks = await catalog.popularTracks();
+  // The hits playlist wins over the genre one, and needs the browse prefix.
+  expect(browsed).toEqual(["VLRDCLAK5uy_b"]);
+  expect(tracks).toEqual([
+    {
+      sourceInput: "https://music.youtube.com/watch?v=OZNOBP0B3_I",
+      canonicalUrl: "https://music.youtube.com/watch?v=OZNOBP0B3_I",
+      sourceId: "OZNOBP0B3_I",
+      title: "Somewhere Only We Know",
+      artist: "Keane",
+      album: "Hopes and Fears",
+      duration: undefined,
+      artwork: "https://i.ytimg.com/vi/OZNOBP0B3_I/a.jpg",
+    },
+    {
+      sourceInput: "https://music.youtube.com/watch?v=ic8j13piAhQ",
+      canonicalUrl: "https://music.youtube.com/watch?v=ic8j13piAhQ",
+      sourceId: "ic8j13piAhQ",
+      title: "Cruel Summer",
+      artist: "Taylor Swift",
+      album: undefined,
+      duration: 180,
+      artwork: "https://i.ytimg.com/vi/ic8j13piAhQ/hq.jpg",
+    },
+  ]);
+});
+
+test("popularTracks still returns quick picks when the playlist fails", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  Reflect.set(catalog, "music", {
+    getHomeSections: async () => [
+      {
+        title: "Quick picks",
+        contents: [
+          {
+            type: "SONG",
+            videoId: "OZNOBP0B3_I",
+            name: "Somewhere Only We Know",
+            artist: { name: "Keane", artistId: "x" },
+            thumbnails: [],
+          },
+          {
+            type: "PLAYLIST",
+            name: "Dance Pop Bangers",
+            playlistId: "RDCLAK5uy_c",
+          },
+        ],
+      },
+    ],
+    getPlaylistVideos: async () => {
+      throw new Error("400");
+    },
+  });
+  expect(
+    (await catalog.popularTracks()).map((track) => track.sourceId),
+  ).toEqual(["OZNOBP0B3_I"]);
+});

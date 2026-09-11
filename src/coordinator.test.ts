@@ -1414,13 +1414,13 @@ test("Previous restarts after five seconds and seek controls move ten seconds", 
     );
 
   await result.coordinator.start();
-  expect(JSON.stringify(result.posted[0])).toContain('"block_id":"seek_');
-  expect(JSON.stringify(result.posted[0])).toContain('"action_id":"seek_back"');
-  expect(JSON.stringify(result.posted[0])).toContain(
-    '"action_id":"seek_forward"',
-  );
+  expect(JSON.stringify(result.posted[0])).not.toContain('"block_id":"seek_');
   await action("add_track_to_queue", "a");
   expect(JSON.stringify(result.updates)).toContain("Added by <@host>");
+  const playing = JSON.stringify(result.updates.at(-1));
+  expect(playing).toContain('"block_id":"seek_');
+  expect(playing).toContain('"action_id":"seek_back"');
+  expect(playing).toContain('"action_id":"seek_forward"');
   await action("add_track_to_queue", "b");
   const first = plays()[0]!.entryId;
   await result.coordinator.mediaEvent("track_ended", { entryId: first });
@@ -4765,4 +4765,165 @@ test("settings selects offer an initial option Slack can match", async () => {
   }
   await test.coordinator.endFromSlack();
   store.close();
+});
+
+function playSomethingSetup(
+  candidates: { sourceId: string; title: string }[],
+  popular: () => Promise<{ sourceId: string; title: string }[]>,
+) {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(candidates, calls);
+  const test = setup(
+    {
+      resolve: async () => ({
+        sourceInput: "https://example.com/a",
+        canonicalUrl: "https://example.com/a",
+        sourceId: "aaaaaaaaaaa",
+        title: "A",
+        artist: "Artist",
+      }),
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("play something should use cached metadata");
+      },
+      popularTracks: async () =>
+        (await popular()).map((track) => ({
+          sourceInput: `https://music.youtube.com/watch?v=${track.sourceId}`,
+          canonicalUrl: `https://music.youtube.com/watch?v=${track.sourceId}`,
+          sourceId: track.sourceId,
+          title: track.title,
+          artist: "Chart Act",
+        })),
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  return { ...test, calls };
+}
+
+const playSomethingButton = (rendered: unknown) =>
+  JSON.stringify(rendered ?? "").includes('"action_id":"play_something"');
+
+test("idle player offers Play something instead of playback controls", async () => {
+  const test = playSomethingSetup([], async () => []);
+  await test.coordinator.start();
+  const blank = JSON.stringify(test.posted[0]);
+  expect(blank).toContain('"action_id":"play_something"');
+  expect(blank).not.toContain('"action_id":"toggle_playback"');
+  expect(blank).not.toContain('"action_id":"volume_up"');
+  expect(blank).not.toContain('"action_id":"seek_back"');
+  expect(blank).toContain("Volume: 60%");
+
+  await test.coordinator.action(
+    interaction(test.coordinator, "add_track_to_queue", "a"),
+  );
+  const playing = JSON.stringify(test.updates.at(-1));
+  expect(playing).toContain('"action_id":"toggle_playback"');
+  expect(playing).not.toContain('"action_id":"play_something"');
+
+  const current = Reflect.get(test.coordinator, "current") as { id: string };
+  await test.coordinator.mediaEvent("track_ended", { entryId: current.id });
+  expect(playSomethingButton(test.updates.at(-1))).toBeTrue();
+  await test.coordinator.endFromSlack();
+});
+
+test("Play something turns on Huddle mix and plays its pick", async () => {
+  const test = playSomethingSetup(
+    [{ sourceId: "mixpick0001", title: "Mix Pick" }],
+    async () => {
+      throw new Error("the mix had a pick, so no fallback");
+    },
+  );
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "play_something"),
+  );
+  expect(test.sessions).toContainEqual({ autoplay: "huddle" });
+  await until(() => JSON.stringify(test.updates).includes("Finding next song"));
+  await until(() =>
+    test.audit.some(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  );
+  await until(() => Boolean(Reflect.get(test.coordinator, "current")));
+  expect(Reflect.get(test.coordinator, "current")).toMatchObject({
+    sourceId: "mixpick0001",
+    automatic: true,
+  });
+  expect(Reflect.get(test.coordinator, "autoplayMode")).toBe("huddle");
+  expect(test.calls[0]).toMatchObject({ userIds: ["host", "guest"] });
+  expect(playSomethingButton(test.updates.at(-1))).toBeFalse();
+  expect(test.ephemeral).toEqual([]);
+  await test.coordinator.endFromSlack();
+});
+
+test("Play something falls back to a popular song when the mix is empty", async () => {
+  const test = playSomethingSetup([], async () => [
+    { sourceId: "popular0001", title: "Hit One" },
+    { sourceId: "popular0002", title: "Hit Two" },
+  ]);
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "play_something"),
+  );
+  await until(() => Boolean(Reflect.get(test.coordinator, "current")));
+  const current = Reflect.get(test.coordinator, "current") as {
+    sourceId: string;
+    automatic: boolean;
+    artist: string;
+  };
+  expect(["popular0001", "popular0002"]).toContain(current.sourceId);
+  expect(current).toMatchObject({ automatic: true, artist: "Chart Act" });
+  expect(Reflect.get(test.coordinator, "autoplayMode")).toBe("huddle");
+  expect(test.calls[0]?.nowPlaying).toBeUndefined();
+  expect(test.ephemeral).toEqual([]);
+  // The popular song now seeds the mix for what follows.
+  await until(() => test.calls.length >= 2);
+  expect(test.calls[1]).toMatchObject({
+    nowPlaying: { sourceId: current.sourceId },
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("Play something tells the user when nothing at all can be played", async () => {
+  const test = playSomethingSetup([], async () => []);
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "play_something"),
+  );
+  await until(() =>
+    test.audit.some(
+      (value) => (value as unknown[])[0] === "autoplay.recommendation_failed",
+    ),
+  );
+  await until(() => test.ephemeral.length > 0);
+  expect(test.ephemeral).toEqual([
+    "Could not find anything to play; add a song to get started.",
+  ]);
+  expect(Reflect.get(test.coordinator, "current")).toBeUndefined();
+  await until(() => playSomethingButton(test.updates.at(-1)));
+  await test.coordinator.endFromSlack();
+});
+
+test("Play something needs the configure-settings permission", async () => {
+  const test = playSomethingSetup(
+    [{ sourceId: "mixpick0001", title: "Mix Pick" }],
+    async () => [],
+  );
+  await test.coordinator.start();
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "play_something"),
+    userId: "guest",
+  });
+  expect(test.ephemeral).toEqual(["You do not have permission for that."]);
+  expect(Reflect.get(test.coordinator, "autoplayMode")).toBe("off");
+  expect(test.calls).toEqual([]);
+  expect(test.sessions).not.toContainEqual({ autoplay: "huddle" });
+  await test.coordinator.endFromSlack();
 });
