@@ -24,6 +24,26 @@ export type JoinedHuddle = {
   chimeAttendee: Record<string, unknown>;
 };
 
+export type ActiveHuddleRoom = {
+  callId: string;
+  participantIds: string[];
+};
+
+/** Slack reports Huddle participants as user IDs or as membership objects. */
+function participantIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (typeof entry === "string") return [entry];
+    if (
+      entry &&
+      typeof entry === "object" &&
+      typeof (entry as { user_id?: unknown }).user_id === "string"
+    )
+      return [(entry as { user_id: string }).user_id];
+    return [];
+  });
+}
+
 /** True when activity belongs to the session UI thread or the original huddle thread. */
 export function roomOwnsThread(
   room: Pick<
@@ -105,18 +125,7 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
     huddleCallId: text(call.call_id, "call.call_id"),
     huddleId: text(huddle.id, "huddle.id"),
     huddleCreatorId: text(huddle.created_by, "huddle.created_by"),
-    participantIds: Array.isArray(huddle.participants)
-      ? huddle.participants.flatMap((value) => {
-          if (typeof value === "string") return [value];
-          if (
-            value &&
-            typeof value === "object" &&
-            typeof (value as { user_id?: unknown }).user_id === "string"
-          )
-            return [(value as { user_id: string }).user_id];
-          return [];
-        })
-      : [],
+    participantIds: participantIds(huddle.participants),
     uiChannelId: text(canvas.thread_channel_id, "canvas.thread_channel_id"),
     uiThreadTs: text(canvas.root_thread_ts, "canvas.root_thread_ts"),
     chimeMeeting: meeting,
@@ -144,12 +153,7 @@ export function normalizeInvitedJoinResponse(
     huddleCallId: callId,
     huddleId: callId,
     huddleCreatorId: text(room.created_by, "room.created_by"),
-    participantIds: Array.isArray(room.participants)
-      ? room.participants.filter(
-          (participant): participant is string =>
-            typeof participant === "string",
-        )
-      : [],
+    participantIds: participantIds(room.participants),
     uiChannelId: channelId,
     uiThreadTs: text(
       room.thread_root_ts ?? room.canvas_thread_ts,
@@ -477,7 +481,7 @@ export class SlackHuddleAdapter {
       );
   }
 
-  async activeHuddleCall(channelId: string, threadTs: string) {
+  async activeHuddleRoom(channelId: string, threadTs: string) {
     const replies = await this.api("conversations.replies", {
       channel: channelId,
       ts: threadTs,
@@ -488,7 +492,7 @@ export class SlackHuddleAdapter {
       throw new Error(
         `conversations.replies failed: ${String(replies.error ?? "unknown_error")}`,
       );
-    return activeHuddleCallId(replies, threadTs);
+    return activeHuddleRoom(replies, threadTs);
   }
 
   async react(channelId: string, messageTs: string, name: string) {
@@ -744,7 +748,10 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
   }
 }
 
-export function activeHuddleCallId(raw: unknown, threadTs: string) {
+export function activeHuddleRoom(
+  raw: unknown,
+  threadTs: string,
+): ActiveHuddleRoom | undefined {
   const messages = object(raw, "replies").messages;
   if (!Array.isArray(messages)) return;
   const root = messages.find(
@@ -763,7 +770,17 @@ export function activeHuddleCallId(raw: unknown, threadTs: string) {
   const endedAt = Number(room.date_end ?? 0);
   if (room.has_ended === true || (Number.isFinite(endedAt) && endedAt > 0))
     return;
-  return typeof room.id === "string" && room.id ? room.id : undefined;
+  if (typeof room.id !== "string" || !room.id) return;
+  return { callId: room.id, participantIds: participantIds(room.participants) };
+}
+
+/**
+ * True when the user is one of the Huddle's current participants. Slack only
+ * lists participants it knows about, so an empty list means we cannot tell and
+ * the user gets the benefit of the doubt rather than a false rejection.
+ */
+export function huddleHasParticipant(room: ActiveHuddleRoom, userId: string) {
+  return !room.participantIds.length || room.participantIds.includes(userId);
 }
 
 export async function verifySlackIdentity(config: {
