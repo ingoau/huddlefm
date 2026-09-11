@@ -70,10 +70,7 @@ import {
   wrapIntegrationResult,
   type IntegrationCommand,
 } from "./integration.ts";
-import {
-  RecommendationCatalog,
-  type PlayableRecommendation,
-} from "./recommendations.ts";
+import { RecommendationCatalog } from "./recommendations.ts";
 
 const endRestoreMs = 2 * 60_000;
 const searchDebounceMs = 300;
@@ -103,19 +100,6 @@ function throwIfAborted(signal?: AbortSignal) {
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
 const autoplayCreditWindow = 10;
-
-function recommendationSourceLabel(track: PlayableRecommendation) {
-  const names = track.sources.map((source) =>
-    source === "lastfm"
-      ? "Last.fm"
-      : source === "listenbrainz"
-        ? "ListenBrainz"
-        : source === "similar" || source === "related"
-          ? "Similar"
-          : "HuddleFM",
-  );
-  return [...new Set(names)].join(" · ") || "Recommended";
-}
 
 export class Coordinator {
   readonly id: string;
@@ -3335,13 +3319,6 @@ export class Coordinator {
         options: group.tracks.map((track) => ({
           text: plain(`${track.title} — ${track.artist}`.slice(0, 75)),
           value: track.id,
-          ...(track.sources.length
-            ? {
-                description: plain(
-                  recommendationSourceLabel(track).slice(0, 75),
-                ),
-              }
-            : {}),
         })),
       }));
     const canBulk = this.can(interaction.userId, "add-bulk");
