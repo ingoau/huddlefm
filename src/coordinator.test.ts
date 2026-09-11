@@ -4231,15 +4231,17 @@ test("a manual add refreshes the adder's personal recommendations", async () => 
     },
     autoplayCandidates: async () => [],
   } as unknown as RecommendationCatalog;
+  const track = (input: string) => ({
+    sourceInput: input,
+    canonicalUrl: input,
+    sourceId: input.slice(-11),
+    title: input,
+    artist: "Artist",
+  });
   const test = setup(
     {
-      resolve: async () => ({
-        sourceInput: "https://example.com/track",
-        canonicalUrl: "https://example.com/track",
-        sourceId: "track",
-        title: "Track",
-        artist: "Artist",
-      }),
+      resolve: async (input: string) => track(input),
+      resolveUrl: async (input: string) => track(input),
       prepare: async () => "track.opus",
     } as unknown as TrackCatalog,
     undefined,
@@ -4263,6 +4265,65 @@ test("a manual add refreshes the adder's personal recommendations", async () => 
     state: {},
   });
   expect(refreshed).toEqual(["guest"]);
+  await test.coordinator.agentAdd("host", "https://example.com/agent");
+  expect(refreshed).toEqual(["guest", "host"]);
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: { links: { text: { value: "https://example.com/bulk\n" } } },
+  });
+  expect(refreshed).toEqual(["guest", "host", "host"]);
+  await test.coordinator.endFromSlack();
+});
+
+test("an autoplay pick displaced before it plays is not counted", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "queuedpick1", title: "Queued", listenerIds: ["guest"] }],
+    calls,
+  );
+  const test = setup(
+    {
+      resolve: async (input: string) => ({
+        sourceInput: input,
+        canonicalUrl: input,
+        sourceId: input.slice(-11),
+        title: input,
+        artist: "Manual",
+      }),
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await test.coordinator.agentAdd("host", "https://example.com/manual00001");
+  await enableHuddleMix(test.coordinator);
+  await until(() =>
+    (Reflect.get(test.coordinator, "queue") as { automatic?: boolean }[]).some(
+      (track) => track.automatic,
+    ),
+  );
+  expect(Reflect.get(test.coordinator, "autoplayCredits")).toEqual([]);
+  expect(Reflect.get(test.coordinator, "autoplaySinceDiscovery")).toBe(0);
+  await test.coordinator.agentAdd("host", "https://example.com/manual00002");
+  expect(
+    (Reflect.get(test.coordinator, "queue") as { automatic?: boolean }[]).some(
+      (track) => track.automatic,
+    ),
+  ).toBe(false);
+  expect(Reflect.get(test.coordinator, "autoplayCredits")).toEqual([]);
+  expect(Reflect.get(test.coordinator, "autoplaySinceDiscovery")).toBe(0);
   await test.coordinator.endFromSlack();
 });
 

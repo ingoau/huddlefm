@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   applySkipPenalties,
   mergeTaste,
+  primaryArtist,
   RecommendationCatalog,
   type RecommendationTracks,
   trackKey,
@@ -1086,6 +1087,11 @@ test("trackKey matches the same song across featured-artist credit styles", () =
     trackKey("Tommy Lee", "Tyla Yaweh"),
   );
   expect(trackKey("Feat", "Band")).toBe(trackKey("feat", "band"));
+  // Words that can be part of a name are not separators.
+  expect(primaryArtist("Simon and Garfunkel")).toBe("Simon and Garfunkel");
+  expect(primaryArtist("Malcolm X")).toBe("Malcolm X");
+  expect(primaryArtist("Florence + the Machine")).toBe("Florence");
+  expect(primaryArtist("Tyla Yaweh feat. Post Malone")).toBe("Tyla Yaweh");
   expect(trackKey("Song (Remix)", "Band")).not.toBe(trackKey("Song", "Band"));
 });
 

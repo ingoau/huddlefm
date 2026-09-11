@@ -175,7 +175,7 @@ export function primaryArtist(artist: string) {
   return (
     artist
       .split(
-        /\s*(?:,|&|\+|\bx\b|\band\b|\bwith\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*/i,
+        /\s*(?:,|&|\+|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*/i,
       )[0]
       ?.trim() || artist
   );

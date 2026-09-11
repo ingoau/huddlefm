@@ -82,6 +82,7 @@ type Entry = TrackMetadata & {
   // Autoplay provenance; not persisted.
   discovery?: boolean;
   listenerIds?: string[];
+  counted?: boolean;
   status: string;
   filePath?: string;
   lyrics?: Promise<LyricsPayload | undefined>;
@@ -786,6 +787,7 @@ export class Coordinator {
         await this.render();
         this.queueChanged();
         throwIfAborted(signal);
+        if (pending.length) void this.recommendations?.refreshUser(userId);
         return { pending, heldAutoplay, omitted: fit.omitted };
       } catch (error) {
         for (const { entry, controller } of pending) {
@@ -2493,11 +2495,6 @@ export class Coordinator {
         if (pending === undefined) return false;
         if (pending === false) continue;
         if (await this.prepareAutoplay(pending.entry, pending.controller)) {
-          if (discovery) this.autoplaySinceDiscovery = 0;
-          else this.autoplaySinceDiscovery++;
-          this.autoplayCredits = [...this.autoplayCredits, listenerIds].slice(
-            -autoplayCreditWindow,
-          );
           this.log.info(
             {
               event: "autoplay_recommendation_added",
@@ -2713,6 +2710,18 @@ export class Coordinator {
     this.current = next;
     this.playbackSeconds = 0;
     next.status = "playing";
+    // An autoplay pick only counts towards fairness and discovery cadence
+    // once it actually plays; a queued pick can still be displaced by a
+    // manual add, and Previous can bring a played one back.
+    if (next.automatic && !next.counted) {
+      next.counted = true;
+      if (next.discovery) this.autoplaySinceDiscovery = 0;
+      else this.autoplaySinceDiscovery++;
+      this.autoplayCredits = [
+        ...this.autoplayCredits,
+        next.listenerIds ?? [],
+      ].slice(-autoplayCreditWindow);
+    }
     this.state = "playing";
     this.store.setTrack(next.id, { status: "playing" });
     this.store.setSession(this.id, { status: "playing", playbackSeconds: 0 });
@@ -3543,6 +3552,8 @@ export class Coordinator {
         this.store.incrementUsage("added");
         return { entry, controller };
       });
+      if (pending.length)
+        void this.recommendations?.refreshUser(interaction.userId);
       await this.render();
       this.queueChanged();
       return {
