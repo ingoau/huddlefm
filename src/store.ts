@@ -48,6 +48,22 @@ export const autoplayModeLabels: Record<AutoplayMode, string> = {
   huddle: "Huddle mix",
 };
 
+export const loopModes = ["off", "track", "queue"] as const;
+export type LoopMode = (typeof loopModes)[number];
+
+export function parseLoopMode(value: unknown): LoopMode {
+  if (value === true || value === 1 || value === "1" || value === "track")
+    return "track";
+  if (value === "queue") return "queue";
+  return "off";
+}
+
+export const loopModeLabels: Record<LoopMode, string> = {
+  off: "Off",
+  track: "Track",
+  queue: "Queue",
+};
+
 export const recentTrackLimit = 100;
 
 export const usageLabels = {
@@ -117,6 +133,7 @@ export type SavedSession = {
   state: string;
   volume: number;
   autoplay: AutoplayMode;
+  loopMode: LoopMode;
   transitionMode: TransitionMode;
   displayMode: DisplayMode;
   anchorEnabled: boolean;
@@ -184,6 +201,7 @@ export class Store {
         status TEXT NOT NULL,
         volume REAL NOT NULL DEFAULT 0.6,
         autoplay TEXT NOT NULL DEFAULT 'off',
+        loop_mode TEXT NOT NULL DEFAULT 'off',
         transition_mode TEXT NOT NULL DEFAULT 'none',
         resume_state TEXT,
         resume_until INTEGER,
@@ -309,6 +327,7 @@ export class Store {
     `);
     this.ensureColumn("sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'");
     this.migrateAutoplayModes();
+    this.ensureColumn("sessions", "loop_mode", "TEXT NOT NULL DEFAULT 'off'");
     this.ensureColumn(
       "sessions",
       "transition_mode",
@@ -506,6 +525,7 @@ export class Store {
       hostId?: string | null;
       volume?: number;
       autoplay?: AutoplayMode;
+      loopMode?: LoopMode;
       transitionMode?: TransitionMode;
       playbackSeconds?: number;
       listenedSeconds?: number;
@@ -529,6 +549,10 @@ export class Store {
       this.db
         .query("UPDATE sessions SET autoplay = ?, updated_at = ? WHERE id = ?")
         .run(fields.autoplay, Date.now(), sessionId);
+    if (fields.loopMode !== undefined)
+      this.db
+        .query("UPDATE sessions SET loop_mode = ?, updated_at = ? WHERE id = ?")
+        .run(fields.loopMode, Date.now(), sessionId);
     if (fields.transitionMode !== undefined)
       this.db
         .query(
@@ -860,6 +884,7 @@ export class Store {
           state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
           autoplay: parseAutoplayMode(row.autoplay),
+          loopMode: parseLoopMode(row.loop_mode),
           transitionMode: transitionModes.includes(
             row.transition_mode as TransitionMode,
           )

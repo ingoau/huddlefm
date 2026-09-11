@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { LyricsCatalog } from "./lyrics.ts";
@@ -474,6 +476,7 @@ test("suspends with a restart notice and restores playback", async () => {
     state: "paused",
     volume: 0.4,
     autoplay: "off",
+    loopMode: "off",
     transitionMode: "none",
     displayMode: "lyrics",
     anchorEnabled: true,
@@ -1844,6 +1847,9 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(modal).toContain('"value":"related"');
   expect(modal).toContain('"value":"huddle"');
   expect(modal).toContain("Huddle mix");
+  expect(modal).toContain('"block_id":"loop"');
+  expect(modal).toContain('"value":"track"');
+  expect(modal).toContain('"value":"queue"');
   expect(modal).toContain("Include my listening in Huddle mix");
   expect(modal).toContain(
     '"block_id":"transition","label":{"type":"plain_text","text":"Transitions"}',
@@ -1859,6 +1865,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     '"block_id":"volume"',
     '"block_id":"display"',
     '"block_id":"autoplay"',
+    '"block_id":"loop"',
     '"block_id":"transition"',
     '"block_id":"anchor"',
     '"block_id":"session_actions"',
@@ -1929,6 +1936,243 @@ test("autoplay defaults off and host settings persist both toggle states", async
     type: "transition_mode",
     mode: "adaptive",
   });
+
+  const loop = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  loop.state = {
+    loop: { mode: { selected_option: { value: "track" } } },
+  };
+  await result.coordinator.action(loop);
+  expect(result.sessions).toContainEqual({ loopMode: "track" });
+  await result.coordinator.endFromSlack();
+});
+
+test("track loop replays the current song without advancing", async () => {
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: value,
+      canonicalUrl: value,
+      sourceId: value.includes("b") ? "bbbbbbbbbbb" : "aaaaaaaaaaa",
+      title: value.includes("b") ? "B" : "A",
+      artist: "Artist",
+      duration: 100,
+    }),
+    prepare: async (metadata: { sourceId: string }) =>
+      `${metadata.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await Bun.sleep(0);
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://b"),
+  );
+  await Bun.sleep(0);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    loop: { mode: { selected_option: { value: "track" } } },
+  };
+  await result.coordinator.action(enable);
+  const preload = result.media.findLast(
+    (value) => (value as { type?: string }).type === "preload",
+  ) as { nextEntryId?: string };
+  expect(preload.nextEntryId).toBeUndefined();
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  expect(result.media).toContainEqual({
+    type: "replay",
+    entryId: first,
+    introSeconds: 0,
+  });
+  const plays = result.media.filter(
+    (value) => (value as { type?: string }).type === "play",
+  );
+  expect(plays).toHaveLength(1);
+  expect(
+    (
+      result.media.findLast(
+        (value) => (value as { type?: string }).type === "play",
+      ) as { entryId: string }
+    ).entryId,
+  ).toBe(first);
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    nowPlaying: expect.objectContaining({ title: "A" }),
+    queue: [expect.objectContaining({ title: "B" })],
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("queue loop rotates finished tracks to the end", async () => {
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: value,
+      canonicalUrl: value,
+      sourceId: value.includes("b") ? "bbbbbbbbbbb" : "aaaaaaaaaaa",
+      title: value.includes("b") ? "B" : "A",
+      artist: "Artist",
+      duration: 100,
+    }),
+    prepare: async (metadata: { sourceId: string }) =>
+      `${metadata.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await Bun.sleep(0);
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://b"),
+  );
+  await Bun.sleep(0);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    loop: { mode: { selected_option: { value: "queue" } } },
+  };
+  await result.coordinator.action(enable);
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  const status = result.coordinator.agentStatus("host");
+  expect(status).toMatchObject({
+    nowPlaying: expect.objectContaining({ title: "B" }),
+    queue: [expect.objectContaining({ title: "A" })],
+  });
+  expect((status as { queue: { id: string }[] }).queue[0]!.id).not.toBe(first);
+  await result.coordinator.endFromSlack();
+});
+
+test("queue loop keeps the shared media file until the last copy goes", async () => {
+  const directory = `${tmpdir()}/huddlefm-loop-${crypto.randomUUID()}`;
+  await mkdir(directory, { recursive: true });
+  const filePath = `${directory}/a.opus`;
+  await Bun.write(filePath, "audio");
+  const tracks = {
+    resolve: async (value: string) => {
+      const letter = value.slice(-1);
+      return {
+        sourceInput: value,
+        canonicalUrl: value,
+        sourceId: letter.repeat(11),
+        title: letter.toUpperCase(),
+        artist: "Artist",
+        duration: 100,
+      };
+    },
+    prepare: async (metadata: { sourceId: string }) =>
+      `${directory}/${metadata.sourceId[0]}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await Bun.sleep(0);
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://b"),
+  );
+  await Bun.sleep(0);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = { loop: { mode: { selected_option: { value: "queue" } } } };
+  await result.coordinator.action(enable);
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+
+  // The looped copy shares the finished track's prepared file, so removing it
+  // must not delete the file the history entry still plays.
+  const copy = (
+    result.coordinator.agentStatus("host") as { queue: { id: string }[] }
+  ).queue[0]!.id;
+  expect(copy).not.toBe(first);
+  expect(await result.coordinator.agentRemove("host", copy)).toMatchObject({
+    ok: true,
+  });
+  expect(await Bun.file(filePath).exists()).toBe(true);
+
+  // An entry that is the only holder of its file still releases it.
+  await Bun.write(`${directory}/c.opus`, "audio");
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://c"),
+  );
+  await Bun.sleep(0);
+  const solo = (
+    result.coordinator.agentStatus("host") as {
+      queue: { id: string; title: string }[];
+    }
+  ).queue.find((entry) => entry.title === "C")!.id;
+  expect(await result.coordinator.agentRemove("host", solo)).toMatchObject({
+    ok: true,
+  });
+  expect(await Bun.file(`${directory}/c.opus`).exists()).toBe(false);
+
+  await result.coordinator.endFromSlack();
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("track loop suppresses autoplay recommendations", async () => {
+  let recommendations = 0;
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/a",
+      canonicalUrl: "https://example.com/a",
+      sourceId: "aaaaaaaaaaa",
+      title: "A",
+      artist: "Artist",
+    }),
+    prepare: async () => "a.opus",
+    upNextIds: async () => (recommendations++, ["bbbbbbbbbbb"]),
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  await Bun.sleep(0);
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    autoplay: { mode: { selected_option: { value: "related" } } },
+    loop: { mode: { selected_option: { value: "track" } } },
+  };
+  await result.coordinator.action(enable);
+  await Bun.sleep(10);
+  expect(recommendations).toBe(0);
   await result.coordinator.endFromSlack();
 });
 
@@ -1958,7 +2202,7 @@ test("delegated users only see and save settings they can configure", async () =
   await test.coordinator.action(open);
   const modal = JSON.stringify(test.modals.at(-1));
   expect(modal).toContain('"text":"Session"');
-  for (const block of ["volume", "display", "autoplay", "anchor"])
+  for (const block of ["volume", "display", "autoplay", "loop", "anchor"])
     expect(modal).toContain(`"block_id":"${block}"`);
   for (const block of [
     "session_actions",
@@ -4006,6 +4250,7 @@ test("settings selects offer an initial option Slack can match", async () => {
   expect(selects.map((block) => block.block_id)).toEqual([
     "display",
     "autoplay",
+    "loop",
     "transition",
     "permission_preset",
     "scrobbling_mode",

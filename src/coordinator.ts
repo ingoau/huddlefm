@@ -18,8 +18,11 @@ import {
   autoplayModes,
   autoplayModeLabels,
   parseAutoplayMode,
+  loopModes,
+  loopModeLabels,
   type AutoplayMode,
   type DisplayMode,
+  type LoopMode,
   type SavedSession,
   type ScrobblingMode,
   type TransitionMode,
@@ -118,6 +121,7 @@ export class Coordinator {
   private volume: number;
   private displayMode: DisplayMode = "default";
   private autoplayMode: AutoplayMode = "off";
+  private loopMode: LoopMode = "off";
   private transitionMode: TransitionMode = "none";
   private autoplayGeneration = 0;
   private autoplayPending = false;
@@ -232,6 +236,7 @@ export class Coordinator {
       this.playbackSeconds = restored.playbackSeconds;
       this.listenedSeconds = restored.listenedSeconds ?? 0;
       this.autoplayMode = restored.autoplay;
+      this.loopMode = restored.loopMode;
       this.transitionMode = restored.transitionMode;
       this.displayMode = restored.displayMode;
       this.anchorEnabled = restored.anchorEnabled;
@@ -628,6 +633,7 @@ export class Coordinator {
       playbackSeconds: this.playbackSeconds,
       displayMode: this.displayMode,
       autoplay: this.autoplayMode,
+      loopMode: this.loopMode,
       transitionMode: this.transitionMode,
       anchorEnabled: this.anchorEnabled,
       hostId: this.hostId ?? null,
@@ -883,7 +889,7 @@ export class Coordinator {
       });
       this.store.incrementUsage("removed");
       this.queueChanged();
-      if (entry.filePath) await removePreparedMedia(entry.filePath);
+      await this.releaseMedia(entry);
       await this.render();
       this.syncPreloads();
       this.refreshIdle();
@@ -984,13 +990,14 @@ export class Coordinator {
         };
       this.autoplayGeneration++;
       this.autoplayPending = false;
-      const count = this.queue.length;
-      for (const entry of this.queue) {
+      const cleared = this.queue;
+      const count = cleared.length;
+      this.queue = [];
+      for (const entry of cleared) {
         this.preparations.get(entry.id)?.abort();
         this.store.removeTrack(entry.id);
-        if (entry.filePath) await removePreparedMedia(entry.filePath);
       }
-      this.queue = [];
+      await this.releaseMedia(...cleared);
       this.queueChanged();
       this.audit.record("queue.cleared", userId, {
         sessionId: this.id,
@@ -1226,6 +1233,7 @@ export class Coordinator {
       displayMode?: DisplayMode;
       autoplay?: boolean;
       autoplayMode?: AutoplayMode;
+      loopMode?: LoopMode;
       transitionMode?: TransitionMode;
       anchorEnabled?: boolean;
       permissionPreset?: keyof typeof permissionPresets;
@@ -1255,6 +1263,7 @@ export class Coordinator {
         (patch.displayMode !== undefined ||
           patch.autoplay !== undefined ||
           patch.autoplayMode !== undefined ||
+          patch.loopMode !== undefined ||
           patch.transitionMode !== undefined ||
           patch.anchorEnabled !== undefined) &&
         !this.can(userId, "configure-settings")
@@ -1273,6 +1282,8 @@ export class Coordinator {
         !transitionModes.includes(patch.transitionMode)
       )
         return { ok: false as const, error: "Invalid transition mode." };
+      if (patch.loopMode !== undefined && !loopModes.includes(patch.loopMode))
+        return { ok: false as const, error: "Invalid loop mode." };
       const permissionPreset =
         patch.permissionPreset === undefined
           ? undefined
@@ -1317,6 +1328,13 @@ export class Coordinator {
         this.store.setSession(this.id, { autoplay: nextAutoplay });
         if (nextAutoplay === "off") await this.removeQueuedAutoplay();
         changed.push(`autoplay=${nextAutoplay}`);
+      }
+      if (patch.loopMode !== undefined && patch.loopMode !== this.loopMode) {
+        this.loopMode = patch.loopMode;
+        this.store.setSession(this.id, { loopMode: patch.loopMode });
+        if (patch.loopMode !== "off") await this.removeQueuedAutoplay();
+        this.syncPreloads();
+        changed.push(`loopMode=${patch.loopMode}`);
       }
       if (patch.transitionMode !== undefined) {
         this.transitionMode = patch.transitionMode;
@@ -1369,6 +1387,7 @@ export class Coordinator {
         changed,
         displayMode: this.displayMode,
         autoplay: this.autoplayMode,
+        loopMode: this.loopMode,
         transitionMode: this.transitionMode,
         anchorEnabled: this.anchorEnabled,
         hostId: this.hostId ?? null,
@@ -1828,6 +1847,7 @@ export class Coordinator {
           displayMode: command.displayMode,
           autoplay: command.autoplay,
           autoplayMode: command.autoplayMode,
+          loopMode: command.loopMode,
           transitionMode: command.transitionMode,
           anchorEnabled: command.anchorEnabled,
         });
@@ -1848,6 +1868,7 @@ export class Coordinator {
       playbackSeconds: status.playbackSeconds,
       displayMode: status.displayMode,
       autoplay: status.autoplay,
+      loopMode: status.loopMode,
       transitionMode: status.transitionMode,
       anchorEnabled: status.anchorEnabled,
       yourCapabilities: status.yourCapabilities,
@@ -2267,6 +2288,7 @@ export class Coordinator {
     const huddleMix = this.autoplayMode === "huddle" && this.recommendations;
     if (
       !this.autoplayOn() ||
+      this.loopMode !== "off" ||
       this.autoplayPending ||
       this.state === "ended" ||
       this.state === "suspended" ||
@@ -2566,12 +2588,30 @@ export class Coordinator {
     this.queueChanged();
   }
 
+  /**
+   * Drops the prepared media of entries that just left the session. Queue loop
+   * hands a finished track's file to its fresh copy, so a file outlives the
+   * entry being dropped whenever another entry still plays it.
+   */
+  private async releaseMedia(...dropped: Entry[]) {
+    const paths = new Set(
+      dropped
+        .map((entry) => entry.filePath)
+        .filter((filePath): filePath is string => Boolean(filePath)),
+    );
+    if (!paths.size) return;
+    for (const entry of [this.current, ...this.queue, ...this.history])
+      if (entry && entry.filePath && !dropped.includes(entry))
+        paths.delete(entry.filePath);
+    await Promise.all([...paths].map((path) => removePreparedMedia(path)));
+  }
+
   private async destroyQueuedAutoplay(automatic: Entry[]) {
     for (const entry of automatic) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
-      if (entry.filePath) await removePreparedMedia(entry.filePath);
     }
+    await this.releaseMedia(...automatic);
   }
 
   private async rollbackAgentAdd(
@@ -2728,9 +2768,12 @@ export class Coordinator {
   }
 
   private syncPreloads() {
-    const next = this.queue.find(
-      (entry) => entry.status === "ready" && entry.filePath,
-    );
+    const next =
+      this.loopMode === "track"
+        ? undefined
+        : this.queue.find(
+            (entry) => entry.status === "ready" && entry.filePath,
+          );
     const entries = [next, this.history.at(-1)].filter(
       (entry, index, all): entry is Entry =>
         Boolean(entry?.filePath) &&
@@ -2787,6 +2830,7 @@ export class Coordinator {
           entryId: this.current.id,
           reason,
           playbackSeconds: this.playbackSeconds,
+          loopMode: this.loopMode,
         },
         "Track advanced",
       );
@@ -2794,9 +2838,41 @@ export class Coordinator {
         reason === "transition"
           ? (this.current.outroSeconds ?? this.current.duration)
           : this.current.duration;
-      if ((reason === "track_ended" || reason === "transition") && end) {
+      const natural = reason === "track_ended" || reason === "transition";
+      if (natural && end) {
         this.playbackScrobbling?.position(end);
         this.listenedSeconds += Math.max(0, end - this.playbackSeconds);
+      }
+      if (natural && this.loopMode === "track") {
+        this.playbackScrobbling?.finish();
+        this.audit.record("track.finished", undefined, {
+          sessionId: this.id,
+          ...auditTrack(this.current),
+          looped: "track",
+        });
+        this.notifyIntegrations("track.finished", {
+          id: this.current.id,
+          title: this.current.title,
+          artist: this.current.artist,
+        });
+        this.playbackSeconds = 0;
+        this.store.setSession(this.id, {
+          listenedSeconds: this.listenedSeconds,
+          playbackSeconds: 0,
+        });
+        this.sendMedia({
+          type: "replay",
+          entryId: this.current.id,
+          introSeconds: this.current.introSeconds ?? 0,
+        });
+        this.playbackScrobbling?.start(this.current, this.participants);
+        this.notifyIntegrations("track.started", {
+          id: this.current.id,
+          title: this.current.title,
+          artist: this.current.artist,
+        });
+        await this.render();
+        return;
       }
       this.playbackScrobbling?.finish();
       const played = [
@@ -2808,7 +2884,7 @@ export class Coordinator {
       this.current.status = played ? "played" : "failed";
       if (played) this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
-      if (reason === "track_ended" || reason === "transition") {
+      if (natural) {
         this.audit.record("track.finished", undefined, {
           sessionId: this.id,
           ...auditTrack(this.current),
@@ -2831,6 +2907,70 @@ export class Coordinator {
           artist: this.current.artist,
           reason,
         });
+      }
+      // A copy needs the finished track's prepared file: nothing schedules
+      // preparation for an entry pushed straight onto the queue, so a copy
+      // without one could never become playable.
+      if (
+        natural &&
+        this.loopMode === "queue" &&
+        played &&
+        this.current.filePath
+      ) {
+        const finished = this.current;
+        const looping: Entry = {
+          sourceInput: finished.sourceInput,
+          canonicalUrl: finished.canonicalUrl,
+          sourceId: finished.sourceId,
+          title: finished.title,
+          artist: finished.artist,
+          ...(finished.album ? { album: finished.album } : {}),
+          ...(finished.duration !== undefined
+            ? { duration: finished.duration }
+            : {}),
+          ...(finished.artwork ? { artwork: finished.artwork } : {}),
+          id: crypto.randomUUID(),
+          requesterId: finished.requesterId,
+          ...(finished.automatic ? { automatic: true } : {}),
+          status: finished.filePath ? "ready" : "queued",
+          ...(finished.filePath ? { filePath: finished.filePath } : {}),
+          ...(finished.introSeconds !== undefined
+            ? { introSeconds: finished.introSeconds }
+            : {}),
+          ...(finished.outroSeconds !== undefined
+            ? { outroSeconds: finished.outroSeconds }
+            : {}),
+          ...(finished.fadeInSeconds !== undefined
+            ? { fadeInSeconds: finished.fadeInSeconds }
+            : {}),
+          ...(finished.fadeOutSeconds !== undefined
+            ? { fadeOutSeconds: finished.fadeOutSeconds }
+            : {}),
+        };
+        this.queue.push(looping);
+        this.store.addTrack({
+          ...looping,
+          sessionId: this.id,
+          status: looping.status,
+        });
+        if (looping.filePath)
+          this.store.setTrack(looping.id, {
+            status: "ready",
+            filePath: looping.filePath,
+            ...(looping.introSeconds !== undefined
+              ? { introSeconds: looping.introSeconds }
+              : {}),
+            ...(looping.outroSeconds !== undefined
+              ? { outroSeconds: looping.outroSeconds }
+              : {}),
+            ...(looping.fadeInSeconds !== undefined
+              ? { fadeInSeconds: looping.fadeInSeconds }
+              : {}),
+            ...(looping.fadeOutSeconds !== undefined
+              ? { fadeOutSeconds: looping.fadeOutSeconds }
+              : {}),
+          });
+        this.queueChanged();
       }
     }
     this.store.setSession(this.id, { listenedSeconds: this.listenedSeconds });
@@ -2995,7 +3135,7 @@ export class Coordinator {
     });
     this.store.incrementUsage("removed");
     this.queueChanged(interaction);
-    if (entry.filePath) await removePreparedMedia(entry.filePath);
+    await this.releaseMedia(entry);
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
@@ -3070,13 +3210,14 @@ export class Coordinator {
     if (!(await this.require(interaction, "clear"))) return;
     this.autoplayGeneration++;
     this.autoplayPending = false;
-    const count = this.queue.length;
-    for (const entry of this.queue) {
+    const cleared = this.queue;
+    const count = cleared.length;
+    this.queue = [];
+    for (const entry of cleared) {
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
-      if (entry.filePath) await removePreparedMedia(entry.filePath);
     }
-    this.queue = [];
+    await this.releaseMedia(...cleared);
     this.queueChanged();
     this.audit.record("queue.cleared", interaction.userId, {
       sessionId: this.id,
@@ -3750,6 +3891,28 @@ export class Coordinator {
             },
             {
               type: "input",
+              block_id: "loop",
+              optional: true,
+              label: plain("Loop"),
+              hint: plain("Repeat the current track or cycle the queue"),
+              element: staticSelect(
+                "mode",
+                loopModes.map((mode) => ({
+                  text: plain(loopModeLabels[mode]),
+                  value: mode,
+                  description: plain(
+                    mode === "track"
+                      ? "Restart the current song when it ends"
+                      : mode === "queue"
+                        ? "Move finished songs back to the end of the queue"
+                        : "Do not repeat",
+                  ),
+                })),
+                this.loopMode,
+              ),
+            },
+            {
+              type: "input",
               block_id: "transition",
               label: plain("Transitions"),
               element: staticSelect(
@@ -4256,6 +4419,7 @@ export class Coordinator {
       hostId: this.hostId,
       volume: this.volume,
       autoplay: this.autoplayMode,
+      loopMode: this.loopMode,
       transitionMode: this.transitionMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
@@ -4291,6 +4455,16 @@ export class Coordinator {
           this.autoplayMode = autoplayMode;
           this.store.setSession(this.id, { autoplay: autoplayMode });
           if (autoplayMode === "off") await this.removeQueuedAutoplay();
+        }
+      }
+      const loopMode = interaction.state.loop?.mode?.selected_option?.value as
+        LoopMode | undefined;
+      if (loopMode && loopModes.includes(loopMode)) {
+        if (loopMode !== this.loopMode) {
+          this.loopMode = loopMode;
+          this.store.setSession(this.id, { loopMode });
+          if (loopMode !== "off") await this.removeQueuedAutoplay();
+          this.syncPreloads();
         }
       }
       const transitionMode = interaction.state.transition?.mode?.selected_option
@@ -4408,6 +4582,7 @@ export class Coordinator {
       hostId: this.hostId,
       volume: this.volume,
       autoplay: this.autoplayMode,
+      loopMode: this.loopMode,
       displayMode: this.displayMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],

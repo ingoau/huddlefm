@@ -20,12 +20,13 @@ test("persists session and permission defaults", () => {
   expect(
     store.db
       .query(
-        "SELECT status, autoplay, transition_mode, display_mode, anchor_enabled FROM sessions",
+        "SELECT status, autoplay, loop_mode, transition_mode, display_mode, anchor_enabled FROM sessions",
       )
       .get(),
   ).toEqual({
     status: "ready",
     autoplay: "off",
+    loop_mode: "off",
     transition_mode: "none",
     display_mode: "default",
     anchor_enabled: 0,
@@ -33,6 +34,10 @@ test("persists session and permission defaults", () => {
   store.setSession("session", { autoplay: "related" });
   expect(store.db.query("SELECT autoplay FROM sessions").get()).toEqual({
     autoplay: "related",
+  });
+  store.setSession("session", { loopMode: "queue" });
+  expect(store.db.query("SELECT loop_mode FROM sessions").get()).toEqual({
+    loop_mode: "queue",
   });
   store.setSession("session", { transitionMode: "gapless" });
   expect(store.db.query("SELECT transition_mode FROM sessions").get()).toEqual({
@@ -337,6 +342,7 @@ test("restores suspended sessions for three minutes", () => {
   });
   store.setSession("session", {
     autoplay: "related",
+    loopMode: "track",
     transitionMode: "gapless",
     playbackSeconds: 42,
     listenedSeconds: 84,
@@ -365,6 +371,7 @@ test("restores suspended sessions for three minutes", () => {
       playbackSeconds: 42,
       listenedSeconds: 84,
       autoplay: "related",
+      loopMode: "track",
       transitionMode: "gapless",
       displayMode: "lyrics",
       anchorEnabled: false,

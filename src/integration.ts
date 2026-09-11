@@ -2,6 +2,7 @@ import {
   autoplayModes,
   capabilities,
   displayModes,
+  loopModes,
   transitionModes,
 } from "./store.ts";
 import { confirm, permissionLabels, plain } from "./coordinator-ui.ts";
@@ -70,6 +71,7 @@ export type IntegrationCommand = {
   displayMode?: (typeof displayModes)[number];
   autoplay?: boolean;
   autoplayMode?: (typeof autoplayModes)[number];
+  loopMode?: (typeof loopModes)[number];
   transitionMode?: (typeof transitionModes)[number];
   anchorEnabled?: boolean;
 };
@@ -176,6 +178,16 @@ export function parseIntegrationMessage(text: string): IntegrationParseResult {
     autoplayModes.includes(body.autoplayMode as (typeof autoplayModes)[number])
   )
     command.autoplayMode = body.autoplayMode as (typeof autoplayModes)[number];
+  if (
+    typeof body.loopMode === "string" &&
+    loopModes.includes(body.loopMode as (typeof loopModes)[number])
+  )
+    command.loopMode = body.loopMode as (typeof loopModes)[number];
+  if (
+    typeof body.loop === "string" &&
+    loopModes.includes(body.loop as (typeof loopModes)[number])
+  )
+    command.loopMode = body.loop as (typeof loopModes)[number];
   if (
     typeof body.transitionMode === "string" &&
     transitionModes.includes(
