@@ -493,6 +493,9 @@ export class TrackCatalog {
     return (await this.upNextTracks(videoId)).map((track) => track.sourceId);
   }
 
+  // ytmusic-api's up-next rows do not match its own types: at runtime
+  // `artists` is a plain string, `duration` is "m:ss", and there is a single
+  // `thumbnail`. Accept every shape seen so far.
   async upNextTracks(videoId: string): Promise<TrackMetadata[]> {
     const results: unknown = await this.music.getUpNexts(videoId);
     if (!Array.isArray(results)) return [];
@@ -501,17 +504,21 @@ export class TrackCatalog {
       const row = result as {
         videoId?: unknown;
         title?: unknown;
-        artists?: { name?: unknown };
+        artists?: unknown;
+        artist?: unknown;
         duration?: unknown;
+        thumbnail?: unknown;
         thumbnails?: { url?: string }[];
       };
       const id = row.videoId;
       if (typeof id !== "string" || !isYoutubeVideoId(id)) return [];
       const title = typeof row.title === "string" ? row.title : "Untitled";
       const artist =
-        typeof row.artists?.name === "string"
-          ? row.artists.name
-          : "Unknown artist";
+        artistName(row.artists) ?? artistName(row.artist) ?? "Unknown artist";
+      const artwork = artworkUrl(
+        row.thumbnails?.at(-1)?.url ??
+          (typeof row.thumbnail === "string" ? row.thumbnail : undefined),
+      );
       return [
         {
           sourceInput: `https://music.youtube.com/watch?v=${id}`,
@@ -519,8 +526,8 @@ export class TrackCatalog {
           sourceId: id,
           title,
           artist,
-          duration: typeof row.duration === "number" ? row.duration : undefined,
-          artwork: artworkUrl(row.thumbnails?.at(-1)?.url),
+          duration: parseDuration(row.duration),
+          artwork,
         } satisfies TrackMetadata,
       ];
     });
@@ -935,6 +942,29 @@ function songMetadata(
     duration: song.duration ?? undefined,
     artwork: artworkUrl(song.thumbnails.at(-1)?.url),
   };
+}
+
+function artistName(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (Array.isArray(value))
+    return value.map(artistName).filter(Boolean).join(", ") || undefined;
+  if (value && typeof value === "object") {
+    const name = (value as { name?: unknown }).name;
+    return typeof name === "string" ? name.trim() || undefined : undefined;
+  }
+  return undefined;
+}
+
+// Seconds from a number, or a "h:mm:ss" / "m:ss" clock string.
+function parseDuration(value: unknown): number | undefined {
+  if (typeof value === "number")
+    return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || !/^\d+(?::\d{1,2}){0,2}$/.test(value.trim()))
+    return undefined;
+  return value
+    .trim()
+    .split(":")
+    .reduce((total, part) => total * 60 + Number(part), 0);
 }
 
 function artworkUrl(value: unknown) {

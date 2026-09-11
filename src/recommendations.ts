@@ -42,6 +42,7 @@ const listenBrainzFetchCount = 100;
 const listenBrainzSampleCount = 25;
 const recentAddLimit = 25;
 const knownHistoryLimit = 1000;
+const upNextPerSeed = 10;
 
 // Huddle mix autoplay.
 const mixCandidateLimit = 12;
@@ -166,9 +167,15 @@ export function trackKey(title: string, artist: string) {
 
 const creditPattern =
   /\s*[([]\s*(?:feat|ft|featuring|with)\.?\s[^)\]]*[)\]]|\s+(?:feat|ft|featuring)\.?\s.*$/i;
+// YouTube titles carry labels that no scrobbler includes.
+const videoLabelPattern =
+  /\s*[([](?:official\s+)?(?:music\s+|lyric\s+)?(?:video|audio|visuali[sz]er|lyrics|hd|4k)[)\]]/gi;
 
 export function stripCredits(title: string) {
-  return title.replace(creditPattern, "").trim() || title;
+  return (
+    title.replace(videoLabelPattern, "").replace(creditPattern, "").trim() ||
+    title
+  );
 }
 
 export function primaryArtist(artist: string) {
@@ -753,11 +760,20 @@ export class RecommendationCatalog {
       ...similar.flat(),
       ...similarArtists.flat(),
       ...listenBrainz,
-      ...upNext
-        .flat()
-        .map((track) =>
-          contributionFromMetadata(track, userId, "related", 2.2),
-        ),
+      // YouTube returns ~50 up-next rows per seed in relevance order; keep
+      // the head so it seasons the mix rather than swamping it.
+      ...upNext.flatMap((tracks) =>
+        tracks
+          .slice(0, upNextPerSeed)
+          .map((track, index) =>
+            contributionFromMetadata(
+              track,
+              userId,
+              "related",
+              2.2 / (1 + index / 5),
+            ),
+          ),
+      ),
     ];
     const isKnown = (track: TasteTrack & { listened?: boolean }) =>
       track.listened === true ||

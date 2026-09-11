@@ -482,6 +482,65 @@ test("only accepts video IDs from getUpNexts runtime data", async () => {
   ]);
 });
 
+test("upNextTracks reads the shapes ytmusic-api actually returns", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  Reflect.set(catalog, "music", {
+    getUpNexts: async () => [
+      // What the library returns at runtime, despite its types.
+      {
+        type: "SONG",
+        videoId: "euCqAq6BRa4",
+        title: "Let Me Love You (feat. Justin Bieber)",
+        artists: "DJ Snake",
+        duration: "3:26",
+        thumbnail: "https://i.ytimg.com/vi/euCqAq6BRa4/hq720.jpg",
+      },
+      // What its types promise.
+      {
+        videoId: "typedtypedt",
+        title: "Typed",
+        artists: { name: "Typed Artist", artistId: null },
+        duration: 200,
+        thumbnails: [{ url: "https://i.ytimg.com/vi/typedtypedt/small.jpg" }],
+      },
+      {
+        videoId: "arrayarraya",
+        title: "Array",
+        artists: [{ name: "One" }, { name: "Two" }],
+        duration: "1:02:03",
+      },
+      { videoId: "nothingnoth", title: "Nothing" },
+    ],
+  });
+  expect(await catalog.upNextTracks("seedseedsee")).toEqual([
+    expect.objectContaining({
+      sourceId: "euCqAq6BRa4",
+      artist: "DJ Snake",
+      duration: 206,
+      artwork: "https://i.ytimg.com/vi/euCqAq6BRa4/hq720.jpg",
+    }),
+    expect.objectContaining({
+      sourceId: "typedtypedt",
+      artist: "Typed Artist",
+      duration: 200,
+      artwork: "https://i.ytimg.com/vi/typedtypedt/small.jpg",
+    }),
+    expect.objectContaining({
+      sourceId: "arrayarraya",
+      artist: "One, Two",
+      duration: 3723,
+    }),
+    expect.objectContaining({
+      sourceId: "nothingnoth",
+      artist: "Unknown artist",
+      duration: undefined,
+    }),
+  ]);
+});
+
 test("searchSong prefers an artist match from YouTube Music results", async () => {
   const catalog = new TrackCatalog({
     durationSeconds: 1_200,
