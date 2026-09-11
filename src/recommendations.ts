@@ -47,6 +47,13 @@ const knownHistoryLimit = 1000;
 const mixCandidateLimit = 12;
 const mixResolveAttempts = 24;
 const mixDiscoveryLimit = 6;
+const mixPoolDiscoveryWeight = 3;
+const mixSameArtistBoost = 1.4;
+const mixArtistRunLimit = 2;
+const mixArtistRunDamping = 0.5;
+const mixFairnessWeight = 1;
+const skipTrackPenalty = 0.2;
+const skipArtistPenalty = 0.6;
 // Contributions from similarity lookups carry these ids instead of a real
 // listener, so they must not count as a seed.
 const syntheticUsers = new Set(["similar", "related"]);
@@ -89,6 +96,8 @@ export type AutoplayCandidate = {
   score: number;
   seedCount: number;
   discovery: boolean;
+  // Listeners whose taste put this track forward.
+  listenerIds: string[];
   metadata: TrackMetadata;
 };
 
@@ -430,6 +439,12 @@ export class RecommendationCatalog {
     exclude?: Iterable<string | undefined>;
     skipped?: SkipPenalties;
     discover?: boolean;
+    // How many recent autoplay picks each listener's taste contributed to,
+    // so the mix can favour whoever has been underserved.
+    credited?: Record<string, number>;
+    // How many tracks in a row the now-playing artist has had, including
+    // the current one.
+    artistRun?: number;
   }) {
     const excluded = new Set(
       [...(options.exclude ?? [])].filter((id): id is string => Boolean(id)),
@@ -452,6 +467,8 @@ export class RecommendationCatalog {
             .catch(() => [] as TrackMetadata[])
         : Promise.resolve([] as TrackMetadata[]),
     ]);
+    const knownBy = new Map<string, TasteProfile>();
+    listeners.forEach((userId, index) => knownBy.set(userId, profiles[index]!));
     const known = new Set<string>();
     for (const profile of profiles)
       for (const key of profile.known) known.add(key);
@@ -466,9 +483,27 @@ export class RecommendationCatalog {
           0.9 / (index + 1),
         ),
       );
+    // On a discovery turn, each listener's already-resolved Discover pool is
+    // the most personal source there is, and costs nothing to use.
+    const poolDiscoveries = options.discover
+      ? listeners.flatMap((userId) => {
+          const pool = this.pools.get(userId)?.value.discover ?? [];
+          const best = pool[0]?.score || 1;
+          return pool.map((track) => ({
+            ...contributionFromMetadata(
+              track.metadata,
+              userId,
+              "discover",
+              (mixPoolDiscoveryWeight * track.score) / best,
+            ),
+            listened: false,
+          }));
+        })
+      : [];
     const ranked = applySkipPenalties(
       mergeTaste([
         ...contributions,
+        ...poolDiscoveries,
         ...similar,
         ...similarArtists,
         ...relatedNudge,
@@ -481,12 +516,37 @@ export class RecommendationCatalog {
           trackKey(nowPlaying.title, nowPlaying.artist),
     );
     if (nowPlaying) {
-      const playingArtist = normalizeToken(firstArtist(nowPlaying.artist));
+      // Following the same artist makes a nice segue once; after a run it
+      // gets samey.
+      const playingArtist = normalizeToken(primaryArtist(nowPlaying.artist));
+      const sameArtist =
+        (options.artistRun ?? 1) < mixArtistRunLimit
+          ? mixSameArtistBoost
+          : mixArtistRunDamping;
       for (const track of ranked)
-        if (normalizeToken(firstArtist(track.artist)) === playingArtist)
-          track.score *= 1.4;
-      ranked.sort((a, b) => b.score - a.score);
+        if (normalizeToken(primaryArtist(track.artist)) === playingArtist)
+          track.score *= sameArtist;
     }
+    // Lift tracks from listeners whose taste has had fewer recent picks
+    // than the room average. Nobody is penalised for being well served.
+    const credited = options.credited ?? {};
+    const credits = listeners.map((userId) => credited[userId] ?? 0);
+    const averageCredit = credits.length
+      ? credits.reduce((sum, value) => sum + value, 0) / credits.length
+      : 0;
+    for (const track of ranked) {
+      const underserved = Math.max(
+        0,
+        ...track.userIds
+          .filter((userId) => knownBy.has(userId))
+          .map(
+            (userId) =>
+              (averageCredit - (credited[userId] ?? 0)) / (averageCredit + 1),
+          ),
+      );
+      if (underserved > 0) track.score *= 1 + mixFairnessWeight * underserved;
+    }
+    ranked.sort((a, b) => b.score - a.score);
     const recentKeys = new Set(
       (options.recent ?? []).map((track) =>
         trackKey(track.title, track.artist),
@@ -497,6 +557,26 @@ export class RecommendationCatalog {
     );
     const isDiscovery = (track: ScoredTrack) =>
       !known.has(trackKey(track.title, track.artist));
+    // A track counts as a seed for each listener who has actually played it,
+    // which is a stronger signal than merely turning up in their similar
+    // tracks or Discover pool.
+    const playedBy = (track: ScoredTrack) => {
+      const key = trackKey(track.title, track.artist);
+      return listeners.filter((userId) => knownBy.get(userId)!.known.has(key));
+    };
+    const finish = (
+      candidate: AutoplayCandidate & { track: ScoredTrack },
+      discovery: boolean,
+    ): AutoplayCandidate => {
+      const { track, ...rest } = candidate;
+      const played = playedBy(track);
+      return {
+        ...rest,
+        discovery,
+        seedCount: Math.max(1, played.length),
+        listenerIds: track.userIds.filter((userId) => knownBy.has(userId)),
+      };
+    };
     const bySeeds = (a: AutoplayCandidate, b: AutoplayCandidate) =>
       b.seedCount - a.seedCount || b.score - a.score;
     if (!options.discover) {
@@ -507,12 +587,8 @@ export class RecommendationCatalog {
         mixResolveAttempts,
       );
       return resolved
-        .map((candidate) => ({
-          ...candidate,
-          discovery: isDiscovery(candidate.track),
-        }))
-        .sort(bySeeds)
-        .map(({ track: _, ...candidate }) => candidate);
+        .map((candidate) => finish(candidate, isDiscovery(candidate.track)))
+        .sort(bySeeds);
     }
     // A discovery turn: lead with tracks nobody in the huddle has listened
     // to, then fall back to the usual ranking.
@@ -534,18 +610,30 @@ export class RecommendationCatalog {
     );
     return [
       ...discoveries
-        .map(({ track: _, ...candidate }) => ({
-          ...candidate,
-          discovery: true,
-        }))
+        .map((candidate) => finish(candidate, true))
         .sort((a, b) => b.score - a.score),
-      ...rest
-        .map(({ track: _, ...candidate }) => ({
-          ...candidate,
-          discovery: false,
-        }))
-        .sort(bySeeds),
+      ...rest.map((candidate) => finish(candidate, false)).sort(bySeeds),
     ];
+  }
+
+  // A listener skipped a track: push it and, more gently, its artist down
+  // in their own pools so it does not come straight back in the modal.
+  penalize(userId: string, track: { title: string; artist: string }) {
+    const pool = this.pools.get(userId)?.value;
+    if (!pool) return;
+    const key = trackKey(track.title, track.artist);
+    const artist = normalizeToken(primaryArtist(track.artist));
+    const punish = (entry: PoolTrack) => {
+      if (entry.key === key) entry.score *= skipTrackPenalty;
+      else if (normalizeToken(primaryArtist(entry.metadata.artist)) === artist)
+        entry.score *= skipArtistPenalty;
+    };
+    pool.discover.forEach(punish);
+    pool.favourites.forEach(punish);
+    const keep = (entry: PlayableRecommendation) =>
+      trackKey(entry.title, entry.artist) !== key;
+    pool.sample.discover = pool.sample.discover.filter(keep);
+    pool.sample.favourites = pool.sample.favourites.filter(keep);
   }
 
   private userTaste(userId: string) {
@@ -834,6 +922,7 @@ export class RecommendationCatalog {
             track.userIds.filter((id) => !syntheticUsers.has(id)).length,
           ),
           discovery: false,
+          listenerIds: track.userIds.filter((id) => !syntheticUsers.has(id)),
           metadata,
           track,
         });
