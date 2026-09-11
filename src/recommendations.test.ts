@@ -487,6 +487,152 @@ test("a discovery turn leads huddle mix with tracks nobody has listened to", asy
   store.close();
 });
 
+test("a refresh during an in-flight build still rebuilds afterwards", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Seed", "Band", "seedseedsee");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let builds = 0;
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async () => undefined,
+    upNextTracks: async () => {
+      builds++;
+      if (builds === 1) await gate;
+      return [];
+    },
+  });
+  const first = catalog.prefetchUser("host");
+  const refreshed = catalog.refreshUser("host");
+  release();
+  await first;
+  await refreshed;
+  expect(builds).toBe(2);
+  const pools = Reflect.get(catalog, "pools") as Map<
+    string,
+    { expires: number; dirty?: boolean }
+  >;
+  expect(pools.get("host")!.expires).toBeGreaterThan(Date.now());
+  expect(pools.get("host")!.dirty).toBeFalsy();
+  store.close();
+});
+
+test("a failed Last.fm lookup is retried soon while not-found sticks", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  let similarCalls = 0;
+  let topTrackCalls = 0;
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    (async (input) => {
+      const url = new URL(String(input));
+      const method = url.searchParams.get("method");
+      if (method === "user.getTopTracks")
+        return Response.json({
+          toptracks: {
+            track: [{ name: "Seed", artist: { name: "Band" }, playcount: "5" }],
+          },
+        });
+      if (method === "user.getTopArtists")
+        return Response.json({
+          topartists: { artist: [{ name: "Ghost", playcount: "9" }] },
+        });
+      if (method === "track.getSimilar") {
+        similarCalls++;
+        if (similarCalls === 1) return new Response("", { status: 503 });
+        return Response.json({
+          similartracks: {
+            track: [{ name: "Recovered", artist: { name: "Other" } }],
+          },
+        });
+      }
+      if (method === "artist.getSimilar")
+        return Response.json({
+          similarartists: { artist: [{ name: "Neighbour", match: "0.8" }] },
+        });
+      if (method === "artist.getTopTracks") {
+        topTrackCalls++;
+        return Response.json({
+          error: 6,
+          message: "The artist you supplied could not be found",
+        });
+      }
+      return Response.json({});
+    }) as typeof fetch,
+  );
+  await catalog.prefetchUser("host");
+  expect(catalog.userRecommendations("host").discover).toHaveLength(0);
+  expect(similarCalls).toBe(1);
+  expect(topTrackCalls).toBe(1);
+  // Still within the failure TTL: no retry yet.
+  await catalog.refreshUser("host");
+  expect(similarCalls).toBe(1);
+  // Once the short failure TTL lapses the outage is retried, but the
+  // not-found answer is kept for the full TTL.
+  const lookups = Reflect.get(catalog, "lookups") as {
+    entries: Map<string, { expires: number }>;
+  };
+  for (const [key, entry] of Reflect.get(lookups, "entries") as Map<
+    string,
+    { expires: number }
+  >)
+    if (key.startsWith("similar\0")) entry.expires = 0;
+  await catalog.refreshUser("host");
+  expect(similarCalls).toBe(2);
+  expect(topTrackCalls).toBe(1);
+  expect(
+    catalog.userRecommendations("host").discover.map((t) => t.title),
+  ).toEqual(["Recovered"]);
+  store.close();
+});
+
+test("an evicted recommendation id stays resolvable for a grace period", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Seed", "Band", "seedseedsee");
+  let round = 0;
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async () => undefined,
+    upNextTracks: async () => [
+      round === 0
+        ? {
+            sourceInput: "https://music.youtube.com/watch?v=firstfirst1",
+            canonicalUrl: "https://music.youtube.com/watch?v=firstfirst1",
+            sourceId: "firstfirst1",
+            title: "First",
+            artist: "Other",
+          }
+        : {
+            sourceInput: "https://music.youtube.com/watch?v=secondsecon",
+            canonicalUrl: "https://music.youtube.com/watch?v=secondsecon",
+            sourceId: "secondsecon",
+            title: "Second",
+            artist: "Other",
+          },
+    ],
+  });
+  await catalog.prefetchUser("host");
+  const first = catalog.userRecommendations("host").discover[0]!;
+  expect(first.title).toBe("First");
+  // The session played it, so the next build drops it from the pool.
+  catalog.userRecommendations("host", [first.sourceId]);
+  round = 1;
+  await catalog.prefetchUser("host");
+  expect(
+    catalog.userRecommendations("host").discover.map((t) => t.title),
+  ).toEqual(["Second"]);
+  expect(catalog.recommendation(first.id)?.title).toBe("First");
+  const evicted = Reflect.get(catalog, "evicted") as Map<string, number>;
+  evicted.set(first.id, Date.now() - 31 * 60_000);
+  await catalog.refreshUser("host");
+  expect(catalog.recommendation(first.id)).toBeUndefined();
+  store.close();
+});
+
 test("trackKey ignores punctuation and case", () => {
   expect(trackKey("Karma Police!", "Radiohead")).toBe(
     trackKey("karma police", "RADIOHEAD"),

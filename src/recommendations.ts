@@ -14,7 +14,9 @@ const listenBrainzEndpoint = "https://api.listenbrainz.org/1";
 const tasteTtlMs = 15 * 60_000;
 const poolTtlMs = 5 * 60_000;
 const lookupTtlMs = 24 * 60 * 60_000;
+const lookupFailureTtlMs = 5 * 60_000;
 const lookupCap = 5_000;
+const evictedGraceMs = 30 * 60_000;
 const requestTimeoutMs = 8_000;
 const searchConcurrency = 3;
 
@@ -128,6 +130,9 @@ type CacheEntry<T> = {
   value: T;
   expires: number;
   inflight?: Promise<T>;
+  // Invalidated while a load was in flight: that load's result is already
+  // out of date, so store it expired.
+  dirty?: boolean;
 };
 
 export function trackKey(title: string, artist: string) {
@@ -237,13 +242,16 @@ export function weightedSample<T>(
 
 // A bounded, expiring memo for lookups whose answers barely change: search
 // results, similar tracks and artists. Misses are remembered too so an
-// unresolvable track does not cost a search on every build.
+// unresolvable track does not cost a search on every build, but a failed
+// lookup is only remembered briefly so an outage does not blank a seed for
+// a day.
 class Memo<T> {
   private entries = new Map<string, { value: T; expires: number }>();
 
   constructor(
     private ttlMs: number,
     private cap: number,
+    private failureTtlMs = ttlMs,
   ) {}
 
   get(key: string) {
@@ -256,9 +264,9 @@ class Memo<T> {
     return entry;
   }
 
-  set(key: string, value: T) {
+  set(key: string, value: T, ttlMs = this.ttlMs) {
     this.entries.delete(key);
-    this.entries.set(key, { value, expires: Date.now() + this.ttlMs });
+    this.entries.set(key, { value, expires: Date.now() + ttlMs });
     while (this.entries.size > this.cap) {
       const oldest = this.entries.keys().next().value;
       if (oldest === undefined) break;
@@ -266,12 +274,18 @@ class Memo<T> {
     }
   }
 
-  async load(key: string, load: () => Promise<T>) {
+  async load(key: string, load: () => Promise<T>, fallback: T) {
     const entry = this.get(key);
     if (entry) return entry.value;
-    const value = await load();
-    this.set(key, value);
-    return value;
+    try {
+      const value = await load();
+      this.set(key, value);
+      return value;
+    } catch (error) {
+      log.warn({ event: "lookup_failed", key, err: error }, "Lookup failed");
+      this.set(key, fallback, this.failureTtlMs);
+      return fallback;
+    }
   }
 }
 
@@ -279,15 +293,23 @@ export class RecommendationCatalog {
   private taste = new Map<string, CacheEntry<TasteProfile>>();
   private pools = new Map<string, CacheEntry<UserPool>>();
   private playable = new Map<string, TrackMetadata>();
+  // Ids dropped from a pool stay resolvable for a while, since a modal that
+  // was open when the rebuild landed may still submit them.
+  private evicted = new Map<string, number>();
   private consumed = new Map<string, Set<string>>();
   private searches = new Memo<TrackMetadata | undefined>(
     lookupTtlMs,
     lookupCap,
   );
-  private lookups = new Memo<TasteTrack[]>(lookupTtlMs, lookupCap);
+  private lookups = new Memo<TasteTrack[]>(
+    lookupTtlMs,
+    lookupCap,
+    lookupFailureTtlMs,
+  );
   private artistLookups = new Memo<{ name: string; match: number }[]>(
     lookupTtlMs,
     lookupCap,
+    lookupFailureTtlMs,
   );
   private recordings = new Memo<TasteTrack | undefined>(lookupTtlMs, lookupCap);
   private random: () => number;
@@ -324,9 +346,13 @@ export class RecommendationCatalog {
   // version keeps serving.
   refreshUser(userId: string) {
     const taste = this.taste.get(userId);
-    if (taste) taste.expires = 0;
+    if (taste) Object.assign(taste, { expires: 0, dirty: true });
     const pool = this.pools.get(userId);
-    if (pool) pool.expires = 0;
+    if (pool) Object.assign(pool, { expires: 0, dirty: true });
+    // A build already in flight started before this change; run another one
+    // behind it.
+    if (pool?.inflight)
+      return pool.inflight.then(() => this.prefetchUser(userId));
     return this.prefetchUser(userId);
   }
 
@@ -634,11 +660,19 @@ export class RecommendationCatalog {
       favouritesResolveAttempts,
       excludedIds,
     );
+    const now = Date.now();
+    for (const [id, evictedAt] of this.evicted)
+      if (now - evictedAt > evictedGraceMs) {
+        this.evicted.delete(id);
+        this.playable.delete(id);
+      }
     const kept = new Set([...discover, ...favourites].map((track) => track.id));
     for (const track of [...previous.discover, ...previous.favourites])
-      if (!kept.has(track.id)) this.playable.delete(track.id);
-    for (const track of [...discover, ...favourites])
+      if (!kept.has(track.id)) this.evicted.set(track.id, now);
+    for (const track of [...discover, ...favourites]) {
+      this.evicted.delete(track.id);
       this.playable.set(track.id, track.metadata);
+    }
     const sample = {
       discover: weightedSample(
         discover,
@@ -850,20 +884,24 @@ export class RecommendationCatalog {
       return Promise.resolve([] as TasteContribution[]);
     const seed = firstArtist(artist);
     return this.lookups
-      .load(`similar\0${trackKey(title, seed)}`, async () => {
-        const result = await this.lastFm("track.getSimilar", {
-          track: title,
-          artist: seed,
-          limit: "20",
-        }).catch(() => undefined);
-        if (!result) return [];
-        return asArray(
-          (result.similartracks as { track?: unknown })?.track,
-        ).flatMap((row) => {
-          const track = lastFmTrack(row);
-          return track ? [track] : [];
-        });
-      })
+      .load(
+        `similar\0${trackKey(title, seed)}`,
+        async () => {
+          const result = await this.lastFm("track.getSimilar", {
+            track: title,
+            artist: seed,
+            limit: "20",
+          }).catch(lastFmNotFound);
+          if (!result) return [];
+          return asArray(
+            (result.similartracks as { track?: unknown })?.track,
+          ).flatMap((row) => {
+            const track = lastFmTrack(row);
+            return track ? [track] : [];
+          });
+        },
+        [],
+      )
       .then((tracks) =>
         tracks.map((track, index) => ({
           userId: "similar",
@@ -886,7 +924,7 @@ export class RecommendationCatalog {
         const result = await this.lastFm("artist.getSimilar", {
           artist: seed,
           limit: String(similarArtistsPerSeed),
-        }).catch(() => undefined);
+        }).catch(lastFmNotFound);
         if (!result) return [];
         return asArray(
           (result.similarartists as { artist?: unknown })?.artist,
@@ -897,6 +935,7 @@ export class RecommendationCatalog {
           return [{ name, match: match > 0 ? match : 0.5 }];
         });
       },
+      [],
     );
     const perArtist = await Promise.all(
       neighbours.map(async (neighbour) => {
@@ -906,7 +945,7 @@ export class RecommendationCatalog {
             const result = await this.lastFm("artist.getTopTracks", {
               artist: neighbour.name,
               limit: String(tracksPerSimilarArtist),
-            }).catch(() => undefined);
+            }).catch(lastFmNotFound);
             if (!result) return [];
             return asArray(
               (result.toptracks as { track?: unknown })?.track,
@@ -915,6 +954,7 @@ export class RecommendationCatalog {
               return track ? [track] : [];
             });
           },
+          [],
         );
         return tracks.map((track, index) => ({
           userId: "similar",
@@ -1068,7 +1108,10 @@ export class RecommendationCatalog {
       url.searchParams.set(key, value);
     const result = await this.json(url.href);
     if (!result || result.error)
-      throw new Error(String(result?.message ?? "Last.fm request failed"));
+      throw new LastFmError(
+        String(result?.message ?? "Last.fm request failed"),
+        Number(result?.error ?? 0),
+      );
     return result;
   }
 
@@ -1097,7 +1140,8 @@ export class RecommendationCatalog {
       return Promise.resolve(current.value);
     const inflight = load()
       .then((value) => {
-        cache.set(key, { value, expires: Date.now() + ttlMs });
+        const dirty = cache.get(key)?.dirty ?? false;
+        cache.set(key, { value, expires: dirty ? 0 : Date.now() + ttlMs });
         return value;
       })
       .catch((error) => {
@@ -1116,6 +1160,22 @@ export class RecommendationCatalog {
     });
     return inflight;
   }
+}
+
+class LastFmError extends Error {
+  constructor(
+    message: string,
+    readonly code: number,
+  ) {
+    super(message);
+  }
+}
+
+// "Not found" is a real answer worth remembering for the full memo TTL;
+// anything else is an outage and should be retried soon.
+function lastFmNotFound(error: unknown) {
+  if (error instanceof LastFmError && error.code === 6) return undefined;
+  throw error;
 }
 
 function emptyProfile(): TasteProfile {
