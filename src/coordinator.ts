@@ -3376,9 +3376,6 @@ export class Coordinator {
                 block_id: "recommend",
                 optional: true,
                 label: plain("Recommended for you"),
-                hint: plain(
-                  "Discover is new to you; favourites come from Last.fm, ListenBrainz, and songs you've added",
-                ),
                 element: {
                   type: "static_select",
                   action_id: "selection",
