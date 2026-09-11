@@ -59,6 +59,52 @@ type Body = {
 
 export type Interaction = ReturnType<typeof normalizeInteraction>;
 
+// Slack answers WebSocket pings but never sends application frames on an idle
+// Socket Mode connection, so a half-open TCP link looks identical to a quiet
+// one. Pinging on an interval and terminating when pongs stop is the only way
+// to notice the server is gone; terminate() fires "close", which reconnects.
+export const heartbeatIntervalMs = 10_000;
+export const heartbeatTimeoutMs = 30_000;
+
+// Bun's client WebSocket extends the DOM interface with ping frames, pong
+// events, and terminate(); the DOM lib types do not know about them.
+export type HeartbeatSocket = {
+  ping(): void;
+  terminate(): void;
+  addEventListener(type: "pong", listener: () => void): void;
+};
+
+export function startHeartbeat(
+  socket: HeartbeatSocket,
+  options: {
+    intervalMs?: number;
+    timeoutMs?: number;
+    onStale?: (silentMs: number) => void;
+  } = {},
+) {
+  const intervalMs = options.intervalMs ?? heartbeatIntervalMs;
+  const timeoutMs = options.timeoutMs ?? heartbeatTimeoutMs;
+  let lastPongAt = Date.now();
+  socket.addEventListener("pong", () => {
+    lastPongAt = Date.now();
+  });
+  const timer = setInterval(() => {
+    const silentMs = Date.now() - lastPongAt;
+    if (silentMs >= timeoutMs) {
+      clearInterval(timer);
+      options.onStale?.(silentMs);
+      socket.terminate();
+      return;
+    }
+    try {
+      socket.ping();
+    } catch {
+      // A socket that can no longer send will surface a close event itself.
+    }
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
 export function ackEnvelope(
   socket: Pick<WebSocket, "send"> & Partial<Pick<WebSocket, "readyState">>,
   envelopeId: string,
@@ -111,6 +157,7 @@ export class SlackAppAdapter {
   private names = new Map<string, Promise<string>>();
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
+  private stopHeartbeat?: () => void;
   private stopping = false;
   onAction?: (interaction: Interaction) => void | Promise<void>;
   onSuggestion?: (interaction: Interaction) => Promise<unknown[]>;
@@ -128,6 +175,7 @@ export class SlackAppAdapter {
   async stop() {
     this.stopping = true;
     clearTimeout(this.reconnectTimer);
+    this.stopHeartbeat?.();
     this.socket?.close();
     log.info({ event: "stopped" }, "Slack app stopped");
   }
@@ -392,6 +440,17 @@ export class SlackAppAdapter {
         }
         if (envelope.type === "hello") {
           this.reconnectAttempts = 0;
+          this.stopHeartbeat?.();
+          this.stopHeartbeat = startHeartbeat(
+            socket as unknown as HeartbeatSocket,
+            {
+              onStale: (silentMs) =>
+                log.warn(
+                  { event: "connection_stale", silentMs },
+                  "Slack socket stopped answering pings, terminating",
+                ),
+            },
+          );
           log.info(
             {
               event: "connected",
@@ -400,6 +459,14 @@ export class SlackAppAdapter {
             "Slack Socket Mode connected",
           );
           resolve();
+        } else if (envelope.type === "disconnect") {
+          // Slack closes the connection shortly after this; closing it
+          // ourselves reconnects without waiting on the server's FIN.
+          log.info(
+            { event: "disconnect_requested", reason: envelope.reason },
+            "Slack requested Socket Mode disconnect",
+          );
+          socket.close();
         } else void this.handleEnvelope(socket, envelope);
       });
       socket.addEventListener("error", () =>
@@ -408,6 +475,8 @@ export class SlackAppAdapter {
       socket.addEventListener("close", () => {
         if (this.socket !== socket) return;
         this.socket = undefined;
+        this.stopHeartbeat?.();
+        this.stopHeartbeat = undefined;
         if (!this.stopping)
           log.warn({ event: "connection_closed" }, "Slack socket closed");
         this.scheduleReconnect();
