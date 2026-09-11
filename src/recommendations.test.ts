@@ -633,6 +633,199 @@ test("an evicted recommendation id stays resolvable for a grace period", async (
   store.close();
 });
 
+test("re-recommended tracks are bumped, not stacked, and newcomers keep a share", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  let round = 0;
+  const incumbents = Array.from({ length: 35 }, (_, i) => ({
+    name: `Incumbent ${i + 1}`,
+    artist: { name: "Regular" },
+    match: "1.0",
+  }));
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      // A fresh seed each round so getSimilar is asked again rather than
+      // served from the memo.
+      "user.getTopTracks": () => ({
+        toptracks: {
+          track: [
+            {
+              name: `Seed ${round}`,
+              artist: { name: "Band" },
+              playcount: "10",
+            },
+          ],
+        },
+      }),
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      "track.getSimilar": () => ({
+        similartracks: {
+          track:
+            round < 2
+              ? incumbents
+              : [
+                  ...incumbents,
+                  { name: "Newcomer", artist: { name: "Fresh" }, match: "0.1" },
+                ],
+        },
+      }),
+    }),
+  );
+  const pools = Reflect.get(catalog, "pools") as Map<
+    string,
+    { value: { discover: { score: number; metadata: { title: string } }[] } }
+  >;
+  await catalog.prefetchUser("host");
+  for (round = 1; round < 3; round++) await catalog.refreshUser("host");
+  const discover = pools.get("host")!.value.discover;
+  expect(discover).toHaveLength(30);
+  const incumbent = discover.find(
+    (track) => track.metadata.title === "Incumbent 1",
+  );
+  // Three builds at 2.5 each: stacking would reach 5.5, bumping stays put.
+  expect(incumbent!.score).toBeLessThanOrEqual(1.5 * 2.5);
+  expect(discover.some((track) => track.metadata.title === "Newcomer")).toBe(
+    true,
+  );
+  store.close();
+});
+
+test("a discover track the user has since listened to leaves the pool", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": {
+        toptracks: {
+          track: [{ name: "Seed", artist: { name: "Band" }, playcount: "10" }],
+        },
+      },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      "track.getSimilar": {
+        similartracks: {
+          track: [{ name: "New Sound", artist: { name: "Stranger" } }],
+        },
+      },
+    }),
+  );
+  await catalog.prefetchUser("host");
+  expect(
+    catalog.userRecommendations("host").discover.map((t) => t.title),
+  ).toEqual(["New Sound"]);
+  addPastTrack(store, "host", "New Sound", "Stranger", "newsoundnew");
+  await catalog.refreshUser("host");
+  const recs = catalog.userRecommendations("host");
+  expect(recs.discover.map((t) => t.title)).not.toContain("New Sound");
+  expect(recs.favourites.map((t) => t.title)).not.toContain("New Sound");
+  store.close();
+});
+
+test("similarity-only tracks do not count as seeds in huddle mix", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Host Song", "Regular", "hostsonghos");
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [
+        {
+          sourceInput: "https://music.youtube.com/watch?v=everywhere1",
+          canonicalUrl: "https://music.youtube.com/watch?v=everywhere1",
+          sourceId: "everywhere1",
+          title: "Everywhere",
+          artist: "Stranger",
+        },
+      ],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": { toptracks: { track: [] } },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      "track.getSimilar": {
+        similartracks: {
+          track: [
+            { name: "Everywhere", artist: { name: "Stranger" }, match: "0.1" },
+          ],
+        },
+      },
+      "artist.getSimilar": { similarartists: { artist: [] } },
+    }),
+  );
+  const candidates = await catalog.autoplayCandidates({
+    userIds: ["host"],
+    nowPlaying: { title: "Now", artist: "Band", sourceId: "nownownownow" },
+  });
+  expect(candidates.map((track) => track.metadata.title)).toEqual([
+    "Host Song",
+    "Everywhere",
+  ]);
+  expect(candidates[1]?.seedCount).toBe(1);
+  store.close();
+});
+
+test("similar tracks are weighted by Last.fm match rather than rank", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": {
+        toptracks: {
+          track: [{ name: "Seed", artist: { name: "Band" }, playcount: "10" }],
+        },
+      },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      "track.getSimilar": {
+        similartracks: {
+          track: [
+            { name: "Weak", artist: { name: "Other" }, match: "0.2" },
+            { name: "Strong", artist: { name: "Other" }, match: "0.9" },
+          ],
+        },
+      },
+    }),
+  );
+  await catalog.prefetchUser("host");
+  const pools = Reflect.get(catalog, "pools") as Map<
+    string,
+    { value: { discover: { score: number; metadata: { title: string } }[] } }
+  >;
+  const discover = pools.get("host")!.value.discover;
+  expect(discover.map((track) => track.metadata.title)).toEqual([
+    "Strong",
+    "Weak",
+  ]);
+  expect(discover[0]!.score).toBeCloseTo(2.25);
+  expect(discover[1]!.score).toBeCloseTo(0.5);
+  store.close();
+});
+
 test("trackKey ignores punctuation and case", () => {
   expect(trackKey("Karma Police!", "Radiohead")).toBe(
     trackKey("karma police", "RADIOHEAD"),
