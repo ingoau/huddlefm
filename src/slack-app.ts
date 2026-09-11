@@ -90,7 +90,7 @@ export function startHeartbeat(
   });
   const timer = setInterval(() => {
     const silentMs = Date.now() - lastPongAt;
-    if (silentMs > timeoutMs) {
+    if (silentMs >= timeoutMs) {
       clearInterval(timer);
       options.onStale?.(silentMs);
       socket.terminate();

@@ -165,7 +165,7 @@ test("heartbeat terminates a socket that stops answering pings", async () => {
   stop();
   expect(socket.terminated).toBeTrue();
   expect(stale).toHaveLength(1);
-  expect(stale[0]).toBeGreaterThan(30);
+  expect(stale[0]).toBeGreaterThanOrEqual(30);
   // Pinging stops once the socket is terminated.
   const pings = socket.pings;
   await sleep(20);
