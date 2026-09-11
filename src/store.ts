@@ -1201,6 +1201,21 @@ export class Store {
       .all(userId, limit) as RecentTrack[];
   }
 
+  // The most recent track anyone here has played with this title and artist,
+  // so recommendations can reuse a known-good video instead of searching.
+  findPlayedTrack(title: string, artist: string) {
+    return this.db
+      .query(
+        `SELECT id, source_input AS sourceInput, canonical_url AS canonicalUrl,
+        source_id AS sourceId, title, artist, album, duration, artwork
+        FROM tracks
+        WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE
+        AND status = 'played'
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(title, artist) as RecentTrack | null;
+  }
+
   setTrack(
     id: string,
     fields: {

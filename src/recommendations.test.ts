@@ -5,6 +5,7 @@ import {
   RecommendationCatalog,
   type RecommendationTracks,
   trackKey,
+  weightedSample,
 } from "./recommendations.ts";
 import { Store } from "./store.ts";
 
@@ -182,43 +183,307 @@ test("huddle mix treats YouTube up-next as a light nudge", async () => {
   store.close();
 });
 
-test("personal recommendations exclude songs the user already added", async () => {
+test("personal recommendations split discover from favourites and exclude recent adds", async () => {
   const store = new Store(":memory:");
   addPastTrack(store, "host", "Already Added", "Band", "alreadyadde");
-  const catalog = new RecommendationCatalog(store, {
-    searchSong: async (title: string, artist: string) => ({
-      sourceInput: "https://music.youtube.com/watch?v=recommend1",
-      canonicalUrl: "https://music.youtube.com/watch?v=recommend1",
-      sourceId: "recommend1",
-      title,
-      artist,
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [
+        {
+          sourceInput: "https://music.youtube.com/watch?v=nextnextnex",
+          canonicalUrl: "https://music.youtube.com/watch?v=nextnextnex",
+          sourceId: "nextnextnex",
+          title: "Fresh Pick",
+          artist: "Band",
+        },
+      ],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": {
+        toptracks: {
+          track: [
+            {
+              name: "Old Favourite",
+              artist: { name: "Band" },
+              playcount: "40",
+            },
+          ],
+        },
+      },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": {
+        topartists: { artist: [{ name: "Band", playcount: "80" }] },
+      },
+      "track.getSimilar": {
+        similartracks: {
+          track: [
+            { name: "Old Favourite", artist: { name: "Band" } },
+            { name: "New Sound", artist: { name: "Stranger" } },
+          ],
+        },
+      },
+      "artist.getSimilar": {
+        similarartists: { artist: [{ name: "Neighbour", match: "0.9" }] },
+      },
+      "artist.getTopTracks": {
+        toptracks: {
+          track: [{ name: "Neighbour Hit", artist: { name: "Neighbour" } }],
+        },
+      },
     }),
+  );
+  await catalog.prefetchUser("host");
+  const recs = catalog.userRecommendations("host");
+  const titles = (tracks: { title: string }[]) => tracks.map((t) => t.title);
+  expect(titles(recs.discover).sort()).toEqual([
+    "Fresh Pick",
+    "Neighbour Hit",
+    "New Sound",
+  ]);
+  expect(titles(recs.favourites)).toEqual(["Old Favourite"]);
+  expect(titles([...recs.discover, ...recs.favourites])).not.toContain(
+    "Already Added",
+  );
+  expect(catalog.recommendation(recs.discover[0]!.id)?.title).toBe(
+    recs.discover[0]!.title,
+  );
+  store.close();
+});
+
+test("the pool accumulates across builds and the sample is stable until then", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  let round = 0;
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      // Refreshing also refreshes taste, so the second build seeds from a
+      // different track and asks Last.fm a new question.
+      "user.getTopTracks": () => ({
+        toptracks: {
+          track: [
+            {
+              name: round === 0 ? "Seed" : "Seed Two",
+              artist: { name: "Band" },
+              playcount: "10",
+            },
+          ],
+        },
+      }),
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      "track.getSimilar": () => ({
+        similartracks: {
+          track: [
+            {
+              name: round === 0 ? "First Wave" : "Second Wave",
+              artist: { name: "Other" },
+            },
+          ],
+        },
+      }),
+    }),
+  );
+  await catalog.prefetchUser("host");
+  const first = catalog.userRecommendations("host");
+  expect(first.discover.map((t) => t.title)).toEqual(["First Wave"]);
+  expect(catalog.userRecommendations("host")).toEqual(first);
+  round = 1;
+  await catalog.refreshUser("host");
+  const second = catalog.userRecommendations("host");
+  expect(second.discover.map((t) => t.title).sort()).toEqual([
+    "First Wave",
+    "Second Wave",
+  ]);
+  const kept = second.discover.find((t) => t.title === "First Wave");
+  expect(kept?.id).toBe(first.discover[0]!.id);
+  expect(catalog.recommendation(kept!.id)?.title).toBe("First Wave");
+  store.close();
+});
+
+test("a stale pool keeps serving while the rebuild is in flight", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Seed", "Band", "seedseedsee");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let builds = 0;
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async () => undefined,
+    upNextTracks: async () => {
+      builds++;
+      if (builds > 1) await gate;
+      return [
+        {
+          sourceInput: "https://music.youtube.com/watch?v=nextnextnex",
+          canonicalUrl: "https://music.youtube.com/watch?v=nextnextnex",
+          sourceId: "nextnextnex",
+          title: "Fresh Pick",
+          artist: "Other",
+        },
+      ];
+    },
+  });
+  await catalog.prefetchUser("host");
+  expect(catalog.userRecommendations("host").discover).toHaveLength(1);
+  const rebuild = catalog.refreshUser("host");
+  expect(catalog.userRecommendations("host").discover).toHaveLength(1);
+  release();
+  await rebuild;
+  expect(catalog.userRecommendations("host").discover).toHaveLength(1);
+  store.close();
+});
+
+test("session exclusions filter the sample and a depleted pool goes stale", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Seed", "Band", "seedseedsee");
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async () => undefined,
     upNextTracks: async () => [
       {
         sourceInput: "https://music.youtube.com/watch?v=nextnextnex",
         canonicalUrl: "https://music.youtube.com/watch?v=nextnextnex",
         sourceId: "nextnextnex",
         title: "Fresh Pick",
-        artist: "Band",
+        artist: "Other",
       },
     ],
   });
   await catalog.prefetchUser("host");
-  const recs = catalog.userRecommendations("host");
-  expect(recs.some((track) => track.title === "Already Added")).toBe(false);
-  expect(recs.some((track) => track.title === "Fresh Pick")).toBe(true);
-  expect(catalog.recommendation(recs[0]!.id)?.title).toBe("Fresh Pick");
-  const cache = Reflect.get(catalog, "userRecs") as Map<
+  const pools = Reflect.get(catalog, "pools") as Map<
     string,
-    { value: { id: string }[]; expires: number }
+    { expires: number }
   >;
-  const previousId = recs[0]!.id;
-  cache.get("host")!.expires = 0;
+  expect(pools.get("host")!.expires).toBeGreaterThan(Date.now());
+  expect(
+    catalog.userRecommendations("host", ["nextnextnex"]).discover,
+  ).toHaveLength(0);
+  expect(pools.get("host")!.expires).toBe(0);
   await catalog.prefetchUser("host");
-  const next = catalog.userRecommendations("host")[0];
-  expect(next?.id).not.toBe(previousId);
-  expect(catalog.recommendation(previousId)).toBeUndefined();
-  expect(catalog.recommendation(next!.id)?.title).toBe("Fresh Pick");
+  expect(catalog.userRecommendations("host").discover).toHaveLength(0);
+  store.close();
+});
+
+test("resolution reuses the memo and tracks this workspace has played", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  addPastTrack(
+    store,
+    "someone",
+    "Played Here",
+    "Other",
+    "playedhere1",
+    "played",
+  );
+  const searched: string[] = [];
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) => {
+        searched.push(title);
+        return title === "Unfindable" ? undefined : fakeSong(title, artist);
+      },
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": {
+        toptracks: {
+          track: [{ name: "Seed", artist: { name: "Band" }, playcount: "10" }],
+        },
+      },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      "track.getSimilar": {
+        similartracks: {
+          track: [
+            { name: "Played Here", artist: { name: "Other" } },
+            { name: "Searched", artist: { name: "Other" } },
+            { name: "Unfindable", artist: { name: "Other" } },
+          ],
+        },
+      },
+    }),
+  );
+  await catalog.prefetchUser("host");
+  expect(searched.sort()).toEqual(["Searched", "Seed", "Unfindable"]);
+  const recs = catalog.userRecommendations("host");
+  expect(recs.discover.find((t) => t.title === "Played Here")?.sourceId).toBe(
+    "playedhere1",
+  );
+  await catalog.refreshUser("host");
+  expect(searched).toHaveLength(3);
+  store.close();
+});
+
+test("weightedSample favours heavier items and never repeats", () => {
+  const items = [
+    { name: "heavy", weight: 90 },
+    { name: "light", weight: 10 },
+  ];
+  let heavyFirst = 0;
+  for (let i = 0; i < 200; i++) {
+    const picked = weightedSample(items, 2, (item) => item.weight);
+    expect(picked.map((item) => item.name).sort()).toEqual(["heavy", "light"]);
+    if (picked[0]!.name === "heavy") heavyFirst++;
+  }
+  expect(heavyFirst).toBeGreaterThan(150);
+  expect(weightedSample(items, 5, (item) => item.weight)).toHaveLength(2);
+  expect(weightedSample([], 3, () => 1)).toEqual([]);
+});
+
+test("a discovery turn leads huddle mix with tracks nobody has listened to", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Shared", "Band", "sharedshare");
+  addPastTrack(store, "guest", "Shared", "Band", "sharedshare");
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": { toptracks: { track: [] } },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      "track.getSimilar": {
+        similartracks: {
+          track: [{ name: "Unheard", artist: { name: "Stranger" } }],
+        },
+      },
+      "artist.getSimilar": { similarartists: { artist: [] } },
+    }),
+  );
+  const nowPlaying = { title: "Now", artist: "Band", sourceId: "nownownownow" };
+  const usual = await catalog.autoplayCandidates({
+    userIds: ["host", "guest"],
+    nowPlaying,
+  });
+  expect(usual[0]?.metadata.title).toBe("Shared");
+  expect(usual[0]?.discovery).toBe(false);
+  const discovery = await catalog.autoplayCandidates({
+    userIds: ["host", "guest"],
+    nowPlaying,
+    discover: true,
+  });
+  expect(discovery[0]?.metadata.title).toBe("Unheard");
+  expect(discovery[0]?.discovery).toBe(true);
+  expect(discovery.some((track) => track.metadata.title === "Shared")).toBe(
+    true,
+  );
   store.close();
 });
 
@@ -228,12 +493,47 @@ test("trackKey ignores punctuation and case", () => {
   );
 });
 
+function fakeSong(title: string, artist: string) {
+  const id = title
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(0, 11)
+    .padEnd(11, "x");
+  return {
+    sourceInput: `https://music.youtube.com/watch?v=${id}`,
+    canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+    sourceId: id,
+    title,
+    artist,
+  };
+}
+
+// A deterministic stand-in for Math.random that walks a fixed cycle, so
+// weighted sampling is reproducible.
+function sequence(values = [0.1, 0.5, 0.9, 0.3, 0.7]) {
+  let index = 0;
+  return () => values[index++ % values.length]!;
+}
+
+function lastFmStub(
+  responses: Record<string, object | (() => object)>,
+): typeof fetch {
+  return (async (input) => {
+    const url = new URL(String(input));
+    const method = url.searchParams.get("method") ?? "";
+    const response = responses[method];
+    if (!response) return new Response("{}", { status: 404 });
+    const body = typeof response === "function" ? response() : response;
+    return Response.json(body);
+  }) as typeof fetch;
+}
+
 function addPastTrack(
   store: Store,
   userId: string,
   title: string,
   artist: string,
   sourceId: string,
+  status = "played",
 ) {
   store.createSession({
     id: `session-${userId}-${sourceId}`,
@@ -254,6 +554,6 @@ function addPastTrack(
     sourceId,
     title,
     artist,
-    status: "played",
+    status,
   });
 }
