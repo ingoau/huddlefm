@@ -548,6 +548,72 @@ export class TrackCatalog {
     return songMetadata(match);
   }
 
+  // What YouTube Music is promoting on its signed-out home page right now:
+  // the quick picks plus one of the featured hits playlists, chosen at
+  // random. For a session with no history to seed from.
+  async popularTracks(): Promise<TrackMetadata[]> {
+    const startedAt = Date.now();
+    const sections: unknown = await this.music.getHomeSections();
+    const rows = (Array.isArray(sections) ? sections : []).flatMap(
+      (section) => {
+        const contents = (section as { contents?: unknown })?.contents;
+        return Array.isArray(contents) ? (contents as unknown[]) : [];
+      },
+    );
+    const songs = rows.flatMap((row) => homeSongMetadata(row));
+    const playlists = rows.flatMap((row) => {
+      const { type, name, playlistId } = (row ?? {}) as {
+        type?: unknown;
+        name?: unknown;
+        playlistId?: unknown;
+      };
+      // Only YouTube Music's own editorial playlists browse without an
+      // account; user and chart playlists (PL…, OLAK…) return 400.
+      return type === "PLAYLIST" &&
+        typeof playlistId === "string" &&
+        playlistId.startsWith("RDCLAK")
+        ? [{ name: typeof name === "string" ? name : "", playlistId }]
+        : [];
+    });
+    const hits = playlists.filter((playlist) =>
+      /hits|top|trending|popular|bangers/i.test(playlist.name),
+    );
+    const pick = (list: typeof playlists) =>
+      list[Math.floor(Math.random() * list.length)];
+    const playlist = pick(hits.length ? hits : playlists);
+    const videos: unknown = playlist
+      ? await this.music
+          .getPlaylistVideos(`VL${playlist.playlistId}`)
+          .catch((error) => {
+            log.warn(
+              { event: "popular_playlist_failed", playlist, err: error },
+              "Could not read featured playlist",
+            );
+            return [];
+          })
+      : [];
+    const tracks = [
+      ...songs,
+      ...(Array.isArray(videos) ? videos : []).flatMap((row) =>
+        homeSongMetadata(row),
+      ),
+    ].filter(
+      (track, index, all) =>
+        all.findIndex((other) => other.sourceId === track.sourceId) === index,
+    );
+    log.info(
+      {
+        event: "popular_tracks_loaded",
+        quickPicks: songs.length,
+        playlist: playlist?.name,
+        count: tracks.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Popular tracks loaded",
+    );
+    return tracks;
+  }
+
   resolveVideoId(videoId: string) {
     if (!isYoutubeVideoId(videoId))
       throw new Error("Invalid YouTube Music video ID");
@@ -942,6 +1008,38 @@ function songMetadata(
     duration: song.duration ?? undefined,
     artwork: artworkUrl(song.thumbnails.at(-1)?.url),
   };
+}
+
+// A song or video row from the home page or a playlist, accepting the
+// runtime shapes ytmusic-api returns for either.
+function homeSongMetadata(row: unknown): TrackMetadata[] {
+  if (!row || typeof row !== "object") return [];
+  const { type, videoId, name, artist, album, duration, thumbnails } = row as {
+    type?: unknown;
+    videoId?: unknown;
+    name?: unknown;
+    artist?: unknown;
+    album?: { name?: unknown } | null;
+    duration?: unknown;
+    thumbnails?: { url?: string }[];
+  };
+  if (type !== "SONG" && type !== "VIDEO") return [];
+  if (typeof videoId !== "string" || !isYoutubeVideoId(videoId)) return [];
+  if (typeof name !== "string" || !name.trim()) return [];
+  return [
+    {
+      sourceInput: `https://music.youtube.com/watch?v=${videoId}`,
+      canonicalUrl: `https://music.youtube.com/watch?v=${videoId}`,
+      sourceId: videoId,
+      title: name,
+      artist: artistName(artist) ?? "Unknown artist",
+      album: typeof album?.name === "string" ? album.name : undefined,
+      duration: parseDuration(duration),
+      artwork: artworkUrl(
+        Array.isArray(thumbnails) ? thumbnails.at(-1)?.url : undefined,
+      ),
+    },
+  ];
 }
 
 function artistName(value: unknown): string | undefined {

@@ -101,6 +101,17 @@ function throwIfAborted(signal?: AbortSignal) {
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
 const autoplayCreditWindow = 10;
+// How many random popular songs Play something tries before giving up.
+const autoplayPopularAttempts = 5;
+
+function shuffle<T>(items: T[]) {
+  const shuffled = [...items];
+  for (let index = shuffled.length - 1; index > 0; index--) {
+    const other = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[other]] = [shuffled[other]!, shuffled[index]!];
+  }
+  return shuffled;
+}
 
 export class Coordinator {
   readonly id: string;
@@ -524,6 +535,7 @@ export class Coordinator {
         remove_queue_track: () => this.remove(interaction),
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
+        play_something: () => this.playSomething(interaction),
         next_track: () => this.next(interaction, currentId),
         seek_back: () => this.seek(interaction, -10),
         seek_forward: () => this.seek(interaction, 10),
@@ -2332,7 +2344,10 @@ export class Coordinator {
     }
   }
 
-  private scheduleAutoplay() {
+  // When someone pressed Play something, a mix that produces nothing falls
+  // back to a random currently-popular song, and they hear about it if even
+  // that fails.
+  private scheduleAutoplay(playSomethingBy?: string) {
     const context =
       this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "";
     const seeds = [this.current, ...[...this.history].reverse()]
@@ -2364,7 +2379,12 @@ export class Coordinator {
       let added = false;
       let currentGeneration = false;
       try {
-        added = await this.recommend(context, seeds, generation);
+        added = await this.recommend(
+          context,
+          seeds,
+          generation,
+          playSomethingBy,
+        );
       } finally {
         currentGeneration = generation === this.autoplayGeneration;
         if (currentGeneration) {
@@ -2380,6 +2400,7 @@ export class Coordinator {
     context: string,
     seeds: string[],
     generation: number,
+    playSomethingBy?: string,
   ): Promise<boolean> {
     const startedAt = Date.now();
     this.log.debug(
@@ -2459,77 +2480,39 @@ export class Coordinator {
       const ids = [...ranked.values()]
         .sort((a, b) => b.seedCount - a.seedCount || b.score - a.score)
         .map(({ id }) => id);
-      for (const id of ids) {
-        if (excluded.has(id)) continue;
-        const discovery = ranked.get(id)?.discovery ?? false;
-        const listenerIds = ranked.get(id)?.listenerIds ?? [];
-        let metadata = ranked.get(id)?.metadata;
-        if (!metadata) {
-          try {
-            metadata = await this.tracks.resolveVideoId(id);
-          } catch {
-            continue;
-          }
-        }
-        const pending = await this.enqueue(async () => {
-          if (!this.canAddAutoplay(context, generation)) return;
-          const currentIds = new Set([
-            this.current?.sourceId,
-            ...this.queue.map((track) => track.sourceId),
-            ...this.history.slice(-20).map((track) => track.sourceId),
-            ...this.autoplayRejected,
-          ]);
-          if (currentIds.has(metadata.sourceId)) return false;
-          const entry: Entry = {
-            ...metadata,
-            id: crypto.randomUUID(),
-            requesterId: this.botUserId,
-            automatic: true,
-            discovery,
-            listenerIds,
-            status: "preparing",
-          };
-          const controller = new AbortController();
-          this.preparations.set(entry.id, controller);
-          this.queue.push(entry);
-          this.store.addTrack({
-            ...entry,
-            sessionId: this.id,
-            status: entry.status,
-          });
-          this.audit.record("track.autoplay_added", undefined, {
-            sessionId: this.id,
-            seedSourceIds: seeds,
-            autoplayMode: this.autoplayMode,
-            ...auditTrack(entry),
-          });
-          this.notifyIntegrations("queue.added", {
-            id: entry.id,
-            title: entry.title,
-            artist: entry.artist,
-            automatic: true,
-          });
-          await this.render();
-          this.queueChanged();
-          return { entry, controller };
-        });
-        if (pending === undefined) return false;
-        if (pending === false) continue;
-        if (await this.prepareAutoplay(pending.entry, pending.controller)) {
-          this.log.info(
-            {
-              event: "autoplay_recommendation_added",
-              entryId: pending.entry.id,
-              sourceId: pending.entry.sourceId,
-              discovery,
-              listenerIds,
-              durationMs: Date.now() - startedAt,
-            },
-            "Autoplay recommendation added",
-          );
-          return true;
-        }
-        if (!this.canAddAutoplay(context, generation)) return false;
+      const added = await this.queueFirstPlayable(
+        ids,
+        ranked,
+        excluded,
+        context,
+        seeds,
+        generation,
+        startedAt,
+      );
+      if (added !== undefined) return added;
+      if (playSomethingBy && this.canAddAutoplay(context, generation)) {
+        const popular = shuffle(await this.tracks.popularTracks()).filter(
+          (track) => !excluded.has(track.sourceId),
+        );
+        this.log.info(
+          { event: "autoplay_popular_fallback", candidates: popular.length },
+          "Falling back to a popular song",
+        );
+        const played = await this.queueFirstPlayable(
+          popular.slice(0, autoplayPopularAttempts).map((t) => t.sourceId),
+          new Map(
+            popular.map((metadata) => [
+              metadata.sourceId,
+              { id: metadata.sourceId, seedCount: 0, score: 0, metadata },
+            ]),
+          ),
+          excluded,
+          context,
+          seeds,
+          generation,
+          startedAt,
+        );
+        if (played !== undefined) return played;
       }
       this.audit.record("autoplay.recommendation_failed", undefined, {
         sessionId: this.id,
@@ -2543,6 +2526,11 @@ export class Coordinator {
         },
         "No usable autoplay recommendation found",
       );
+      if (playSomethingBy)
+        await this.notice(
+          playSomethingBy,
+          "Could not find anything to play; add a song to get started.",
+        );
       return false;
     } catch (error) {
       this.audit.record("autoplay.recommendation_failed", undefined, {
@@ -2558,8 +2546,110 @@ export class Coordinator {
         error,
         "Autoplay recommendation failed",
       );
+      if (playSomethingBy)
+        await this.notice(
+          playSomethingBy,
+          "Could not find anything to play; add a song to get started.",
+        );
       return false;
     }
+  }
+
+  // Queues the first candidate that resolves and prepares. Returns true once
+  // one is playing or queued, false when the session no longer wants an
+  // autoplay track, and undefined when every candidate was unusable.
+  private async queueFirstPlayable(
+    ids: string[],
+    ranked: Map<
+      string,
+      {
+        id: string;
+        seedCount: number;
+        score: number;
+        discovery?: boolean;
+        listenerIds?: string[];
+        metadata?: TrackMetadata;
+      }
+    >,
+    excluded: Set<string | undefined>,
+    context: string,
+    seeds: string[],
+    generation: number,
+    startedAt: number,
+  ): Promise<boolean | undefined> {
+    for (const id of ids) {
+      if (excluded.has(id)) continue;
+      const discovery = ranked.get(id)?.discovery ?? false;
+      const listenerIds = ranked.get(id)?.listenerIds ?? [];
+      let metadata = ranked.get(id)?.metadata;
+      if (!metadata) {
+        try {
+          metadata = await this.tracks.resolveVideoId(id);
+        } catch {
+          continue;
+        }
+      }
+      const pending = await this.enqueue(async () => {
+        if (!this.canAddAutoplay(context, generation)) return;
+        const currentIds = new Set([
+          this.current?.sourceId,
+          ...this.queue.map((track) => track.sourceId),
+          ...this.history.slice(-20).map((track) => track.sourceId),
+          ...this.autoplayRejected,
+        ]);
+        if (currentIds.has(metadata.sourceId)) return false;
+        const entry: Entry = {
+          ...metadata,
+          id: crypto.randomUUID(),
+          requesterId: this.botUserId,
+          automatic: true,
+          discovery,
+          listenerIds,
+          status: "preparing",
+        };
+        const controller = new AbortController();
+        this.preparations.set(entry.id, controller);
+        this.queue.push(entry);
+        this.store.addTrack({
+          ...entry,
+          sessionId: this.id,
+          status: entry.status,
+        });
+        this.audit.record("track.autoplay_added", undefined, {
+          sessionId: this.id,
+          seedSourceIds: seeds,
+          autoplayMode: this.autoplayMode,
+          ...auditTrack(entry),
+        });
+        this.notifyIntegrations("queue.added", {
+          id: entry.id,
+          title: entry.title,
+          artist: entry.artist,
+          automatic: true,
+        });
+        await this.render();
+        this.queueChanged();
+        return { entry, controller };
+      });
+      if (pending === undefined) return false;
+      if (pending === false) continue;
+      if (await this.prepareAutoplay(pending.entry, pending.controller)) {
+        this.log.info(
+          {
+            event: "autoplay_recommendation_added",
+            entryId: pending.entry.id,
+            sourceId: pending.entry.sourceId,
+            discovery,
+            listenerIds,
+            durationMs: Date.now() - startedAt,
+          },
+          "Autoplay recommendation added",
+        );
+        return true;
+      }
+      if (!this.canAddAutoplay(context, generation)) return false;
+    }
+    return undefined;
   }
 
   private canAddAutoplay(context: string, generation: number) {
@@ -4684,6 +4774,31 @@ export class Coordinator {
     await this.render();
   }
 
+  // The idle player's one button: turn on Huddle mix and let it pick, with
+  // a popular song as the backstop when the mix has nothing to draw on.
+  private async playSomething(interaction: Interaction) {
+    if (!(await this.require(interaction, "configure-settings"))) return;
+    if (this.current || this.queue.length || this.autoplayPending) return;
+    if (this.loopMode !== "off") {
+      this.loopMode = "off";
+      this.store.setSession(this.id, { loopMode: "off" });
+    }
+    if (this.autoplayMode !== "huddle") {
+      this.autoplayMode = "huddle";
+      this.store.setSession(this.id, { autoplay: "huddle" });
+    }
+    this.audit.record("autoplay.play_something", interaction.userId, {
+      sessionId: this.id,
+      autoplayMode: this.autoplayMode,
+    });
+    this.scheduleAutoplay(interaction.userId);
+    if (!this.autoplayPending)
+      await this.notice(
+        interaction.userId,
+        "Autoplay cannot start right now; add a song instead.",
+      );
+  }
+
   private async claimHost(interaction: Interaction) {
     if (interaction.value !== this.id || interaction.messageTs !== this.uiTs)
       return this.notice(interaction.userId, "That takeover request is stale.");
@@ -4757,6 +4872,9 @@ export class Coordinator {
     const current = this.current;
     const next = this.queue[0];
     const findingAutoplay = !next && this.autoplayPending;
+    // Nothing playing, queued, or being chosen: offer to start something
+    // instead of controls that have nothing to act on.
+    const idle = !current && !next && !this.autoplayPending;
     return [
       {
         type: "container",
@@ -4793,69 +4911,89 @@ export class Coordinator {
                 },
               ]
             : []),
-          {
-            type: "actions",
-            block_id: `playback_${id}`,
-            elements: [
-              {
-                type: "button",
-                action_id: "previous_track",
-                text: icon(":ms-skip-back:"),
-                value: this.id,
-              },
-              {
-                type: "button",
-                action_id: "toggle_playback",
-                text: icon(
-                  this.state === "paused" ? ":ms-play:" : ":ms-pause:",
-                ),
-                style: "primary",
-                value: this.id,
-              },
-              {
-                type: "button",
-                action_id: "next_track",
-                text: icon(":ms-skip-forward:"),
-                value: this.id,
-              },
-            ],
-          },
-          {
-            type: "actions",
-            block_id: `volume_${id}`,
-            elements: [
-              {
-                type: "button",
-                action_id: "volume_down",
-                text: icon(":ms-speaker-low-volume:"),
-                value: this.id,
-              },
-              {
-                type: "button",
-                action_id: "volume_up",
-                text: icon(":ms-speaker-loud-volume:"),
-                value: this.id,
-              },
-            ],
-          },
-          {
-            type: "actions",
-            block_id: `seek_${id}`,
-            elements: [
-              {
-                type: "button",
-                action_id: "seek_back",
-                text: icon(":ms-rewind:"),
-                value: this.id,
-              },
-              {
-                type: "button",
-                action_id: "seek_forward",
-                text: icon(":ms-fast-forward:"),
-                value: this.id,
-              },
-            ],
-          },
+          ...(current
+            ? [
+                {
+                  type: "actions",
+                  block_id: `playback_${id}`,
+                  elements: [
+                    {
+                      type: "button",
+                      action_id: "previous_track",
+                      text: icon(":ms-skip-back:"),
+                      value: this.id,
+                    },
+                    {
+                      type: "button",
+                      action_id: "toggle_playback",
+                      text: icon(
+                        this.state === "paused" ? ":ms-play:" : ":ms-pause:",
+                      ),
+                      style: "primary",
+                      value: this.id,
+                    },
+                    {
+                      type: "button",
+                      action_id: "next_track",
+                      text: icon(":ms-skip-forward:"),
+                      value: this.id,
+                    },
+                  ],
+                },
+                {
+                  type: "actions",
+                  block_id: `volume_${id}`,
+                  elements: [
+                    {
+                      type: "button",
+                      action_id: "volume_down",
+                      text: icon(":ms-speaker-low-volume:"),
+                      value: this.id,
+                    },
+                    {
+                      type: "button",
+                      action_id: "volume_up",
+                      text: icon(":ms-speaker-loud-volume:"),
+                      value: this.id,
+                    },
+                  ],
+                },
+                {
+                  type: "actions",
+                  block_id: `seek_${id}`,
+                  elements: [
+                    {
+                      type: "button",
+                      action_id: "seek_back",
+                      text: icon(":ms-rewind:"),
+                      value: this.id,
+                    },
+                    {
+                      type: "button",
+                      action_id: "seek_forward",
+                      text: icon(":ms-fast-forward:"),
+                      value: this.id,
+                    },
+                  ],
+                },
+              ]
+            : idle
+              ? [
+                  {
+                    type: "actions",
+                    block_id: `play_something_${id}`,
+                    elements: [
+                      {
+                        type: "button",
+                        action_id: "play_something",
+                        text: plain("Play something"),
+                        style: "primary",
+                        value: this.id,
+                      },
+                    ],
+                  },
+                ]
+              : []),
           {
             type: "context",
             block_id: `volume_status_${id}`,

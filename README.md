@@ -14,6 +14,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 - View album art, progress, and read lyrics streamed as a camera feed
 - Automatically scrobble to Last.fm and Listenbrainz
 - Autoplay: Related (YouTube up-next) or Huddle mix (Last.fm, ListenBrainz, and songs people have added)
+- Play something: one click on an idle player starts Huddle mix, falling back to a currently popular song when there is no listening history yet
 - Loop: repeat the current track or cycle the finished queue
 - Support for simultaneous huddles
 - End of session recaps & a statistics canvas
