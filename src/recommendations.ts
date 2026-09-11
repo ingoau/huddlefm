@@ -1361,9 +1361,16 @@ class LastFmError extends Error {
 }
 
 // "Not found" is a real answer worth remembering for the full memo TTL;
-// anything else is an outage and should be retried soon.
+// anything else is an outage and should be retried soon. Last.fm reports
+// both a missing track and an invalid request as code 6, so go by the
+// message.
 function lastFmNotFound(error: unknown) {
-  if (error instanceof LastFmError && error.code === 6) return undefined;
+  if (
+    error instanceof LastFmError &&
+    error.code === 6 &&
+    /not (?:be )?found/i.test(error.message)
+  )
+    return undefined;
   throw error;
 }
 

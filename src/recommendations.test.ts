@@ -553,14 +553,28 @@ test("a failed Last.fm lookup is retried soon while not-found sticks", async () 
       }
       if (method === "artist.getSimilar")
         return Response.json({
-          similarartists: { artist: [{ name: "Neighbour", match: "0.8" }] },
+          similarartists: {
+            artist: [
+              { name: "Neighbour", match: "0.8" },
+              { name: "Broken", match: "0.7" },
+            ],
+          },
         });
       if (method === "artist.getTopTracks") {
         topTrackCalls++;
-        return Response.json({
-          error: 6,
-          message: "The artist you supplied could not be found",
-        });
+        // Last.fm uses code 6 for both; only the first is a real answer.
+        return Response.json(
+          url.searchParams.get("artist") === "Neighbour"
+            ? {
+                error: 6,
+                message: "The artist you supplied could not be found",
+              }
+            : {
+                error: 6,
+                message:
+                  "Invalid parameters - Your request is missing a required parameter",
+              },
+        );
       }
       return Response.json({});
     }) as typeof fetch,
@@ -568,7 +582,16 @@ test("a failed Last.fm lookup is retried soon while not-found sticks", async () 
   await catalog.prefetchUser("host");
   expect(catalog.userRecommendations("host").discover).toHaveLength(0);
   expect(similarCalls).toBe(1);
-  expect(topTrackCalls).toBe(1);
+  expect(topTrackCalls).toBe(2);
+  const memoTtl = (key: string) => {
+    const entries = Reflect.get(
+      Reflect.get(catalog, "lookups") as object,
+      "entries",
+    ) as Map<string, { expires: number }>;
+    return entries.get(key)!.expires - Date.now();
+  };
+  expect(memoTtl("top-tracks\0neighbour")).toBeGreaterThan(60 * 60_000);
+  expect(memoTtl("top-tracks\0broken")).toBeLessThan(10 * 60_000);
   // Still within the failure TTL: no retry yet.
   await catalog.refreshUser("host");
   expect(similarCalls).toBe(1);
@@ -584,7 +607,7 @@ test("a failed Last.fm lookup is retried soon while not-found sticks", async () 
     if (key.startsWith("similar\0")) entry.expires = 0;
   await catalog.refreshUser("host");
   expect(similarCalls).toBe(2);
-  expect(topTrackCalls).toBe(1);
+  expect(topTrackCalls).toBe(2);
   expect(
     catalog.userRecommendations("host").discover.map((t) => t.title),
   ).toEqual(["Recovered"]);
