@@ -51,6 +51,7 @@ type Deck = {
   gain: GainNode;
   url: string;
   pastRestartThreshold: boolean;
+  lastReportedSecond: number;
 };
 
 const decks = new Map<string, Deck>();
@@ -570,6 +571,23 @@ socket.addEventListener("message", async (event) => {
       requestAnimationFrame(() =>
         requestAnimationFrame(() => stage.classList.remove("changing")),
       );
+    }
+    if (message.type === "replay" && currentId === message.entryId) {
+      cancelTransition();
+      const current = decks.get(message.entryId);
+      if (!current) return;
+      const player = current.audio;
+      const intro = Number(message.introSeconds) || 0;
+      player.currentTime = intro;
+      // Rewinding puts the clock behind the last reported second, which would
+      // otherwise mute position reports until playback passed the old end.
+      current.pastRestartThreshold = player.currentTime > 5;
+      current.lastReportedSecond = -1;
+      const now = audioContext.currentTime;
+      current.gain.gain.cancelScheduledValues(now);
+      current.gain.gain.setValueAtTime(1, now);
+      await player.play();
+      send("playing", { entryId: message.entryId });
     }
     if (
       message.type === "lyrics" &&

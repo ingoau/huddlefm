@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import {
   ackEnvelope,
   normalizeInteraction,
+  SlackAppAdapter,
+  slackErrorCode,
   startHeartbeat,
   type HeartbeatSocket,
 } from "./slack-app.ts";
@@ -27,6 +29,59 @@ function fakeSocket() {
     },
   };
 }
+
+function apiError(code: string) {
+  return Object.assign(new Error(`An API error occurred: ${code}`), {
+    data: { error: code },
+  });
+}
+
+function adapterWithViews(
+  update: (options: Record<string, unknown>) => unknown,
+) {
+  const adapter = new SlackAppAdapter({ xapp: "xapp-1", xoxp: "xoxp-1" });
+  Reflect.set(adapter, "web", { views: { update } });
+  return adapter;
+}
+
+test("reads the reason out of a Slack API error", () => {
+  expect(slackErrorCode(apiError("hash_conflict"))).toBe("hash_conflict");
+  expect(slackErrorCode(new Error("hash_conflict"))).toBeUndefined();
+  expect(slackErrorCode(undefined)).toBeUndefined();
+});
+
+test("updates the current view when a modal hash is stale", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const adapter = adapterWithViews(async (options) => {
+    calls.push(options);
+    if (calls.length === 1) throw apiError("hash_conflict");
+    return { view: { id: "V123", hash: "fresh" } };
+  });
+
+  expect(await adapter.updateModal("V123", "stale", { type: "modal" })).toEqual(
+    {
+      id: "V123",
+      hash: "fresh",
+    },
+  );
+  expect(calls).toEqual([
+    { view_id: "V123", hash: "stale", view: { type: "modal" } },
+    { view_id: "V123", view: { type: "modal" } },
+  ]);
+});
+
+test("reports modal update failures other than a stale hash", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const adapter = adapterWithViews(async (options) => {
+    calls.push(options);
+    throw apiError("not_found");
+  });
+
+  await expect(
+    adapter.updateModal("V123", "stale", { type: "modal" }),
+  ).rejects.toThrow("not_found");
+  expect(calls).toHaveLength(1);
+});
 
 test("acknowledges on the socket that received the envelope", () => {
   const sent: string[] = [];
