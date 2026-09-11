@@ -96,6 +96,8 @@ function throwIfAborted(signal?: AbortSignal) {
   throw new DOMException("This operation was aborted", "AbortError");
 }
 
+const autoplayDiscoveryEvery = 4;
+
 function recommendationSourceLabel(track: PlayableRecommendation) {
   const names = track.sources.map((source) =>
     source === "lastfm"
@@ -124,6 +126,7 @@ export class Coordinator {
   private loopMode: LoopMode = "off";
   private transitionMode: TransitionMode = "none";
   private autoplayGeneration = 0;
+  private autoplayPicks = 0;
   private autoplayPending = false;
   private autoplayRejected: string[] = [];
   private autoplayRejectedArtists: string[] = [];
@@ -2160,6 +2163,8 @@ export class Coordinator {
         this.store.incrementUsage("added");
         return { entry, controller };
       });
+      if (pending.length)
+        void this.recommendations?.refreshUser(interaction.userId);
       await this.render();
       this.queueChanged();
       return { pending, omitted: fit.omitted, total: tracks.length };
@@ -2349,6 +2354,7 @@ export class Coordinator {
           id: string;
           seedCount: number;
           score: number;
+          discovery?: boolean;
           metadata?: TrackMetadata;
         }
       >();
@@ -2364,6 +2370,11 @@ export class Coordinator {
             ranked.set(id, candidate);
           });
       } else if (this.recommendations) {
+        // Every few picks, lead with something nobody in the huddle has
+        // listened to so the mix is not only shared favourites.
+        const discover =
+          this.autoplayPicks % autoplayDiscoveryEvery ===
+          autoplayDiscoveryEvery - 1;
         const extras = await this.recommendations.autoplayCandidates({
           userIds: this.listenerIds(),
           nowPlaying: this.current ?? this.history.at(-1),
@@ -2377,21 +2388,25 @@ export class Coordinator {
             artists: this.autoplayRejectedArtists,
             tracks: this.history.slice(-20),
           },
+          discover,
         });
-        for (const extra of extras) {
+        // The catalog has already ordered these.
+        extras.forEach((extra, index) => {
           ranked.set(extra.sourceId, {
             id: extra.sourceId,
-            seedCount: extra.seedCount,
-            score: extra.score,
+            seedCount: 0,
+            score: -index,
+            discovery: extra.discovery,
             metadata: extra.metadata,
           });
-        }
+        });
       }
       const ids = [...ranked.values()]
         .sort((a, b) => b.seedCount - a.seedCount || b.score - a.score)
         .map(({ id }) => id);
       for (const id of ids) {
         if (excluded.has(id)) continue;
+        const discovery = ranked.get(id)?.discovery ?? false;
         let metadata = ranked.get(id)?.metadata;
         if (!metadata) {
           try {
@@ -2443,11 +2458,13 @@ export class Coordinator {
         if (pending === undefined) return false;
         if (pending === false) continue;
         if (await this.prepareAutoplay(pending.entry, pending.controller)) {
+          this.autoplayPicks++;
           this.log.info(
             {
               event: "autoplay_recommendation_added",
               entryId: pending.entry.id,
               sourceId: pending.entry.sourceId,
+              discovery,
               durationMs: Date.now() - startedAt,
             },
             "Autoplay recommendation added",
@@ -3254,6 +3271,25 @@ export class Coordinator {
       ],
     );
     this.prefetchRecommendations(interaction.userId);
+    const recommendedGroups = [
+      { label: "Discover", tracks: recommended?.discover ?? [] },
+      { label: "Your favourites", tracks: recommended?.favourites ?? [] },
+    ]
+      .filter((group) => group.tracks.length)
+      .map((group) => ({
+        label: plain(group.label),
+        options: group.tracks.map((track) => ({
+          text: plain(`${track.title} — ${track.artist}`.slice(0, 75)),
+          value: track.id,
+          ...(track.sources.length
+            ? {
+                description: plain(
+                  recommendationSourceLabel(track).slice(0, 75),
+                ),
+              }
+            : {}),
+        })),
+      }));
     const canBulk = this.can(interaction.userId, "add-bulk");
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
@@ -3266,7 +3302,7 @@ export class Coordinator {
         {
           type: "input",
           block_id: "track",
-          optional: Boolean(recent.length || recommended?.length),
+          optional: Boolean(recent.length || recommendedGroups.length),
           label: plain("Song, album, playlist, or link"),
           element: {
             type: "external_select",
@@ -3276,7 +3312,7 @@ export class Coordinator {
             focus_on_load: true,
           },
         },
-        ...(recommended?.length
+        ...(recommendedGroups.length
           ? [
               {
                 type: "input",
@@ -3284,25 +3320,13 @@ export class Coordinator {
                 optional: true,
                 label: plain("Recommended for you"),
                 hint: plain(
-                  "From Last.fm, ListenBrainz, and songs you've added",
+                  "Discover is new to you; favourites come from Last.fm, ListenBrainz, and songs you've added",
                 ),
                 element: {
                   type: "static_select",
                   action_id: "selection",
                   placeholder: plain("Choose a recommendation"),
-                  options: recommended.map((track) => ({
-                    text: plain(
-                      `${track.title} — ${track.artist}`.slice(0, 75),
-                    ),
-                    value: track.id,
-                    ...(track.sources.length
-                      ? {
-                          description: plain(
-                            recommendationSourceLabel(track).slice(0, 75),
-                          ),
-                        }
-                      : {}),
-                  })),
+                  option_groups: recommendedGroups,
                 },
               },
             ]
