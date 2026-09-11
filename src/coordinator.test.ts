@@ -4020,11 +4020,12 @@ test("prefetches personal recommendations on start and join", async () => {
       requested.push([...ids].sort());
     },
     userRecommendations() {
-      return [];
+      return { discover: [], favourites: [] };
     },
     recommendation() {
       return undefined;
     },
+    refreshUser() {},
     autoplayCandidates: async () => [],
   } as unknown as RecommendationCatalog;
   const test = setup(
@@ -4048,7 +4049,7 @@ test("add modal omits recommendations when the cache is empty", async () => {
   const catalog = {
     prefetchUsers() {},
     userRecommendations() {
-      return [];
+      return { discover: [], favourites: [] };
     },
   } as unknown as RecommendationCatalog;
   const test = setup(
@@ -4129,8 +4130,10 @@ test("add modal shows cached personal recommendations", async () => {
   );
   const modal = JSON.stringify(test.modals[0]);
   expect(modal).toContain('"block_id":"recommend"');
+  expect(modal).toContain('"option_groups"');
+  expect(modal).toContain('"text":"Discover"');
   expect(modal).toContain("For You — Band");
-  const recId = catalog.userRecommendations("host")[0]?.id;
+  const recId = catalog.userRecommendations("host").discover[0]?.id;
   expect(recId).toBeTruthy();
   await test.coordinator.action({
     ...interaction(
@@ -4211,6 +4214,393 @@ test("opted-out listeners still see personal recommendations", async () => {
   expect(JSON.stringify(test.modals[0])).toContain("For You — Band");
   await test.coordinator.endFromSlack();
   store.close();
+});
+
+test("a manual add refreshes the adder's personal recommendations", async () => {
+  const refreshed: string[] = [];
+  const catalog = {
+    prefetchUsers() {},
+    userRecommendations() {
+      return { discover: [], favourites: [] };
+    },
+    recommendation() {
+      return undefined;
+    },
+    refreshUser(userId: string) {
+      refreshed.push(userId);
+    },
+    autoplayCandidates: async () => [],
+  } as unknown as RecommendationCatalog;
+  const track = (input: string) => ({
+    sourceInput: input,
+    canonicalUrl: input,
+    sourceId: input.slice(-11),
+    title: input,
+    artist: "Artist",
+  });
+  const test = setup(
+    {
+      resolve: async (input: string) => track(input),
+      resolveUrl: async (input: string) => track(input),
+      prepare: async () => "track.opus",
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "guest",
+    actionId: "add_track_to_queue",
+    value: "ref",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(refreshed).toEqual(["guest"]);
+  await test.coordinator.agentAdd("host", "https://example.com/agent");
+  expect(refreshed).toEqual(["guest", "host"]);
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "bulk_add_to_queue",
+      "",
+      "view_submission",
+    ),
+    state: { links: { text: { value: "https://example.com/bulk\n" } } },
+  });
+  expect(refreshed).toEqual(["guest", "host", "host"]);
+  await test.coordinator.endFromSlack();
+});
+
+test("an autoplay pick displaced before it plays is not counted", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "queuedpick1", title: "Queued", listenerIds: ["guest"] }],
+    calls,
+  );
+  const test = setup(
+    {
+      resolve: async (input: string) => ({
+        sourceInput: input,
+        canonicalUrl: input,
+        sourceId: input.slice(-11),
+        title: input,
+        artist: "Manual",
+      }),
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await test.coordinator.agentAdd("host", "https://example.com/manual00001");
+  await enableHuddleMix(test.coordinator);
+  await until(() =>
+    (Reflect.get(test.coordinator, "queue") as { automatic?: boolean }[]).some(
+      (track) => track.automatic,
+    ),
+  );
+  expect(Reflect.get(test.coordinator, "autoplayCredits")).toEqual([]);
+  expect(Reflect.get(test.coordinator, "autoplaySinceDiscovery")).toBe(0);
+  await test.coordinator.agentAdd("host", "https://example.com/manual00002");
+  expect(
+    (Reflect.get(test.coordinator, "queue") as { automatic?: boolean }[]).some(
+      (track) => track.automatic,
+    ),
+  ).toBe(false);
+  expect(Reflect.get(test.coordinator, "autoplayCredits")).toEqual([]);
+  expect(Reflect.get(test.coordinator, "autoplaySinceDiscovery")).toBe(0);
+  await test.coordinator.endFromSlack();
+});
+
+function huddleMixCatalog(
+  candidates: {
+    sourceId: string;
+    title: string;
+    listenerIds?: string[];
+  }[],
+  calls: Record<string, unknown>[],
+  penalized: [string, { title: string; artist: string }][] = [],
+) {
+  return {
+    prefetchUsers() {},
+    userRecommendations() {
+      return { discover: [], favourites: [] };
+    },
+    recommendation() {
+      return undefined;
+    },
+    refreshUser() {},
+    penalize(userId: string, track: { title: string; artist: string }) {
+      penalized.push([userId, { title: track.title, artist: track.artist }]);
+    },
+    autoplayCandidates: async (options: Record<string, unknown>) => {
+      calls.push(options);
+      return candidates.map((candidate, index) => ({
+        sourceId: candidate.sourceId,
+        score: 1,
+        seedCount: 1,
+        discovery: index === 0,
+        listenerIds: candidate.listenerIds ?? [],
+        metadata: {
+          sourceInput: `https://music.youtube.com/watch?v=${candidate.sourceId}`,
+          canonicalUrl: `https://music.youtube.com/watch?v=${candidate.sourceId}`,
+          sourceId: candidate.sourceId,
+          title: candidate.title,
+          artist: "Band",
+        },
+      }));
+    },
+  } as unknown as RecommendationCatalog;
+}
+
+async function enableHuddleMix(coordinator: Coordinator) {
+  const enable = interaction(
+    coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    volume: { percent: { value: "60" } },
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+  };
+  await coordinator.action(enable);
+}
+
+test("huddle mix asks for a discovery on every fourth autoplay pick", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "discover001", title: "New To You" }],
+    calls,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "autoplaySinceDiscovery", 3);
+  await enableHuddleMix(test.coordinator);
+  await until(() =>
+    test.audit.some(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  );
+  expect(calls[0]).toMatchObject({ discover: true });
+  await until(
+    () => Reflect.get(test.coordinator, "autoplaySinceDiscovery") === 0,
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("skipping a discovery pick backs off the cadence and penalises the skipper's pools", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const penalized: [string, { title: string; artist: string }][] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "discover001", title: "New To You" }],
+    calls,
+    penalized,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "autoplaySinceDiscovery", 3);
+  await enableHuddleMix(test.coordinator);
+  await until(
+    () =>
+      (Reflect.get(test.coordinator, "current") as { sourceId?: string })
+        ?.sourceId === "discover001",
+  );
+  expect(
+    (Reflect.get(test.coordinator, "current") as { discovery?: boolean })
+      .discovery,
+  ).toBe(true);
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  expect(Reflect.get(test.coordinator, "autoplayDiscoveryInterval")).toBe(8);
+  expect(penalized).toEqual([
+    ["host", { title: "New To You", artist: "Band" }],
+  ]);
+  await test.coordinator.endFromSlack();
+});
+
+test("huddle mix credits the listeners behind recent picks", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [
+      { sourceId: "guestpick01", title: "Guest Pick", listenerIds: ["guest"] },
+      { sourceId: "guestpick02", title: "Guest Again", listenerIds: ["guest"] },
+    ],
+    calls,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await enableHuddleMix(test.coordinator);
+  await until(() => calls.length >= 2);
+  expect(calls[0]).toMatchObject({ credited: {} });
+  expect(calls[1]).toMatchObject({ credited: { guest: 1 } });
+  await test.coordinator.endFromSlack();
+});
+
+test("huddle mix reports how long the current artist has been playing", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "bandpick001", title: "Another" }],
+    calls,
+  );
+  const test = setup(
+    {
+      resolve: async () => ({
+        sourceInput: "https://music.youtube.com/watch?v=bandsong001",
+        canonicalUrl: "https://music.youtube.com/watch?v=bandsong001",
+        sourceId: "bandsong001",
+        title: "Current",
+        artist: "Band",
+      }),
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "history", [
+    {
+      id: "older",
+      requesterId: "host",
+      sourceInput: "https://music.youtube.com/watch?v=otherband01",
+      canonicalUrl: "https://music.youtube.com/watch?v=otherband01",
+      sourceId: "otherband01",
+      title: "Older",
+      artist: "Other",
+      status: "played",
+    },
+    {
+      id: "previous",
+      requesterId: "host",
+      sourceInput: "https://music.youtube.com/watch?v=bandsong000",
+      canonicalUrl: "https://music.youtube.com/watch?v=bandsong000",
+      sourceId: "bandsong000",
+      title: "Previous",
+      artist: "Band",
+      status: "played",
+    },
+  ]);
+  await test.coordinator.action(
+    interaction(test.coordinator, "add_track_to_queue", "ref"),
+  );
+  await until(
+    () =>
+      (Reflect.get(test.coordinator, "current") as { sourceId?: string })
+        ?.sourceId === "bandsong001",
+  );
+  await enableHuddleMix(test.coordinator);
+  await until(() => calls.length >= 1);
+  expect(calls[0]).toMatchObject({ artistRun: 2 });
+  await test.coordinator.endFromSlack();
+});
+
+test("huddle mix queues candidates in the catalog's order", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [
+      { sourceId: "firstpick01", title: "First" },
+      { sourceId: "secondpick1", title: "Second" },
+    ],
+    calls,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await enableHuddleMix(test.coordinator);
+  await until(() =>
+    test.audit.some(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  );
+  expect(calls[0]).toMatchObject({ discover: false });
+  await until(
+    () =>
+      (Reflect.get(test.coordinator, "current") as { sourceId?: string })
+        ?.sourceId === "firstpick01",
+  );
+  await test.coordinator.endFromSlack();
 });
 
 test("user settings persist huddle mix opt-out", async () => {

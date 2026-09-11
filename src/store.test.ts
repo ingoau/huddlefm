@@ -282,18 +282,20 @@ test("creates the recent-track index after migrating legacy databases", () => {
     session_id TEXT,
     requester_id TEXT,
     source_id TEXT,
+    title TEXT,
+    artist TEXT,
     status TEXT,
     created_at INTEGER
   )`);
   legacy.close();
 
   const store = new Store(path);
-  expect(
-    store.db
-      .query("PRAGMA index_list(tracks)")
-      .all()
-      .map((row) => (row as { name: string }).name),
-  ).toContain("tracks_requester_recent");
+  const indexes = store.db
+    .query("PRAGMA index_list(tracks)")
+    .all()
+    .map((row) => (row as { name: string }).name);
+  expect(indexes).toContain("tracks_requester_recent");
+  expect(indexes).toContain("tracks_played_title_artist");
   store.close();
   rmSync(directory, { recursive: true });
 });

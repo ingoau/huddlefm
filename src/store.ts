@@ -374,6 +374,9 @@ export class Store {
     this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.db.run(`CREATE INDEX IF NOT EXISTS tracks_requester_recent
       ON tracks(requester_id, automatic, created_at DESC)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS tracks_played_title_artist
+      ON tracks(title COLLATE NOCASE, artist COLLATE NOCASE, created_at DESC)
+      WHERE status = 'played'`);
     this.ensureColumn("tracks", "queue_position", "INTEGER");
     this.ensureColumn("tracks", "intro_seconds", "REAL");
     this.ensureColumn("tracks", "outro_seconds", "REAL");
@@ -1199,6 +1202,21 @@ export class Store {
         ORDER BY created_at DESC, insertionOrder DESC LIMIT ?`,
       )
       .all(userId, limit) as RecentTrack[];
+  }
+
+  // The most recent track anyone here has played with this title and artist,
+  // so recommendations can reuse a known-good video instead of searching.
+  findPlayedTrack(title: string, artist: string) {
+    return this.db
+      .query(
+        `SELECT id, source_input AS sourceInput, canonical_url AS canonicalUrl,
+        source_id AS sourceId, title, artist, album, duration, artwork
+        FROM tracks
+        WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE
+        AND status = 'played'
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(title, artist) as RecentTrack | null;
   }
 
   setTrack(
