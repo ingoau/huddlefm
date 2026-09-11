@@ -10,6 +10,15 @@ const deleteSettledErrors = new Set([
   "is_archived",
 ]);
 
+// Slack reports why a call failed in the response body rather than the message.
+export function slackErrorCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("data" in error))
+    return undefined;
+  const data = error.data;
+  if (!data || typeof data !== "object" || !("error" in data)) return undefined;
+  return String(data.error);
+}
+
 type Body = {
   type?: string;
   value?: string;
@@ -173,16 +182,8 @@ export class SlackAppAdapter {
     try {
       await this.web.chat.delete({ channel, ts });
     } catch (error) {
-      if (
-        !error ||
-        typeof error !== "object" ||
-        !("data" in error) ||
-        !error.data ||
-        typeof error.data !== "object" ||
-        !("error" in error.data) ||
-        !deleteSettledErrors.has(String(error.data.error))
-      )
-        throw error;
+      const code = slackErrorCode(error);
+      if (!code || !deleteSettledErrors.has(code)) throw error;
     }
     log.debug(
       { event: "message_deleted", channelId: channel, messageTs: ts },
@@ -242,13 +243,27 @@ export class SlackAppAdapter {
   }
 
   async updateModal(viewId: string, hash: string | undefined, view: unknown) {
-    const result = await this.web.views.update({
+    const result = await this.viewsUpdate(viewId, hash, view).catch((error) => {
+      // A hash names one version of a view, so anything else that updates the
+      // view leaves ours behind and Slack answers `hash_conflict`. Sending no
+      // hash means "update the version you hold", which recovers the update.
+      if (!hash || slackErrorCode(error) !== "hash_conflict") throw error;
+      log.warn(
+        { event: "modal_hash_stale", viewId, err: error },
+        "Slack modal hash was stale, updating the current version",
+      );
+      return this.viewsUpdate(viewId, undefined, view);
+    });
+    log.debug({ event: "modal_updated", viewId }, "Slack modal updated");
+    return result.view;
+  }
+
+  private viewsUpdate(viewId: string, hash: string | undefined, view: unknown) {
+    return this.web.views.update({
       view_id: viewId,
       ...(hash ? { hash } : {}),
       view: view as never,
     });
-    log.debug({ event: "modal_updated", viewId }, "Slack modal updated");
-    return result.view;
   }
 
   userName(userId: string) {
