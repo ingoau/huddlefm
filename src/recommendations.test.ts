@@ -1093,6 +1093,16 @@ test("trackKey matches the same song across featured-artist credit styles", () =
   expect(primaryArtist("Florence + the Machine")).toBe("Florence");
   expect(primaryArtist("Tyla Yaweh feat. Post Malone")).toBe("Tyla Yaweh");
   expect(trackKey("Song (Remix)", "Band")).not.toBe(trackKey("Song", "Band"));
+  // YouTube video labels are not part of the song.
+  expect(trackKey("THOUSAND MILES (Official Video)", "The Kid LAROI")).toBe(
+    trackKey("Thousand Miles", "The Kid LAROI"),
+  );
+  expect(trackKey("Song [Official Music Video]", "Band")).toBe(
+    trackKey("Song", "Band"),
+  );
+  expect(trackKey("Song (Lyrics) (feat. Guest)", "Band")).toBe(
+    trackKey("Song", "Band"),
+  );
 });
 
 test("all-time history keeps old favourites out of Discover without scoring them", async () => {
