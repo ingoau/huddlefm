@@ -363,9 +363,15 @@ test("session exclusions filter the sample and a depleted pool goes stale", asyn
   await catalog.prefetchUser("host");
   const pools = Reflect.get(catalog, "pools") as Map<
     string,
-    { expires: number }
+    { expires: number; value: { builtAt: number } }
   >;
   expect(pools.get("host")!.expires).toBeGreaterThan(Date.now());
+  // Just built: a depleted read does not rebuild straight away.
+  expect(
+    catalog.userRecommendations("host", ["nextnextnex"]).discover,
+  ).toHaveLength(0);
+  expect(pools.get("host")!.expires).toBeGreaterThan(Date.now());
+  pools.get("host")!.value.builtAt = 0;
   expect(
     catalog.userRecommendations("host", ["nextnextnex"]).discover,
   ).toHaveLength(0);
@@ -643,6 +649,9 @@ test("an evicted recommendation id stays resolvable for a grace period", async (
   const first = catalog.userRecommendations("host").discover[0]!;
   expect(first.title).toBe("First");
   // The session played it, so the next build drops it from the pool.
+  (
+    Reflect.get(catalog, "pools") as Map<string, { value: { builtAt: number } }>
+  ).get("host")!.value.builtAt = 0;
   catalog.userRecommendations("host", [first.sourceId]);
   round = 1;
   await catalog.prefetchUser("host");
@@ -661,7 +670,7 @@ test("re-recommended tracks are bumped, not stacked, and newcomers keep a share"
   const store = new Store(":memory:");
   store.connectLastFm("host", "last-user", "session-key");
   let round = 0;
-  const incumbents = Array.from({ length: 35 }, (_, i) => ({
+  const incumbents = Array.from({ length: 50 }, (_, i) => ({
     name: `Incumbent ${i + 1}`,
     artist: { name: "Regular" },
     match: "1.0",
@@ -710,7 +719,7 @@ test("re-recommended tracks are bumped, not stacked, and newcomers keep a share"
   await catalog.prefetchUser("host");
   for (round = 1; round < 3; round++) await catalog.refreshUser("host");
   const discover = pools.get("host")!.value.discover;
-  expect(discover).toHaveLength(30);
+  expect(discover).toHaveLength(45);
   const incumbent = discover.find(
     (track) => track.metadata.title === "Incumbent 1",
   );
@@ -1067,6 +1076,58 @@ test("penalize pushes a skipped track and its artist down in the skipper's pools
     catalog.userRecommendations("host").discover.map((t) => t.title),
   ).not.toContain("Skip Me");
   catalog.penalize("nobody", { title: "Skip Me", artist: "Noisy" });
+  store.close();
+});
+
+test("a favourites lane that the session plays through is topped up on its own", async () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("host", "last-user", "session-key");
+  const favourites = Array.from({ length: 40 }, (_, i) => ({
+    name: `Favourite ${i + 1}`,
+    artist: { name: "Band" },
+    playcount: String(100 - i),
+  }));
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": { toptracks: { track: favourites } },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+      "user.getTopArtists": { topartists: { artist: [] } },
+      // Discover stays full so only the favourites lane can run low.
+      "track.getSimilar": {
+        similartracks: {
+          track: Array.from({ length: 30 }, (_, i) => ({
+            name: `New ${i + 1}`,
+            artist: { name: "Stranger" },
+            match: "0.9",
+          })),
+        },
+      },
+    }),
+  );
+  await catalog.prefetchUser("host");
+  const pools = Reflect.get(catalog, "pools") as Map<
+    string,
+    { expires: number; value: { builtAt: number } }
+  >;
+  const before = catalog.userRecommendations("host", []);
+  expect(before.favourites.length).toBeGreaterThanOrEqual(20);
+  expect(before.discover.length).toBeGreaterThanOrEqual(20);
+  // Autoplay works through most of the favourites.
+  const played = before.favourites.slice(0, 15).map((t) => t.sourceId);
+  pools.get("host")!.value.builtAt = 0;
+  catalog.noteSessions(["host"], played);
+  expect(pools.get("host")!.expires).toBe(0);
+  await catalog.prefetchUser("host");
+  const after = catalog.userRecommendations("host", played);
+  expect(after.favourites.length).toBeGreaterThanOrEqual(20);
+  expect(after.favourites.some((t) => played.includes(t.sourceId))).toBe(false);
   store.close();
 });
 

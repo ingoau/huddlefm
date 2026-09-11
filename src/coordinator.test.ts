@@ -4048,6 +4048,7 @@ test("prefetches personal recommendations on start and join", async () => {
 test("add modal omits recommendations when the cache is empty", async () => {
   const catalog = {
     prefetchUsers() {},
+    noteSessions() {},
     userRecommendations() {
       return { discover: [], favourites: [] };
     },
@@ -4220,6 +4221,7 @@ test("a manual add refreshes the adder's personal recommendations", async () => 
   const refreshed: string[] = [];
   const catalog = {
     prefetchUsers() {},
+    noteSessions() {},
     userRecommendations() {
       return { discover: [], favourites: [] };
     },
@@ -4277,6 +4279,105 @@ test("a manual add refreshes the adder's personal recommendations", async () => 
     state: { links: { text: { value: "https://example.com/bulk\n" } } },
   });
   expect(refreshed).toEqual(["guest", "host", "host"]);
+  await test.coordinator.endFromSlack();
+});
+
+test("starting a track tells the catalog what the session has played and tops up", async () => {
+  const noted: { userIds: string[]; exclude: (string | undefined)[] }[] = [];
+  const prefetched: string[][] = [];
+  const catalog = {
+    prefetchUsers(ids: Iterable<string>) {
+      prefetched.push([...ids].sort());
+    },
+    noteSessions(ids: Iterable<string>, exclude: Iterable<string | undefined>) {
+      noted.push({ userIds: [...ids].sort(), exclude: [...exclude] });
+    },
+    userRecommendations() {
+      return { discover: [], favourites: [] };
+    },
+    recommendation() {
+      return undefined;
+    },
+    refreshUser() {},
+    autoplayCandidates: async () => [],
+  } as unknown as RecommendationCatalog;
+  const test = setup(
+    {
+      resolve: async () => ({
+        sourceInput: "https://example.com/track",
+        canonicalUrl: "https://example.com/track",
+        sourceId: "trackxxxxxx",
+        title: "Track",
+        artist: "Artist",
+      }),
+      prepare: async () => "track.opus",
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  expect(noted).toEqual([]);
+  await test.coordinator.agentAdd("host", "https://example.com/track");
+  expect(noted).toHaveLength(1);
+  expect(noted[0]).toEqual({
+    userIds: ["guest", "host"],
+    exclude: expect.arrayContaining(["trackxxxxxx"]),
+  });
+  expect(prefetched.at(-1)).toEqual(["guest", "host"]);
+  await test.coordinator.endFromSlack();
+});
+
+test("the add modal lists favourites before discoveries", async () => {
+  const catalog = {
+    prefetchUsers() {},
+    noteSessions() {},
+    userRecommendations() {
+      const track = (id: string, title: string) => ({
+        id,
+        sourceInput: `https://music.youtube.com/watch?v=${id}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+        sourceId: id,
+        title,
+        artist: "Band",
+        sources: [],
+      });
+      return {
+        discover: [track("rec_new", "Brand New")],
+        favourites: [track("rec_fav", "Old Favourite")],
+      };
+    },
+    recommendation() {
+      return undefined;
+    },
+    refreshUser() {},
+    autoplayCandidates: async () => [],
+  } as unknown as RecommendationCatalog;
+  const test = setup(
+    {} as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "open_add_to_queue"),
+  );
+  const modal = JSON.stringify(test.modals[0]);
+  expect(modal.indexOf("Your favourites")).toBeLessThan(
+    modal.indexOf('"Discover"'),
+  );
+  expect(modal.indexOf("Old Favourite")).toBeLessThan(
+    modal.indexOf("Brand New"),
+  );
   await test.coordinator.endFromSlack();
 });
 
@@ -4338,6 +4439,7 @@ function huddleMixCatalog(
 ) {
   return {
     prefetchUsers() {},
+    noteSessions() {},
     userRecommendations() {
       return { discover: [], favourites: [] };
     },
