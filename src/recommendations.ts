@@ -23,13 +23,16 @@ const searchConcurrency = 3;
 // Personal recommendations: each lane keeps a rolling pool that decays between
 // builds, and a sample is drawn once per build so the modal is stable until the
 // pool actually changes.
-const discoverPoolSize = 30;
-const favouritesPoolSize = 15;
-const discoverSampleSize = 20;
-const favouritesSampleSize = 10;
-const depletionThreshold = 10;
-const discoverResolveAttempts = 20;
-const favouritesResolveAttempts = 10;
+const discoverPoolSize = 45;
+const favouritesPoolSize = 45;
+const discoverSampleSize = 30;
+const favouritesSampleSize = 30;
+// A lane whose visible sample has dropped to half is topped up, but not
+// more often than this, so a thin lane does not rebuild on every play.
+const laneDepletionThreshold = 15;
+const depletionRebuildIntervalMs = 60_000;
+const discoverResolveAttempts = 25;
+const favouritesResolveAttempts = 25;
 const poolDecay = 0.7;
 const newcomerShare = 1 / 3;
 const trackSeedCount = 5;
@@ -147,6 +150,7 @@ type UserPool = {
   discover: PoolTrack[];
   favourites: PoolTrack[];
   sample: UserRecommendations;
+  builtAt: number;
 };
 
 type CacheEntry<T> = {
@@ -406,31 +410,54 @@ export class RecommendationCatalog {
   }
 
   // Returns the current sample minus whatever the session already has. A
-  // stale or rebuilding pool still serves its last version. When the session
-  // has played through most of the sample, the pool is marked stale so the
-  // caller's usual prefetch tops it up.
+  // stale or rebuilding pool still serves its last version.
   userRecommendations(
     userId: string,
-    exclude: Iterable<string | undefined> = [],
+    exclude?: Iterable<string | undefined>,
+  ): UserRecommendations {
+    const entry = this.pools.get(userId);
+    if (!entry) return { discover: [], favourites: [] };
+    if (exclude) return this.noteSession(userId, exclude);
+    return { ...entry.value.sample };
+  }
+
+  // Tells the catalog what a session has already played or queued for these
+  // listeners, so the next build drops it from their pools, and marks a pool
+  // stale when either lane's visible sample has run low. Callers prefetch
+  // afterwards to top up in the background.
+  noteSessions(
+    userIds: Iterable<string>,
+    exclude: Iterable<string | undefined>,
+  ) {
+    const excluded = [...exclude];
+    for (const userId of userIds)
+      if (this.pools.has(userId)) this.noteSession(userId, excluded);
+  }
+
+  private noteSession(
+    userId: string,
+    exclude: Iterable<string | undefined>,
   ): UserRecommendations {
     const excluded = new Set(
       [...exclude].filter((id): id is string => Boolean(id)),
     );
-    const entry = this.pools.get(userId);
-    if (!entry) return { discover: [], favourites: [] };
+    const entry = this.pools.get(userId)!;
+    this.consumed.set(userId, excluded);
     const keep = (track: PlayableRecommendation) =>
       !excluded.has(track.sourceId);
+    const { sample } = entry.value;
     const result = {
-      discover: entry.value.sample.discover.filter(keep),
-      favourites: entry.value.sample.favourites.filter(keep),
+      discover: sample.discover.filter(keep),
+      favourites: sample.favourites.filter(keep),
     };
-    const total = result.discover.length + result.favourites.length;
-    const sampled =
-      entry.value.sample.discover.length + entry.value.sample.favourites.length;
-    if (total < depletionThreshold && sampled > total) {
-      this.consumed.set(userId, excluded);
+    const depleted = (lane: keyof UserRecommendations) =>
+      result[lane].length < laneDepletionThreshold &&
+      sample[lane].length > result[lane].length;
+    if (
+      (depleted("discover") || depleted("favourites")) &&
+      Date.now() - entry.value.builtAt > depletionRebuildIntervalMs
+    )
       entry.expires = 0;
-    }
     return result;
   }
 
@@ -712,7 +739,6 @@ export class RecommendationCatalog {
   private async buildUserPool(userId: string): Promise<UserPool> {
     const previous = this.pools.get(userId)?.value ?? emptyPool();
     const consumed = this.consumed.get(userId) ?? new Set<string>();
-    this.consumed.delete(userId);
     const recent = this.store.recentTracks(userId, recentAddLimit);
     const recentKeys = new Set(
       recent.map((track) => trackKey(track.title, track.artist)),
@@ -842,7 +868,7 @@ export class RecommendationCatalog {
       },
       "User recommendations ready",
     );
-    return { discover, favourites, sample };
+    return { discover, favourites, sample, builtAt: Date.now() };
   }
 
   // Folds this build's ranking into the previous pool: old entries decay,
@@ -1399,6 +1425,7 @@ function emptyPool(): UserPool {
     discover: [],
     favourites: [],
     sample: { discover: [], favourites: [] },
+    builtAt: 0,
   };
 }
 

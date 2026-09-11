@@ -2053,6 +2053,27 @@ export class Coordinator {
     this.recommendations?.prefetchUsers(userId ? [userId] : this.listenerIds());
   }
 
+  // What this session has already played or queued, so personal
+  // recommendations do not offer it and lanes that have run low get topped
+  // up in the background rather than on the next modal open.
+  private sessionExclusions() {
+    return [
+      this.current?.sourceId,
+      ...this.queue.map((track) => track.sourceId),
+      ...this.history.slice(-20).map((track) => track.sourceId),
+      ...this.autoplayRejected,
+    ];
+  }
+
+  private noteSessionRecommendations() {
+    if (!this.recommendations) return;
+    this.recommendations.noteSessions(
+      this.listenerIds(),
+      this.sessionExclusions(),
+    );
+    this.prefetchRecommendations();
+  }
+
   private rejectAutoplayArtist(artist: string) {
     const name = firstArtist(artist);
     this.autoplayRejectedArtists = [
@@ -2748,6 +2769,7 @@ export class Coordinator {
       "Track started",
     );
     this.playbackScrobbling?.start(next, this.participants);
+    this.noteSessionRecommendations();
     this.sendMedia(await this.playMessage(next));
     void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
@@ -3310,17 +3332,12 @@ export class Coordinator {
     );
     const recommended = this.recommendations?.userRecommendations(
       interaction.userId,
-      [
-        this.current?.sourceId,
-        ...this.queue.map((track) => track.sourceId),
-        ...this.history.slice(-20).map((track) => track.sourceId),
-        ...this.autoplayRejected,
-      ],
+      this.sessionExclusions(),
     );
     this.prefetchRecommendations(interaction.userId);
     const recommendedGroups = [
-      { label: "Discover", tracks: recommended?.discover ?? [] },
       { label: "Your favourites", tracks: recommended?.favourites ?? [] },
+      { label: "Discover", tracks: recommended?.discover ?? [] },
     ]
       .filter((group) => group.tracks.length)
       .map((group) => ({
