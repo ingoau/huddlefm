@@ -883,6 +883,169 @@ test("ListenBrainz recommendations ask for artist metadata and route heard ones 
   store.close();
 });
 
+test("huddle mix lifts an underserved listener's taste", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Host Pick", "Host Band", "hostpick001");
+  addPastTrack(store, "guest", "Guest Pick", "Guest Band", "guestpick01");
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async () => undefined,
+    upNextTracks: async () => [],
+  });
+  const even = await catalog.autoplayCandidates({
+    userIds: ["host", "guest"],
+  });
+  expect(even.map((c) => c.metadata.title).sort()).toEqual([
+    "Guest Pick",
+    "Host Pick",
+  ]);
+  expect(even[0]?.score).toBe(even[1]?.score);
+  const skewed = await catalog.autoplayCandidates({
+    userIds: ["host", "guest"],
+    credited: { host: 4, guest: 0 },
+  });
+  expect(skewed[0]?.metadata.title).toBe("Guest Pick");
+  expect(skewed[0]!.score).toBeGreaterThan(skewed[1]!.score);
+  expect(skewed[0]?.listenerIds).toEqual(["guest"]);
+  // Being well served never costs anything.
+  expect(skewed[1]?.score).toBe(even[1]?.score);
+  store.close();
+});
+
+test("a discovery turn draws on the listeners' own Discover pools", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Seed", "Band", "seedseedsee");
+  addPastTrack(store, "guest", "Seed", "Band", "seedseedsee");
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async (title: string, artist: string) =>
+      fakeSong(title, artist),
+    upNextTracks: async (id: string) =>
+      id === "seedseedsee"
+        ? [
+            {
+              sourceInput: "https://music.youtube.com/watch?v=pooledpick1",
+              canonicalUrl: "https://music.youtube.com/watch?v=pooledpick1",
+              sourceId: "pooledpick1",
+              title: "Pooled Pick",
+              artist: "Stranger",
+            },
+          ]
+        : [],
+  });
+  await Promise.all([
+    catalog.prefetchUser("host"),
+    catalog.prefetchUser("guest"),
+  ]);
+  const discovery = await catalog.autoplayCandidates({
+    userIds: ["host", "guest"],
+    nowPlaying: { title: "Now", artist: "Other", sourceId: "nownownownow" },
+    discover: true,
+  });
+  expect(discovery[0]?.metadata.title).toBe("Pooled Pick");
+  expect(discovery[0]?.discovery).toBe(true);
+  expect(discovery[0]?.listenerIds?.sort()).toEqual(["guest", "host"]);
+  // Nobody has played it, so it is a single seed despite two listeners.
+  expect(discovery[0]?.seedCount).toBe(1);
+  store.close();
+});
+
+test("seeds count listeners who played a track, not who were merely recommended it", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Shared", "Band", "sharedshare");
+  addPastTrack(store, "guest", "Shared", "Band", "sharedshare");
+  addPastTrack(store, "guest", "Guest Only", "Solo", "guestonly01");
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async (title: string, artist: string) =>
+      fakeSong(title, artist),
+    upNextTracks: async () => [],
+  });
+  const candidates = await catalog.autoplayCandidates({
+    userIds: ["host", "guest"],
+  });
+  const shared = candidates.find((c) => c.metadata.title === "Shared");
+  const solo = candidates.find((c) => c.metadata.title === "Guest Only");
+  expect(shared?.seedCount).toBe(2);
+  expect(solo?.seedCount).toBe(1);
+  store.close();
+});
+
+test("the same-artist segue boost turns into damping after a run", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "More Band", "Band", "morebandxxx");
+  addPastTrack(store, "host", "Something Else", "Other", "somethingel");
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async () => undefined,
+    upNextTracks: async () => [],
+  });
+  const nowPlaying = { title: "Now", artist: "Band", sourceId: "nownownownow" };
+  const first = await catalog.autoplayCandidates({
+    userIds: ["host"],
+    nowPlaying,
+    artistRun: 1,
+  });
+  expect(first[0]?.metadata.title).toBe("More Band");
+  const run = await catalog.autoplayCandidates({
+    userIds: ["host"],
+    nowPlaying,
+    artistRun: 2,
+  });
+  expect(run[0]?.metadata.title).toBe("Something Else");
+  store.close();
+});
+
+test("penalize pushes a skipped track and its artist down in the skipper's pools", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Seed", "Band", "seedseedsee");
+  const catalog = new RecommendationCatalog(store, {
+    searchSong: async () => undefined,
+    upNextTracks: async () => [
+      {
+        sourceInput: "https://music.youtube.com/watch?v=skipmeplzxx",
+        canonicalUrl: "https://music.youtube.com/watch?v=skipmeplzxx",
+        sourceId: "skipmeplzxx",
+        title: "Skip Me",
+        artist: "Noisy",
+      },
+      {
+        sourceInput: "https://music.youtube.com/watch?v=samebandxxx",
+        canonicalUrl: "https://music.youtube.com/watch?v=samebandxxx",
+        sourceId: "samebandxxx",
+        title: "Same Band",
+        artist: "Noisy",
+      },
+      {
+        sourceInput: "https://music.youtube.com/watch?v=untouchedxx",
+        canonicalUrl: "https://music.youtube.com/watch?v=untouchedxx",
+        sourceId: "untouchedxx",
+        title: "Untouched",
+        artist: "Calm",
+      },
+    ],
+  });
+  await catalog.prefetchUser("host");
+  const pools = Reflect.get(catalog, "pools") as Map<
+    string,
+    { value: { discover: { metadata: { title: string }; score: number }[] } }
+  >;
+  const before = Object.fromEntries(
+    pools.get("host")!.value.discover.map((t) => [t.metadata.title, t.score]),
+  );
+  expect(
+    catalog.userRecommendations("host").discover.map((t) => t.title),
+  ).toContain("Skip Me");
+  catalog.penalize("host", { title: "Skip Me", artist: "Noisy" });
+  const after = Object.fromEntries(
+    pools.get("host")!.value.discover.map((t) => [t.metadata.title, t.score]),
+  );
+  expect(after["Skip Me"]).toBeCloseTo(before["Skip Me"]! * 0.2);
+  expect(after["Same Band"]).toBeCloseTo(before["Same Band"]! * 0.6);
+  expect(after["Untouched"]).toBe(before["Untouched"]!);
+  expect(
+    catalog.userRecommendations("host").discover.map((t) => t.title),
+  ).not.toContain("Skip Me");
+  catalog.penalize("nobody", { title: "Skip Me", artist: "Noisy" });
+  store.close();
+});
+
 test("trackKey ignores punctuation and case", () => {
   expect(trackKey("Karma Police!", "Radiohead")).toBe(
     trackKey("karma police", "RADIOHEAD"),
