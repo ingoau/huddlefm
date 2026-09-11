@@ -29,6 +29,7 @@ const depletionThreshold = 10;
 const discoverResolveAttempts = 20;
 const favouritesResolveAttempts = 10;
 const poolDecay = 0.7;
+const newcomerShare = 1 / 3;
 const trackSeedCount = 5;
 const trackSeedWindow = 30;
 const artistSeedCount = 3;
@@ -43,6 +44,9 @@ const recentAddLimit = 25;
 const mixCandidateLimit = 12;
 const mixResolveAttempts = 24;
 const mixDiscoveryLimit = 6;
+// Contributions from similarity lookups carry these ids instead of a real
+// listener, so they must not count as a seed.
+const syntheticUsers = new Set(["similar", "related"]);
 
 export type TasteTrack = {
   title: string;
@@ -284,7 +288,10 @@ export class RecommendationCatalog {
     lookupTtlMs,
     lookupCap,
   );
-  private lookups = new Memo<TasteTrack[]>(lookupTtlMs, lookupCap);
+  private lookups = new Memo<(TasteTrack & { match?: number })[]>(
+    lookupTtlMs,
+    lookupCap,
+  );
   private artistLookups = new Memo<{ name: string; match: number }[]>(
     lookupTtlMs,
     lookupCap,
@@ -575,6 +582,7 @@ export class RecommendationCatalog {
       (artist) => artist.score,
       this.random,
     );
+    const topArtistScore = profile.artists[0]?.score || 1;
     const upNextSeeds = recent
       .filter((track) => isYoutubeVideoId(track.sourceId))
       .slice(0, 2);
@@ -585,8 +593,11 @@ export class RecommendationCatalog {
         ),
       ),
       Promise.all(
-        artistSeeds.map((artist, index) =>
-          this.similarArtistTracks(artist.name, index + 1).catch(() => []),
+        artistSeeds.map((artist) =>
+          this.similarArtistTracks(
+            artist.name,
+            artist.score / topArtistScore,
+          ).catch(() => []),
         ),
       ),
       this.listenBrainzRecommendations(userId, profile.listenBrainz),
@@ -619,8 +630,10 @@ export class RecommendationCatalog {
       ...consumed,
       ...recent.map((track) => track.sourceId),
     ]);
+    // A track the user has since listened to no longer belongs in Discover,
+    // and a favourite they just added moves to "Recent songs".
     const discover = await this.mergePool(
-      previous.discover,
+      previous.discover.filter((track) => !profile.known.has(track.key)),
       discoverRanked,
       discoverPoolSize,
       discoverResolveAttempts,
@@ -628,7 +641,7 @@ export class RecommendationCatalog {
     );
     for (const track of discover) excludedIds.add(track.metadata.sourceId);
     const favourites = await this.mergePool(
-      previous.favourites,
+      previous.favourites.filter((track) => !recentKeys.has(track.key)),
       favouritesRanked,
       favouritesPoolSize,
       favouritesResolveAttempts,
@@ -667,7 +680,8 @@ export class RecommendationCatalog {
 
   // Folds this build's ranking into the previous pool: old entries decay,
   // re-recommended ones are bumped, and a bounded number of newcomers are
-  // resolved. The result is the top `size` by score.
+  // resolved. The result is the top `size` by score, with a share reserved
+  // for this build's newcomers so incumbents cannot lock the pool.
   private async mergePool(
     previous: PoolTrack[],
     ranked: ScoredTrack[],
@@ -685,7 +699,8 @@ export class RecommendationCatalog {
       const key = trackKey(track.title, track.artist);
       const existing = pool.get(key);
       if (existing) {
-        existing.score += track.score;
+        existing.score =
+          Math.max(existing.score, track.score) + 0.25 * track.score;
         for (const source of track.sources)
           if (!existing.sources.includes(source)) existing.sources.push(source);
       } else newcomers.push(track);
@@ -700,15 +715,29 @@ export class RecommendationCatalog {
       size,
       attempts,
     );
-    for (const candidate of resolved)
-      pool.set(trackKey(candidate.track.title, candidate.track.artist), {
+    const fresh: PoolTrack[] = [];
+    for (const candidate of resolved) {
+      const key = trackKey(candidate.track.title, candidate.track.artist);
+      const track = {
         id: `rec_${crypto.randomUUID()}`,
-        key: trackKey(candidate.track.title, candidate.track.artist),
+        key,
         score: candidate.score,
         sources: candidate.track.sources,
         metadata: candidate.metadata,
-      });
-    return [...pool.values()].sort((a, b) => b.score - a.score).slice(0, size);
+      };
+      pool.set(key, track);
+      fresh.push(track);
+    }
+    const byScore = (a: PoolTrack, b: PoolTrack) => b.score - a.score;
+    const reserved = fresh
+      .sort(byScore)
+      .slice(0, Math.ceil(size * newcomerShare));
+    const keptIds = new Set(reserved.map((track) => track.id));
+    const rest = [...pool.values()]
+      .filter((track) => !keptIds.has(track.id))
+      .sort(byScore)
+      .slice(0, Math.max(0, size - reserved.length));
+    return [...reserved, ...rest].sort(byScore);
   }
 
   private async resolvePlayable(
@@ -737,7 +766,10 @@ export class RecommendationCatalog {
         results.push({
           sourceId: metadata.sourceId,
           score: track.score,
-          seedCount: Math.max(1, track.userIds.length),
+          seedCount: Math.max(
+            1,
+            track.userIds.filter((id) => !syntheticUsers.has(id)).length,
+          ),
           discovery: false,
           metadata,
           track,
@@ -861,14 +893,16 @@ export class RecommendationCatalog {
           (result.similartracks as { track?: unknown })?.track,
         ).flatMap((row) => {
           const track = lastFmTrack(row);
-          return track ? [track] : [];
+          if (!track) return [];
+          const match = Number((row as { match?: unknown }).match ?? 0);
+          return [{ ...track, ...(match > 0 ? { match } : {}) }];
         });
       })
       .then((tracks) =>
-        tracks.map((track, index) => ({
+        tracks.map(({ match, ...track }, index) => ({
           userId: "similar",
           source: "similar",
-          weight: 2.5 / (index + 1),
+          weight: match ? 2.5 * match : 2.5 / (index + 1),
           ...track,
         })),
       );
@@ -876,8 +910,9 @@ export class RecommendationCatalog {
 
   // One hop out from an artist: their closest neighbours on Last.fm, and a
   // few of each neighbour's best-known tracks, weighted by how close the
-  // neighbour is.
-  private async similarArtistTracks(artist: string, seedRank: number) {
+  // neighbour is and how much the seed artist matters to the listener
+  // (`seedWeight` is 0..1).
+  private async similarArtistTracks(artist: string, seedWeight: number) {
     if (!this.config.lastFmApiKey || !artist.trim()) return [];
     const seed = firstArtist(artist);
     const neighbours = await this.artistLookups.load(
@@ -916,10 +951,10 @@ export class RecommendationCatalog {
             });
           },
         );
-        return tracks.map((track, index) => ({
+        return tracks.map(({ match: _, ...track }, index) => ({
           userId: "similar",
           source: "similar",
-          weight: (2 * neighbour.match) / (index + 1) / seedRank,
+          weight: (2 * neighbour.match * seedWeight) / (index + 1),
           ...track,
         }));
       }),
