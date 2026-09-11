@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import {
-  activeHuddleCallId,
+  activeHuddleRoom,
   channelAccess,
+  huddleHasParticipant,
   normalizeInvitedJoinResponse,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
@@ -208,20 +209,28 @@ test("only accepts active Huddle thread roots", () => {
       {
         ts: "1.0",
         subtype: "huddle_thread",
-        room: { id: "R123", has_ended: false, date_end: 0 },
+        room: {
+          id: "R123",
+          has_ended: false,
+          date_end: 0,
+          participants: ["U1", { user_id: "U2" }, 7],
+        },
       },
     ],
   };
-  expect(activeHuddleCallId(active, "1.0")).toBe("R123");
-  expect(activeHuddleCallId(active, "2.0")).toBeUndefined();
+  expect(activeHuddleRoom(active, "1.0")).toEqual({
+    callId: "R123",
+    participantIds: ["U1", "U2"],
+  });
+  expect(activeHuddleRoom(active, "2.0")).toBeUndefined();
   expect(
-    activeHuddleCallId(
+    activeHuddleRoom(
       { ok: true, messages: [{ ts: "1.0", room: { id: "R123" } }] },
       "1.0",
     ),
   ).toBeUndefined();
   expect(
-    activeHuddleCallId(
+    activeHuddleRoom(
       {
         ok: true,
         messages: [
@@ -235,6 +244,16 @@ test("only accepts active Huddle thread roots", () => {
       "1.0",
     ),
   ).toBeUndefined();
+});
+
+test("only counts listed Huddle participants as members", () => {
+  const room = { callId: "R123", participantIds: ["U1", "U2"] };
+  expect(huddleHasParticipant(room, "U1")).toBe(true);
+  expect(huddleHasParticipant(room, "U3")).toBe(false);
+  // Slack did not list anyone, so membership is unknown rather than empty.
+  expect(
+    huddleHasParticipant({ callId: "R123", participantIds: [] }, "U3"),
+  ).toBe(true);
 });
 
 test("ignores partial lifecycle events", () => {
