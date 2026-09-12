@@ -65,6 +65,9 @@ export const loopModeLabels: Record<LoopMode, string> = {
 };
 
 export const recentTrackLimit = 100;
+// How many distinct autoplayed songs count as "recent" when keeping the
+// mix's own output out of listeners' taste profiles.
+const recentAutomaticLimit = 500;
 
 export const usageLabels = {
   added: "Songs added",
@@ -1202,6 +1205,23 @@ export class Store {
         ORDER BY created_at DESC, insertionOrder DESC LIMIT ?`,
       )
       .all(userId, limit) as RecentTrack[];
+  }
+
+  // Tracks autoplay has queued recently, across every session. Listeners
+  // scrobble these, so a taste profile built from recent scrobbles would
+  // otherwise feed the mix's own output straight back into it.
+  recentAutomaticTracks(limit = recentAutomaticLimit) {
+    return this.db
+      .query(
+        `SELECT title, artist FROM (
+          SELECT title, artist, MAX(created_at) AS created_at,
+          MAX(rowid) AS insertionOrder
+          FROM tracks WHERE automatic = 1
+          GROUP BY title COLLATE NOCASE, artist COLLATE NOCASE
+        )
+        ORDER BY created_at DESC, insertionOrder DESC LIMIT ?`,
+      )
+      .all(limit) as { title: string; artist: string }[];
   }
 
   // The most recent track anyone here has played with this title and artist,

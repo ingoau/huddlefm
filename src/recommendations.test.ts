@@ -148,24 +148,28 @@ test("huddle mix treats YouTube up-next as a light nudge", async () => {
   const store = new Store(":memory:");
   addPastTrack(store, "host", "Shared", "Band", "sharedshared");
   addPastTrack(store, "guest", "Shared", "Band", "sharedshared");
-  const catalog = new RecommendationCatalog(store, {
-    searchSong: async (title: string, artist: string) => ({
-      sourceInput: `https://music.youtube.com/watch?v=${title.slice(0, 11).padEnd(11, "x")}`,
-      canonicalUrl: `https://music.youtube.com/watch?v=${title.slice(0, 11).padEnd(11, "x")}`,
-      sourceId: title.slice(0, 11).padEnd(11, "x"),
-      title,
-      artist,
-    }),
-    upNextTracks: async () => [
-      {
-        sourceInput: "https://music.youtube.com/watch?v=upnextnudge",
-        canonicalUrl: "https://music.youtube.com/watch?v=upnextnudge",
-        sourceId: "upnextnudge",
-        title: "Up Next Only",
-        artist: "Other",
-      },
-    ],
-  });
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) => ({
+        sourceInput: `https://music.youtube.com/watch?v=${title.slice(0, 11).padEnd(11, "x")}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${title.slice(0, 11).padEnd(11, "x")}`,
+        sourceId: title.slice(0, 11).padEnd(11, "x"),
+        title,
+        artist,
+      }),
+      upNextTracks: async () => [
+        {
+          sourceInput: "https://music.youtube.com/watch?v=upnextnudge",
+          canonicalUrl: "https://music.youtube.com/watch?v=upnextnudge",
+          sourceId: "upnextnudge",
+          title: "Up Next Only",
+          artist: "Other",
+        },
+      ],
+    },
+    { random: () => 0 },
+  );
   const candidates = await catalog.autoplayCandidates({
     userIds: ["host", "guest"],
     nowPlaying: {
@@ -920,10 +924,14 @@ test("huddle mix lifts an underserved listener's taste", async () => {
   const store = new Store(":memory:");
   addPastTrack(store, "host", "Host Pick", "Host Band", "hostpick001");
   addPastTrack(store, "guest", "Guest Pick", "Guest Band", "guestpick01");
-  const catalog = new RecommendationCatalog(store, {
-    searchSong: async () => undefined,
-    upNextTracks: async () => [],
-  });
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async () => undefined,
+      upNextTracks: async () => [],
+    },
+    { random: () => 0 },
+  );
   const even = await catalog.autoplayCandidates({
     userIds: ["host", "guest"],
   });
@@ -1005,10 +1013,14 @@ test("the same-artist segue boost turns into damping after a run", async () => {
   const store = new Store(":memory:");
   addPastTrack(store, "host", "More Band", "Band", "morebandxxx");
   addPastTrack(store, "host", "Something Else", "Other", "somethingel");
-  const catalog = new RecommendationCatalog(store, {
-    searchSong: async () => undefined,
-    upNextTracks: async () => [],
-  });
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async () => undefined,
+      upNextTracks: async () => [],
+    },
+    { random: () => 0 },
+  );
   const nowPlaying = { title: "Now", artist: "Band", sourceId: "nownownownow" };
   const first = await catalog.autoplayCandidates({
     userIds: ["host"],
@@ -1237,6 +1249,96 @@ function fakeSong(title: string, artist: string) {
     artist,
   };
 }
+
+test("huddle mix draws its lead by score instead of always taking the top", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "More Band", "Band", "morebandxxx");
+  addPastTrack(store, "host", "Something Else", "Other", "somethingel");
+  const tracks = {
+    searchSong: async () => undefined,
+    upNextTracks: async () => [],
+  };
+  const nowPlaying = { title: "Now", artist: "Band", sourceId: "nownownownow" };
+  // A roll near the top of the range lands on the lighter candidate.
+  const upset = new RecommendationCatalog(store, tracks, {
+    random: () => 0.99,
+  });
+  const upsetPicks = await catalog(upset, nowPlaying);
+  expect(upsetPicks).toEqual(["Something Else", "More Band"]);
+  // A roll at the bottom keeps the strongest candidate in front.
+  const usual = new RecommendationCatalog(store, tracks, { random: () => 0 });
+  expect(await catalog(usual, nowPlaying)).toEqual([
+    "More Band",
+    "Something Else",
+  ]);
+  store.close();
+
+  async function catalog(
+    catalog: RecommendationCatalog,
+    playing: typeof nowPlaying,
+  ) {
+    const candidates = await catalog.autoplayCandidates({
+      userIds: ["host"],
+      nowPlaying: playing,
+      artistRun: 1,
+    });
+    return candidates.map((track) => track.metadata.title);
+  }
+});
+
+test("recent autoplay picks do not count as a listener's recent scrobbles", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Own Pick", "Band", "ownpickxxxx");
+  store.createSession({
+    id: "mix-session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.addTrack({
+    id: "mix-pick",
+    sessionId: "mix-session",
+    requesterId: "host",
+    sourceInput: "https://example.com/mixpickxxxx",
+    canonicalUrl: "https://example.com/mixpickxxxx",
+    sourceId: "mixpickxxxx",
+    title: "Mix Pick",
+    artist: "Stranger",
+    automatic: true,
+    status: "played",
+  });
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: () => 0 },
+    lastFmStub({
+      "user.getTopTracks": { toptracks: { track: [] } },
+      "user.getRecentTracks": {
+        recenttracks: {
+          track: [
+            { name: "Mix Pick", artist: { "#text": "Stranger" } },
+            { name: "Scrobbled", artist: { "#text": "Elsewhere" } },
+          ],
+        },
+      },
+      "user.getTopArtists": { topartists: { artist: [] } },
+    }),
+  );
+  const candidates = await catalog.autoplayCandidates({ userIds: ["host"] });
+  const titles = candidates.map((track) => track.metadata.title);
+  expect(titles).toContain("Scrobbled");
+  expect(titles).not.toContain("Mix Pick");
+  store.close();
+});
 
 // A deterministic stand-in for Math.random that walks a fixed cycle, so
 // weighted sampling is reproducible.

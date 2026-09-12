@@ -118,7 +118,10 @@ export type RecommendationTracks = Pick<
 
 export type RecommendationStore = Pick<
   Store,
-  "getUserScrobbling" | "recentTracks" | "findPlayedTrack"
+  | "getUserScrobbling"
+  | "recentTracks"
+  | "recentAutomaticTracks"
+  | "findPlayedTrack"
 >;
 
 type TasteArtist = { name: string; score: number };
@@ -611,23 +614,23 @@ export class RecommendationCatalog {
         listenerIds: track.userIds.filter((userId) => knownBy.has(userId)),
       };
     };
-    const bySeeds = (a: AutoplayCandidate, b: AutoplayCandidate) =>
-      b.seedCount - a.seedCount || b.score - a.score;
+    // Candidates come back in the sampled order, which the caller keeps:
+    // re-sorting by score here would put the same track first every pick.
     if (!options.discover) {
       const resolved = await this.resolvePlayable(
-        eligible,
+        this.sampleByScore(eligible),
         excluded,
         mixCandidateLimit,
         mixResolveAttempts,
       );
-      return resolved
-        .map((candidate) => finish(candidate, isDiscovery(candidate.track)))
-        .sort(bySeeds);
+      return resolved.map((candidate) =>
+        finish(candidate, isDiscovery(candidate.track)),
+      );
     }
     // A discovery turn: lead with tracks nobody in the huddle has listened
     // to, then fall back to the usual ranking.
     const discoveries = await this.resolvePlayable(
-      eligible.filter(isDiscovery),
+      this.sampleByScore(eligible.filter(isDiscovery)),
       excluded,
       mixDiscoveryLimit,
       mixResolveAttempts,
@@ -637,16 +640,30 @@ export class RecommendationCatalog {
       ...discoveries.map((candidate) => candidate.sourceId),
     ]);
     const rest = await this.resolvePlayable(
-      eligible.filter((track) => !isDiscovery(track)),
+      this.sampleByScore(eligible.filter((track) => !isDiscovery(track))),
       seen,
       mixCandidateLimit - discoveries.length,
       mixResolveAttempts,
     );
     return [
-      ...discoveries
-        .map((candidate) => finish(candidate, true))
-        .sort((a, b) => b.score - a.score),
-      ...rest.map((candidate) => finish(candidate, false)).sort(bySeeds),
+      ...discoveries.map((candidate) => finish(candidate, true)),
+      ...rest.map((candidate) => finish(candidate, false)),
+    ];
+  }
+
+  // Reorders the strongest candidates with a score-weighted draw, so the
+  // best track is the most likely lead but not the only one. Anything past
+  // the resolve window keeps its ranked order.
+  private sampleByScore(ranked: ScoredTrack[]) {
+    const window = ranked.slice(0, mixResolveAttempts);
+    return [
+      ...weightedSample(
+        window,
+        window.length,
+        (track) => track.score,
+        this.random,
+      ),
+      ...ranked.slice(mixResolveAttempts),
     ];
   }
 
@@ -685,18 +702,27 @@ export class RecommendationCatalog {
     const added = this.store
       .recentTracks(userId, recentAddLimit)
       .map((track) => contributionFromMetadata(track, userId, "huddlefm", 2));
+    // Autoplay picks get scrobbled for everyone in the room, so they would
+    // otherwise turn up in every listener's recent listens and, boosted as a
+    // shared taste, come straight back into the mix.
+    const autoplayed = new Set(
+      this.store
+        .recentAutomaticTracks()
+        .map((track) => trackKey(track.title, track.artist)),
+    );
     const warn = (event: string, text: string) => (error: unknown) => {
       log.warn({ event, userId, err: error }, text);
       return emptyProfile();
     };
     const [lastFm, listenBrainz] = await Promise.all([
-      this.lastFmTaste(userId, settings.lastFmUsername).catch(
+      this.lastFmTaste(userId, settings.lastFmUsername, autoplayed).catch(
         warn("lastfm_taste_failed", "Last.fm taste lookup failed"),
       ),
       this.listenBrainzTaste(
         userId,
         settings.listenBrainzUsername,
         settings.listenBrainzToken,
+        autoplayed,
       ).catch(
         warn("listenbrainz_taste_failed", "ListenBrainz taste lookup failed"),
       ),
@@ -941,11 +967,14 @@ export class RecommendationCatalog {
   ) {
     const seen = new Set(excluded);
     const seenKeys = new Set<string>();
-    const results: (AutoplayCandidate & { track: ScoredTrack })[] = [];
+    const results: (AutoplayCandidate & {
+      track: ScoredTrack;
+      rank: number;
+    })[] = [];
     await mapPool(
-      ranked.slice(0, attempts),
+      ranked.slice(0, attempts).map((track, rank) => ({ track, rank })),
       searchConcurrency,
-      async (track) => {
+      async ({ track, rank }) => {
         if (results.length >= limit) return;
         const key = trackKey(track.title, track.artist);
         if (seenKeys.has(key)) return;
@@ -967,10 +996,14 @@ export class RecommendationCatalog {
           listenerIds: track.userIds.filter((id) => !syntheticUsers.has(id)),
           metadata,
           track,
+          rank,
         });
       },
     );
-    return results;
+    // Lookups finish out of order; hand back the caller's order.
+    return results
+      .sort((a, b) => a.rank - b.rank)
+      .map(({ rank: _, ...candidate }) => candidate);
   }
 
   // Turns a title/artist pair into playable metadata: a track that already
@@ -1020,7 +1053,11 @@ export class RecommendationCatalog {
     }
   }
 
-  private async lastFmTaste(userId: string, username?: string) {
+  private async lastFmTaste(
+    userId: string,
+    username?: string,
+    autoplayed = new Set<string>(),
+  ) {
     if (!this.config.lastFmApiKey || !username) return emptyProfile();
     const [top, recent, artists, allTime] = await Promise.all([
       this.lastFm("user.getTopTracks", {
@@ -1067,7 +1104,9 @@ export class RecommendationCatalog {
       (recent.recenttracks as { track?: unknown })?.track,
     ).flatMap((row) => {
       const track = lastFmTrack(row);
-      return track ? [{ userId, source: "lastfm", weight: 1, ...track }] : [];
+      if (!track || autoplayed.has(trackKey(track.title, track.artist)))
+        return [];
+      return [{ userId, source: "lastfm", weight: 1, ...track }];
     });
     const topArtists = asArray(
       (artists?.topartists as { artist?: unknown })?.artist,
@@ -1180,6 +1219,7 @@ export class RecommendationCatalog {
     userId: string,
     username?: string,
     token?: string,
+    autoplayed = new Set<string>(),
   ) {
     if (!username) return emptyProfile();
     const headers = token ? { authorization: `Token ${token}` } : undefined;
@@ -1219,9 +1259,9 @@ export class RecommendationCatalog {
       const track = listenBrainzTrack(
         (row as { track_metadata?: unknown }).track_metadata,
       );
-      return track
-        ? [{ userId, source: "listenbrainz", weight: 1, ...track }]
-        : [];
+      if (!track || autoplayed.has(trackKey(track.title, track.artist)))
+        return [];
+      return [{ userId, source: "listenbrainz", weight: 1, ...track }];
     });
     const top = asArray(
       (stats?.payload as { recordings?: unknown })?.recordings,

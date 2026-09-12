@@ -802,6 +802,45 @@ test("migrates integer autoplay flags to off and related", () => {
   rmSync(directory, { recursive: true });
 });
 
+test("lists recently autoplayed songs once each, newest first", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  const add = (id: string, title: string, automatic: boolean) =>
+    store.addTrack({
+      id,
+      sessionId: "session",
+      requesterId: "host",
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title,
+      artist: "Band",
+      automatic,
+      status: "played",
+    });
+  add("1", "Manual", false);
+  add("2", "Older Pick", true);
+  add("3", "Newer Pick", true);
+  add("4", "older pick", true);
+  expect(store.recentAutomaticTracks().map((track) => track.title)).toEqual([
+    "older pick",
+    "Newer Pick",
+  ]);
+  expect(store.recentAutomaticTracks(1).map((track) => track.title)).toEqual([
+    "older pick",
+  ]);
+  store.close();
+});
+
 test("persists huddle mix opt-in per Slack user", () => {
   const store = new Store(":memory:");
   expect(store.getUserScrobbling("user").huddleMixOptIn).toBe(true);
