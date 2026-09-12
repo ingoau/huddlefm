@@ -4565,6 +4565,60 @@ test("skipping a discovery pick backs off the cadence and penalises the skipper'
   await test.coordinator.endFromSlack();
 });
 
+test("removing a queued autoplay pick keeps it out of the mix", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const penalized: [string, { title: string; artist: string }][] = [];
+  const catalog = huddleMixCatalog(
+    [
+      { sourceId: "firstpick01", title: "First Pick" },
+      { sourceId: "secondpick1", title: "Second Pick" },
+    ],
+    calls,
+    penalized,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await enableHuddleMix(test.coordinator);
+  const queued = () =>
+    (
+      Reflect.get(test.coordinator, "queue") as {
+        id: string;
+        sourceId: string;
+        automatic?: boolean;
+      }[]
+    ).find((track) => track.automatic && track.sourceId === "secondpick1");
+  await until(() => Boolean(queued()));
+  const entry = queued()!;
+  const before = calls.length;
+  expect(await test.coordinator.agentRemove("host", entry.id)).toMatchObject({
+    ok: true,
+  });
+  expect(penalized).toEqual([
+    ["host", { title: "Second Pick", artist: "Band" }],
+  ]);
+  expect(Reflect.get(test.coordinator, "autoplayRejected")).toContain(
+    "secondpick1",
+  );
+  await until(() => calls.length > before);
+  expect((calls.at(-1)!.exclude as Set<string>).has("secondpick1")).toBe(true);
+  await test.coordinator.endFromSlack();
+});
+
 test("huddle mix credits the listeners behind recent picks", async () => {
   const calls: Record<string, unknown>[] = [];
   const catalog = huddleMixCatalog(

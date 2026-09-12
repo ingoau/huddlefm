@@ -101,6 +101,9 @@ function throwIfAborted(signal?: AbortSignal) {
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
 const autoplayCreditWindow = 10;
+// How far back in this session's history autoplay looks when deciding a
+// track has been heard too recently to come round again.
+const autoplayRecentWindow = 100;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 
@@ -891,6 +894,7 @@ export class Coordinator {
       this.queue.splice(this.queue.indexOf(entry), 1);
       this.preparations.get(entry.id)?.abort();
       this.store.removeTrack(entry.id);
+      if (entry.automatic) this.rejectSkipped(entry, userId);
       this.audit.record("track.removed", userId, {
         sessionId: this.id,
         ...auditTrack(entry),
@@ -2094,9 +2098,10 @@ export class Coordinator {
     ].slice(-20);
   }
 
-  // A skip keeps the track and artist out of this session's autoplay, pushes
-  // them down in the skipper's own recommendations, and, for a discovery,
-  // makes the next discovery turn wait longer.
+  // Skipping an autoplay pick, or removing one from the queue, keeps the
+  // track and artist out of this session's autoplay, pushes them down in the
+  // rejecter's own recommendations, and, for a discovery, makes the next
+  // discovery turn wait longer.
   private rejectSkipped(skipped: Entry, userId: string) {
     this.autoplayRejected = [
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
@@ -2412,10 +2417,11 @@ export class Coordinator {
       "Finding autoplay recommendation",
     );
     try {
+      const recent = this.history.slice(-autoplayRecentWindow);
       const excluded = new Set([
         this.current?.sourceId,
         ...this.queue.map((track) => track.sourceId),
-        ...this.history.slice(-20).map((track) => track.sourceId),
+        ...recent.map((track) => track.sourceId),
         ...this.autoplayRejected,
       ]);
       const ranked = new Map<
@@ -2451,15 +2457,12 @@ export class Coordinator {
         const extras = await this.recommendations.autoplayCandidates({
           userIds: this.listenerIds(),
           nowPlaying: this.current ?? this.history.at(-1),
-          recent: [
-            ...this.history.slice(-20),
-            ...(this.current ? [this.current] : []),
-          ],
+          recent: [...recent, ...(this.current ? [this.current] : [])],
           exclude: excluded,
           skipped: {
             sourceIds: this.autoplayRejected,
             artists: this.autoplayRejectedArtists,
-            tracks: this.history.slice(-20),
+            tracks: recent,
           },
           discover,
           credited,
@@ -2594,7 +2597,9 @@ export class Coordinator {
         const currentIds = new Set([
           this.current?.sourceId,
           ...this.queue.map((track) => track.sourceId),
-          ...this.history.slice(-20).map((track) => track.sourceId),
+          ...this.history
+            .slice(-autoplayRecentWindow)
+            .map((track) => track.sourceId),
           ...this.autoplayRejected,
         ]);
         if (currentIds.has(metadata.sourceId)) return false;
@@ -3300,6 +3305,7 @@ export class Coordinator {
     this.queue.splice(this.queue.indexOf(entry), 1);
     this.preparations.get(entry.id)?.abort();
     this.store.removeTrack(entry.id);
+    if (entry.automatic) this.rejectSkipped(entry, interaction.userId);
     this.audit.record("track.removed", interaction.userId, {
       sessionId: this.id,
       ...auditTrack(entry),
