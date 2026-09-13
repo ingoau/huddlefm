@@ -47,6 +47,8 @@ function setup(
   const sessions: unknown[] = [];
   const permissions: unknown[] = [];
   const suspensions: unknown[] = [];
+  const queueOrders: string[][] = [];
+  const usage: string[] = [];
   const media: unknown[] = [];
   const audit: unknown[] = [];
   const sessionChanges: unknown[] = [];
@@ -104,7 +106,9 @@ function setup(
       removeTrack: () => {},
       addTrack: () => {},
       recentTracks: () => [],
-      incrementUsage: () => {},
+      incrementUsage: (event: string) => {
+        usage.push(event);
+      },
       setSession: (_id: string, value: unknown) => {
         sessions.push(value);
       },
@@ -113,6 +117,9 @@ function setup(
       },
       suspendSession: (...args: unknown[]) => {
         suspensions.push(args);
+      },
+      setQueueOrder: (_id: string, queue: string[]) => {
+        queueOrders.push(queue);
       },
       endSession: (...args: unknown[]) => {
         sessions.push({ status: "ended", args });
@@ -182,6 +189,8 @@ function setup(
     sessions,
     permissions,
     suspensions,
+    queueOrders,
+    usage,
     media,
     audit,
     sessionChanges,
@@ -441,6 +450,247 @@ test("plays a queued track next", async () => {
       (track) => track.id,
     ),
   ).toEqual(["second", "first"]);
+  await result.coordinator.endFromSlack();
+});
+
+function queued(id: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    requesterId: "host",
+    sourceInput: id,
+    canonicalUrl: id,
+    sourceId: id,
+    title: id.toUpperCase(),
+    artist: "Artist",
+    status: "ready",
+    ...extra,
+  };
+}
+
+const queueIds = (coordinator: Coordinator) =>
+  (Reflect.get(coordinator, "queue") as { id: string }[]).map(
+    (track) => track.id,
+  );
+
+// Math.random() === 0 turns the Fisher-Yates pass into a rotation, so the
+// order a shuffle produces is known without giving up the real helper.
+async function withoutRandomness(run: () => Promise<void>) {
+  const random = Math.random;
+  Math.random = () => 0;
+  try {
+    await run();
+  } finally {
+    Math.random = random;
+  }
+}
+
+const playerBlocks = (coordinator: Coordinator) =>
+  JSON.stringify(
+    (Reflect.get(coordinator, "blocks") as () => unknown[]).call(coordinator),
+  );
+
+const queueDialog = (coordinator: Coordinator, userId: string) =>
+  JSON.stringify(
+    (Reflect.get(coordinator, "queueView") as (id: string) => unknown).call(
+      coordinator,
+      userId,
+    ),
+  );
+
+test("shuffles the pending queue and leaves the playing track alone", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(
+    result.coordinator,
+    "current",
+    queued("playing", {
+      status: "playing",
+    }),
+  );
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ["a", "b", "c", "d", "e"].map((id) => queued(id)),
+  );
+
+  await withoutRandomness(() =>
+    result.coordinator.action(interaction(result.coordinator, "shuffle_queue")),
+  );
+
+  expect(
+    (Reflect.get(result.coordinator, "current") as { id: string }).id,
+  ).toBe("playing");
+  expect(queueIds(result.coordinator)).toEqual(["b", "c", "d", "e", "a"]);
+  expect(result.audit).toContainEqual([
+    "queue.shuffled",
+    "host",
+    { sessionId: result.coordinator.id, count: 5 },
+  ]);
+  expect(result.usage).toContain("shuffled");
+  expect(result.queueOrders.at(-1)).toEqual(["b", "c", "d", "e", "a"]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a shuffle is a permutation of the pending queue", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const ids = ["a", "b", "c", "d", "e", "f", "g"];
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ids.map((id) => queued(id)),
+  );
+
+  // Real randomness, so assert the invariants rather than an exact order.
+  for (let round = 0; round < 10; round++) {
+    await result.coordinator.action(
+      interaction(result.coordinator, "shuffle_queue"),
+    );
+    expect([...queueIds(result.coordinator)].sort()).toEqual([...ids].sort());
+  }
+  await result.coordinator.endFromSlack();
+});
+
+test("shuffle leaves a queued autoplay pick in its slot", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [
+    queued("auto", { automatic: true }),
+    queued("a"),
+    queued("b"),
+    queued("c"),
+  ]);
+
+  await withoutRandomness(() =>
+    result.coordinator.action(interaction(result.coordinator, "shuffle_queue")),
+  );
+
+  expect(queueIds(result.coordinator)).toEqual(["auto", "b", "c", "a"]);
+  await result.coordinator.endFromSlack();
+});
+
+test("shuffle needs the manage-queue permission", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ["a", "b", "c"].map((id) => queued(id)),
+  );
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "shuffle_queue"),
+    userId: "guest",
+  });
+
+  expect(result.ephemeral).toEqual(["You do not have permission for that."]);
+  expect(queueIds(result.coordinator)).toEqual(["a", "b", "c"]);
+  expect(result.usage).not.toContain("shuffled");
+  expect(result.queueOrders).toEqual([]);
+  expect(result.audit).toContainEqual([
+    "action.denied",
+    "guest",
+    { sessionId: result.coordinator.id, capability: "manage-queue" },
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("agentShuffle shuffles under the manage-queue permission", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  result.coordinator.memberJoined("listener");
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ["a", "b", "c"].map((id) => queued(id)),
+  );
+
+  expect(await result.coordinator.agentShuffle("listener")).toEqual({
+    ok: false,
+    error: "You do not have permission for that.",
+  });
+  expect(queueIds(result.coordinator)).toEqual(["a", "b", "c"]);
+
+  await withoutRandomness(async () => {
+    expect(await result.coordinator.agentShuffle("host")).toEqual({
+      ok: true,
+      shuffled: 3,
+    });
+  });
+  expect(queueIds(result.coordinator)).toEqual(["b", "c", "a"]);
+
+  Reflect.set(result.coordinator, "queue", [queued("a")]);
+  expect(await result.coordinator.agentShuffle("host")).toEqual({
+    ok: false,
+    error: "There are not enough queued songs to shuffle.",
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("a shuffled queue survives a restore", async () => {
+  const store = new Store(":memory:");
+  const result = setup(undefined, undefined, undefined, undefined, store);
+  await result.coordinator.start();
+  const ids = ["a", "b", "c", "d", "e"];
+  for (const id of ids)
+    store.addTrack({
+      id,
+      sessionId: result.coordinator.id,
+      requesterId: "host",
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id.toUpperCase(),
+      artist: "Artist",
+      status: "ready",
+    });
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ids.map((id) => queued(id)),
+  );
+
+  await withoutRandomness(() =>
+    result.coordinator.action(interaction(result.coordinator, "shuffle_queue")),
+  );
+  const shuffled = queueIds(result.coordinator);
+  expect(shuffled).not.toEqual(ids);
+
+  // A restart that never reached suspend still restores the new order.
+  const saved = store.resumableSessions(Date.now(), 600_000).sessions[0];
+  expect(saved?.tracks.map((track) => track.id)).toEqual(shuffled);
+  const restored = setup(undefined, undefined, saved, undefined, store);
+  expect(queueIds(restored.coordinator)).toEqual(shuffled);
+
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("offers shuffle only when there is something to shuffle", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+
+  Reflect.set(result.coordinator, "queue", [queued("a")]);
+  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+  expect(queueDialog(result.coordinator, "host")).not.toContain(
+    "shuffle_queue",
+  );
+
+  // A lone autoplay pick is not counted, so neither is a queue holding one.
+  Reflect.set(result.coordinator, "queue", [
+    queued("a"),
+    queued("auto", { automatic: true }),
+  ]);
+  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+
+  Reflect.set(result.coordinator, "queue", [queued("a"), queued("b")]);
+  expect(playerBlocks(result.coordinator)).toContain("shuffle_queue");
+  expect(queueDialog(result.coordinator, "host")).toContain("shuffle_queue");
+  // The dialog gates its controls on the capability; the player does not.
+  expect(queueDialog(result.coordinator, "guest")).not.toContain(
+    "shuffle_queue",
+  );
   await result.coordinator.endFromSlack();
 });
 

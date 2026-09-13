@@ -67,6 +67,7 @@ export class AuditLog {
       resumed: 0,
       volume: 0,
       reordered: 0,
+      shuffled: 0,
       cleared: 0,
       settings: 0,
     };
@@ -92,6 +93,7 @@ export class AuditLog {
         if (entry.event === "playback.resumed") counts.resumed++;
         if (entry.event === "volume.changed") counts.volume++;
         if (entry.event === "queue.reordered") counts.reordered++;
+        if (entry.event === "queue.shuffled") counts.shuffled++;
         if (entry.event === "queue.cleared") counts.cleared++;
         if (entry.event === "settings.changed") counts.settings++;
         if (entry.event === "playback.seeked") {

@@ -116,6 +116,20 @@ function shuffle<T>(items: T[]) {
   return shuffled;
 }
 
+// A fair shuffle can hand back the order it was given, which reads as a
+// button that did nothing. A few retries make a click visibly change the
+// queue without biasing short queues much.
+function reshuffle<T>(items: T[]) {
+  let shuffled = shuffle(items);
+  for (
+    let attempt = 0;
+    attempt < 4 && shuffled.every((item, index) => item === items[index]);
+    attempt++
+  )
+    shuffled = shuffle(items);
+  return shuffled;
+}
+
 export class Coordinator {
   readonly id: string;
   readonly participants = new Set<string>();
@@ -548,6 +562,7 @@ export class Coordinator {
         queue_move_down: () => this.reorder(interaction, 1),
         queue_play_next: () => this.playNext(interaction),
         queue_move_to_position: () => this.queuePositionModal(interaction),
+        shuffle_queue: () => this.shuffleQueue(interaction),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
         open_settings: () => this.settingsModal(interaction),
@@ -992,6 +1007,26 @@ export class Coordinator {
         title: entry!.title,
         artist: entry!.artist,
       };
+    });
+  }
+
+  async agentShuffle(userId: string, signal?: AbortSignal) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "manage-queue"))
+        return {
+          ok: false as const,
+          error: this.canUsePlayer(userId)
+            ? "You do not have permission for that."
+            : "Join the huddle before using the player.",
+        };
+      const shuffled = await this.applyShuffle(userId);
+      if (!shuffled)
+        return {
+          ok: false as const,
+          error: "There are not enough queued songs to shuffle.",
+        };
+      return { ok: true as const, shuffled };
     });
   }
 
@@ -1835,6 +1870,8 @@ export class Coordinator {
           playNext: command.playNext,
           position: command.position,
         });
+      case "shuffle":
+        return this.agentShuffle(userId);
       case "clear":
         return this.agentClear(userId);
       case "skip":
@@ -3388,6 +3425,52 @@ export class Coordinator {
     this.syncPreloads();
   }
 
+  private async shuffleQueue(interaction: Interaction) {
+    // The player message carries no view metadata; the full queue dialog does.
+    if (interaction.metadata && !this.validQueueView(interaction))
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
+    if (!(await this.require(interaction, "manage-queue"))) return;
+    await this.applyShuffle(interaction.userId, interaction);
+  }
+
+  /**
+   * Randomizes the pending queue in place. The playing track is not part of
+   * the queue and so never moves, and queued autoplay picks keep their slots:
+   * the coordinator holds at most one, drops it the moment somebody queues a
+   * song of their own, and takes and restores it as a unit, so a shuffle only
+   * reorders what people actually asked for.
+   */
+  private async applyShuffle(actorId: string, interaction?: Interaction) {
+    const requested = this.queue.filter((track) => !track.automatic);
+    if (requested.length < 2) return 0;
+    const shuffled = reshuffle(requested);
+    let index = 0;
+    this.queue = this.queue.map((track) =>
+      track.automatic ? track : shuffled[index++]!,
+    );
+    this.audit.record("queue.shuffled", actorId, {
+      sessionId: this.id,
+      count: requested.length,
+    });
+    this.notifyIntegrations("queue.shuffled", { count: requested.length });
+    this.store.incrementUsage("shuffled");
+    this.store.setQueueOrder(
+      this.id,
+      this.queue.map((track) => track.id),
+    );
+    this.queueChanged(interaction);
+    await this.render();
+    this.syncPreloads();
+    return requested.length;
+  }
+
+  private shufflableCount() {
+    return this.queue.filter((track) => !track.automatic).length;
+  }
+
   private async clear(interaction: Interaction) {
     if (!(await this.require(interaction, "clear"))) return;
     this.autoplayGeneration++;
@@ -3784,6 +3867,7 @@ export class Coordinator {
   }
 
   private queueView(userId: string) {
+    const manages = this.can(userId, "manage-queue");
     return {
       type: "modal",
       callback_id: "manage_queue",
@@ -3792,82 +3876,99 @@ export class Coordinator {
       title: plain("HuddleFM queue"),
       close: plain("Close"),
       blocks: this.queue.length
-        ? this.queue.flatMap((track, index) => {
-            const manages = this.can(userId, "manage-queue");
-            const controls = [
-              ...(manages && index
-                ? [
-                    {
-                      type: "button",
-                      action_id: "queue_play_next",
-                      text: plain("Play next"),
-                      value: track.id,
-                    },
-                  ]
-                : []),
-              ...(manages && index
-                ? [
-                    {
-                      type: "button",
-                      action_id: "queue_move_up",
-                      text: plain("Up"),
-                      value: track.id,
-                    },
-                  ]
-                : []),
-              ...(manages && index < this.queue.length - 1
-                ? [
-                    {
-                      type: "button",
-                      action_id: "queue_move_down",
-                      text: plain("Down"),
-                      value: track.id,
-                    },
-                  ]
-                : []),
-              ...(manages
-                ? [
-                    {
-                      type: "button",
-                      action_id: "queue_move_to_position",
-                      text: plain("Move to…"),
-                      value: track.id,
-                    },
-                  ]
-                : []),
-              ...(manages ||
-              (track.requesterId === userId && this.can(userId, "remove-own"))
-                ? [
-                    {
-                      type: "button",
-                      action_id: "remove_queue_track",
-                      text: plain("Remove"),
-                      style: "danger",
-                      value: track.id,
-                    },
-                  ]
-                : []),
-            ];
-            return [
-              {
-                type: "section",
-                block_id: `queue_item_${track.id}`,
-                text: {
-                  type: "mrkdwn",
-                  text: `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.automatic ? "Autoplay recommendation" : `Added by <@${track.requesterId}>`}`,
+        ? [
+            ...(manages && this.shufflableCount() > 1
+              ? [
+                  {
+                    type: "actions",
+                    block_id: "queue_shuffle",
+                    elements: [
+                      {
+                        type: "button",
+                        action_id: "shuffle_queue",
+                        text: plain("Shuffle"),
+                        value: this.id,
+                      },
+                    ],
+                  },
+                ]
+              : []),
+            ...this.queue.flatMap((track, index) => {
+              const controls = [
+                ...(manages && index
+                  ? [
+                      {
+                        type: "button",
+                        action_id: "queue_play_next",
+                        text: plain("Play next"),
+                        value: track.id,
+                      },
+                    ]
+                  : []),
+                ...(manages && index
+                  ? [
+                      {
+                        type: "button",
+                        action_id: "queue_move_up",
+                        text: plain("Up"),
+                        value: track.id,
+                      },
+                    ]
+                  : []),
+                ...(manages && index < this.queue.length - 1
+                  ? [
+                      {
+                        type: "button",
+                        action_id: "queue_move_down",
+                        text: plain("Down"),
+                        value: track.id,
+                      },
+                    ]
+                  : []),
+                ...(manages
+                  ? [
+                      {
+                        type: "button",
+                        action_id: "queue_move_to_position",
+                        text: plain("Move to…"),
+                        value: track.id,
+                      },
+                    ]
+                  : []),
+                ...(manages ||
+                (track.requesterId === userId && this.can(userId, "remove-own"))
+                  ? [
+                      {
+                        type: "button",
+                        action_id: "remove_queue_track",
+                        text: plain("Remove"),
+                        style: "danger",
+                        value: track.id,
+                      },
+                    ]
+                  : []),
+              ];
+              return [
+                {
+                  type: "section",
+                  block_id: `queue_item_${track.id}`,
+                  text: {
+                    type: "mrkdwn",
+                    text: `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.automatic ? "Autoplay recommendation" : `Added by <@${track.requesterId}>`}`,
+                  },
                 },
-              },
-              ...(controls.length
-                ? [
-                    {
-                      type: "actions",
-                      block_id: `queue_actions_${track.id}`,
-                      elements: controls,
-                    },
-                  ]
-                : []),
-            ];
-          })
+                ...(controls.length
+                  ? [
+                      {
+                        type: "actions",
+                        block_id: `queue_actions_${track.id}`,
+                        elements: controls,
+                      },
+                    ]
+                  : []),
+              ];
+            }),
+          ]
         : [
             {
               type: "section",
@@ -5072,6 +5173,16 @@ export class Coordinator {
                 text: plain("Queue"),
                 value: this.id,
               },
+              ...(this.shufflableCount() > 1
+                ? [
+                    {
+                      type: "button",
+                      action_id: "shuffle_queue",
+                      text: plain("Shuffle"),
+                      value: this.id,
+                    },
+                  ]
+                : []),
               {
                 type: "button",
                 action_id: "clear_queue",

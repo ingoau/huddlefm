@@ -50,6 +50,7 @@ test("counts successful control usage", async () => {
   audit.record("track.added", "U1");
   audit.record("track.skipped", "U1");
   audit.record("track.previous", "U1");
+  audit.record("queue.shuffled", "U1", { count: 4 });
   audit.record("playback.seeked", "U1", { previous: 10, seconds: 20 });
   audit.record("playback.seeked", "U1", { previous: 20, seconds: 10 });
   audit.record("action.denied", "U1");
@@ -58,6 +59,7 @@ test("counts successful control usage", async () => {
     expect.objectContaining({
       added: 1,
       next: 1,
+      shuffled: 1,
       previous: 1,
       forward: 1,
       back: 1,
