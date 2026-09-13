@@ -41,7 +41,7 @@ test("shares one lookup between concurrent checks", async () => {
   expect(lookups).toEqual(["admin"]);
 });
 
-test("refreshes a stale answer in the background", async () => {
+test("confirms a stale answer with Slack before granting", async () => {
   const lookups: string[] = [];
   let admin = true;
   let now = 1_000;
@@ -56,11 +56,10 @@ test("refreshes a stale answer in the background", async () => {
   admin = false;
   now += 60_000;
 
-  // The stale answer still applies to the check that triggers the refresh.
-  expect(await admins.resolve("admin")).toBe(true);
-  await Bun.sleep(0);
-  expect(lookups).toEqual(["admin", "admin"]);
+  // A stale answer counts for nothing until Slack confirms it.
   expect(admins.isAdmin("admin")).toBe(false);
+  expect(await admins.resolve("admin")).toBe(false);
+  expect(lookups).toEqual(["admin", "admin"]);
 });
 
 test("keeps host powers away when the lookup fails", async () => {
@@ -81,7 +80,7 @@ test("keeps host powers away when the lookup fails", async () => {
   expect(failures).toBe(2);
 });
 
-test("answers from the last known state when a refresh fails", async () => {
+test("drops manager access when a later lookup fails", async () => {
   let fail = false;
   let now = 1_000;
   const admins = new WorkspaceAdmins(
@@ -94,7 +93,20 @@ test("answers from the last known state when a refresh fails", async () => {
   expect(await admins.resolve("admin")).toBe(true);
   fail = true;
   now += 60_000;
+  expect(await admins.resolve("admin")).toBe(false);
+  expect(admins.isAdmin("admin")).toBe(false);
+
+  // Slack recovering restores the answer.
+  fail = false;
   expect(await admins.resolve("admin")).toBe(true);
-  await Bun.sleep(0);
   expect(admins.isAdmin("admin")).toBe(true);
+});
+
+test("denies access when the lookup never answers", async () => {
+  const admins = new WorkspaceAdmins(() => new Promise<boolean>(() => {}), {
+    enabled: true,
+    timeoutMs: 5,
+  });
+  expect(await admins.resolve("admin")).toBe(false);
+  expect(admins.isAdmin("admin")).toBe(false);
 });

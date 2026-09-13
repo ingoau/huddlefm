@@ -1653,13 +1653,12 @@ export class Coordinator {
 
   // A manager holds host powers in every session without joining the huddle:
   // the configured manager, and workspace admins when the host runs with
-  // WORKSPACE_ADMINS_AS_MANAGERS enabled. Excluded users never qualify, so the
-  // bot and integration accounts cannot let themselves in this way.
+  // WORKSPACE_ADMINS_AS_MANAGERS enabled. Exclusion wins over both, so the bot
+  // and integration accounts cannot let themselves in this way.
   private isManager(userId: string) {
+    if (this.isExcluded(userId)) return false;
     if (userId === this.config.managerUserId) return true;
-    return (
-      !this.isExcluded(userId) && this.workspaceAdmins?.isAdmin(userId) === true
-    );
+    return this.workspaceAdmins?.isAdmin(userId) === true;
   }
 
   // Permission checks are synchronous, so a user's admin status has to be in

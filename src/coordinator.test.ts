@@ -1924,6 +1924,41 @@ test("an excluded workspace admin gains nothing", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("an excluded configured manager cannot approve integration control", async () => {
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(["manager"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "request_control", channel: "channel", permissions: ["pause"] },
+    "9.0",
+    "Dbot",
+  );
+  await result.coordinator.action({
+    type: "block_actions",
+    userId: "manager",
+    actionId: "integration_accept",
+    value: requestValue(result.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://hooks.slack.com/actions/test",
+  });
+  expect(result.ephemeral.at(-1)).toBe("Only the host can approve that.");
+  expect(
+    result.dms.some((args) => String(args[1]).includes("grant_accepted")),
+  ).toBe(false);
+  await result.coordinator.endFromSlack();
+});
+
 test("a workspace admin holds host powers over settings", async () => {
   const result = setup(
     undefined,
