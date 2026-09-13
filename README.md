@@ -51,6 +51,8 @@ SLACK_XOXD=xoxd-...   # Browser `d` cookie for that session
 
 `SLACK_XOXP` and `SLACK_XOXC`/`SLACK_XOXD` must belong to the same Slack user. HuddleFM checks this on startup.
 
+On Enterprise Grid the client token can be set as `SLACK_ENTERPRISE_XOXC` instead of `SLACK_XOXC`; it takes precedence when both are set. Either way one of the two is required.
+
 3. Start it:
 
 ```sh
@@ -65,13 +67,14 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Required
 
-| Variable              | Purpose                                          |
-| --------------------- | ------------------------------------------------ |
-| `SLACK_WORKSPACE_URL` | Workspace URL, e.g. `https://example.slack.com`  |
-| `SLACK_XOXP`          | User OAuth token used for Slack Web API calls    |
-| `SLACK_XAPP`          | App-level token used for Socket Mode             |
-| `SLACK_XOXC`          | Client token from the bot user's browser session |
-| `SLACK_XOXD`          | `d` cookie from the same browser session         |
+| Variable                | Purpose                                                             |
+| ----------------------- | ------------------------------------------------------------------- |
+| `SLACK_WORKSPACE_URL`   | Workspace URL, e.g. `https://example.slack.com`                     |
+| `SLACK_XOXP`            | User OAuth token used for Slack Web API calls                       |
+| `SLACK_XAPP`            | App-level token used for Socket Mode                                |
+| `SLACK_XOXC`            | Client token from the bot user's browser session                    |
+| `SLACK_ENTERPRISE_XOXC` | Enterprise Grid client token; used instead of `SLACK_XOXC` when set |
+| `SLACK_XOXD`            | `d` cookie from the same browser session                            |
 
 #### Optional Slack behavior
 
