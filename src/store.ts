@@ -80,6 +80,7 @@ export const usageLabels = {
   resumed: "Resume",
   volume: "Volume changes",
   reordered: "Queue moves",
+  shuffled: "Queue shuffles",
   cleared: "Queue clears",
   settings: "Settings changes",
 } as const;
@@ -618,14 +619,26 @@ export class Store {
           Date.now(),
           sessionId,
         );
-      this.db
-        .query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?")
-        .run(sessionId);
-      const position = this.db.query(
-        "UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?",
-      );
-      state.queue.forEach((id, index) => position.run(index, id, sessionId));
+      this.writeQueueOrder(sessionId, state.queue);
     })();
+  }
+
+  /**
+   * Rewrites the queue order of a live session, so a reorder survives a crash
+   * that never reached suspendSession.
+   */
+  setQueueOrder(sessionId: string, queue: string[]) {
+    this.db.transaction(() => this.writeQueueOrder(sessionId, queue))();
+  }
+
+  private writeQueueOrder(sessionId: string, queue: string[]) {
+    this.db
+      .query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?")
+      .run(sessionId);
+    const position = this.db.query(
+      "UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?",
+    );
+    queue.forEach((id, index) => position.run(index, id, sessionId));
   }
 
   endSession(
@@ -657,13 +670,7 @@ export class Store {
           Date.now(),
           sessionId,
         );
-      this.db
-        .query("UPDATE tracks SET queue_position = NULL WHERE session_id = ?")
-        .run(sessionId);
-      const position = this.db.query(
-        "UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?",
-      );
-      state.queue.forEach((id, index) => position.run(index, id, sessionId));
+      this.writeQueueOrder(sessionId, state.queue);
     })();
   }
 

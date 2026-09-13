@@ -148,6 +148,13 @@ function agentTools(coordinator: Coordinator, userId: string) {
           abortSignal,
         ),
     }),
+    shuffle_queue: tool({
+      description:
+        "Randomize the order of the upcoming queue. The playing track is unaffected.",
+      inputSchema: z.object({}),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentShuffle(userId, abortSignal),
+    }),
     clear_queue: tool({
       description: "Clear all upcoming tracks from the queue.",
       inputSchema: z.object({}),
