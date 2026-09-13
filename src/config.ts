@@ -2,7 +2,6 @@ const required = [
   "SLACK_WORKSPACE_URL",
   "SLACK_XOXP",
   "SLACK_XAPP",
-  "SLACK_XOXC",
   "SLACK_XOXD",
 ] as const;
 
@@ -19,11 +18,16 @@ export function loadConfig() {
   for (const name of required)
     if (!process.env[name]) throw new Error(`Missing ${name}`);
 
+  const xoxc =
+    optionalText(process.env.SLACK_ENTERPRISE_XOXC) ??
+    optionalText(process.env.SLACK_XOXC);
+  if (!xoxc) throw new Error("Missing SLACK_XOXC or SLACK_ENTERPRISE_XOXC");
+
   return {
     workspaceUrl: process.env.SLACK_WORKSPACE_URL!,
     xoxp: process.env.SLACK_XOXP!,
     xapp: process.env.SLACK_XAPP!,
-    xoxc: process.env.SLACK_XOXC!,
+    xoxc,
     xoxd: process.env.SLACK_XOXD!,
     teamId: process.env.SLACK_TEAM_ID,
     port: Number(process.env.PORT ?? 3210),
