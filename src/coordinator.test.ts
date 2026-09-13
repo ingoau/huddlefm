@@ -10,6 +10,7 @@ import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
+import { WorkspaceAdmins } from "./workspace-admins.ts";
 
 function setup(
   tracks = {} as TrackCatalog,
@@ -31,6 +32,7 @@ function setup(
   excludedUserIds = new Set<string>(),
   lyricsOverride?: LyricsCatalog,
   recommendations?: import("./recommendations.ts").RecommendationCatalog,
+  workspaceAdmins?: WorkspaceAdmins,
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -171,6 +173,7 @@ function setup(
     () => {},
     (...args) => recordedMessages.push(args),
     recommendations,
+    workspaceAdmins,
   );
   return {
     coordinator,
@@ -1824,6 +1827,166 @@ test("manager overrides permissions and HuddleFM cannot become host", async () =
   });
   expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
   expect(result.ephemeral).toContain("HuddleFM cannot be the host.");
+  await result.coordinator.endFromSlack();
+});
+
+function volumeUp(userId: string) {
+  return {
+    type: "block_actions" as const,
+    userId,
+    actionId: "volume_up",
+    value: "",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  };
+}
+
+function workspaceAdmins(
+  enabled: boolean,
+  admins = ["admin"],
+  lookups: string[] = [],
+) {
+  return new WorkspaceAdmins(
+    async (userId) => (lookups.push(userId), admins.includes(userId)),
+    { enabled },
+  );
+}
+
+test("treats a workspace admin as a manager when enabled", async () => {
+  const lookups: string[] = [];
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    workspaceAdmins(true, ["admin"], lookups),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("admin"));
+  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(lookups).toEqual(["admin"]);
+
+  // The cached answer keeps later actions off the Slack API.
+  await result.coordinator.action(volumeUp("admin"));
+  expect(lookups).toEqual(["admin"]);
+  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
+  await result.coordinator.endFromSlack();
+});
+
+test("leaves workspace admins alone while the option is off", async () => {
+  const lookups: string[] = [];
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    workspaceAdmins(false, ["admin"], lookups),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("admin"));
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  expect(lookups).toEqual([]);
+  await result.coordinator.endFromSlack();
+});
+
+test("an excluded workspace admin gains nothing", async () => {
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(["admin"]),
+    undefined,
+    undefined,
+    workspaceAdmins(true, ["admin"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("admin"));
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  await result.coordinator.endFromSlack();
+});
+
+test("an excluded configured manager cannot approve integration control", async () => {
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(["manager"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "request_control", channel: "channel", permissions: ["pause"] },
+    "9.0",
+    "Dbot",
+  );
+  await result.coordinator.action({
+    type: "block_actions",
+    userId: "manager",
+    actionId: "integration_accept",
+    value: requestValue(result.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://hooks.slack.com/actions/test",
+  });
+  expect(result.ephemeral.at(-1)).toBe("Only the host can approve that.");
+  expect(
+    result.dms.some((args) => String(args[1]).includes("grant_accepted")),
+  ).toBe(false);
+  await result.coordinator.endFromSlack();
+});
+
+test("a workspace admin holds host powers over settings", async () => {
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    workspaceAdmins(true, ["admin"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action({
+    type: "view_submission",
+    userId: "admin",
+    actionId: "save_settings",
+    value: "",
+    channelId: "channel",
+    messageTs: "",
+    triggerId: "",
+    metadata: JSON.stringify({
+      sessionId: result.coordinator.id,
+      hostId: "host",
+    }),
+    state: { host: { user: { selected_user: "guest" } } },
+  });
+  expect(result.coordinator.hostUserId()).toBe("guest");
   await result.coordinator.endFromSlack();
 });
 
