@@ -60,6 +60,7 @@ captureAnalytics("app.started", {
     trackDurationLimitSeconds: config.durationSeconds,
     trackDownloadLimitBytes: config.downloadBytes,
     initialVolume: config.initialVolume,
+    duckingMode: config.duckingMode,
     loudnessNormalization: config.loudnessNormalization,
     aloneTimeoutMs: config.aloneMs,
     idleTimeoutMs: config.idleMs,
@@ -449,6 +450,7 @@ async function joinHuddle(
       meeting: joined.chimeMeeting,
       attendee: joined.chimeAttendee,
       initialVolume: restored?.volume ?? config.initialVolume,
+      duckingMode: restored?.duckingMode ?? config.duckingMode,
       bridgeToken: crypto.randomUUID(),
     };
     runtime = {

@@ -10,6 +10,8 @@ import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
 import {
   capabilities,
   displayModes,
+  duckingModes,
+  duckingModeLabels,
   permissionPresets,
   recentTrackLimit,
   scrobblingModes,
@@ -22,6 +24,7 @@ import {
   loopModeLabels,
   type AutoplayMode,
   type DisplayMode,
+  type DuckingMode,
   type LoopMode,
   type SavedSession,
   type ScrobblingMode,
@@ -130,6 +133,7 @@ export class Coordinator {
   private autoplayMode: AutoplayMode = "off";
   private loopMode: LoopMode = "off";
   private transitionMode: TransitionMode = "none";
+  private duckingMode: DuckingMode;
   private autoplayGeneration = 0;
   // Discovery turns come every `autoplayDiscoveryInterval` picks; a skipped
   // discovery backs the interval off, one that plays through restores it.
@@ -200,6 +204,7 @@ export class Coordinator {
     private config: {
       queueLimit: number;
       initialVolume: number;
+      duckingMode: DuckingMode;
       aloneMs: number;
       idleMs: number;
       pausedMs: number;
@@ -241,6 +246,7 @@ export class Coordinator {
         )
       : requestedHost;
     this.volume = restored?.volume ?? config.initialVolume;
+    this.duckingMode = restored?.duckingMode ?? config.duckingMode;
     if (!this.isExcluded(hostId)) this.participants.add(hostId);
     this.participants.add(botUserId);
     for (const id of room.participantIds)
@@ -292,6 +298,7 @@ export class Coordinator {
       creatorId: this.room.huddleCreatorId,
       hostId: this.hostId,
       volume: this.volume,
+      duckingMode: this.duckingMode,
     });
     this.uiTs = await this.post(
       this.room.uiChannelId,
@@ -349,6 +356,7 @@ export class Coordinator {
     this.sendMedia({ type: "volume", value: this.volume });
     this.sendMedia({ type: "display_mode", mode: this.displayMode });
     this.sendMedia({ type: "transition_mode", mode: this.transitionMode });
+    this.sendMedia({ type: "ducking_mode", mode: this.duckingMode });
     this.prefetchRecommendations();
     if (!this.current) await this.startNext();
     else {
@@ -650,6 +658,7 @@ export class Coordinator {
       autoplay: this.autoplayMode,
       loopMode: this.loopMode,
       transitionMode: this.transitionMode,
+      duckingMode: this.duckingMode,
       anchorEnabled: this.anchorEnabled,
       hostId: this.hostId ?? null,
       youAreHost: host,
@@ -1248,6 +1257,7 @@ export class Coordinator {
       autoplayMode?: AutoplayMode;
       loopMode?: LoopMode;
       transitionMode?: TransitionMode;
+      duckingMode?: DuckingMode;
       anchorEnabled?: boolean;
       permissionPreset?: keyof typeof permissionPresets;
       hostUserId?: string;
@@ -1278,6 +1288,7 @@ export class Coordinator {
           patch.autoplayMode !== undefined ||
           patch.loopMode !== undefined ||
           patch.transitionMode !== undefined ||
+          patch.duckingMode !== undefined ||
           patch.anchorEnabled !== undefined) &&
         !this.can(userId, "configure-settings")
       )
@@ -1295,6 +1306,11 @@ export class Coordinator {
         !transitionModes.includes(patch.transitionMode)
       )
         return { ok: false as const, error: "Invalid transition mode." };
+      if (
+        patch.duckingMode !== undefined &&
+        !duckingModes.includes(patch.duckingMode)
+      )
+        return { ok: false as const, error: "Invalid ducking mode." };
       if (patch.loopMode !== undefined && !loopModes.includes(patch.loopMode))
         return { ok: false as const, error: "Invalid loop mode." };
       const permissionPreset =
@@ -1361,6 +1377,15 @@ export class Coordinator {
         changed.push(`transitionMode=${patch.transitionMode}`);
       }
       if (
+        patch.duckingMode !== undefined &&
+        patch.duckingMode !== this.duckingMode
+      ) {
+        this.duckingMode = patch.duckingMode;
+        this.sendMedia({ type: "ducking_mode", mode: patch.duckingMode });
+        this.store.setSession(this.id, { duckingMode: patch.duckingMode });
+        changed.push(`duckingMode=${patch.duckingMode}`);
+      }
+      if (
         patch.anchorEnabled !== undefined &&
         patch.anchorEnabled !== this.anchorEnabled
       ) {
@@ -1402,6 +1427,7 @@ export class Coordinator {
         autoplay: this.autoplayMode,
         loopMode: this.loopMode,
         transitionMode: this.transitionMode,
+        duckingMode: this.duckingMode,
         anchorEnabled: this.anchorEnabled,
         hostId: this.hostId ?? null,
         permissions: [...this.allowed],
@@ -1862,6 +1888,7 @@ export class Coordinator {
           autoplayMode: command.autoplayMode,
           loopMode: command.loopMode,
           transitionMode: command.transitionMode,
+          duckingMode: command.duckingMode,
           anchorEnabled: command.anchorEnabled,
         });
       case "end":
@@ -1883,6 +1910,7 @@ export class Coordinator {
       autoplay: status.autoplay,
       loopMode: status.loopMode,
       transitionMode: status.transitionMode,
+      duckingMode: status.duckingMode,
       anchorEnabled: status.anchorEnabled,
       yourCapabilities: status.yourCapabilities,
       nowPlaying: status.nowPlaying,
@@ -4108,6 +4136,27 @@ export class Coordinator {
             },
             {
               type: "input",
+              block_id: "ducking",
+              label: plain("Auto-duck"),
+              hint: plain("Lower the music while someone is speaking"),
+              element: staticSelect(
+                "mode",
+                duckingModes.map((mode) => ({
+                  text: plain(duckingModeLabels[mode]),
+                  value: mode,
+                  description: plain(
+                    mode === "gentle"
+                      ? "Dip the music under the conversation"
+                      : mode === "strong"
+                        ? "Drop the music well back while people talk"
+                        : "Keep playing at full volume",
+                  ),
+                })),
+                this.duckingMode,
+              ),
+            },
+            {
+              type: "input",
               block_id: "anchor",
               optional: true,
               label: plain("Thread position"),
@@ -4597,6 +4646,7 @@ export class Coordinator {
       autoplay: this.autoplayMode,
       loopMode: this.loopMode,
       transitionMode: this.transitionMode,
+      duckingMode: this.duckingMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     };
@@ -4649,6 +4699,17 @@ export class Coordinator {
         this.transitionMode = transitionMode;
         this.sendMedia({ type: "transition_mode", mode: transitionMode });
         this.store.setSession(this.id, { transitionMode });
+      }
+      const duckingMode = interaction.state.ducking?.mode?.selected_option
+        ?.value as DuckingMode | undefined;
+      if (
+        duckingMode &&
+        duckingModes.includes(duckingMode) &&
+        duckingMode !== this.duckingMode
+      ) {
+        this.duckingMode = duckingMode;
+        this.sendMedia({ type: "ducking_mode", mode: duckingMode });
+        this.store.setSession(this.id, { duckingMode });
       }
       const anchorState = interaction.state.anchor?.enabled;
       if (anchorState) {
@@ -4760,6 +4821,7 @@ export class Coordinator {
       autoplay: this.autoplayMode,
       loopMode: this.loopMode,
       displayMode: this.displayMode,
+      duckingMode: this.duckingMode,
       anchorEnabled: this.anchorEnabled,
       permissions: [...this.allowed],
     });

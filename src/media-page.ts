@@ -11,6 +11,11 @@ import "@braccato/core/element";
 import type { BraccatoLyricsElement } from "@braccato/core/element";
 import type { Lyric } from "@braccato/core";
 import type { DisplayMode } from "./store.ts";
+import {
+  DuckingController,
+  parseDuckingMode,
+  type DuckDecision,
+} from "./ducking.ts";
 import { volumeGain } from "./volume.ts";
 import "./media-page.css";
 
@@ -41,9 +46,60 @@ const send = (type: string, details?: unknown) =>
 
 const audioContext = new AudioContext();
 const gain = audioContext.createGain();
+// Auto-ducking rides its own stage so it never overwrites the volume the
+// session chose: `gain` stays exactly where the volume controls put it.
+const duck = audioContext.createGain();
 const limiter = audioContext.createDynamicsCompressor();
 const destination = audioContext.createMediaStreamDestination();
-gain.connect(limiter).connect(destination);
+gain.connect(duck).connect(limiter).connect(destination);
+
+const ducking = new DuckingController();
+let duckTimer: ReturnType<typeof setTimeout> | undefined;
+// Volume indicator callbacks are kept so they can be unsubscribed per attendee.
+const duckSubscriptions = new Map<
+  string,
+  (attendeeId: string, volume: number | null, muted: boolean | null) => void
+>();
+let attendeePresence:
+  ((attendeeId: string, present: boolean) => void) | undefined;
+
+function applyDuck(decision: DuckDecision | undefined) {
+  if (!decision) return;
+  clearTimeout(duckTimer);
+  duckTimer = undefined;
+  const now = audioContext.currentTime;
+  // Holding at the value the ramp actually reached keeps rapid speech from
+  // leaving the gain parked partway between ducked and restored.
+  duck.gain.cancelAndHoldAtTime(now);
+  if (decision.rampSeconds > 0)
+    duck.gain.linearRampToValueAtTime(
+      decision.gain,
+      now + decision.rampSeconds,
+    );
+  else duck.gain.setValueAtTime(decision.gain, now);
+  if (decision.recheckMs !== undefined)
+    duckTimer = setTimeout(
+      () => applyDuck(ducking.tick(Date.now())),
+      decision.recheckMs,
+    );
+}
+
+function stopDucking() {
+  clearTimeout(duckTimer);
+  duckTimer = undefined;
+  for (const [attendeeId, callback] of duckSubscriptions)
+    session?.audioVideo.realtimeUnsubscribeFromVolumeIndicator(
+      attendeeId,
+      callback,
+    );
+  duckSubscriptions.clear();
+  if (attendeePresence)
+    session?.audioVideo.realtimeUnsubscribeToAttendeeIdPresence(
+      attendeePresence,
+    );
+  attendeePresence = undefined;
+  applyDuck(ducking.reset());
+}
 
 type Deck = {
   audio: HTMLAudioElement;
@@ -458,10 +514,12 @@ async function join(payload: {
   meeting: Record<string, unknown>;
   attendee: Record<string, unknown>;
   initialVolume: number;
+  duckingMode?: string;
 }) {
   mediaSessionId = payload.sessionId;
   await audioContext.resume();
   gain.gain.value = volumeGain(payload.initialVolume);
+  applyDuck(ducking.setMode(parseDuckingMode(payload.duckingMode), Date.now()));
 
   const logger = new ConsoleLogger("HuddleFM", LogLevel.WARN);
   const deviceController = new DefaultDeviceController(logger);
@@ -506,9 +564,45 @@ async function join(payload: {
       send("ended", { code: event.statusCode() });
     },
   });
+  listenForSpeech(session, configuration.credentials?.attendeeId ?? undefined);
   await session.audioVideo.startAudioInput(destination.stream);
   session.audioVideo.start();
   session.audioVideo.realtimeUnmuteLocalAudio();
+}
+
+/**
+ * Watches the volume indicators of everyone but the bot, whose own attendee is
+ * the music itself. Chime reports a level and a mute state per attendee; the
+ * controller decides what that means for the duck stage.
+ */
+function listenForSpeech(
+  meeting: DefaultMeetingSession,
+  botAttendeeId?: string,
+) {
+  const watch = (attendeeId: string) => {
+    if (attendeeId === botAttendeeId || duckSubscriptions.has(attendeeId))
+      return;
+    const callback = (
+      id: string,
+      volume: number | null,
+      muted: boolean | null,
+    ) => applyDuck(ducking.volume(id, volume, muted, Date.now()));
+    duckSubscriptions.set(attendeeId, callback);
+    meeting.audioVideo.realtimeSubscribeToVolumeIndicator(attendeeId, callback);
+  };
+  const forget = (attendeeId: string) => {
+    const callback = duckSubscriptions.get(attendeeId);
+    if (!callback) return;
+    duckSubscriptions.delete(attendeeId);
+    meeting.audioVideo.realtimeUnsubscribeFromVolumeIndicator(
+      attendeeId,
+      callback,
+    );
+    applyDuck(ducking.leave(attendeeId, Date.now()));
+  };
+  attendeePresence = (attendeeId: string, present: boolean) =>
+    present ? watch(attendeeId) : forget(attendeeId);
+  meeting.audioVideo.realtimeSubscribeToAttendeeIdPresence(attendeePresence);
 }
 
 socket.addEventListener("open", () => send("ready"));
@@ -638,6 +732,8 @@ socket.addEventListener("message", async (event) => {
     }
     if (message.type === "stop") stop();
     if (message.type === "volume") gain.gain.value = volumeGain(message.value);
+    if (message.type === "ducking_mode")
+      applyDuck(ducking.setMode(parseDuckingMode(message.mode), Date.now()));
     if (message.type === "transition_mode") {
       transitionMode = message.mode;
       if (transitioning) cancelTransition();
@@ -647,6 +743,7 @@ socket.addEventListener("message", async (event) => {
       send("leaving");
       tone?.stop();
       stop();
+      stopDucking();
       session?.audioVideo.stop();
       await session?.audioVideo.stopAudioInput();
       session?.audioVideo.stopLocalVideoTile();

@@ -5,7 +5,7 @@ import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { LyricsCatalog } from "./lyrics.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
-import { Store, type SavedSession } from "./store.ts";
+import { Store, type DuckingMode, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
@@ -31,6 +31,7 @@ function setup(
   excludedUserIds = new Set<string>(),
   lyricsOverride?: LyricsCatalog,
   recommendations?: import("./recommendations.ts").RecommendationCatalog,
+  duckingMode: DuckingMode = "gentle",
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -45,6 +46,7 @@ function setup(
   const dms: unknown[][] = [];
   const replacements: unknown[][] = [];
   const sessions: unknown[] = [];
+  const created: unknown[] = [];
   const permissions: unknown[] = [];
   const suspensions: unknown[] = [];
   const media: unknown[] = [];
@@ -97,7 +99,9 @@ function setup(
   const store =
     storeOverride ??
     ({
-      createSession: () => {},
+      createSession: (value: unknown) => {
+        created.push(value);
+      },
       setUi: () => {},
       setUiLocation: () => {},
       setTrack: () => {},
@@ -150,6 +154,7 @@ function setup(
     {
       queueLimit: 50,
       initialVolume: 0.6,
+      duckingMode,
       ...timeouts,
       port: 3210,
       managerUserId: "manager",
@@ -168,6 +173,7 @@ function setup(
   return {
     coordinator,
     posted,
+    created,
     updates,
     deleted,
     deletedOriginals,
@@ -4798,6 +4804,7 @@ test("settings selects offer an initial option Slack can match", async () => {
     "autoplay",
     "loop",
     "transition",
+    "ducking",
     "permission_preset",
     "scrobbling_mode",
   ]);
@@ -4980,4 +4987,174 @@ test("Play something needs the configure-settings permission", async () => {
   expect(test.calls).toEqual([]);
   expect(test.sessions).not.toContainEqual({ autoplay: "huddle" });
   await test.coordinator.endFromSlack();
+});
+
+test("stores the configured ducking mode with a new session", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  expect(result.created).toEqual([
+    expect.objectContaining({ duckingMode: "gentle" }),
+  ]);
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    duckingMode: "gentle",
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("saves the ducking mode from the settings modal", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const save = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    ducking: { mode: { selected_option: { value: "strong" } } },
+  };
+  await result.coordinator.action(save);
+  expect(result.sessions).toContainEqual({ duckingMode: "strong" });
+  expect(result.media).toContainEqual({
+    type: "ducking_mode",
+    mode: "strong",
+  });
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    duckingMode: "strong",
+  });
+
+  // Saving the same mode again should not disturb a live session.
+  const again = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  again.state = {
+    ducking: { mode: { selected_option: { value: "strong" } } },
+  };
+  result.media.length = 0;
+  await result.coordinator.action(again);
+  expect(result.media).not.toContainEqual({
+    type: "ducking_mode",
+    mode: "strong",
+  });
+
+  const off = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  off.state = { ducking: { mode: { selected_option: { value: "off" } } } };
+  await result.coordinator.action(off);
+  expect(result.sessions).toContainEqual({ duckingMode: "off" });
+  expect(result.media).toContainEqual({ type: "ducking_mode", mode: "off" });
+  await result.coordinator.endFromSlack();
+});
+
+test("changes the ducking mode from the bot API", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  expect(
+    await result.coordinator.agentUpdateSettings("host", {
+      duckingMode: "strong",
+    }),
+  ).toMatchObject({ ok: true, changed: ["duckingMode=strong"] });
+  expect(result.sessions).toContainEqual({ duckingMode: "strong" });
+  expect(result.media).toContainEqual({
+    type: "ducking_mode",
+    mode: "strong",
+  });
+  expect(
+    await result.coordinator.agentUpdateSettings("host", {
+      duckingMode: "loud" as never,
+    }),
+  ).toEqual({ ok: false, error: "Invalid ducking mode." });
+  expect(
+    await result.coordinator.agentUpdateSettings("guest", {
+      duckingMode: "off",
+    }),
+  ).toEqual({
+    ok: false,
+    error: "You do not have permission to change settings.",
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("restores the saved ducking mode and tells the media page", async () => {
+  const restored: SavedSession = {
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    uiTs: "player",
+    revision: 2,
+    creatorId: "creator",
+    hostId: "host",
+    state: "ready",
+    volume: 0.4,
+    autoplay: "off",
+    loopMode: "off",
+    transitionMode: "none",
+    duckingMode: "strong",
+    displayMode: "default",
+    anchorEnabled: false,
+    playbackSeconds: 0,
+    listenedSeconds: 0,
+    resumeUntil: 180_000,
+    permissions: ["add"],
+    tracks: [],
+  };
+  const result = setup(undefined, undefined, restored);
+  await result.coordinator.resume("restorer");
+  expect(result.media).toContainEqual({
+    type: "ducking_mode",
+    mode: "strong",
+  });
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    duckingMode: "strong",
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("falls back to the configured ducking mode when none was saved", async () => {
+  const restored: SavedSession = {
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    uiTs: "player",
+    revision: 2,
+    creatorId: "creator",
+    hostId: "host",
+    state: "ready",
+    volume: 0.4,
+    autoplay: "off",
+    loopMode: "off",
+    transitionMode: "none",
+    displayMode: "default",
+    anchorEnabled: false,
+    playbackSeconds: 0,
+    listenedSeconds: 0,
+    resumeUntil: 180_000,
+    permissions: ["add"],
+    tracks: [],
+  };
+  const result = setup(
+    undefined,
+    undefined,
+    restored,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "off",
+  );
+  await result.coordinator.resume("restorer");
+  expect(result.media).toContainEqual({ type: "ducking_mode", mode: "off" });
+  await result.coordinator.endFromSlack();
 });
