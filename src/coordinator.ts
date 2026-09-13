@@ -41,6 +41,7 @@ import {
 import { safeError as message } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
+import type { WorkspaceAdmins } from "./workspace-admins.ts";
 import {
   auditTrack,
   confirm,
@@ -239,6 +240,7 @@ export class Coordinator {
       _messageTs: string,
     ) => {},
     private recommendations?: RecommendationCatalog,
+    private workspaceAdmins?: WorkspaceAdmins,
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
@@ -503,8 +505,9 @@ export class Coordinator {
     }
   }
 
-  action(interaction: Interaction) {
+  async action(interaction: Interaction) {
     this.scrobbling?.syncAnalyticsUser(interaction.userId);
+    await this.primeManager(interaction.userId);
     this.log.debug(
       {
         event: "action_received",
@@ -653,7 +656,7 @@ export class Coordinator {
         error: "Join the huddle before using the player.",
       };
     const capabilities = [...this.allowed];
-    const host = this.hostId === userId || userId === this.config.managerUserId;
+    const host = this.hostId === userId || this.isManager(userId);
     const grant = this.integrations.get(userId);
     const scrobbling = this.scrobbling?.settings(userId, this.id);
     return {
@@ -1642,16 +1645,33 @@ export class Coordinator {
     if (this.isExcluded(userId)) return false;
     if (this.integrations.get(userId)?.permissions.has(capability)) return true;
     return (
-      userId === this.config.managerUserId ||
+      this.isManager(userId) ||
       (this.participants.has(userId) &&
         (userId === this.hostId || this.allowed.has(capability)))
     );
   }
 
+  // A manager holds host powers in every session without joining the huddle:
+  // the configured manager, and workspace admins when the host runs with
+  // WORKSPACE_ADMINS_AS_MANAGERS enabled. Excluded users never qualify, so the
+  // bot and integration accounts cannot let themselves in this way.
+  private isManager(userId: string) {
+    if (userId === this.config.managerUserId) return true;
+    return (
+      !this.isExcluded(userId) && this.workspaceAdmins?.isAdmin(userId) === true
+    );
+  }
+
+  // Permission checks are synchronous, so a user's admin status has to be in
+  // hand before the first one runs.
+  primeManager(userId: string) {
+    return this.workspaceAdmins?.resolve(userId) ?? Promise.resolve(false);
+  }
+
   private settingsAdmin(userId: string) {
     return (
       !this.isExcluded(userId) &&
-      (userId === this.hostId || userId === this.config.managerUserId)
+      (userId === this.hostId || this.isManager(userId))
     );
   }
 
@@ -1685,7 +1705,7 @@ export class Coordinator {
   private isParticipantOrManager(userId: string) {
     return (
       !this.isExcluded(userId) &&
-      (userId === this.config.managerUserId || this.participants.has(userId))
+      (this.isManager(userId) || this.participants.has(userId))
     );
   }
 
@@ -1825,6 +1845,9 @@ export class Coordinator {
         error: "session_inactive",
       });
     try {
+      // Commands check permissions synchronously, and a grant holder may also
+      // be a workspace admin.
+      await this.primeManager(userId);
       const result = await this.runIntegrationCommand(userId, command);
       return this.slack.dm(
         userId,
@@ -1941,7 +1964,7 @@ export class Coordinator {
     if (!parsed) return;
     if (
       interaction.userId !== this.hostId &&
-      interaction.userId !== this.config.managerUserId
+      !this.isManager(interaction.userId)
     )
       return this.notice(interaction.userId, "Only the host can approve that.");
     if (interaction.actionId === "integration_revoke")

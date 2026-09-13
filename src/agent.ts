@@ -320,6 +320,9 @@ export async function runAgentCommand(options: {
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? agentTimeoutMs;
   try {
+    // The tools below check permissions synchronously, so resolve whether this
+    // user counts as a manager before any of them runs.
+    await options.coordinator.primeManager(options.userId);
     const agent = new ToolLoopAgent({
       id: "huddlefm-session",
       model: openRouterModel(),

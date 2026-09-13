@@ -41,6 +41,7 @@ export function loadConfig() {
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID,
+    adminsAreManagers: process.env.WORKSPACE_ADMINS_AS_MANAGERS === "true",
     excludedUserIds: parseIds(process.env.EXCLUDED_USER_IDS),
     integrationUserIds: parseIds(process.env.INTEGRATION_USER_IDS),
     forcedCompanionChannelIds: parseIds(

@@ -75,14 +75,15 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Optional Slack behavior
 
-| Variable                      | Default | Purpose                                                                                     |
-| ----------------------------- | ------- | ------------------------------------------------------------------------------------------- |
-| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                        |
-| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling |
-| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                               |
-| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials          |
-| `SLACK_CANVAS_ID`             | unset   | Canvas updated with all-time listening stats                                                |
-| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                             |
+| Variable                       | Default | Purpose                                                                                     |
+| ------------------------------ | ------- | ------------------------------------------------------------------------------------------- |
+| `MANAGER_USER_ID`              | unset   | User who is always treated as a host                                                        |
+| `WORKSPACE_ADMINS_AS_MANAGERS` | `false` | Treat every Slack workspace admin and owner as a manager                                    |
+| `EXCLUDED_USER_IDS`            | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling |
+| `FORCE_COMPANION_CHANNEL_IDS`  | unset   | Channels that always get a separate HuddleFM controls channel                               |
+| `SLACK_TEAM_ID`                | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials          |
+| `SLACK_CANVAS_ID`              | unset   | Canvas updated with all-time listening stats                                                |
+| `FOOTER`                       | unset   | Optional mrkdwn footer under the queue controls                                             |
 
 #### Optional features
 

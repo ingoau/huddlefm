@@ -34,6 +34,7 @@ import {
 import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
+import { WorkspaceAdmins } from "./workspace-admins.ts";
 
 const resumeTtlMs = 3 * 60_000;
 const log = logger.child({ component: "app" });
@@ -107,6 +108,10 @@ const catalog = new TrackCatalog(config);
 const lyrics = new LyricsCatalog();
 const recommendations = new RecommendationCatalog(store, catalog, config);
 const slackApp = new SlackAppAdapter(config);
+const workspaceAdmins = new WorkspaceAdmins(
+  (userId) => slackApp.workspaceAdmin(userId),
+  { enabled: config.adminsAreManagers },
+);
 const audit = new AuditLog(
   "data/audit.jsonl",
   (id) => slackApp.userName(id),
@@ -532,6 +537,7 @@ async function joinHuddle(
           companions.recordMessage(sessionId, postedChannelId, messageTs);
       },
       recommendations,
+      workspaceAdmins,
     ));
     try {
       if (restored) await coordinator.resume(resumeActorId);
