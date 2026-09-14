@@ -29,6 +29,15 @@ export type DisplayMode = (typeof displayModes)[number];
 export const transitionModes = ["none", "gapless", "adaptive"] as const;
 export type TransitionMode = (typeof transitionModes)[number];
 
+export const duckingModes = ["off", "gentle", "strong"] as const;
+export type DuckingMode = (typeof duckingModes)[number];
+
+export const duckingModeLabels: Record<DuckingMode, string> = {
+  off: "Off",
+  gentle: "Gentle",
+  strong: "Strong",
+};
+
 export const scrobblingModes = ["always", "ask", "disabled"] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
 
@@ -139,6 +148,9 @@ export type SavedSession = {
   autoplay: AutoplayMode;
   loopMode: LoopMode;
   transitionMode: TransitionMode;
+  // Absent on sessions saved before ducking existed, and on any session that
+  // never overrode the configured default.
+  duckingMode?: DuckingMode;
   displayMode: DisplayMode;
   anchorEnabled: boolean;
   playbackSeconds: number;
@@ -207,6 +219,7 @@ export class Store {
         autoplay TEXT NOT NULL DEFAULT 'off',
         loop_mode TEXT NOT NULL DEFAULT 'off',
         transition_mode TEXT NOT NULL DEFAULT 'none',
+        ducking_mode TEXT,
         resume_state TEXT,
         resume_until INTEGER,
         playback_seconds REAL NOT NULL DEFAULT 0,
@@ -337,6 +350,7 @@ export class Store {
       "transition_mode",
       "TEXT NOT NULL DEFAULT 'none'",
     );
+    this.ensureColumn("sessions", "ducking_mode", "TEXT");
     this.ensureColumn("sessions", "resume_state", "TEXT");
     this.ensureColumn("sessions", "resume_until", "INTEGER");
     this.ensureColumn(
@@ -410,6 +424,7 @@ export class Store {
     creatorId: string;
     hostId?: string;
     volume: number;
+    duckingMode?: DuckingMode;
   }) {
     const now = Date.now();
     const transaction = this.db.transaction(() => {
@@ -418,8 +433,8 @@ export class Store {
           `INSERT INTO sessions
           (id, huddle_id, call_id, channel_id, thread_ts, source_channel_id,
           huddle_thread_ts, companion_channel_id, creator_id, host_id, status,
-          volume, anchor_enabled, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, 0, ?, ?)`,
+          volume, ducking_mode, anchor_enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, 0, ?, ?)`,
         )
         .run(
           session.id,
@@ -433,6 +448,7 @@ export class Store {
           session.creatorId,
           session.hostId ?? null,
           session.volume,
+          session.duckingMode ?? null,
           now,
           now,
         );
@@ -534,6 +550,7 @@ export class Store {
       autoplay?: AutoplayMode;
       loopMode?: LoopMode;
       transitionMode?: TransitionMode;
+      duckingMode?: DuckingMode;
       playbackSeconds?: number;
       listenedSeconds?: number;
       displayMode?: DisplayMode;
@@ -566,6 +583,12 @@ export class Store {
           "UPDATE sessions SET transition_mode = ?, updated_at = ? WHERE id = ?",
         )
         .run(fields.transitionMode, Date.now(), sessionId);
+    if (fields.duckingMode !== undefined)
+      this.db
+        .query(
+          "UPDATE sessions SET ducking_mode = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(fields.duckingMode, Date.now(), sessionId);
     if (fields.playbackSeconds !== undefined)
       this.db
         .query(
@@ -903,6 +926,9 @@ export class Store {
           )
             ? (row.transition_mode as TransitionMode)
             : "none",
+          ...(duckingModes.includes(row.ducking_mode as DuckingMode)
+            ? { duckingMode: row.ducking_mode as DuckingMode }
+            : {}),
           displayMode: displayModes.includes(row.display_mode as DisplayMode)
             ? (row.display_mode as DisplayMode)
             : "default",

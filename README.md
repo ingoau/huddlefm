@@ -16,6 +16,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 - Autoplay: Related (YouTube up-next) or Huddle mix (Last.fm, ListenBrainz, and songs people have added)
 - Play something: one click on an idle player starts Huddle mix, falling back to a currently popular song when there is no listening history yet
 - Loop: repeat the current track or cycle the finished queue
+- Auto-duck: lower the music while someone is speaking in the huddle, and bring it back when they stop
 - Support for simultaneous huddles
 - End of session recaps & a statistics canvas
 - Auto leave when inactive
@@ -106,6 +107,7 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 | `TRACK_DURATION_LIMIT_SECONDS` | `1200`           | Maximum track duration                         |
 | `TRACK_DOWNLOAD_LIMIT_BYTES`   | `100000000`      | Maximum download size                          |
 | `INITIAL_VOLUME`               | `0.5`            | Starting volume as a fraction of max           |
+| `DUCKING_MODE`                 | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`   |
 | `LOUDNESS_NORMALIZATION`       | `false`          | Set to `true` to enable -14 LUFS normalization |
 | `ALONE_TIMEOUT_MS`             | `120000`         | Leave when alone for this long                 |
 | `IDLE_TIMEOUT_MS`              | `600000`         | Leave when idle for this long                  |

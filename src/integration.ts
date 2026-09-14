@@ -2,6 +2,7 @@ import {
   autoplayModes,
   capabilities,
   displayModes,
+  duckingModes,
   loopModes,
   transitionModes,
 } from "./store.ts";
@@ -74,6 +75,7 @@ export type IntegrationCommand = {
   autoplayMode?: (typeof autoplayModes)[number];
   loopMode?: (typeof loopModes)[number];
   transitionMode?: (typeof transitionModes)[number];
+  duckingMode?: (typeof duckingModes)[number];
   anchorEnabled?: boolean;
 };
 
@@ -197,6 +199,16 @@ export function parseIntegrationMessage(text: string): IntegrationParseResult {
   )
     command.transitionMode =
       body.transitionMode as (typeof transitionModes)[number];
+  if (
+    typeof body.duckingMode === "string" &&
+    duckingModes.includes(body.duckingMode as (typeof duckingModes)[number])
+  )
+    command.duckingMode = body.duckingMode as (typeof duckingModes)[number];
+  if (
+    typeof body.ducking === "string" &&
+    duckingModes.includes(body.ducking as (typeof duckingModes)[number])
+  )
+    command.duckingMode = body.ducking as (typeof duckingModes)[number];
   if (typeof body.anchorEnabled === "boolean")
     command.anchorEnabled = body.anchorEnabled;
   return { ok: true, command };

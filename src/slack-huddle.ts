@@ -1,4 +1,5 @@
 import { logger } from "./logger.ts";
+import type { DuckingMode } from "./store.ts";
 
 const log = logger.child({ component: "slack-huddle" });
 
@@ -7,6 +8,7 @@ export type ChimeBootstrap = {
   meeting: Record<string, unknown>;
   attendee: Record<string, unknown>;
   initialVolume: number;
+  duckingMode: DuckingMode;
   bridgeToken: string;
 };
 

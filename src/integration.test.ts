@@ -151,6 +151,27 @@ test("parses a valid request_control and command with optional channel", () => {
     ok: true,
     command: { type: "settings", loopMode: "track" },
   });
+  expect(
+    parseIntegrationMessage(
+      JSON.stringify({ v: 1, type: "settings", duckingMode: "strong" }),
+    ),
+  ).toEqual({
+    ok: true,
+    command: { type: "settings", duckingMode: "strong" },
+  });
+  expect(
+    parseIntegrationMessage(
+      JSON.stringify({ v: 1, type: "settings", ducking: "off" }),
+    ),
+  ).toEqual({
+    ok: true,
+    command: { type: "settings", duckingMode: "off" },
+  });
+  expect(
+    parseIntegrationMessage(
+      JSON.stringify({ v: 1, type: "settings", ducking: "loud" }),
+    ),
+  ).toEqual({ ok: true, command: { type: "settings" } });
 });
 
 test("matches sessions by source, UI, or companion channel", () => {

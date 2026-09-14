@@ -20,7 +20,7 @@ test("persists session and permission defaults", () => {
   expect(
     store.db
       .query(
-        "SELECT status, autoplay, loop_mode, transition_mode, display_mode, anchor_enabled FROM sessions",
+        "SELECT status, autoplay, loop_mode, transition_mode, ducking_mode, display_mode, anchor_enabled FROM sessions",
       )
       .get(),
   ).toEqual({
@@ -28,6 +28,8 @@ test("persists session and permission defaults", () => {
     autoplay: "off",
     loop_mode: "off",
     transition_mode: "none",
+    // Left unset so restores fall back to the configured default.
+    ducking_mode: null,
     display_mode: "default",
     anchor_enabled: 0,
   });
@@ -42,6 +44,10 @@ test("persists session and permission defaults", () => {
   store.setSession("session", { transitionMode: "gapless" });
   expect(store.db.query("SELECT transition_mode FROM sessions").get()).toEqual({
     transition_mode: "gapless",
+  });
+  store.setSession("session", { duckingMode: "strong" });
+  expect(store.db.query("SELECT ducking_mode FROM sessions").get()).toEqual({
+    ducking_mode: "strong",
   });
   expect(
     store.db
@@ -346,6 +352,7 @@ test("restores suspended sessions for three minutes", () => {
     autoplay: "related",
     loopMode: "track",
     transitionMode: "gapless",
+    duckingMode: "strong",
     playbackSeconds: 42,
     listenedSeconds: 84,
     displayMode: "off",
@@ -375,6 +382,7 @@ test("restores suspended sessions for three minutes", () => {
       autoplay: "related",
       loopMode: "track",
       transitionMode: "gapless",
+      duckingMode: "strong",
       displayMode: "lyrics",
       anchorEnabled: false,
       resumeUntil: 180_000,
@@ -743,6 +751,56 @@ test("migrates the old lyrics toggle to display mode", () => {
   expect(store.db.query("SELECT display_mode FROM sessions").get()).toEqual({
     display_mode: "off",
   });
+  store.close();
+  rmSync(directory, { recursive: true });
+});
+
+test("restores sessions saved before ducking without a stored mode", () => {
+  const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
+  const path = join(directory, "store.sqlite");
+  let store = new Store(path);
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.close();
+
+  const legacy = new Database(path);
+  legacy.run("ALTER TABLE sessions DROP COLUMN ducking_mode");
+  legacy.close();
+
+  store = new Store(path);
+  store.suspendSession(
+    "session",
+    {
+      state: "playing",
+      playbackSeconds: 0,
+      displayMode: "default",
+      anchorEnabled: false,
+      queue: [],
+    },
+    180_000,
+  );
+  // Left out entirely so the configured default applies on restore.
+  const [saved] = store.resumableSessions(1, 180_000).sessions;
+  expect(saved).toBeDefined();
+  expect(saved).not.toHaveProperty("duckingMode");
+
+  store.db.run("UPDATE sessions SET ducking_mode = 'loud'");
+  expect(store.resumableSessions(1, 180_000).sessions[0]).not.toHaveProperty(
+    "duckingMode",
+  );
+  store.db.run("UPDATE sessions SET ducking_mode = 'strong'");
+  expect(store.resumableSessions(1, 180_000).sessions[0]).toHaveProperty(
+    "duckingMode",
+    "strong",
+  );
   store.close();
   rmSync(directory, { recursive: true });
 });

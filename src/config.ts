@@ -1,3 +1,5 @@
+import { parseDuckingMode } from "./ducking.ts";
+
 const required = [
   "SLACK_WORKSPACE_URL",
   "SLACK_XOXP",
@@ -39,6 +41,7 @@ export function loadConfig() {
       process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000,
     ),
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.5),
+    duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
     loudnessNormalization: process.env.LOUDNESS_NORMALIZATION === "true",
     aloneMs: Number(process.env.ALONE_TIMEOUT_MS ?? 120_000),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
