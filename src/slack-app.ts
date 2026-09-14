@@ -338,6 +338,16 @@ export class SlackAppAdapter {
     return name;
   }
 
+  // Owners can do everything an admin can, so every flag counts as admin.
+  async workspaceAdmin(userId: string) {
+    const result = await this.web.users.info({ user: userId });
+    return Boolean(
+      result.user?.is_admin ||
+      result.user?.is_owner ||
+      result.user?.is_primary_owner,
+    );
+  }
+
   async dm(
     userId: string,
     text: string,

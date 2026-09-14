@@ -31,6 +31,13 @@ test("ignores non-JSON and missing protocol version", () => {
   });
 });
 
+test("accepts shuffle as a queue command", () => {
+  expect(
+    parseIntegrationMessage(JSON.stringify({ v: 1, type: "shuffle" })),
+  ).toEqual({ ok: true, command: { type: "shuffle" } });
+  expect(eventGroup("queue.shuffled")).toBe("queue");
+});
+
 test("rejects unknown types and request_control without a channel", () => {
   expect(
     parseIntegrationMessage(JSON.stringify({ v: 1, type: "sessions" })),

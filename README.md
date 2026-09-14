@@ -8,7 +8,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 
 - Search for songs, albums, and playlists from YouTube
 - Add supported media links (e.g. YouTube, SoundCloud, Navidrome shares) to the queue
-- Build and reorder a shared queue
+- Build and reorder a shared queue, or shuffle the pending queue in one click
 - Control playback, volume and settings, directly through Slack
 - Set permissions for who can control playback and queue
 - View album art, progress, and read lyrics streamed as a camera feed
@@ -52,6 +52,8 @@ SLACK_XOXD=xoxd-...   # Browser `d` cookie for that session
 
 `SLACK_XOXP` and `SLACK_XOXC`/`SLACK_XOXD` must belong to the same Slack user. HuddleFM checks this on startup.
 
+On Enterprise Grid the client token can be set as `SLACK_ENTERPRISE_XOXC` instead of `SLACK_XOXC`; it takes precedence when both are set. Either way one of the two is required.
+
 3. Start it:
 
 ```sh
@@ -66,24 +68,26 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Required
 
-| Variable              | Purpose                                          |
-| --------------------- | ------------------------------------------------ |
-| `SLACK_WORKSPACE_URL` | Workspace URL, e.g. `https://example.slack.com`  |
-| `SLACK_XOXP`          | User OAuth token used for Slack Web API calls    |
-| `SLACK_XAPP`          | App-level token used for Socket Mode             |
-| `SLACK_XOXC`          | Client token from the bot user's browser session |
-| `SLACK_XOXD`          | `d` cookie from the same browser session         |
+| Variable                | Purpose                                                             |
+| ----------------------- | ------------------------------------------------------------------- |
+| `SLACK_WORKSPACE_URL`   | Workspace URL, e.g. `https://example.slack.com`                     |
+| `SLACK_XOXP`            | User OAuth token used for Slack Web API calls                       |
+| `SLACK_XAPP`            | App-level token used for Socket Mode                                |
+| `SLACK_XOXC`            | Client token from the bot user's browser session                    |
+| `SLACK_ENTERPRISE_XOXC` | Enterprise Grid client token; used instead of `SLACK_XOXC` when set |
+| `SLACK_XOXD`            | `d` cookie from the same browser session                            |
 
 #### Optional Slack behavior
 
-| Variable                      | Default | Purpose                                                                                     |
-| ----------------------------- | ------- | ------------------------------------------------------------------------------------------- |
-| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                        |
-| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling |
-| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                               |
-| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials          |
-| `SLACK_CANVAS_ID`             | unset   | Canvas updated with all-time listening stats                                                |
-| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                             |
+| Variable                       | Default | Purpose                                                                                     |
+| ------------------------------ | ------- | ------------------------------------------------------------------------------------------- |
+| `MANAGER_USER_ID`              | unset   | User who is always treated as a host                                                        |
+| `WORKSPACE_ADMINS_AS_MANAGERS` | `false` | Treat every Slack workspace admin and owner as a manager                                    |
+| `EXCLUDED_USER_IDS`            | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling |
+| `FORCE_COMPANION_CHANNEL_IDS`  | unset   | Channels that always get a separate HuddleFM controls channel                               |
+| `SLACK_TEAM_ID`                | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials          |
+| `SLACK_CANVAS_ID`              | unset   | Canvas updated with all-time listening stats                                                |
+| `FOOTER`                       | unset   | Optional mrkdwn footer under the queue controls                                             |
 
 #### Optional features
 

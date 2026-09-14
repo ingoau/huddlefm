@@ -148,6 +148,13 @@ function agentTools(coordinator: Coordinator, userId: string) {
           abortSignal,
         ),
     }),
+    shuffle_queue: tool({
+      description:
+        "Randomize the order of the upcoming queue. The playing track is unaffected.",
+      inputSchema: z.object({}),
+      execute: async (_input, { abortSignal }) =>
+        coordinator.agentShuffle(userId, abortSignal),
+    }),
     clear_queue: tool({
       description: "Clear all upcoming tracks from the queue.",
       inputSchema: z.object({}),
@@ -313,6 +320,9 @@ export async function runAgentCommand(options: {
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? agentTimeoutMs;
   try {
+    // The tools below check permissions synchronously, so resolve whether this
+    // user counts as a manager before any of them runs.
+    await options.coordinator.primeManager(options.userId);
     const agent = new ToolLoopAgent({
       id: "huddlefm-session",
       model: openRouterModel(),

@@ -10,6 +10,7 @@ import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
+import { WorkspaceAdmins } from "./workspace-admins.ts";
 
 function setup(
   tracks = {} as TrackCatalog,
@@ -31,6 +32,7 @@ function setup(
   excludedUserIds = new Set<string>(),
   lyricsOverride?: LyricsCatalog,
   recommendations?: import("./recommendations.ts").RecommendationCatalog,
+  workspaceAdmins?: WorkspaceAdmins,
   duckingMode: DuckingMode = "gentle",
 ) {
   const posted: unknown[] = [];
@@ -49,6 +51,8 @@ function setup(
   const created: unknown[] = [];
   const permissions: unknown[] = [];
   const suspensions: unknown[] = [];
+  const queueOrders: string[][] = [];
+  const usage: string[] = [];
   const media: unknown[] = [];
   const audit: unknown[] = [];
   const sessionChanges: unknown[] = [];
@@ -108,7 +112,9 @@ function setup(
       removeTrack: () => {},
       addTrack: () => {},
       recentTracks: () => [],
-      incrementUsage: () => {},
+      incrementUsage: (event: string) => {
+        usage.push(event);
+      },
       setSession: (_id: string, value: unknown) => {
         sessions.push(value);
       },
@@ -117,6 +123,9 @@ function setup(
       },
       suspendSession: (...args: unknown[]) => {
         suspensions.push(args);
+      },
+      setQueueOrder: (_id: string, queue: string[]) => {
+        queueOrders.push(queue);
       },
       endSession: (...args: unknown[]) => {
         sessions.push({ status: "ended", args });
@@ -169,6 +178,7 @@ function setup(
     () => {},
     (...args) => recordedMessages.push(args),
     recommendations,
+    workspaceAdmins,
   );
   return {
     coordinator,
@@ -188,6 +198,8 @@ function setup(
     sessions,
     permissions,
     suspensions,
+    queueOrders,
+    usage,
     media,
     audit,
     sessionChanges,
@@ -447,6 +459,247 @@ test("plays a queued track next", async () => {
       (track) => track.id,
     ),
   ).toEqual(["second", "first"]);
+  await result.coordinator.endFromSlack();
+});
+
+function queued(id: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    requesterId: "host",
+    sourceInput: id,
+    canonicalUrl: id,
+    sourceId: id,
+    title: id.toUpperCase(),
+    artist: "Artist",
+    status: "ready",
+    ...extra,
+  };
+}
+
+const queueIds = (coordinator: Coordinator) =>
+  (Reflect.get(coordinator, "queue") as { id: string }[]).map(
+    (track) => track.id,
+  );
+
+// Math.random() === 0 turns the Fisher-Yates pass into a rotation, so the
+// order a shuffle produces is known without giving up the real helper.
+async function withoutRandomness(run: () => Promise<void>) {
+  const random = Math.random;
+  Math.random = () => 0;
+  try {
+    await run();
+  } finally {
+    Math.random = random;
+  }
+}
+
+const playerBlocks = (coordinator: Coordinator) =>
+  JSON.stringify(
+    (Reflect.get(coordinator, "blocks") as () => unknown[]).call(coordinator),
+  );
+
+const queueDialog = (coordinator: Coordinator, userId: string) =>
+  JSON.stringify(
+    (Reflect.get(coordinator, "queueView") as (id: string) => unknown).call(
+      coordinator,
+      userId,
+    ),
+  );
+
+test("shuffles the pending queue and leaves the playing track alone", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(
+    result.coordinator,
+    "current",
+    queued("playing", {
+      status: "playing",
+    }),
+  );
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ["a", "b", "c", "d", "e"].map((id) => queued(id)),
+  );
+
+  await withoutRandomness(() =>
+    result.coordinator.action(interaction(result.coordinator, "shuffle_queue")),
+  );
+
+  expect(
+    (Reflect.get(result.coordinator, "current") as { id: string }).id,
+  ).toBe("playing");
+  expect(queueIds(result.coordinator)).toEqual(["b", "c", "d", "e", "a"]);
+  expect(result.audit).toContainEqual([
+    "queue.shuffled",
+    "host",
+    { sessionId: result.coordinator.id, count: 5 },
+  ]);
+  expect(result.usage).toContain("shuffled");
+  expect(result.queueOrders.at(-1)).toEqual(["b", "c", "d", "e", "a"]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a shuffle is a permutation of the pending queue", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const ids = ["a", "b", "c", "d", "e", "f", "g"];
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ids.map((id) => queued(id)),
+  );
+
+  // Real randomness, so assert the invariants rather than an exact order.
+  for (let round = 0; round < 10; round++) {
+    await result.coordinator.action(
+      interaction(result.coordinator, "shuffle_queue"),
+    );
+    expect([...queueIds(result.coordinator)].sort()).toEqual([...ids].sort());
+  }
+  await result.coordinator.endFromSlack();
+});
+
+test("shuffle leaves a queued autoplay pick in its slot", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [
+    queued("auto", { automatic: true }),
+    queued("a"),
+    queued("b"),
+    queued("c"),
+  ]);
+
+  await withoutRandomness(() =>
+    result.coordinator.action(interaction(result.coordinator, "shuffle_queue")),
+  );
+
+  expect(queueIds(result.coordinator)).toEqual(["auto", "b", "c", "a"]);
+  await result.coordinator.endFromSlack();
+});
+
+test("shuffle needs the manage-queue permission", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ["a", "b", "c"].map((id) => queued(id)),
+  );
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "shuffle_queue"),
+    userId: "guest",
+  });
+
+  expect(result.ephemeral).toEqual(["You do not have permission for that."]);
+  expect(queueIds(result.coordinator)).toEqual(["a", "b", "c"]);
+  expect(result.usage).not.toContain("shuffled");
+  expect(result.queueOrders).toEqual([]);
+  expect(result.audit).toContainEqual([
+    "action.denied",
+    "guest",
+    { sessionId: result.coordinator.id, capability: "manage-queue" },
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("agentShuffle shuffles under the manage-queue permission", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  result.coordinator.memberJoined("listener");
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ["a", "b", "c"].map((id) => queued(id)),
+  );
+
+  expect(await result.coordinator.agentShuffle("listener")).toEqual({
+    ok: false,
+    error: "You do not have permission for that.",
+  });
+  expect(queueIds(result.coordinator)).toEqual(["a", "b", "c"]);
+
+  await withoutRandomness(async () => {
+    expect(await result.coordinator.agentShuffle("host")).toEqual({
+      ok: true,
+      shuffled: 3,
+    });
+  });
+  expect(queueIds(result.coordinator)).toEqual(["b", "c", "a"]);
+
+  Reflect.set(result.coordinator, "queue", [queued("a")]);
+  expect(await result.coordinator.agentShuffle("host")).toEqual({
+    ok: false,
+    error: "There are not enough queued songs to shuffle.",
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("a shuffled queue survives a restore", async () => {
+  const store = new Store(":memory:");
+  const result = setup(undefined, undefined, undefined, undefined, store);
+  await result.coordinator.start();
+  const ids = ["a", "b", "c", "d", "e"];
+  for (const id of ids)
+    store.addTrack({
+      id,
+      sessionId: result.coordinator.id,
+      requesterId: "host",
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id.toUpperCase(),
+      artist: "Artist",
+      status: "ready",
+    });
+  Reflect.set(
+    result.coordinator,
+    "queue",
+    ids.map((id) => queued(id)),
+  );
+
+  await withoutRandomness(() =>
+    result.coordinator.action(interaction(result.coordinator, "shuffle_queue")),
+  );
+  const shuffled = queueIds(result.coordinator);
+  expect(shuffled).not.toEqual(ids);
+
+  // A restart that never reached suspend still restores the new order.
+  const saved = store.resumableSessions(Date.now(), 600_000).sessions[0];
+  expect(saved?.tracks.map((track) => track.id)).toEqual(shuffled);
+  const restored = setup(undefined, undefined, saved, undefined, store);
+  expect(queueIds(restored.coordinator)).toEqual(shuffled);
+
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("offers shuffle only when there is something to shuffle", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+
+  Reflect.set(result.coordinator, "queue", [queued("a")]);
+  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+  expect(queueDialog(result.coordinator, "host")).not.toContain(
+    "shuffle_queue",
+  );
+
+  // A lone autoplay pick is not counted, so neither is a queue holding one.
+  Reflect.set(result.coordinator, "queue", [
+    queued("a"),
+    queued("auto", { automatic: true }),
+  ]);
+  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+
+  Reflect.set(result.coordinator, "queue", [queued("a"), queued("b")]);
+  expect(playerBlocks(result.coordinator)).toContain("shuffle_queue");
+  expect(queueDialog(result.coordinator, "host")).toContain("shuffle_queue");
+  // The dialog gates its controls on the capability; the player does not.
+  expect(queueDialog(result.coordinator, "guest")).not.toContain(
+    "shuffle_queue",
+  );
   await result.coordinator.endFromSlack();
 });
 
@@ -1580,6 +1833,166 @@ test("manager overrides permissions and HuddleFM cannot become host", async () =
   });
   expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
   expect(result.ephemeral).toContain("HuddleFM cannot be the host.");
+  await result.coordinator.endFromSlack();
+});
+
+function volumeUp(userId: string) {
+  return {
+    type: "block_actions" as const,
+    userId,
+    actionId: "volume_up",
+    value: "",
+    channelId: "channel",
+    messageTs: "1",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  };
+}
+
+function workspaceAdmins(
+  enabled: boolean,
+  admins = ["admin"],
+  lookups: string[] = [],
+) {
+  return new WorkspaceAdmins(
+    async (userId) => (lookups.push(userId), admins.includes(userId)),
+    { enabled },
+  );
+}
+
+test("treats a workspace admin as a manager when enabled", async () => {
+  const lookups: string[] = [];
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    workspaceAdmins(true, ["admin"], lookups),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("admin"));
+  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(lookups).toEqual(["admin"]);
+
+  // The cached answer keeps later actions off the Slack API.
+  await result.coordinator.action(volumeUp("admin"));
+  expect(lookups).toEqual(["admin"]);
+  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
+  await result.coordinator.endFromSlack();
+});
+
+test("leaves workspace admins alone while the option is off", async () => {
+  const lookups: string[] = [];
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    workspaceAdmins(false, ["admin"], lookups),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("admin"));
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  expect(lookups).toEqual([]);
+  await result.coordinator.endFromSlack();
+});
+
+test("an excluded workspace admin gains nothing", async () => {
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(["admin"]),
+    undefined,
+    undefined,
+    workspaceAdmins(true, ["admin"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("admin"));
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  await result.coordinator.endFromSlack();
+});
+
+test("an excluded configured manager cannot approve integration control", async () => {
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(["manager"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "request_control", channel: "channel", permissions: ["pause"] },
+    "9.0",
+    "Dbot",
+  );
+  await result.coordinator.action({
+    type: "block_actions",
+    userId: "manager",
+    actionId: "integration_accept",
+    value: requestValue(result.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+    responseUrl: "https://hooks.slack.com/actions/test",
+  });
+  expect(result.ephemeral.at(-1)).toBe("Only the host can approve that.");
+  expect(
+    result.dms.some((args) => String(args[1]).includes("grant_accepted")),
+  ).toBe(false);
+  await result.coordinator.endFromSlack();
+});
+
+test("a workspace admin holds host powers over settings", async () => {
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    workspaceAdmins(true, ["admin"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action({
+    type: "view_submission",
+    userId: "admin",
+    actionId: "save_settings",
+    value: "",
+    channelId: "channel",
+    messageTs: "",
+    triggerId: "",
+    metadata: JSON.stringify({
+      sessionId: result.coordinator.id,
+      hostId: "host",
+    }),
+    state: { host: { user: { selected_user: "guest" } } },
+  });
+  expect(result.coordinator.hostUserId()).toBe("guest");
   await result.coordinator.endFromSlack();
 });
 
@@ -5147,6 +5560,7 @@ test("falls back to the configured ducking mode when none was saved", async () =
     undefined,
     undefined,
     restored,
+    undefined,
     undefined,
     undefined,
     undefined,

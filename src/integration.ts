@@ -35,6 +35,7 @@ export const integrationCommandTypes = [
   "add",
   "remove",
   "move",
+  "shuffle",
   "clear",
   "skip",
   "previous",

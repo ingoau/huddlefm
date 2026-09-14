@@ -636,6 +636,62 @@ test("groups channel statistics by source after companion replacement", () => {
   store.close();
 });
 
+test("persists a live queue order without disturbing history", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1",
+    creatorId: "host",
+    hostId: "host",
+    volume: 0.6,
+  });
+  const add = (id: string, status: string) =>
+    store.addTrack({
+      id,
+      sessionId: "session",
+      requesterId: "host",
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id,
+      artist: "Artist",
+      status,
+    });
+  add("first", "played");
+  add("second", "played");
+  add("a", "ready");
+  add("b", "ready");
+  add("c", "ready");
+
+  store.setQueueOrder("session", ["c", "a", "b"]);
+  const tracks = store.resumableSessions(Date.now(), 600_000).sessions[0]
+    ?.tracks;
+  expect(
+    tracks?.filter((track) => track.status === "ready").map((t) => t.id),
+  ).toEqual(["c", "a", "b"]);
+  // Played tracks keep their own chronology; a rewrite clears stale positions.
+  expect(
+    tracks?.filter((track) => track.status === "played").map((t) => t.id),
+  ).toEqual(["first", "second"]);
+
+  store.setQueueOrder("session", ["b"]);
+  expect(
+    store
+      .resumableSessions(Date.now(), 600_000)
+      .sessions[0]?.tracks.map((track) => [track.id, track.queuePosition]),
+  ).toEqual([
+    ["b", 0],
+    ["first", undefined],
+    ["second", undefined],
+    ["a", undefined],
+    ["c", undefined],
+  ]);
+  store.close();
+});
+
 test("stores usage counters and imports audit history once", () => {
   const store = new Store(":memory:");
   const history = {
@@ -649,6 +705,7 @@ test("stores usage counters and imports audit history once", () => {
     resumed: 8,
     volume: 9,
     reordered: 10,
+    shuffled: 11,
     cleared: 11,
     settings: 12,
   };
@@ -661,6 +718,10 @@ test("stores usage counters and imports audit history once", () => {
   expect(store.usageStats()).toContainEqual({
     label: "Settings changes",
     count: 12,
+  });
+  expect(store.usageStats()).toContainEqual({
+    label: "Queue shuffles",
+    count: 11,
   });
   store.close();
 });
