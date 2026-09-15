@@ -969,3 +969,165 @@ test("persists huddle mix opt-in per Slack user", () => {
   expect(store.getUserScrobbling("user").huddleMixOptIn).toBe(true);
   store.close();
 });
+
+test("remembers what each listener heard, across Huddles", () => {
+  const store = new Store(":memory:");
+  const session = (id: string, sourceChannelId?: string) =>
+    store.createSession({
+      id,
+      huddleId: `huddle-${id}`,
+      callId: `call-${id}`,
+      channelId: "companion",
+      threadTs: "1.0",
+      ...(sourceChannelId ? { sourceChannelId } : {}),
+      creatorId: "creator",
+      hostId: "host",
+      volume: 0.6,
+    });
+  session("monday", "general");
+  session("tuesday", "general");
+  session("elsewhere", "random");
+
+  store.recordTrackPlay({
+    sessionId: "monday",
+    userId: "host",
+    title: "Song",
+    artist: "Band",
+    playedAt: 1_000,
+  });
+  store.recordTrackPlay({
+    sessionId: "tuesday",
+    userId: "guest",
+    title: "Other",
+    artist: "Band",
+    playedAt: 2_000,
+  });
+  store.recordTrackPlay({
+    sessionId: "elsewhere",
+    userId: "host",
+    title: "Far Away",
+    artist: "Band",
+    playedAt: 3_000,
+  });
+
+  expect(store.recentPlays(["host"], 0)).toEqual([
+    { userId: "host", title: "Far Away", artist: "Band", playedAt: 3_000 },
+    { userId: "host", title: "Song", artist: "Band", playedAt: 1_000 },
+  ]);
+  // The window is honoured, and listeners nobody asked about stay out.
+  expect(store.recentPlays(["host"], 2_000)).toEqual([
+    { userId: "host", title: "Far Away", artist: "Band", playedAt: 3_000 },
+  ]);
+  expect(store.recentPlays([], 0)).toEqual([]);
+  expect(store.recentPlays(["host", "guest"], 0)).toHaveLength(3);
+
+  // A room is the channel, so separate Huddles in it share a memory.
+  expect(store.recentRoomPlays("general", 0)).toEqual([
+    { title: "Other", artist: "Band", playedAt: 2_000 },
+    { title: "Song", artist: "Band", playedAt: 1_000 },
+  ]);
+  expect(store.recentRoomPlays("random", 0)).toEqual([
+    { title: "Far Away", artist: "Band", playedAt: 3_000 },
+  ]);
+  expect(store.recentRoomPlays("quiet", 0)).toEqual([]);
+});
+
+test("falls back to the Huddle's own channel when there is no source channel", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
+  });
+  store.recordTrackPlay({
+    sessionId: "session",
+    userId: "host",
+    title: "Song",
+    artist: "Band",
+    playedAt: 1_000,
+  });
+  expect(store.recentRoomPlays("channel", 0)).toHaveLength(1);
+});
+
+test("remembers skipped autoplay picks per listener", () => {
+  const store = new Store(":memory:");
+  store.recordAutoplaySkip({
+    sessionId: "session",
+    userId: "host",
+    title: "Song",
+    artist: "Band",
+    weight: 1,
+    skippedAt: 5_000,
+  });
+  store.recordAutoplaySkip({
+    sessionId: "session",
+    userId: "guest",
+    title: "Song",
+    artist: "Band",
+    weight: 0.25,
+    skippedAt: 5_000,
+  });
+  expect(store.recentSkips(["host"], 0)).toEqual([
+    {
+      userId: "host",
+      title: "Song",
+      artist: "Band",
+      weight: 1,
+      skippedAt: 5_000,
+    },
+  ]);
+  expect(store.recentSkips(["guest"], 0)[0]?.weight).toBe(0.25);
+  expect(store.recentSkips(["host"], 6_000)).toEqual([]);
+  expect(store.recentSkips([], 0)).toEqual([]);
+  // The same song skipped twice is remembered twice, so it keeps adding up.
+  store.recordAutoplaySkip({
+    sessionId: "later",
+    userId: "host",
+    title: "Song",
+    artist: "Band",
+    weight: 1,
+    skippedAt: 9_000,
+  });
+  expect(store.recentSkips(["host"], 0)).toHaveLength(2);
+});
+
+test("prunes listening memory that has decayed away", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.6,
+  });
+  for (const playedAt of [1_000, 9_000])
+    store.recordTrackPlay({
+      sessionId: "session",
+      userId: "host",
+      title: `Song ${playedAt}`,
+      artist: "Band",
+      playedAt,
+    });
+  for (const skippedAt of [1_000, 9_000])
+    store.recordAutoplaySkip({
+      sessionId: "session",
+      userId: "host",
+      title: `Song ${skippedAt}`,
+      artist: "Band",
+      weight: 1,
+      skippedAt,
+    });
+  store.pruneListeningMemory(5_000, 500);
+  expect(store.recentPlays(["host"], 0)).toHaveLength(1);
+  expect(store.recentSkips(["host"], 0)).toHaveLength(2);
+  store.pruneListeningMemory(5_000, 5_000);
+  expect(store.recentSkips(["host"], 0)).toHaveLength(1);
+});

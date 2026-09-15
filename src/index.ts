@@ -31,6 +31,7 @@ import {
   isAllowlisted,
   parseIntegrationMessage,
 } from "./integration.ts";
+import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
@@ -89,6 +90,11 @@ log.info(
 
 const store = new Store();
 log.info({ event: "store_opened" }, "Store opened");
+// Listening memory past the window the mix looks at has decayed to nothing.
+store.pruneListeningMemory(
+  Date.now() - playWindowMs,
+  Date.now() - skipWindowMs,
+);
 const scrobbling = new ScrobbleDispatcher(store, config);
 scrobbling.start();
 const saved = store.resumableSessions(Date.now(), resumeTtlMs);

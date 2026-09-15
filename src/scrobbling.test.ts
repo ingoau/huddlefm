@@ -304,3 +304,50 @@ async function until(predicate: () => boolean) {
   for (let index = 0; index < 100 && !predicate(); index++) await Bun.sleep(1);
   expect(predicate()).toBeTrue();
 }
+
+test("remembers a real listen for the Huddle mix, scrobbler or not", () => {
+  const store = new Store(":memory:");
+  const dispatcher = new ScrobbleDispatcher(store, {});
+  const track = {
+    id: "track",
+    requesterId: "host",
+    title: "Song",
+    artist: "Band",
+    duration: 200,
+  };
+  // Not listened to for long enough to count as heard.
+  expect(dispatcher.reached("session", "host", track, 1_000, 10)).toBeFalse();
+  expect(store.recentPlays(["host"], 0)).toEqual([]);
+
+  // Past the threshold, with no scrobbling service connected at all.
+  expect(dispatcher.reached("session", "host", track, 1_000, 120)).toBeTrue();
+  expect(store.recentPlays(["host"], 0)).toEqual([
+    {
+      userId: "host",
+      title: "Song",
+      artist: "Band",
+      // reached() works in seconds; the memory is stored in milliseconds.
+      playedAt: 1_000_000,
+    },
+  ]);
+});
+
+test("does not remember listens for someone who opted out of the mix", () => {
+  const store = new Store(":memory:");
+  const dispatcher = new ScrobbleDispatcher(store, {});
+  store.setHuddleMixOptIn("private", false);
+  dispatcher.reached(
+    "session",
+    "private",
+    {
+      id: "track",
+      requesterId: "private",
+      title: "Song",
+      artist: "Band",
+      duration: 200,
+    },
+    1_000,
+    120,
+  );
+  expect(store.recentPlays(["private"], 0)).toEqual([]);
+});

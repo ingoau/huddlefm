@@ -57,6 +57,7 @@ function setup(
   const audit: unknown[] = [];
   const sessionChanges: unknown[] = [];
   const recordedMessages: unknown[] = [];
+  const rememberedSkips: unknown[] = [];
   let post = 0;
   let modal = 0;
   const slack = {
@@ -134,6 +135,13 @@ function setup(
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
       },
+      recentPlays: () => [],
+      recentRoomPlays: () => [],
+      recentSkips: () => [],
+      recordTrackPlay: () => {},
+      recordAutoplaySkip: (value: unknown) => {
+        rememberedSkips.push(value);
+      },
     } as unknown as Store);
   const lyrics =
     lyricsOverride ??
@@ -204,6 +212,7 @@ function setup(
     audit,
     sessionChanges,
     recordedMessages,
+    rememberedSkips,
   };
 }
 
@@ -4445,6 +4454,7 @@ test("prefetches personal recommendations on start and join", async () => {
       return undefined;
     },
     refreshUser() {},
+    huddleMixOptedIn: () => true,
     autoplayCandidates: async () => [],
   } as unknown as RecommendationCatalog;
   const test = setup(
@@ -4650,6 +4660,7 @@ test("a manual add refreshes the adder's personal recommendations", async () => 
     refreshUser(userId: string) {
       refreshed.push(userId);
     },
+    huddleMixOptedIn: () => true,
     autoplayCandidates: async () => [],
   } as unknown as RecommendationCatalog;
   const track = (input: string) => ({
@@ -4718,6 +4729,7 @@ test("starting a track tells the catalog what the session has played and tops up
       return undefined;
     },
     refreshUser() {},
+    huddleMixOptedIn: () => true,
     autoplayCandidates: async () => [],
   } as unknown as RecommendationCatalog;
   const test = setup(
@@ -4774,6 +4786,7 @@ test("the add modal lists favourites before discoveries", async () => {
       return undefined;
     },
     refreshUser() {},
+    huddleMixOptedIn: () => true,
     autoplayCandidates: async () => [],
   } as unknown as RecommendationCatalog;
   const test = setup(
@@ -4869,6 +4882,7 @@ function huddleMixCatalog(
     penalize(userId: string, track: { title: string; artist: string }) {
       penalized.push([userId, { title: track.title, artist: track.artist }]);
     },
+    huddleMixOptedIn: () => true,
     autoplayCandidates: async (options: Record<string, unknown>) => {
       calls.push(options);
       return candidates.map((candidate, index) => ({
@@ -4981,6 +4995,70 @@ test("skipping a discovery pick backs off the cadence and penalises the skipper'
   expect(penalized).toEqual([
     ["host", { title: "New To You", artist: "Band" }],
   ]);
+  await test.coordinator.endFromSlack();
+});
+
+test("a skipped autoplay pick is remembered for the room, not only the skipper", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "skipped0001", title: "Not This One" }],
+    calls,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await enableHuddleMix(test.coordinator);
+  await until(
+    () =>
+      (Reflect.get(test.coordinator, "current") as { sourceId?: string })
+        ?.sourceId === "skipped0001",
+  );
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  // The skipper chose it, so they carry it in full; everyone else in the room
+  // only tolerated it, so it follows them at a fraction.
+  expect(
+    test.rememberedSkips.map((skip) => {
+      const value = skip as { userId: string; title: string; weight: number };
+      return { userId: value.userId, title: value.title, weight: value.weight };
+    }),
+  ).toEqual([
+    { userId: "host", title: "Not This One", weight: 1 },
+    { userId: "guest", title: "Not This One", weight: 0.25 },
+  ]);
+  await test.coordinator.endFromSlack();
+});
+
+test("skipping a song someone chose is not held against the mix", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    id: "manual",
+    requesterId: "host",
+    sourceInput: "manual",
+    canonicalUrl: "manual",
+    sourceId: "manual",
+    title: "Chosen",
+    artist: "Artist",
+    status: "playing",
+    filePath: "manual.opus",
+  });
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  // Someone deliberately queued it, so skipping says nothing about the mix.
+  expect(test.rememberedSkips).toEqual([]);
   await test.coordinator.endFromSlack();
 });
 
