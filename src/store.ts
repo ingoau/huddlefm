@@ -96,6 +96,27 @@ export const usageLabels = {
 export type UsageKey = keyof typeof usageLabels;
 export type UsageCounts = { [key in UsageKey]: number };
 
+export type PlayRecord = {
+  userId: string;
+  title: string;
+  artist: string;
+  playedAt: number;
+};
+
+export type RoomPlayRecord = {
+  title: string;
+  artist: string;
+  playedAt: number;
+};
+
+export type SkipRecord = {
+  userId: string;
+  title: string;
+  artist: string;
+  weight: number;
+  skippedAt: number;
+};
+
 type SavedTrack = {
   id: string;
   requesterId: string;
@@ -329,6 +350,29 @@ export class Store {
         user_id TEXT NOT NULL,
         PRIMARY KEY (session_id, user_id)
       );
+      -- One row per listener who actually heard a song, so the Huddle mix
+      -- remembers across Huddles rather than only within one. Deliberately
+      -- not tied to sessions(id) by a foreign key: the memory has to outlive
+      -- any future session cleanup.
+      CREATE TABLE IF NOT EXISTS track_plays (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        artist TEXT NOT NULL,
+        played_at INTEGER NOT NULL
+      );
+      -- Skips of autoplay picks, attributed to the listener who skipped and,
+      -- at a fraction of the weight, to everyone else who was in the room.
+      CREATE TABLE IF NOT EXISTS autoplay_skips (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        artist TEXT NOT NULL,
+        weight REAL NOT NULL,
+        skipped_at INTEGER NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
       CREATE INDEX IF NOT EXISTS tracks_session_status
@@ -341,6 +385,12 @@ export class Store {
         ON companion_removals(next_attempt_at);
       CREATE INDEX IF NOT EXISTS session_messages_due
         ON session_messages(next_attempt_at);
+      CREATE INDEX IF NOT EXISTS track_plays_user_recent
+        ON track_plays(user_id, played_at DESC);
+      CREATE INDEX IF NOT EXISTS track_plays_session
+        ON track_plays(session_id, played_at DESC);
+      CREATE INDEX IF NOT EXISTS autoplay_skips_user_recent
+        ON autoplay_skips(user_id, skipped_at DESC);
     `);
     this.ensureColumn("sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'");
     this.migrateAutoplayModes();
@@ -1270,6 +1320,112 @@ export class Store {
         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       )
       .get(title, artist) as RecentTrack | null;
+  }
+
+  // Records that one listener actually heard a song. Called once per listener
+  // per play, when they have listened far enough for it to count.
+  recordTrackPlay(play: {
+    sessionId: string;
+    userId: string;
+    title: string;
+    artist: string;
+    playedAt?: number;
+  }) {
+    this.db
+      .query(
+        `INSERT INTO track_plays (id, session_id, user_id, title, artist, played_at)
+        VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        play.sessionId,
+        play.userId,
+        play.title,
+        play.artist,
+        play.playedAt ?? Date.now(),
+      );
+  }
+
+  // Records a skipped autoplay pick against one listener. The skipper is
+  // recorded at full weight and the rest of the room at a fraction, since
+  // whoever pressed the button was acting for everyone present.
+  recordAutoplaySkip(skip: {
+    sessionId: string;
+    userId: string;
+    title: string;
+    artist: string;
+    weight: number;
+    skippedAt?: number;
+  }) {
+    this.db
+      .query(
+        `INSERT INTO autoplay_skips (id, session_id, user_id, title, artist, weight, skipped_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        skip.sessionId,
+        skip.userId,
+        skip.title,
+        skip.artist,
+        skip.weight,
+        skip.skippedAt ?? Date.now(),
+      );
+  }
+
+  // What these listeners have heard since `since`, across every Huddle. Titles
+  // and artists come back raw: the mix normalizes them itself, so changing how
+  // songs are matched never needs the stored rows rewritten.
+  recentPlays(userIds: readonly string[], since: number): PlayRecord[] {
+    if (!userIds.length) return [];
+    const slots = userIds.map(() => "?").join(", ");
+    return this.db
+      .query(
+        `SELECT user_id AS userId, title, artist, played_at AS playedAt
+        FROM track_plays
+        WHERE user_id IN (${slots}) AND played_at >= ?
+        ORDER BY played_at DESC`,
+      )
+      .all(...userIds, since) as PlayRecord[];
+  }
+
+  // What has been heard in this room since `since`, whoever was listening, so
+  // a Huddle full of listeners the mix knows nothing about still drifts.
+  recentRoomPlays(roomId: string, since: number): RoomPlayRecord[] {
+    return this.db
+      .query(
+        `SELECT DISTINCT p.title, p.artist, p.played_at AS playedAt
+        FROM track_plays p
+        JOIN sessions s ON s.id = p.session_id
+        WHERE COALESCE(s.source_channel_id, s.channel_id) = ?
+        AND p.played_at >= ?
+        ORDER BY p.played_at DESC`,
+      )
+      .all(roomId, since) as RoomPlayRecord[];
+  }
+
+  recentSkips(userIds: readonly string[], since: number): SkipRecord[] {
+    if (!userIds.length) return [];
+    const slots = userIds.map(() => "?").join(", ");
+    return this.db
+      .query(
+        `SELECT user_id AS userId, title, artist, weight, skipped_at AS skippedAt
+        FROM autoplay_skips
+        WHERE user_id IN (${slots}) AND skipped_at >= ?
+        ORDER BY skipped_at DESC`,
+      )
+      .all(...userIds, since) as SkipRecord[];
+  }
+
+  // Rows older than the window the mix looks at have decayed to nothing, so
+  // they are only taking up space.
+  pruneListeningMemory(playsBefore: number, skipsBefore: number) {
+    this.db
+      .query("DELETE FROM track_plays WHERE played_at < ?")
+      .run(playsBefore);
+    this.db
+      .query("DELETE FROM autoplay_skips WHERE skipped_at < ?")
+      .run(skipsBefore);
   }
 
   setTrack(

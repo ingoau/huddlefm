@@ -1,5 +1,6 @@
 import { capture as captureAnalytics } from "./analytics.ts";
 import type { AuditLog } from "./audit-log.ts";
+import { loadFatigue, skipBystanderShare } from "./fatigue.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import {
   slackErrorCode,
@@ -2185,10 +2186,18 @@ export class Coordinator {
     ].slice(-20);
   }
 
+  // A room in a channel, which is what a recurring Huddle actually is. The
+  // companion channel is stable per source channel, so either identifies the
+  // same room across Huddles.
+  private get roomId() {
+    return this.room.sourceChannelId ?? this.room.uiChannelId;
+  }
+
   // Skipping an autoplay pick, or removing one from the queue, keeps the
   // track and artist out of this session's autoplay, pushes them down in the
   // rejecter's own recommendations, and, for a discovery, makes the next
-  // discovery turn wait longer.
+  // discovery turn wait longer. An autoplay pick is also remembered across
+  // Huddles, so the mix does not offer it to these listeners again next time.
   private rejectSkipped(skipped: Entry, userId: string) {
     this.autoplayRejected = [
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
@@ -2196,11 +2205,39 @@ export class Coordinator {
     ].slice(-20);
     this.rejectAutoplayArtist(skipped.artist);
     this.recommendations?.penalize(userId, skipped);
+    if (skipped.automatic) this.rememberSkip(skipped, userId);
     if (skipped.discovery)
       this.autoplayDiscoveryInterval = Math.min(
         autoplayDiscoveryMaxInterval,
         this.autoplayDiscoveryInterval * 2,
       );
+  }
+
+  // Records the skip against the listener who made it, and against everyone
+  // else in the room at a fraction of the weight: whoever pressed the button
+  // was acting for the room, but only they chose to.
+  private rememberSkip(skipped: Entry, userId: string) {
+    const optedIn = (listener: string) =>
+      this.recommendations?.huddleMixOptedIn(listener) ?? false;
+    // Managers and integrations can skip without being in the Huddle, and they
+    // never heard the song, so nothing is recorded against them. Only people
+    // who were actually listening carry a skip.
+    const listeners = this.listenerIds();
+    const bystanders = listeners.filter(
+      (listener) => listener !== userId && optedIn(listener),
+    );
+    const skippedAt = Date.now();
+    const record = (listener: string, weight: number) =>
+      this.store.recordAutoplaySkip({
+        sessionId: this.id,
+        userId: listener,
+        title: skipped.title,
+        artist: skipped.artist,
+        weight,
+        skippedAt,
+      });
+    if (listeners.includes(userId) && optedIn(userId)) record(userId, 1);
+    for (const listener of bystanders) record(listener, skipBystanderShare);
   }
 
   // How many tracks in a row the current artist has had, counting back
@@ -2541,8 +2578,9 @@ export class Coordinator {
         const credited: Record<string, number> = {};
         for (const listener of this.autoplayCredits.flat())
           credited[listener] = (credited[listener] ?? 0) + 1;
+        const listeners = this.listenerIds();
         const extras = await this.recommendations.autoplayCandidates({
-          userIds: this.listenerIds(),
+          userIds: listeners,
           nowPlaying: this.current ?? this.history.at(-1),
           recent: [...recent, ...(this.current ? [this.current] : [])],
           exclude: excluded,
@@ -2554,6 +2592,10 @@ export class Coordinator {
           discover,
           credited,
           artistRun: this.artistRun(),
+          fatigue: loadFatigue(this.store, {
+            userIds: listeners,
+            roomId: this.roomId,
+          }),
         });
         // The catalog has already ordered these.
         extras.forEach((extra, index) => {

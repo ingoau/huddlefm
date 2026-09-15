@@ -291,6 +291,26 @@ export class ScrobbleDispatcher {
       );
   }
 
+  // The Huddle mix remembers what each listener actually heard, so it does not
+  // serve them the same songs the next time they are in a Huddle. This is the
+  // same threshold a scrobble uses, and it is recorded whether or not the
+  // listener scrobbles \u2014 but never for someone who opted out of the mix.
+  private rememberListen(
+    sessionId: string,
+    userId: string,
+    track: ScrobbleTrack,
+    listenedAt: number,
+  ) {
+    if (this.store.getUserScrobbling(userId).huddleMixOptIn === false) return;
+    this.store.recordTrackPlay({
+      sessionId,
+      userId,
+      title: track.title,
+      artist: track.artist,
+      playedAt: listenedAt * 1000,
+    });
+  }
+
   reached(
     sessionId: string,
     userId: string,
@@ -300,6 +320,7 @@ export class ScrobbleDispatcher {
   ) {
     const threshold = track.duration ? Math.min(track.duration / 2, 240) : 240;
     if (listenedSeconds < threshold) return false;
+    this.rememberListen(sessionId, userId, track, listenedAt);
     if (!this.sessionEnabled(sessionId, userId)) return true;
     const settings = this.store.getUserScrobbling(userId);
     if (

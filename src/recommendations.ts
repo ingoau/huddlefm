@@ -482,6 +482,14 @@ export class RecommendationCatalog {
     // How many tracks in a row the now-playing artist has had, including
     // the current one.
     artistRun?: number;
+    // Cross-Huddle listening memory. Structural so the catalog does not have
+    // to know how fatigue is built or stored.
+    fatigue?: {
+      multiplier(
+        track: { title: string; artist: string },
+        listenerIds: readonly string[],
+      ): number;
+    };
   }) {
     const excluded = new Set(
       [...(options.exclude ?? [])].filter((id): id is string => Boolean(id)),
@@ -583,6 +591,11 @@ export class RecommendationCatalog {
       );
       if (underserved > 0) track.score *= 1 + mixFairnessWeight * underserved;
     }
+    // Push down whatever these listeners have already heard, or skipped, in
+    // earlier Huddles. Applied last so it weighs the finished score.
+    if (options.fatigue)
+      for (const track of ranked)
+        track.score *= options.fatigue.multiplier(track, listeners);
     ranked.sort((a, b) => b.score - a.score);
     const recentKeys = new Set(
       (options.recent ?? []).map((track) =>

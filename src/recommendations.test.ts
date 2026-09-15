@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { FatigueIndex } from "./fatigue.ts";
 import {
   applySkipPenalties,
   mergeTaste,
@@ -1390,3 +1391,98 @@ function addPastTrack(
     status,
   });
 }
+
+test("huddle mix pushes down what these listeners already heard elsewhere", async () => {
+  const build = () => {
+    const store = new Store(":memory:");
+    addPastTrack(store, "host", "Alpha", "First Band", "alphaalphaa");
+    addPastTrack(store, "host", "Beta", "Second Band", "betabetabet");
+    const catalog = new RecommendationCatalog(
+      store,
+      {
+        searchSong: async (title: string, artist: string) => ({
+          sourceInput: `https://music.youtube.com/watch?v=${title.toLowerCase().padEnd(11, "x")}`,
+          canonicalUrl: `https://music.youtube.com/watch?v=${title.toLowerCase().padEnd(11, "x")}`,
+          sourceId: title.toLowerCase().padEnd(11, "x"),
+          title,
+          artist,
+        }),
+        upNextTracks: async () => [],
+      } satisfies RecommendationTracks,
+      // A fixed draw keeps the sample in ranked order, so the only thing that
+      // can reorder these is the score itself.
+      { random: () => 0 },
+      (async (_input: unknown) =>
+        new Response("{}", { status: 404 })) as unknown as typeof fetch,
+    );
+    return { store, catalog };
+  };
+
+  const plain = build();
+  const before = await plain.catalog.autoplayCandidates({ userIds: ["host"] });
+  expect(before.map((track) => track.metadata.title)).toEqual([
+    "Beta",
+    "Alpha",
+  ]);
+  plain.store.close();
+
+  const weary = build();
+  const now = Date.now();
+  const after = await weary.catalog.autoplayCandidates({
+    userIds: ["host"],
+    fatigue: new FatigueIndex(
+      [{ userId: "host", title: "Beta", artist: "Second Band", playedAt: now }],
+      [],
+      [],
+      now,
+    ),
+  });
+  // Beta is the one they have just heard, so Alpha leads instead.
+  expect(after.map((track) => track.metadata.title)).toEqual(["Alpha", "Beta"]);
+  weary.store.close();
+});
+
+test("huddle mix ignores fatigue carried by listeners who are not here", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Alpha", "First Band", "alphaalphaa");
+  addPastTrack(store, "host", "Beta", "Second Band", "betabetabet");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) => ({
+        sourceInput: `https://music.youtube.com/watch?v=${title.toLowerCase().padEnd(11, "x")}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${title.toLowerCase().padEnd(11, "x")}`,
+        sourceId: title.toLowerCase().padEnd(11, "x"),
+        title,
+        artist,
+      }),
+      upNextTracks: async () => [],
+    } satisfies RecommendationTracks,
+    { random: () => 0 },
+    (async (_input: unknown) =>
+      new Response("{}", { status: 404 })) as unknown as typeof fetch,
+  );
+  const now = Date.now();
+  const candidates = await catalog.autoplayCandidates({
+    userIds: ["host"],
+    fatigue: new FatigueIndex(
+      [],
+      [
+        {
+          userId: "absent",
+          title: "Beta",
+          artist: "Second Band",
+          weight: 1,
+          skippedAt: now,
+        },
+      ],
+      [],
+      now,
+    ),
+  });
+  expect(candidates.map((track) => track.metadata.title)).toEqual([
+    "Beta",
+    "Alpha",
+  ]);
+  store.close();
+});

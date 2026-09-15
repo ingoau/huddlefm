@@ -135,12 +135,34 @@ export function isYoutubeVideoId(id: string) {
   return /^[a-zA-Z0-9_-]{11}$/.test(id);
 }
 
+const combiningMark = /\p{M}/u;
+const latinBase = /[a-z0-9]/;
+
 export function normalizeToken(value: string) {
-  return value
-    .normalize("NFKD")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+  let folded = "";
+  let afterLatin = false;
+  for (const character of value.normalize("NFKD").toLowerCase()) {
+    // NFKD splits an accent off into a combining mark. Dropping the ones that
+    // came off a Latin letter folds "Sigur R\u00f3s" onto "Sigur Ros" rather than
+    // breaking the word in two. Everywhere else a mark carries meaning of its
+    // own -- Devanagari "\u0915\u093e\u0932" is not "\u0915\u0932", Cyrillic "\u0439" is not "\u0438", and "\u30c9" is not
+    // "\u30c8" -- so it stays.
+    if (combiningMark.test(character)) {
+      if (!afterLatin) folded += character;
+      continue;
+    }
+    afterLatin = latinBase.test(character);
+    folded += character;
+  }
+  return (
+    folded
+      // Letters, digits and the marks kept above, in any script, so two songs
+      // whose titles are both Japanese are still two different songs.
+      // Restricting this to ASCII collapsed every non-Latin title onto the
+      // same empty token.
+      .replace(/[^\p{L}\p{N}\p{M}]+/gu, " ")
+      .trim()
+  );
 }
 
 function normalizeArtist(value: string) {
