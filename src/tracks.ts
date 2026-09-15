@@ -136,11 +136,19 @@ export function isYoutubeVideoId(id: string) {
 }
 
 export function normalizeToken(value: string) {
-  return value
-    .normalize("NFKD")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+  return (
+    value
+      .normalize("NFKD")
+      .toLowerCase()
+      // NFKD splits an accent off into a combining mark. Dropping it folds
+      // "Sigur R\u00f3s" onto "Sigur Ros" rather than breaking the word in two.
+      .replace(/\p{M}+/gu, "")
+      // Letters and digits in any script, so two songs whose titles are both
+      // Japanese are still two different songs. Restricting this to ASCII
+      // collapsed every non-Latin title onto the same empty token.
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim()
+  );
 }
 
 function normalizeArtist(value: string) {

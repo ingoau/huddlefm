@@ -223,3 +223,27 @@ test("skips nothing when the room has no listeners the mix knows", () => {
   // so an empty room does not silently skip the room memory either.
   expect(asked).toBeTrue();
 });
+
+test("keeps non-Latin songs apart instead of collapsing them together", () => {
+  const fatigue = index({
+    plays: [play("host", "夜に駆ける", "YOASOBI")],
+  });
+  expect(
+    fatigue.multiplier({ title: "夜に駆ける", artist: "YOASOBI" }, ["host"]),
+  ).toBeLessThan(0.6);
+  // A different song by the same artist is a different song.
+  expect(
+    fatigue.multiplier({ title: "群青", artist: "YOASOBI" }, ["host"]),
+  ).toBeGreaterThan(0.85);
+  // And so is a different song by a different artist, in another script.
+  expect(
+    fatigue.multiplier({ title: "Кукушка", artist: "Кино" }, ["host"]),
+  ).toBe(1);
+});
+
+test("still folds an accent rather than splitting the word at it", () => {
+  const fatigue = index({ plays: [play("host", "Hoppípolla", "Sigur Rós")] });
+  expect(
+    fatigue.multiplier({ title: "Hoppipolla", artist: "Sigur Ros" }, ["host"]),
+  ).toBeLessThan(0.6);
+});

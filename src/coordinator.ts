@@ -2219,7 +2219,11 @@ export class Coordinator {
   private rememberSkip(skipped: Entry, userId: string) {
     const optedIn = (listener: string) =>
       this.recommendations?.huddleMixOptedIn(listener) ?? false;
-    const bystanders = this.listenerIds().filter(
+    // Managers and integrations can skip without being in the Huddle, and they
+    // never heard the song, so nothing is recorded against them. Only people
+    // who were actually listening carry a skip.
+    const listeners = this.listenerIds();
+    const bystanders = listeners.filter(
       (listener) => listener !== userId && optedIn(listener),
     );
     const skippedAt = Date.now();
@@ -2232,7 +2236,7 @@ export class Coordinator {
         weight,
         skippedAt,
       });
-    if (optedIn(userId)) record(userId, 1);
+    if (listeners.includes(userId) && optedIn(userId)) record(userId, 1);
     for (const listener of bystanders) record(listener, skipBystanderShare);
   }
 

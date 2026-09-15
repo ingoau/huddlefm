@@ -5042,6 +5042,53 @@ test("a skipped autoplay pick is remembered for the room, not only the skipper",
   await test.coordinator.endFromSlack();
 });
 
+test("a manager who is not in the Huddle carries no skip of their own", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "skipped0002", title: "Not This One" }],
+    calls,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await enableHuddleMix(test.coordinator);
+  await until(
+    () =>
+      (Reflect.get(test.coordinator, "current") as { sourceId?: string })
+        ?.sourceId === "skipped0002",
+  );
+  // The manager holds host powers without joining, so they never heard it.
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "next_track"),
+    userId: "manager",
+  });
+  expect(
+    test.rememberedSkips.map(
+      (skip) => (skip as { userId: string; weight: number }).userId,
+    ),
+  ).toEqual(["host", "guest"]);
+  expect(
+    test.rememberedSkips.every(
+      (skip) => (skip as { weight: number }).weight === 0.25,
+    ),
+  ).toBeTrue();
+  await test.coordinator.endFromSlack();
+});
+
 test("skipping a song someone chose is not held against the mix", async () => {
   const test = setup();
   await test.coordinator.start();
