@@ -247,3 +247,14 @@ test("still folds an accent rather than splitting the word at it", () => {
     fatigue.multiplier({ title: "Hoppipolla", artist: "Sigur Ros" }, ["host"]),
   ).toBeLessThan(0.6);
 });
+
+test("keeps titles apart when they differ only by a non-Latin mark", () => {
+  const fatigue = index({ plays: [play("host", "काल", "Artist")] });
+  expect(
+    fatigue.multiplier({ title: "काल", artist: "Artist" }, ["host"]),
+  ).toBeLessThan(0.6);
+  // The vowel sign is part of the word, not an accent to fold away.
+  expect(
+    fatigue.multiplier({ title: "कल", artist: "Artist" }, ["host"]),
+  ).toBeGreaterThan(0.85);
+});

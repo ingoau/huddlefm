@@ -987,3 +987,28 @@ test("normalizeToken keeps every script but folds accents away", () => {
   // Punctuation and spacing are still separators.
   expect(normalizeToken("  P!nk  ")).toBe("p nk");
 });
+
+test("normalizeToken keeps marks that are part of the letter", () => {
+  // Only a mark that came off a Latin letter is an accent to fold away. In
+  // other scripts the mark carries meaning, so folding it merges real words.
+  expect(normalizeToken("काल")).not.toBe(normalizeToken("कल"));
+  expect(normalizeToken("मोरनी")).not.toBe(normalizeToken("मरनी"));
+  // Cyrillic "й" decomposes to "и" plus a breve in the same Unicode block as
+  // Latin accents, so a block-based rule would wrongly merge these.
+  expect(normalizeToken("мой")).not.toBe(normalizeToken("мои"));
+  // A dakuten is what separates ド from ト.
+  expect(normalizeToken("ドライフラワー")).not.toBe(
+    normalizeToken("トライフラワー"),
+  );
+  expect(normalizeToken("สวัสดี")).not.toBe(normalizeToken("สวสด"));
+  // The marks survive rather than being dropped along with the separators.
+  expect(normalizeToken("काल")).toBe("काल");
+  // NFKD leaves the dakuten as its own character, so recomposing the result
+  // is what shows it was kept.
+  expect(normalizeToken("ドライフラワー").normalize("NFC")).toBe(
+    "ドライフラワー",
+  );
+  // Latin accents still fold, including mid-word ones.
+  expect(normalizeToken("Motörhead")).toBe(normalizeToken("Motorhead"));
+  expect(normalizeToken("Mylène Farmer")).toBe("mylene farmer");
+});
