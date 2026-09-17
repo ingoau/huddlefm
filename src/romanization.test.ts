@@ -1,14 +1,21 @@
 import { expect, test } from "bun:test";
-import type { Lyric } from "@braccato/core";
+import type { LyricLine } from "@applemusic-like-lyrics/lyric";
 import {
-  buildTimedRomanization,
   enrichLyricsWithRomanization,
-  lyricsHaveRomanization,
   type RomanizeFetch,
 } from "./romanization.ts";
 
-function line(words: string, extra: Partial<Lyric> = {}): Lyric {
-  return { startTimeMs: 0, durationMs: 1000, words, ...extra };
+function line(words: string, extra: Partial<LyricLine> = {}): LyricLine {
+  return {
+    words: [{ startTime: 0, endTime: 1000, word: words }],
+    translatedLyric: "",
+    romanLyric: "",
+    isBG: false,
+    isDuet: false,
+    startTime: 0,
+    endTime: 1000,
+    ...extra,
+  };
 }
 
 test("leaves Latin lyrics untouched", async () => {
@@ -18,13 +25,12 @@ test("leaves Latin lyrics untouched", async () => {
       throw new Error("should not fetch");
     }) as RomanizeFetch,
   });
-  expect(lines.every((item) => !item.romanization)).toBe(true);
-  expect(lyricsHaveRomanization(lines)).toBe(false);
+  expect(lines.every((item) => !item.romanLyric)).toBe(true);
 });
 
 test("keeps provider-supplied romanization", async () => {
   const lines = [
-    line("안녕하세요", { romanization: "annyeonghaseyo" }),
+    line("안녕하세요", { romanLyric: "annyeonghaseyo" }),
     line("세계"),
   ];
   await enrichLyricsWithRomanization(lines, {
@@ -43,16 +49,14 @@ test("keeps provider-supplied romanization", async () => {
         { status: 200 },
       )) as RomanizeFetch,
   });
-  expect(lines[0]!.romanization).toBe("annyeonghaseyo");
-  expect(lines[1]!.romanization).toBe("segye");
-  expect(lyricsHaveRomanization(lines)).toBe(true);
+  expect(lines[0]!.romanLyric).toBe("annyeonghaseyo");
+  expect(lines[1]!.romanLyric).toBe("segye");
 });
 
 test("enriches whitespace-only romanization values", async () => {
   const lines = [
-    line("안녕하세요", { romanization: "   " }),
-    line("세계", { romanization: "segye" }),
-    line("한글", { isInstrumental: true, romanization: "   " }),
+    line("안녕하세요", { romanLyric: "   " }),
+    line("세계", { romanLyric: "segye" }),
   ];
   await enrichLyricsWithRomanization(lines, {
     fetch: (async (_input, init) => {
@@ -64,9 +68,8 @@ test("enriches whitespace-only romanization values", async () => {
       );
     }) as RomanizeFetch,
   });
-  expect(lines[0]!.romanization).toBe("annyeonghaseyo");
-  expect(lines[1]!.romanization).toBe("segye");
-  expect(lines[2]!.romanization).toBe("   ");
+  expect(lines[0]!.romanLyric).toBe("annyeonghaseyo");
+  expect(lines[1]!.romanLyric).toBe("segye");
 });
 
 test("uses Unison romanization when available", async () => {
@@ -102,8 +105,8 @@ test("uses Unison romanization when available", async () => {
     }) as RomanizeFetch,
   });
   expect(urls).toEqual(["https://unison.boidu.dev/translate"]);
-  expect(lines[0]!.romanization).toBe("Nǐ hǎo shìjiè");
-  expect(lines[1]!.romanization).toBe("Zàijiàn");
+  expect(lines[0]!.romanLyric).toBe("Nǐ hǎo shìjiè");
+  expect(lines[1]!.romanLyric).toBe("Zàijiàn");
 });
 
 test("romanizes mixed scripts in language-specific batches", async () => {
@@ -149,8 +152,8 @@ test("romanizes mixed scripts in language-specific batches", async () => {
     { from: "ko", lines: ["안녕하세요"] },
     { from: "zh", lines: ["你好"] },
   ]);
-  expect(lines[0]!.romanization).toBe("annyeonghaseyo");
-  expect(lines[1]!.romanization).toBe("nǐ hǎo");
+  expect(lines[0]!.romanLyric).toBe("annyeonghaseyo");
+  expect(lines[1]!.romanLyric).toBe("nǐ hǎo");
 });
 
 test("falls back to Google romaji when Unison omits romanization", async () => {
@@ -182,7 +185,7 @@ test("falls back to Google romaji when Unison omits romanization", async () => {
   });
   expect(urls[0]).toContain("unison.boidu.dev/translate");
   expect(urls[1]).toContain("translate.googleapis.com");
-  expect(lines[0]!.romanization).toBe("Konnichiwa");
+  expect(lines[0]!.romanLyric).toBe("Konnichiwa");
 });
 
 test("shares one timeout signal across sequential providers", async () => {
@@ -206,7 +209,7 @@ test("shares one timeout signal across sequential providers", async () => {
   });
   expect(signals).toHaveLength(2);
   expect(signals[0]).toBe(signals[1]);
-  expect(lines[0]!.romanization).toBe("Konnichiwa");
+  expect(lines[0]!.romanLyric).toBe("Konnichiwa");
 });
 
 test("uses local transliteration without trying Google after abort", async () => {
@@ -222,7 +225,7 @@ test("uses local transliteration without trying Google after abort", async () =>
     }) as RomanizeFetch,
   });
   expect(calls).toBe(1);
-  expect(lines[0]!.romanization?.toLowerCase()).toContain("privet");
+  expect(lines[0]!.romanLyric?.toLowerCase()).toContain("privet");
 });
 
 test("uses local transliteration when remote providers fail", async () => {
@@ -232,12 +235,12 @@ test("uses local transliteration when remote providers fail", async () => {
       throw new Error("offline");
     }) as RomanizeFetch,
   });
-  expect(lines[0]!.romanization?.toLowerCase()).toContain("annyeong");
-  expect(lines[1]!.romanization?.toLowerCase()).toContain("privet");
+  expect(lines[0]!.romanLyric?.toLowerCase()).toContain("annyeong");
+  expect(lines[1]!.romanLyric?.toLowerCase()).toContain("privet");
 });
 
-test("skips instrumental lines and music-note placeholders", async () => {
-  const lines = [line("♪", { isInstrumental: true }), line("♪"), line("한글")];
+test("skips music-note placeholders", async () => {
+  const lines = [line("♪"), line("한글")];
   await enrichLyricsWithRomanization(lines, {
     fetch: (async () =>
       new Response(
@@ -254,124 +257,51 @@ test("skips instrumental lines and music-note placeholders", async () => {
         { status: 200 },
       )) as RomanizeFetch,
   });
-  expect(lines[0]!.romanization).toBeUndefined();
-  expect(lines[1]!.romanization).toBeUndefined();
-  expect(lines[2]!.romanization).toBe("hangeul");
+  expect(lines[0]!.romanLyric).toBe("");
+  expect(lines[1]!.romanLyric).toBe("hangeul");
 });
 
-test("maps romanization words onto the sung timeline", () => {
-  const timed = buildTimedRomanization({
-    startTimeMs: 2674,
-    durationMs: 1411,
-    words: "共振で苦しんでし罵倒",
-    romanization: "Kyoushin de kurushindeshi batou",
-    parts: [
-      { startTimeMs: 2674, durationMs: 176, words: "共" },
-      { startTimeMs: 2850, durationMs: 176, words: "振" },
-      { startTimeMs: 3026, durationMs: 177, words: "で" },
-      { startTimeMs: 3203, durationMs: 176, words: "苦" },
-      { startTimeMs: 3379, durationMs: 89, words: "し" },
-      { startTimeMs: 3468, durationMs: 88, words: "ん" },
-      { startTimeMs: 3556, durationMs: 88, words: "で" },
-      { startTimeMs: 3644, durationMs: 88, words: "し" },
-      { startTimeMs: 3732, durationMs: 177, words: "罵" },
-      { startTimeMs: 3909, durationMs: 176, words: "倒" },
-    ],
-  });
-
-  expect(timed?.map((part) => part.words.trim())).toEqual([
-    "Kyoushin",
-    "de",
-    "kurushindeshi",
-    "batou",
-  ]);
-  expect(timed?.[0]!.startTimeMs).toBe(2674);
-  expect(timed!.at(-1)!.startTimeMs + timed!.at(-1)!.durationMs).toBe(
-    3909 + 176,
-  );
-  expect(timed!.some((part) => part.durationMs > 0)).toBe(true);
-});
-
-test("attaches timed romanization when enriching lyrics", async () => {
-  const lines = [
-    line("共振で苦しんでし罵倒", {
-      startTimeMs: 2674,
-      durationMs: 1411,
-      romanization: "Kyoushin de kurushindeshi batou",
-      parts: [
-        { startTimeMs: 2674, durationMs: 352, words: "共振" },
-        { startTimeMs: 3026, durationMs: 177, words: "で" },
-        { startTimeMs: 3203, durationMs: 882, words: "苦しんでし罵倒" },
-      ],
-    }),
-  ];
-
-  await enrichLyricsWithRomanization(lines, {
-    fetch: (() => {
-      throw new Error("should not fetch");
-    }) as RomanizeFetch,
-  });
-
-  expect(lines[0]!.romanization).toBe("Kyoushin de kurushindeshi batou");
-  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
-    ["Kyoushin", "de", "kurushindeshi", "batou"],
-  );
-  expect(lines[0]!.timedRomanization?.[0]!.startTimeMs).toBe(2674);
-});
-
-test("keeps punctuation attached to romanized words", async () => {
+test("tidies spaced-out punctuation in provider romanization", async () => {
   const lines = [
     line("Q.更新で降る隕石抹消可？", {
-      romanization: "Q . Kōshin De Furu Inseki Masshō Ka ?",
+      romanLyric: "Q . Kōshin De Furu Inseki Masshō Ka ?",
     }),
+    line("本当?!", { romanLyric: "Hontō ? !" }),
   ];
   await enrichLyricsWithRomanization(lines, {
     fetch: (() => {
       throw new Error("should not fetch");
     }) as RomanizeFetch,
   });
-  expect(lines[0]!.romanization).toBe("Q. Kōshin De Furu Inseki Masshō Ka?");
-  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
-    ["Q.", "Kōshin", "De", "Furu", "Inseki", "Masshō", "Ka?"],
-  );
+  expect(lines[0]!.romanLyric).toBe("Q. Kōshin De Furu Inseki Masshō Ka?");
+  expect(lines[1]!.romanLyric).toBe("Hontō?!");
 });
 
-test("keeps consecutive punctuation in one romanization token", async () => {
-  const lines = [line("本当?!", { romanization: "Hontō ? !" })];
+test("reads the sung text back out of word-timed lines", async () => {
+  const lines = [
+    {
+      words: [
+        { startTime: 0, endTime: 400, word: "共振" },
+        { startTime: 400, endTime: 1000, word: "で" },
+      ],
+      translatedLyric: "",
+      romanLyric: "",
+      isBG: false,
+      isDuet: false,
+      startTime: 0,
+      endTime: 1000,
+    },
+  ];
+  let requested: string[] = [];
   await enrichLyricsWithRomanization(lines, {
-    fetch: (() => {
-      throw new Error("should not fetch");
+    fetch: (async (_input, init) => {
+      requested = JSON.parse(String(init?.body)).lines;
+      return new Response(
+        JSON.stringify({ lines: [{ romanization: "kyoushin de" }] }),
+        { status: 200 },
+      );
     }) as RomanizeFetch,
   });
-
-  expect(lines[0]!.romanization).toBe("Hontō?!");
-  expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
-    ["Hontō?!"],
-  );
-});
-
-test("maps romanization timing around silent gaps", () => {
-  const timed = buildTimedRomanization({
-    startTimeMs: 1000,
-    durationMs: 600,
-    words: "你好",
-    romanization: "ni hao",
-    parts: [
-      { startTimeMs: 1000, durationMs: 100, words: "你" },
-      { startTimeMs: 1500, durationMs: 100, words: "好" },
-    ],
-  });
-
-  expect(timed).toEqual([
-    { startTimeMs: 1000, durationMs: 80, words: "ni " },
-    { startTimeMs: 1080, durationMs: 20, words: "h" },
-    { startTimeMs: 1500, durationMs: 100, words: "ao" },
-  ]);
-  expect(timed?.map((part) => part.words).join("")).toBe("ni hao");
-  expect(
-    timed?.every((part) => {
-      const end = part.startTimeMs + part.durationMs;
-      return end <= 1100 || part.startTimeMs >= 1500;
-    }),
-  ).toBe(true);
+  expect(requested).toEqual(["共振で"]);
+  expect(lines[0]!.romanLyric).toBe("kyoushin de");
 });

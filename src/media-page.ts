@@ -6,10 +6,7 @@ import {
   LogLevel,
   MeetingSessionConfiguration,
 } from "amazon-chime-sdk-js";
-import { injectRomanization } from "@braccato/core";
-import "@braccato/core/element";
-import type { BraccatoLyricsElement } from "@braccato/core/element";
-import type { Lyric } from "@braccato/core";
+import { LyricPlayer, type LyricLine } from "@applemusic-like-lyrics/core";
 import type { DisplayMode } from "./store.ts";
 import {
   DuckingController,
@@ -17,12 +14,13 @@ import {
   type DuckDecision,
 } from "./ducking.ts";
 import { volumeGain } from "./volume.ts";
+import "@applemusic-like-lyrics/core/style.css";
 import "./media-page.css";
 
 const status = document.querySelector("#status")!;
 const title = document.querySelector("#title")!;
 const artist = document.querySelector("#artist")!;
-const lyrics = document.querySelector<BraccatoLyricsElement>("#lyrics")!;
+const lyricsFrame = document.querySelector<HTMLElement>("#lyrics-frame")!;
 const capture = document.querySelector<HTMLButtonElement>("#capture")!;
 const artwork = document.querySelector<HTMLElement>("#artwork")!;
 const cover = document.querySelector<HTMLElement>("#cover")!;
@@ -30,8 +28,12 @@ const progress = document.querySelector<HTMLElement>("#progress-fill")!;
 const elapsed = document.querySelector("#elapsed")!;
 const duration = document.querySelector("#duration")!;
 const stage = document.querySelector<HTMLElement>("#stage")!;
-lyrics.host = { getScrollElement: () => lyrics };
-lyrics.theme = "/* blyrics-target-scroll-pos-ratio = 0.45; */";
+
+const lyricPlayer = new LyricPlayer();
+// Apple Music keeps the line being sung above the middle so the lines still to
+// come stay in view; the frame's mask fades whatever runs past either edge.
+lyricPlayer.setAlignPosition(0.36);
+lyricsFrame.append(lyricPlayer.getElement());
 const params = new URLSearchParams(location.search);
 const token = params.get("token");
 if (!token) throw new Error("Missing bridge token");
@@ -129,13 +131,18 @@ let handoffTimer: ReturnType<typeof setTimeout> | undefined;
 let fadeTimer: ReturnType<typeof setTimeout> | undefined;
 let lyricPriority = Infinity;
 let transition = 0;
-let renderedLyrics: Lyric[] = [];
 let pendingLyrics:
-  | { entryId: string; priority: number; lines: Lyric[]; source: string }
+  | { entryId: string; priority: number; lines: LyricLine[]; source: string }
   | undefined;
 let pendingNoLyrics: string | undefined;
 let preferredDisplayMode: DisplayMode = "default";
 let lyricsAvailable: boolean | undefined;
+// The deck the lyrics are timed against. It only follows the `play` message,
+// never `currentId`, so a crossfade cannot re-time the outgoing song's lyrics
+// to the incoming one halfway through the fade.
+let lyricSource: HTMLAudioElement | undefined;
+let lyricPlaying = false;
+let lastFrameAt = performance.now();
 
 let session: DefaultMeetingSession | undefined;
 let tone: OscillatorNode | undefined;
@@ -158,43 +165,6 @@ async function setDisplayMode(mode: DisplayMode) {
   preferredDisplayMode = mode;
   await applyDisplayMode();
 }
-
-function applyRomanizations(lines: Lyric[]) {
-  const renderer = lyrics.renderer;
-  if (!renderer || lines.length === 0) return;
-  let attached = 0;
-  for (const [index, line] of lines.entries()) {
-    const romanization = line.romanization?.trim();
-    if (!romanization) continue;
-    const lineData = renderer.lines[index];
-    if (!lineData) continue;
-    injectRomanization(
-      document,
-      lineData.lyricElement,
-      lineData,
-      romanization,
-      line.timedRomanization ?? null,
-    );
-    attached += 1;
-  }
-  if (attached)
-    renderer.scheduleLyricPositionUpdate(
-      () => true,
-      () => {},
-    );
-}
-
-lyrics.addEventListener("braccato:lyrics-loaded", (event) => {
-  const detail = (event as CustomEvent).detail;
-  console.log(`[lyrics] rendered ${detail.lineCount} ${detail.syncType} lines`);
-  applyRomanizations(renderedLyrics);
-});
-lyrics.addEventListener("braccato:error", (event) => {
-  const detail = (event as CustomEvent).detail;
-  console.warn(
-    `[lyrics] render ${detail.phase}: ${detail.error?.message ?? detail.error}`,
-  );
-});
 
 capture.addEventListener(
   "click",
@@ -344,7 +314,7 @@ function stop() {
   currentFadeOut = 0;
   lyricPriority = Infinity;
   for (const [entryId, value] of decks) dispose(entryId, value);
-  lyrics.source = null;
+  lyricSource = undefined;
   clearLyrics();
   void applyDisplayMode();
   title.textContent = "Ready for music";
@@ -364,7 +334,36 @@ function formatTime(seconds: number) {
     .padStart(2, "0")}`;
 }
 
-function updateProgress() {
+/**
+ * AMLL drives itself from the clock it is given rather than from an audio
+ * element, so every frame hands it the deck's position and the elapsed time its
+ * springs need to advance. Passing the deck's own `currentTime` rather than a
+ * wall clock keeps the karaoke sweep honest through pauses, seeks, and
+ * crossfades.
+ */
+function updateLyrics(now: number) {
+  const playing = Boolean(lyricSource && !lyricSource.paused);
+  if (playing !== lyricPlaying) {
+    lyricPlaying = playing;
+    if (playing) lyricPlayer.resume();
+    else lyricPlayer.pause();
+  }
+  if (lyricSource) lyricPlayer.setCurrentTime(lyricSource.currentTime * 1_000);
+  lyricPlayer.update(now - lastFrameAt);
+  lastFrameAt = now;
+}
+
+/**
+ * Jumps the lyrics to a new position. A seek has to be announced so the player
+ * drops the lines it was animating through instead of sweeping across the gap.
+ */
+function seekLyrics(seconds: number) {
+  lyricPlayer.setCurrentTime(seconds * 1_000, true);
+  void lyricPlayer.calcLayout(true, true);
+}
+
+function updateProgress(now: number = performance.now()) {
+  updateLyrics(now);
   const player = currentId ? decks.get(currentId)?.audio : undefined;
   const amount =
     player && Number.isFinite(player.duration) && player.duration > 0
@@ -478,14 +477,12 @@ async function beginTransition() {
 
 function showLyrics(message: {
   priority: number;
-  lines: Lyric[];
+  lines: LyricLine[];
   source: string;
 }) {
   if (message.priority >= lyricPriority) return;
   lyricPriority = message.priority;
-  renderedLyrics = message.lines;
-  lyrics.lyricsOptions = {};
-  lyrics.lyrics = message.lines;
+  setLyricLines(message.lines);
   lyricsAvailable = true;
   console.log(
     `[lyrics] received ${message.lines.length} lines from ${message.source}`,
@@ -493,9 +490,19 @@ function showLyrics(message: {
 }
 
 function clearLyrics() {
-  renderedLyrics = [];
-  lyrics.lyricsOptions = {};
-  lyrics.lyrics = [];
+  setLyricLines([]);
+}
+
+/**
+ * Hands a new set of lines to the player and lays them out immediately. The
+ * layout has to be forced: the spring animation starts from the previous song's
+ * positions, so without it the first line slides in from wherever the last one
+ * ended.
+ */
+function setLyricLines(lines: LyricLine[]) {
+  lyricPlayer.setLyricLines(lines, (lyricSource?.currentTime ?? 0) * 1_000);
+  lyricPlayer.resetScroll();
+  void lyricPlayer.calcLayout(true, true);
 }
 
 function markLyricsUnavailable() {
@@ -654,8 +661,8 @@ socket.addEventListener("message", async (event) => {
       cover.style.backgroundImage = message.artwork
         ? `url(${JSON.stringify(message.artwork)})`
         : "";
+      lyricSource = player;
       clearLyrics();
-      lyrics.source = player;
       const queuedLyrics = takePendingLyrics();
       if (queuedLyrics && queuedLyrics.entryId === message.entryId)
         showLyrics(queuedLyrics);
@@ -677,6 +684,7 @@ socket.addEventListener("message", async (event) => {
       // otherwise mute position reports until playback passed the old end.
       current.pastRestartThreshold = player.currentTime > 5;
       current.lastReportedSecond = -1;
+      if (lyricSource === player) seekLyrics(intro);
       const now = audioContext.currentTime;
       current.gain.gain.cancelScheduledValues(now);
       current.gain.gain.setValueAtTime(1, now);
@@ -725,6 +733,7 @@ socket.addEventListener("message", async (event) => {
         Math.min(current.audio.duration || Infinity, seconds),
       );
       current.pastRestartThreshold = current.audio.currentTime > 5;
+      if (lyricSource === current.audio) seekLyrics(current.audio.currentTime);
       send("playback_position", {
         entryId: currentId,
         seconds: current.audio.currentTime,

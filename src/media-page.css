@@ -1,6 +1,3 @@
-@import "@braccato/core/styles/variables.css";
-@import "@braccato/core/styles/lyrics.css";
-@import "@braccato/core/styles/instrumental.css";
 @import "@fontsource/inter/700.css";
 
 * {
@@ -194,204 +191,18 @@ h1 {
   transition-delay: 0s;
 }
 
-braccato-lyrics {
-  display: block;
-  height: 100%;
-  overflow: hidden;
-}
-
-.blyrics-container {
-  --blyrics-font-family: "Inter", sans-serif;
-  --blyrics-font-size: 2.6rem;
-  --blyrics-font-weight: 700;
-  --blyrics-line-height: 1.16;
-  --blyrics-padding: 1.5rem;
-  --blyrics-lyric-active-color: white;
-  --blyrics-lyric-inactive-color: rgb(255 255 255 / 0.2);
-  --blyrics-glow-color: rgb(255 255 255 / 0.0001);
-  --blyrics-lyric-scroll-duration: 400ms;
-  --blyrics-lyric-scroll-timing-function: ease-in-out;
-  --blyrics-scale-transition-duration: 0.6s;
-  --blyrics-scroll-timing-offset: 0.6s;
-  --blyrics-animate-word-wobble: 0;
-  --blyrics-translated-font-size: 1.45rem;
-  --blyrics-translated-font-weight: 600;
-  --blyrics-translated-opacity: 0.55;
-  padding-top: var(--blyrics-padding-top, 40px);
-}
-
-.blyrics-container > div {
-  cursor: default;
-}
-
-.blyrics-container:not([data-sync="none"]):not(.blyrics-user-scrolling)
-  > .blyrics--line {
-  filter: blur(9.5px);
-  transition:
-    filter 0.5s,
-    opacity 0.5s,
-    transform 0.166s var(--blyrics-anim-delay, 0s) !important;
-}
-
-.blyrics-container[data-sync="richsync"]
-  .blyrics--line[data-agent]:not([data-agent="v1"]) {
-  justify-content: flex-end;
-  text-align: right;
-  transform-origin: right center !important;
-}
-
-.blyrics-container:not(.blyrics-user-scrolling)
-  > .blyrics--active
-  + .blyrics--line:not(.blyrics--active) {
-  filter: blur(2px) !important;
-}
-
-.blyrics-container:not(.blyrics-user-scrolling)
-  > .blyrics--active
-  + .blyrics--line
-  + .blyrics--line {
-  filter: blur(3.5px) !important;
-}
-
-.blyrics-container:not(.blyrics-user-scrolling)
-  > .blyrics--active
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line {
-  filter: blur(5px) !important;
-}
-
-.blyrics-container:not(.blyrics-user-scrolling)
-  > .blyrics--active
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line {
-  filter: blur(6.5px) !important;
-}
-
-.blyrics-container:not(.blyrics-user-scrolling)
-  > .blyrics--active
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line {
-  filter: blur(8px) !important;
-}
-
-.blyrics-container:not(.blyrics-user-scrolling)
-  > .blyrics--active
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line
-  + .blyrics--line {
-  filter: blur(9.5px) !important;
-}
-
-.blyrics-container:not(.blyrics-user-scrolling)
-  > .blyrics--line:has(~ .blyrics--active):not(.blyrics--animating) {
-  filter: blur(5px);
-  transition:
-    filter 0.25s,
-    transform 0.166s var(--blyrics-anim-delay, 0s) !important;
-}
-
-.blyrics-container > .blyrics--line.blyrics--active,
-.blyrics-container > .blyrics--line.blyrics--animating {
-  opacity: 1;
-  filter: blur(0) !important;
-}
-
-.blyrics-word-group {
-  white-space: normal;
-}
-
 /*
- * Long unbroken tokens (scat lines, etc.) get a .blyrics-word-highlight clone for
- * the karaoke swipe. Braccato keeps those words as `display: inline` so they can
- * wrap, but absolute children then resolve `width: 100%` against a tiny inline
- * fragment (~one wbr chunk). The highlight stacks that clone into a narrow
- * column over the real line. Make the timed word a wrapping box first so the
- * overlay matches the laid-out width.
+ * AMLL styles itself through these variables and lays the lines out in script,
+ * so the page only sets the type and lets the player do the rest. Its own class
+ * names are build hashes, so nothing here reaches inside it.
  */
-.blyrics-word-group-long .blyrics--word {
-  display: inline-block;
-  max-width: 100%;
-}
-
-.blyrics-word-group-long .blyrics-word-highlight {
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 100%;
-}
-
-/* Line-synced mode already fades word color; the highlight clone only adds
- * a second visible layer once the swipe animation leaves it opaque. */
-.blyrics-container[data-sync="synced"] .blyrics-word-highlight {
-  display: none !important;
-}
-
-.blyrics--word {
-  transform: translateY(3px);
-  transition: transform calc(var(--blyrics-duration, 0ms) + 200ms)
-    calc(var(--blyrics-anim-delay, 0.05s) - 0.05s) !important;
-}
-
-.blyrics--word.blyrics--animating {
-  animation: none;
-  transform: translateY(0) !important;
-}
-
-.blyrics--word::after {
-  --blyrics-glow-color: rgb(255 255 255 / 0.0001);
-}
-.blyrics--word[data-long-word]::after {
-  --blyrics-glow-color: white;
-}
-
-.blyrics--word.blyrics-line-synced-word {
-  animation: none !important;
-  transition: none !important;
-}
-
-.blyrics-container[data-sync="synced"] .blyrics--word {
-  animation: none;
-  transform: none !important;
-  transition: color calc(var(--blyrics-lyric-scroll-duration) * 3) !important;
-}
-
-.blyrics-container[data-sync="synced"]
-  > .blyrics--line:not(.blyrics--active):not(.blyrics--animating)
-  .blyrics--word {
-  color: var(--blyrics-lyric-inactive-color) !important;
-}
-
-.blyrics-container[data-sync="synced"]
-  > .blyrics--line.blyrics--active.blyrics--animating
-  .blyrics--word {
-  color: var(--blyrics-lyric-active-color) !important;
-}
-
-.blyrics--translated,
-.blyrics--romanized {
-  border: 0;
-  background: none;
-  padding: 0;
-  color: rgb(255 255 255 / 0.38);
-  font-size: 18px;
-}
-
-.blyrics-container > .blyrics--line.blyrics--active .blyrics--romanized,
-.blyrics-container > .blyrics--line.blyrics--animating .blyrics--romanized {
-  color: rgb(255 255 255 / 0.78);
-}
-
-.blyrics-container[data-no-lyrics="true"] {
-  padding-top: 220px;
-  font-size: 26px;
+.amll-lyric-player {
+  --amll-lp-color: white;
+  --amll-lp-font-size: 2.4rem;
+  --amll-lp-line-width-aspect: 1;
+  --amll-lp-line-padding-x: 0;
+  font-family: "Inter", sans-serif;
+  font-weight: 700;
 }
 
 #capture {
@@ -445,9 +256,8 @@ braccato-lyrics {
 }
 
 @media (max-width: 560px) {
-  .blyrics-container {
-    --blyrics-font-size: 34px;
-    padding-top: 80px;
+  .amll-lyric-player {
+    --amll-lp-font-size: 2rem;
   }
   #timeline {
     right: 34px;

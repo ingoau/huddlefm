@@ -1,14 +1,18 @@
-import { parseLRC, parseTTMLContent, PlainParser } from "@braccato/parsers";
-import type { Lyric } from "@braccato/core";
 import { logger } from "./logger.ts";
-import { sanitizeInlineLyricRoles } from "./lyric-sanitize.ts";
+import {
+  isWordSynced,
+  parseLrcFile,
+  parsePlain,
+  parseTtml,
+  type LyricLine,
+} from "./lyric-formats.ts";
 import { enrichLyricsWithRomanization } from "./romanization.ts";
 import type { TrackMetadata } from "./tracks.ts";
 
 const log = logger.child({ component: "lyrics" });
 
 export type LyricsPayload = {
-  lines: Lyric[];
+  lines: LyricLine[];
   source: string;
   priority: number;
 };
@@ -75,19 +79,17 @@ export class LyricsCatalog {
         result.status === "fulfilled" && result.value ? [result.value] : [],
       )
       .sort((a, b) => a.priority - b.priority)[0];
-    if (selected) {
-      sanitizeInlineLyricRoles(selected.lines);
+    if (selected)
       await enrichLyricsWithRomanization(selected.lines, {
         videoId: track.sourceId,
       });
-    }
     log.info(
       {
         event: selected ? "found" : "unavailable",
         sourceId: track.sourceId,
         source: selected?.source,
         lines: selected?.lines.length,
-        romanized: selected?.lines.filter((line) => line.romanization).length,
+        romanized: selected?.lines.filter((line) => line.romanLyric).length,
         durationMs: Date.now() - startedAt,
       },
       selected ? "Lyrics found" : "Lyrics unavailable",
@@ -110,11 +112,9 @@ export class LyricsCatalog {
       if (!response.ok) continue;
       const { ttml } = (await response.json()) as { ttml?: string };
       if (!ttml) continue;
-      const parsed = parseTTMLContent(ttml, {
-        songDurationMs: (track.duration ?? 0) * 1000,
-      });
-      if (parsed.isWordSynced && parsed.lyrics.length)
-        return { lines: parsed.lyrics, source: "Better Lyrics", priority: 0 };
+      const lines = parseTtml(ttml, (track.duration ?? 0) * 1000);
+      if (lines.length && isWordSynced(lines))
+        return { lines, source: "Better Lyrics", priority: 0 };
     }
   }
 
@@ -141,11 +141,12 @@ export class LyricsCatalog {
         signal: AbortSignal.timeout(10_000),
       });
       if (!lyricResponse.ok) continue;
-      const parsed = parseTTMLContent(await lyricResponse.text(), {
-        songDurationMs: (track.duration ?? 0) * 1000,
-      });
-      if (parsed.isWordSynced && parsed.lyrics.length)
-        return { lines: parsed.lyrics, source: "BiniLyrics", priority: 2 };
+      const lines = parseTtml(
+        await lyricResponse.text(),
+        (track.duration ?? 0) * 1000,
+      );
+      if (lines.length && isWordSynced(lines))
+        return { lines, source: "BiniLyrics", priority: 2 };
     }
   }
 
@@ -164,22 +165,24 @@ export class LyricsCatalog {
     ).data;
     if (!data?.lyrics) return;
     const duration = (track.duration ?? 0) * 1000;
-    const parsed =
-      data.format === "ttml"
-        ? parseTTMLContent(data.lyrics, { songDurationMs: duration })
-        : undefined;
     const lines =
-      parsed?.lyrics ??
-      (data.format === "lrc"
-        ? parseLRC(data.lyrics, duration)
-        : data.format === "plain"
-          ? PlainParser.parse(data.lyrics, duration)
-          : []);
+      data.format === "ttml"
+        ? parseTtml(data.lyrics, duration)
+        : data.format === "lrc"
+          ? parseLrcFile(data.lyrics, duration)
+          : data.format === "plain"
+            ? parsePlain(data.lyrics, duration)
+            : [];
     return lines.length
       ? {
           lines,
           source: "Better Lyrics · Unison",
-          priority: parsed?.isWordSynced ? 1 : data.format === "plain" ? 13 : 7,
+          priority:
+            data.format === "ttml" && isWordSynced(lines)
+              ? 1
+              : data.format === "plain"
+                ? 13
+                : 7,
         }
       : undefined;
   }
@@ -222,11 +225,12 @@ export class LyricsCatalog {
       },
     );
     if (!lyricResponse.ok) return;
-    const parsed = parseTTMLContent(await lyricResponse.text(), {
-      songDurationMs: (track.duration ?? 0) * 1000,
-    });
-    return parsed.isWordSynced && parsed.lyrics.length
-      ? { lines: parsed.lyrics, source: "AMLL TTML DB", priority: 5 }
+    const lines = parseTtml(
+      await lyricResponse.text(),
+      (track.duration ?? 0) * 1000,
+    );
+    return lines.length && isWordSynced(lines)
+      ? { lines, source: "AMLL TTML DB", priority: 5 }
       : undefined;
   }
 
@@ -245,9 +249,9 @@ export class LyricsCatalog {
     };
     const duration = (track.duration ?? 0) * 1000;
     const lines = data.syncedLyrics
-      ? parseLRC(data.syncedLyrics, duration)
+      ? parseLrcFile(data.syncedLyrics, duration)
       : data.plainLyrics
-        ? PlainParser.parse(data.plainLyrics, duration)
+        ? parsePlain(data.plainLyrics, duration)
         : [];
     return lines.length
       ? {

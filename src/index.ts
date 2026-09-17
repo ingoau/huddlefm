@@ -80,6 +80,25 @@ const build = await Bun.build({
   target: "browser",
   minify: true,
   define: { global: "globalThis" },
+  plugins: [
+    // AMLL's lyric player shares a bundle with its Pixi background renderer,
+    // which the media page never constructs: it draws its own blurred artwork
+    // backdrop instead. Stubbing the import keeps a couple of hundred kilobytes
+    // of unused WebGL out of the page.
+    {
+      name: "stub-pixi",
+      setup(builder) {
+        builder.onResolve({ filter: /^@pixi\// }, (args) => ({
+          path: args.path,
+          namespace: "pixi-stub",
+        }));
+        builder.onLoad({ filter: /.*/, namespace: "pixi-stub" }, () => ({
+          contents: "module.exports = {};",
+          loader: "js",
+        }));
+      },
+    },
+  ],
 });
 if (!build.success)
   throw new AggregateError(build.logs, "Media page build failed");
@@ -1044,7 +1063,7 @@ const server = Bun.serve<SocketData>({
     "/favicon.ico": () => new Response(null, { status: 204 }),
     "/media": () =>
       new Response(
-        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>HuddleFM media</title><link rel=stylesheet href=/media-page.css><main id=stage data-display-mode=default><div id=artwork></div><div id=cover></div><header><h1 id=title>Ready for music</h1><p id=artist>Waiting for the next track</p></header><section id=lyrics-frame><braccato-lyrics id=lyrics></braccato-lyrics></section><div id=timeline><time id=elapsed>0:00</time><div id=progress><div id=progress-fill></div></div><time id=duration>0:00</time></div></main><button id=capture>Start camera</button><p id=status>connecting</p><script type=module src=/media-page.js></script>",
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>HuddleFM media</title><link rel=stylesheet href=/media-page.css><main id=stage data-display-mode=default><div id=artwork></div><div id=cover></div><header><h1 id=title>Ready for music</h1><p id=artist>Waiting for the next track</p></header><section id=lyrics-frame></section><div id=timeline><time id=elapsed>0:00</time><div id=progress><div id=progress-fill></div></div><time id=duration>0:00</time></div></main><button id=capture>Start camera</button><p id=status>connecting</p><script type=module src=/media-page.js></script>",
         { headers: { "content-type": "text/html" } },
       ),
     "/media-page.js": () =>

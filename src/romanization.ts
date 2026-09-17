@@ -1,8 +1,8 @@
-import { containsNonLatin, detectNonLatinLanguage } from "@braccato/core/text";
-import type { Lyric, LyricPart } from "@braccato/core";
+import type { LyricLine } from "@applemusic-like-lyrics/lyric";
 import { transliterate } from "transliteration";
 import { isJapanese, toRomaji } from "wanakana";
 import { logger } from "./logger.ts";
+import { containsNonLatin, detectNonLatinLanguage } from "./script-detect.ts";
 
 const log = logger.child({ component: "romanization" });
 
@@ -48,9 +48,17 @@ function tidyRomanization(text: string) {
     .trim();
 }
 
-function isRomanizableLine(line: Lyric) {
-  if (line.isInstrumental || line.romanization?.trim()) return false;
-  const text = line.words?.trim();
+/** The sung text of a line, rejoined from AMLL's per-word timings. */
+export function lineText(line: LyricLine) {
+  return line.words
+    .map((word) => word.word)
+    .join("")
+    .trim();
+}
+
+function isRomanizableLine(line: LyricLine) {
+  if (line.romanLyric.trim()) return false;
+  const text = lineText(line);
   if (!text || MUSIC_NOTES.test(text)) return false;
   return containsNonLatin(text);
 }
@@ -242,23 +250,25 @@ async function romanizeLanguageGroup(
 }
 
 /**
- * Attaches romanizations to lyric lines that use non-Latin scripts.
+ * Attaches romanizations to the lyric lines that use non-Latin scripts.
  * Prefers provider-supplied romanization, then Unison, then Google Translate
- * romaji, then a local transliteration fallback. Never throws.
+ * romaji, then a local transliteration fallback. AMLL shows the result on its
+ * own sub-line beneath the sung words. Never throws.
  */
 export async function enrichLyricsWithRomanization(
-  lines: Lyric[],
+  lines: LyricLine[],
   options: RomanizeOptions = {},
 ) {
+  for (const line of lines)
+    if (line.romanLyric.trim())
+      line.romanLyric = tidyRomanization(line.romanLyric);
+
   const pending = lines.flatMap((line, lineIndex) => {
     if (!isRomanizableLine(line)) return [];
-    const text = line.words.trim();
+    const text = lineText(line);
     return [{ lineIndex, text, lang: lineLanguage(text) }];
   });
-  if (pending.length === 0) {
-    attachTimedRomanizations(lines);
-    return lines;
-  }
+  if (pending.length === 0) return lines;
 
   const results = new Map<number, string>();
   for (const [lang, group] of groupByLanguage(pending))
@@ -273,11 +283,9 @@ export async function enrichLyricsWithRomanization(
         item.lang === "auto" ? null : item.lang,
       );
     if (!romanization || isSameText(romanization, item.text)) continue;
-    lines[item.lineIndex]!.romanization = tidyRomanization(romanization);
+    lines[item.lineIndex]!.romanLyric = tidyRomanization(romanization);
     attached += 1;
   }
-
-  attachTimedRomanizations(lines);
 
   if (attached)
     log.info(
@@ -290,128 +298,4 @@ export async function enrichLyricsWithRomanization(
       "Attached lyric romanizations",
     );
   return lines;
-}
-
-/**
- * Maps a line romanization onto the sung timeline so Braccato can karaoke-sync
- * the romanized words with the original line.
- */
-export function buildTimedRomanization(line: Lyric): LyricPart[] | undefined {
-  const text = line.romanization?.trim();
-  if (!text || line.isInstrumental) return;
-  const tokens = text.match(/\S+/gu);
-  if (!tokens?.length) return;
-
-  const timed =
-    line.parts
-      ?.filter((part) => part.durationMs > 0)
-      .map((part) => ({
-        startTimeMs: part.startTimeMs,
-        endTimeMs: part.startTimeMs + part.durationMs,
-      }))
-      .sort((a, b) => a.startTimeMs - b.startTimeMs) ?? [];
-  const active = timed.reduce<{ startTimeMs: number; endTimeMs: number }[]>(
-    (intervals, interval) => {
-      const previous = intervals.at(-1);
-      if (previous && interval.startTimeMs <= previous.endTimeMs)
-        previous.endTimeMs = Math.max(previous.endTimeMs, interval.endTimeMs);
-      else intervals.push({ ...interval });
-      return intervals;
-    },
-    [],
-  );
-  if (active.length === 0)
-    active.push({
-      startTimeMs: line.startTimeMs,
-      endTimeMs: line.startTimeMs + Math.max(0, line.durationMs),
-    });
-  const letters = tokens.reduce((sum, token) => sum + token.length, 0);
-  if (letters === 0) return;
-
-  let durationMs = 0;
-  const activeSegments = active.map((interval) => {
-    const offsetStart = durationMs;
-    durationMs += interval.endTimeMs - interval.startTimeMs;
-    return { ...interval, offsetStart, offsetEnd: durationMs };
-  });
-  const timelineTime = (offset: number) => {
-    const bounded = Math.max(0, Math.min(durationMs, offset));
-    const interval =
-      activeSegments.find((item) => bounded < item.offsetEnd) ??
-      activeSegments.at(-1)!;
-    return (
-      interval.startTimeMs +
-      Math.max(
-        0,
-        Math.min(
-          interval.offsetEnd - interval.offsetStart,
-          bounded - interval.offsetStart,
-        ),
-      )
-    );
-  };
-
-  const parts: LyricPart[] = [];
-  let cursor = 0;
-  for (const [index, token] of tokens.entries()) {
-    const startOffset = Math.round((durationMs * cursor) / letters);
-    cursor += token.length;
-    const endOffset = Math.round((durationMs * cursor) / letters);
-    const overlaps = activeSegments.filter(
-      (interval) =>
-        startOffset < interval.offsetEnd && endOffset > interval.offsetStart,
-    );
-    if (overlaps.length === 0) {
-      parts.push({
-        startTimeMs: timelineTime(startOffset),
-        durationMs: 0,
-        words: index === tokens.length - 1 ? token : `${token} `,
-      });
-      continue;
-    }
-
-    const tokenParts: LyricPart[] = [];
-    let tokenCursor = 0;
-    for (const [overlapIndex, interval] of overlaps.entries()) {
-      const segmentStart = Math.max(startOffset, interval.offsetStart);
-      const segmentEnd = Math.min(endOffset, interval.offsetEnd);
-      const nextTokenCursor =
-        overlapIndex === overlaps.length - 1
-          ? token.length
-          : Math.round(
-              (token.length * (segmentEnd - startOffset)) /
-                (endOffset - startOffset),
-            );
-      const words = token.slice(tokenCursor, nextTokenCursor);
-      tokenCursor = nextTokenCursor;
-      if (!words) continue;
-      const start =
-        interval.startTimeMs + (segmentStart - interval.offsetStart);
-      const end = interval.startTimeMs + (segmentEnd - interval.offsetStart);
-      tokenParts.push({
-        startTimeMs: start,
-        durationMs: Math.max(0, end - start),
-        words,
-      });
-    }
-    if (index < tokens.length - 1 && tokenParts.length > 0)
-      tokenParts.at(-1)!.words += " ";
-    parts.push(...tokenParts);
-  }
-  return parts;
-}
-
-function attachTimedRomanizations(lines: Lyric[]) {
-  for (const line of lines) {
-    if (!line.romanization?.trim()) continue;
-    line.romanization = tidyRomanization(line.romanization);
-    if (line.timedRomanization?.length) continue;
-    const timed = buildTimedRomanization(line);
-    if (timed?.length) line.timedRomanization = timed;
-  }
-}
-
-/** True when any line carries a romanization that should be rendered. */
-export function lyricsHaveRomanization(lines: Lyric[]) {
-  return lines.some((line) => Boolean(line.romanization?.trim()));
 }

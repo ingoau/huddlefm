@@ -18,11 +18,13 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@braccato/core": "1.1.0",
-    "@braccato/parsers": "0.2.0",
+    "@applemusic-like-lyrics/core": "^0.5.2",
+    "@applemusic-like-lyrics/lyric": "^1.0.2",
+    "@applemusic-like-lyrics/ttml": "^1.0.1",
     "@fontsource/inter": "^5.3.0",
     "@openrouter/ai-sdk-provider": "^3.0.0",
     "@slack/web-api": "8",
+    "@xmldom/xmldom": "^0.9.12",
     "ai": "^7.0.93",
     "amazon-chime-sdk-js": "3.31.0",
     "pino": "^10.1.0",
