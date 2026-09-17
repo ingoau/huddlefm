@@ -8,6 +8,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 
 - Search for songs, albums, and playlists from YouTube
 - Add supported media links (e.g. YouTube, SoundCloud, Navidrome shares) to the queue
+- Add Last.fm links: loved tracks, a library, an artist, an album, a tag, or the charts
 - Build and reorder a shared queue, or shuffle the pending queue in one click
 - Control playback, volume and settings, directly through Slack
 - Set permissions for who can control playback and queue
@@ -91,13 +92,13 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Optional features
 
-| Variable                                  | Default                    | Purpose                                                                                              |
-| ----------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling                                                       |
-| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                          |
-| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                         |
-| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                               |
-| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, and `/tone` routes; leave unset for typical Docker deploys |
+| Variable                                  | Default                    | Purpose                                                                                                         |
+| ----------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling, and Last.fm links in search (the key alone is enough for links) |
+| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                                     |
+| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                                    |
+| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                                          |
+| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, and `/tone` routes; leave unset for typical Docker deploys            |
 
 #### Playback and limits
 

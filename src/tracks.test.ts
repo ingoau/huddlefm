@@ -651,6 +651,138 @@ test("expands remembered YouTube playlists", async () => {
   ]);
 });
 
+test("offers and expands Last.fm collections", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    lastFmApiKey: "key",
+  });
+  Reflect.set(catalog, "lastFmTracks", async () => [
+    { title: "Song A", artist: "Artist", album: "Album" },
+    { title: "Song B", artist: "Nobody" },
+    { title: "Long Set", artist: "Artist" },
+  ]);
+  Reflect.set(catalog, "music", {
+    searchSongs: async (query: string) =>
+      query.startsWith("Song A")
+        ? [
+            {
+              videoId: "abcdefghijk",
+              name: "Song A",
+              artist: { name: "Artist" },
+              duration: 60,
+              thumbnails: [],
+            },
+          ]
+        : query.startsWith("Long Set")
+          ? [
+              {
+                videoId: "lmnopqrstuv",
+                name: "Long Set",
+                artist: { name: "Artist" },
+                duration: 9_000,
+                thumbnails: [],
+              },
+            ]
+          : [],
+  });
+
+  const options = await catalog.suggestions(
+    "https://www.last.fm/user/rj/loved",
+    { songs: true, bulk: true },
+  );
+  expect(options.map((option) => option.text.text)).toEqual([
+    "Add Last.fm loved tracks: rj",
+  ]);
+  expect(options[0]!.value.startsWith("bulkref_")).toBe(true);
+  // Rows YouTube Music has no match for, and matches past the duration limit,
+  // are dropped rather than failing the add; the Last.fm page stays on the
+  // track as where it came from.
+  expect(await catalog.resolve(options[0]!.value)).toEqual([
+    expect.objectContaining({
+      sourceId: "abcdefghijk",
+      title: "Song A",
+      album: "Album",
+      sourceInput: "https://www.last.fm/user/rj/loved",
+      canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
+    }),
+  ]);
+});
+
+test("keeps Last.fm collections out of searches that cannot add them", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    lastFmApiKey: "key",
+  });
+  expect(
+    await catalog.suggestions("https://www.last.fm/user/rj/loved", {
+      songs: true,
+      bulk: false,
+    }),
+  ).toEqual([]);
+});
+
+test("says so when a Last.fm link has no API behind it", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    lastFmApiKey: "key",
+  });
+  const reason =
+    "Last.fm playlists are not in its API — try loved, library, or album links";
+  const options = await catalog.suggestions(
+    "https://www.last.fm/user/rj/playlists/12345678",
+    { songs: true, bulk: true },
+  );
+  expect(options.map((option) => option.text.text)).toEqual([reason]);
+  expect(catalog.resolve(options[0]!.value)).rejects.toThrow(reason);
+});
+
+test("offers nothing for Last.fm links without an API key", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+  });
+  const options = await catalog.suggestions(
+    "https://www.last.fm/user/rj/loved",
+    { songs: true, bulk: true },
+  );
+  expect(options.map((option) => option.text.text)).toEqual([
+    "Last.fm links are not enabled here",
+  ]);
+});
+
+test("resolves Last.fm song links through a YouTube Music search", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    lastFmApiKey: "key",
+  });
+  Reflect.set(catalog, "music", {
+    searchSongs: async () => [
+      {
+        videoId: "abcdefghijk",
+        name: "Amateur Hour",
+        artist: { name: "Sparks" },
+        duration: 180,
+        thumbnails: [],
+      },
+    ],
+  });
+  const link = "https://www.last.fm/music/Sparks/_/Amateur+Hour";
+  expect(await catalog.resolveUrl(link)).toEqual(
+    expect.objectContaining({
+      sourceId: "abcdefghijk",
+      title: "Amateur Hour",
+      sourceInput: link,
+    }),
+  );
+  expect(
+    catalog.resolveUrl("https://www.last.fm/user/rj/loved"),
+  ).rejects.toThrow("Search for that Last.fm link to add the whole collection");
+});
+
 test("recognizes Navidrome share links including base paths", () => {
   const root = navidromeShare(
     new URL("https://music.example.com/share/AbCdEfGhIj"),

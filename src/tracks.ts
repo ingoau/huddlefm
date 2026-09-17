@@ -1,10 +1,24 @@
 import YTMusic from "ytmusic-api";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import {
+  lastFmCollectionLimit,
+  lastFmCollectionTracks,
+  LastFmError,
+  lastFmLink,
+  type LastFmCollection,
+  type LastFmLink,
+  type LastFmTrack,
+} from "./lastfm.ts";
 import { logger } from "./logger.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
 const log = logger.child({ component: "tracks" });
 const maxEmbeddedArtworkBytes = 5 * 1024 * 1024;
+// Last.fm rows are matched one YouTube Music search at a time; a few in
+// flight keeps a 50-track list quick without hammering the search endpoint.
+const lastFmMatchConcurrency = 4;
+const lastFmNoMatch = "Could not find that track on YouTube Music";
+const lastFmDisabled = "Last.fm links are not enabled here";
 
 // A track failure that is caused by the media itself, not by a fault in
 // HuddleFM. The message is stable and safe to show in Slack; `detail` keeps the
@@ -209,18 +223,27 @@ export type TransitionData = {
 type CollectionReference =
   | { type: "album"; id: string }
   | { type: "playlist"; id: string; url: string }
-  | { type: "navidrome-share"; url: string };
+  | { type: "navidrome-share"; url: string }
+  | { type: "lastfm"; collection: LastFmCollection; url: string };
+
+// Last.fm links that resolve to one song, and the ones that resolve to
+// nothing at all but are worth explaining rather than swallowing.
+type StoredReference =
+  | CollectionReference
+  | { type: "lastfm-track"; track: LastFmTrack; url: string }
+  | { type: "lastfm-unsupported"; reason: string };
 
 export class TrackCatalog {
   private music = new YTMusic();
   private references = new Map<
     string,
-    TrackMetadata | CollectionReference | string
+    TrackMetadata | StoredReference | string
   >();
   private command: string[];
   private proxy?: PublicNetworkProxy;
   private activePreparations = 0;
   private transitions = new Map<string, TransitionData>();
+  private lastFmTracks = lastFmCollectionTracks;
   private preparationQueue: {
     priority: number;
     run: () => Promise<string>;
@@ -229,10 +252,11 @@ export class TrackCatalog {
   }[] = [];
 
   constructor(
-    private limits: {
+    private config: {
       durationSeconds: number;
       downloadBytes: number;
       loudnessNormalization?: boolean;
+      lastFmApiKey?: string;
     },
   ) {
     this.command = ["yt-dlp", "--force-ipv4"];
@@ -292,6 +316,20 @@ export class TrackCatalog {
           {
             event: "suggestions_completed",
             inputType: "navidrome_share_url",
+            count: options.length,
+            durationMs: Date.now() - startedAt,
+          },
+          "Track suggestions completed",
+        );
+        return options;
+      }
+      const lastFm = lastFmLink(url);
+      if (lastFm) {
+        const options = this.lastFmOptions(lastFm, url.href, allowed);
+        log.debug(
+          {
+            event: "suggestions_completed",
+            inputType: "lastfm_url",
             count: options.length,
             durationMs: Date.now() - startedAt,
           },
@@ -375,18 +413,24 @@ export class TrackCatalog {
     const stored = this.references.get(reference);
     if (!stored) throw new TrackError("Track selection expired; search again");
     if (typeof stored === "object" && "type" in stored) {
-      const tracks =
-        stored.type === "album"
-          ? (await this.music.getAlbum(stored.id)).songs.map((song) =>
-              songMetadata(song),
-            )
-          : stored.type === "navidrome-share"
-            ? await this.resolveNavidromeShare(stored.url)
-            : (await this.music.getPlaylistVideos(stored.id)).map((song) =>
-                songMetadata(song, stored.url),
-              );
+      if (stored.type === "lastfm-unsupported") {
+        this.references.delete(reference);
+        throw new TrackError(stored.reason);
+      }
+      if (stored.type === "lastfm-track") {
+        const track = await this.matchLastFmTrack(stored.track, stored.url);
+        if (!track) throw new TrackError(lastFmNoMatch);
+        this.validate(track);
+        this.references.delete(reference);
+        return track;
+      }
+      const tracks = await this.expandCollection(stored);
       if (!tracks.length)
-        throw new TrackError("That album or playlist has no playable songs");
+        throw new TrackError(
+          stored.type === "lastfm"
+            ? "Nothing from that Last.fm link is on YouTube Music"
+            : "That album or playlist has no playable songs",
+        );
       for (const track of tracks) this.validate(track);
       this.references.delete(reference);
       log.info(
@@ -455,6 +499,29 @@ export class TrackCatalog {
       );
       return tracks[0]!;
     }
+    const lastFm = lastFmLink(url);
+    if (lastFm) {
+      if (lastFm.type === "unsupported") throw new TrackError(lastFm.reason);
+      if (lastFm.type === "collection")
+        throw new TrackError(
+          "Search for that Last.fm link to add the whole collection",
+        );
+      const track = await this.matchLastFmTrack(lastFm.track, url.href);
+      if (!track) throw new TrackError(lastFmNoMatch);
+      this.validate(track);
+      log.info(
+        {
+          event: "url_resolved",
+          sourceId: track.sourceId,
+          title: track.title,
+          artist: track.artist,
+          durationSeconds: track.duration,
+          durationMs: Date.now() - startedAt,
+        },
+        "Media URL resolved",
+      );
+      return track;
+    }
     const metadata = await runJson([
       ...this.extractor(),
       "--dump-single-json",
@@ -471,7 +538,7 @@ export class TrackCatalog {
       throw new TrackError("Live streams are not supported");
     if (
       (metadata.filesize ?? metadata.filesize_approx ?? 0) >
-      this.limits.downloadBytes
+      this.config.downloadBytes
     )
       throw new TrackError("Track exceeds the download limit");
     const canonicalUrl = metadata.webpage_url ?? url.href;
@@ -495,7 +562,7 @@ export class TrackCatalog {
         await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxy.url),
       );
     }
-    if (track.duration && track.duration > this.limits.durationSeconds)
+    if (track.duration && track.duration > this.config.durationSeconds)
       throw new TrackError("Track exceeds the duration limit");
     log.info(
       {
@@ -642,6 +709,134 @@ export class TrackCatalog {
     return this.resolveUrl(`https://music.youtube.com/watch?v=${videoId}`);
   }
 
+  private async expandCollection(reference: CollectionReference) {
+    switch (reference.type) {
+      case "album":
+        return (await this.music.getAlbum(reference.id)).songs.map((song) =>
+          songMetadata(song),
+        );
+      case "playlist":
+        return (await this.music.getPlaylistVideos(reference.id)).map((song) =>
+          songMetadata(song, reference.url),
+        );
+      case "navidrome-share":
+        return this.resolveNavidromeShare(reference.url);
+      case "lastfm":
+        return this.resolveLastFmCollection(
+          reference.collection,
+          reference.url,
+        );
+    }
+  }
+
+  // A Last.fm page is never playable on its own: its collections are lists of
+  // names, and its dead ends say so in the menu rather than failing later as
+  // an unsupported link.
+  private lastFmOptions(
+    link: LastFmLink,
+    url: string,
+    allowed: { songs: boolean; bulk: boolean },
+  ) {
+    const dead = (reason: string) =>
+      allowed.bulk
+        ? [
+            option(
+              reason,
+              this.remember({ type: "lastfm-unsupported", reason }),
+            ),
+          ]
+        : [];
+    if (link.type === "unsupported") return dead(link.reason);
+    if (!this.config.lastFmApiKey) return dead(lastFmDisabled);
+    if (link.type === "track")
+      return allowed.songs
+        ? [
+            option(
+              `${link.track.title} — ${link.track.artist}`,
+              this.remember({
+                type: "lastfm-track",
+                track: link.track,
+                url,
+              }),
+            ),
+          ]
+        : [];
+    return allowed.bulk
+      ? [
+          option(
+            link.label,
+            this.remember({
+              type: "lastfm",
+              collection: link.collection,
+              url,
+            }),
+          ),
+        ]
+      : [];
+  }
+
+  // Last.fm hands back names, not media, so every row costs a YouTube Music
+  // search. Rows that match nothing are dropped rather than failing the add.
+  private async resolveLastFmCollection(
+    collection: LastFmCollection,
+    url: string,
+  ) {
+    const startedAt = Date.now();
+    if (!this.config.lastFmApiKey) throw new TrackError(lastFmDisabled);
+    let rows: LastFmTrack[];
+    try {
+      rows = await this.lastFmTracks(collection, {
+        apiKey: this.config.lastFmApiKey,
+        limit: lastFmCollectionLimit,
+        ...(this.proxy ? { proxy: this.proxy.url } : {}),
+      });
+    } catch (error) {
+      throw lastFmFailure(error);
+    }
+    const matched = await mapConcurrent(rows, lastFmMatchConcurrency, (row) =>
+      this.matchLastFmTrack(row, url),
+    );
+    const found = matched.filter((track) => track !== undefined);
+    // One long match should not cost the whole list, so overlong tracks are
+    // dropped here the same way unmatched rows are.
+    const tracks = found.filter(
+      (track) =>
+        !track.duration || track.duration <= this.config.durationSeconds,
+    );
+    log.info(
+      {
+        event: "lastfm_collection_resolved",
+        collectionKind: collection.kind,
+        listed: rows.length,
+        matched: found.length,
+        playable: tracks.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Last.fm collection resolved",
+    );
+    return tracks;
+  }
+
+  private async matchLastFmTrack(track: LastFmTrack, url: string) {
+    const match = await this.searchSong(track.title, track.artist).catch(
+      (error) => {
+        log.debug(
+          { event: "lastfm_match_failed", ...track, err: error },
+          "Last.fm track could not be searched",
+        );
+        return undefined;
+      },
+    );
+    if (!match) return;
+    return {
+      ...match,
+      // Keep the Last.fm page as the provenance; playback still uses the
+      // YouTube Music URL the search matched.
+      sourceInput: url,
+      ...(match.album || !track.album ? {} : { album: track.album }),
+    };
+  }
+
   private async resolveNavidromeShare(input: string) {
     const startedAt = Date.now();
     const url = parseHttpUrl(input);
@@ -712,7 +907,7 @@ export class TrackCatalog {
   }
 
   private validate(track: TrackMetadata) {
-    if (track.duration && track.duration > this.limits.durationSeconds)
+    if (track.duration && track.duration > this.config.durationSeconds)
       throw new TrackError("Track exceeds the duration limit");
   }
 
@@ -775,10 +970,10 @@ export class TrackCatalog {
       "--audio-quality",
       "0",
       ...(keepSource ? ["--keep-video"] : []),
-      ...loudnessNormalizationArgs(this.limits.loudnessNormalization),
+      ...loudnessNormalizationArgs(this.config.loudnessNormalization),
       "--no-playlist",
       "--max-filesize",
-      String(this.limits.downloadBytes),
+      String(this.config.downloadBytes),
       "--print",
       "after_move:filepath",
       "--output",
@@ -833,7 +1028,7 @@ export class TrackCatalog {
         }
       }
       const bytes = (await stat(filePath)).size;
-      if (bytes > this.limits.downloadBytes)
+      if (bytes > this.config.downloadBytes)
         throw new TrackError("Track exceeds the download limit");
       const probe = await run(
         [
@@ -852,7 +1047,7 @@ export class TrackCatalog {
       const duration = Number(probe.stdout.trim());
       if (!Number.isFinite(duration) || duration <= 0)
         throw new Error("Could not verify the downloaded track duration");
-      if (duration > this.limits.durationSeconds)
+      if (duration > this.config.durationSeconds)
         throw new TrackError("Track exceeds the duration limit");
       if (!track.duration) track.duration = duration;
       let transition = {
@@ -947,8 +1142,14 @@ export class TrackCatalog {
     return [...this.command, "--proxy", this.proxy.url];
   }
 
-  private remember(value: TrackMetadata | CollectionReference | string) {
-    const reference = `${typeof value === "object" && "type" in value ? "bulk" : "track"}ref_${crypto.randomUUID()}`;
+  private remember(value: TrackMetadata | StoredReference | string) {
+    // A single Last.fm song is an ordinary add; everything else with a `type`
+    // expands into several tracks and needs the bulk capability.
+    const bulk =
+      typeof value === "object" &&
+      "type" in value &&
+      value.type !== "lastfm-track";
+    const reference = `${bulk ? "bulk" : "track"}ref_${crypto.randomUUID()}`;
     this.references.set(reference, value);
     setTimeout(() => this.references.delete(reference), 10 * 60_000);
     return reference;
@@ -1324,6 +1525,41 @@ async function retainedSourcePath(opusPath: string) {
     return name.startsWith(`${prefix}.`);
   });
   return match ? `${directory}/${match}` : undefined;
+}
+
+function lastFmFailure(error: unknown) {
+  if (!(error instanceof LastFmError))
+    return new TrackError("Last.fm is not responding; try again", {
+      detail: error instanceof Error ? error.message : undefined,
+    });
+  const message =
+    error.code === 6
+      ? "Last.fm has nothing at that link"
+      : error.code === 10 || error.code === 26
+        ? lastFmDisabled
+        : "Last.fm is not responding; try again";
+  return new TrackError(message, {
+    detail: `Last.fm error ${error.code}: ${error.message}`,
+  });
+}
+
+/** Runs `work` a few items at a time, keeping the order of the input. */
+async function mapConcurrent<T, R>(
+  items: T[],
+  limit: number,
+  work: (item: T) => Promise<R>,
+) {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await work(items[index]!);
+      }
+    }),
+  );
+  return results;
 }
 
 function option(label: string, value: string) {

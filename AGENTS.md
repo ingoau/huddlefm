@@ -73,6 +73,7 @@ The coordinator communicates with this page over WebSocket. Audio files are expo
 
 #### Additional services include:
 
+- `src/lastfm.ts`: turns a Last.fm page URL into the API call behind it and reads the tracks it lists.
 - `src/lyrics.ts`: queries multiple lyric providers concurrently and selects the best synchronized result.
 - `src/scrobbling.ts`: tracks each participant's actual listening time and submits eligible listens to Last.fm or ListenBrainz.
 - `src/audit-log.ts`: writes append-only JSONL audit events.

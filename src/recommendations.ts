@@ -1,4 +1,5 @@
 import { firstArtist } from "./artist.ts";
+import { lastFmName } from "./lastfm.ts";
 import { logger } from "./logger.ts";
 import type { Store } from "./store.ts";
 import {
@@ -1124,7 +1125,7 @@ export class RecommendationCatalog {
     const topArtists = asArray(
       (artists?.topartists as { artist?: unknown })?.artist,
     ).flatMap((row) => {
-      const name = lastFmArtist(row).trim();
+      const name = lastFmName(row).trim();
       if (!name) return [];
       const playcount = Number((row as { playcount?: unknown }).playcount ?? 0);
       return [{ name, score: 1 + Math.log10(Math.max(1, playcount) + 1) }];
@@ -1190,7 +1191,7 @@ export class RecommendationCatalog {
         return asArray(
           (result.similarartists as { artist?: unknown })?.artist,
         ).flatMap((row) => {
-          const name = lastFmArtist(row).trim();
+          const name = lastFmName(row).trim();
           if (!name) return [];
           const match = Number((row as { match?: unknown }).match ?? 0);
           return [{ name, match: match > 0 ? match : 0.5 }];
@@ -1512,16 +1513,6 @@ function asArray(value: unknown) {
   return Array.isArray(value) ? value : [value];
 }
 
-function lastFmArtist(value: unknown) {
-  if (!value) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "object") {
-    const row = value as { name?: unknown; "#text"?: unknown };
-    return String(row.name ?? row["#text"] ?? "");
-  }
-  return "";
-}
-
 function lastFmTrack(value: unknown): TasteTrack | undefined {
   if (!value || typeof value !== "object") return;
   const row = value as {
@@ -1530,9 +1521,9 @@ function lastFmTrack(value: unknown): TasteTrack | undefined {
     album?: unknown;
   };
   const title = String(row.name ?? "").trim();
-  const artist = lastFmArtist(row.artist).trim();
+  const artist = lastFmName(row.artist).trim();
   if (!title || !artist) return;
-  const album = lastFmArtist(row.album).trim();
+  const album = lastFmName(row.album).trim();
   return { title, artist, ...(album ? { album } : {}) };
 }
 
