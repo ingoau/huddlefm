@@ -1650,3 +1650,44 @@ test("an aged like seeds its artist as weakly as it seeds the song", async () =>
     "Faded Neighbour Hit",
   ]);
 });
+
+test("liking the same song under two spellings is still one like", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Rival", "Other Band", "rivalrivalr");
+  // Two rows as far as SQLite is concerned, one song as far as the mix is
+  // concerned: the autoplay pick resolved to a differently-titled video than
+  // the one this listener had added, and they liked both airings.
+  store.likeTrack({
+    userId: "host",
+    title: "Alpha (Official Video)",
+    artist: "First Band",
+  });
+  store.likeTrack({
+    userId: "host",
+    title: "Alpha",
+    artist: "First Band feat. Guest",
+  });
+  expect(store.recentLikes(["host"], 0)).toHaveLength(2);
+  const catalog = likeCatalog(store);
+  const candidates = await catalog.autoplayCandidates({ userIds: ["host"] });
+  const alpha = candidates.find((track) =>
+    track.metadata.title.startsWith("Alpha"),
+  )!;
+  // One like's worth, not two.
+  expect(alpha.score).toBeCloseTo(3, 5);
+  store.close();
+});
+
+test("a like from a clock that stepped backwards is not worth more than a fresh one", async () => {
+  const store = new Store(":memory:");
+  store.likeTrack({
+    userId: "host",
+    title: "Alpha",
+    artist: "First Band",
+    likedAt: Date.now() + likeHalfLifeMs * 2,
+  });
+  const catalog = likeCatalog(store);
+  const candidates = await catalog.autoplayCandidates({ userIds: ["host"] });
+  expect(candidates[0]!.score).toBeCloseTo(3, 5);
+  store.close();
+});

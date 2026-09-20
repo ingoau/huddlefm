@@ -77,6 +77,12 @@ export const recentTrackLimit = 100;
 // How many distinct autoplayed songs count as "recent" when keeping the
 // mix's own output out of listeners' taste profiles.
 const recentAutomaticLimit = 500;
+// Likes are read newest first, so this is how far back an enthusiastic
+// listener's profile reaches. Every other taste source is capped too; without
+// one, somebody's own likes can crowd out everything else they have listened
+// to. Generous next to the 25 recent adds, since a like is rarer and the tail
+// past it has decayed to little in any case.
+const recentLikeLimit = 50;
 
 export const usageLabels = {
   added: "Songs added",
@@ -1424,10 +1430,15 @@ export class Store {
     return changes > 0;
   }
 
-  // What these listeners have liked since `since`. The like button is one way,
-  // so age is the only thing that softens one: the mix weighs each row by how
-  // long ago it was pressed.
-  recentLikes(userIds: readonly string[], since: number): LikeRecord[] {
+  // What these listeners have liked since `since`, newest first and capped like
+  // every other taste source. The like button is one way, so age is the only
+  // thing that softens one: the mix weighs each row by how long ago it was
+  // pressed, and past the cap what is left has decayed to little anyway.
+  recentLikes(
+    userIds: readonly string[],
+    since: number,
+    limit = recentLikeLimit,
+  ): LikeRecord[] {
     if (!userIds.length) return [];
     const slots = userIds.map(() => "?").join(", ");
     return this.db
@@ -1435,9 +1446,9 @@ export class Store {
         `SELECT user_id AS userId, title, artist, liked_at AS likedAt
         FROM track_likes
         WHERE user_id IN (${slots}) AND liked_at >= ?
-        ORDER BY liked_at DESC`,
+        ORDER BY liked_at DESC LIMIT ?`,
       )
-      .all(...userIds, since) as LikeRecord[];
+      .all(...userIds, since, limit) as LikeRecord[];
   }
 
   // What these listeners have heard since `since`, across every Huddle. Titles

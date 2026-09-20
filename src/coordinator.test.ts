@@ -9,6 +9,7 @@ import { Store, type DuckingMode, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
+import { parseLikeValue } from "./coordinator-ui.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
 
@@ -5800,97 +5801,62 @@ test("liking a song records it, answers only the listener, and leaves the card a
   const posted = test.ephemeralCalls.at(-1)!;
   expect(posted[1]).toBe("host");
   expect(posted[2]).toBe("This will be recommended to you more");
-  const blocks = JSON.stringify(posted[4]);
-  expect(blocks).toContain('"action_id":"unlike_track"');
-  // The undo carries the song and the lane the pick came from, so taking a
-  // like back is attributable to the same lane the like was.
-  expect(blocks).toContain(
-    JSON.stringify(
-      JSON.stringify({
-        title: "Worth Hearing Again",
-        artist: "Band",
-        discovery: true,
-      }),
-    ).slice(1, -1),
-  );
+  expect(JSON.stringify(posted[4])).toContain('"action_id":"unlike_track"');
   await test.coordinator.endFromSlack();
 });
 
-test("a like takes itself back, from a message the player never rendered", async () => {
+test("the undo button is not the player's to handle", async () => {
   const test = setup();
   await test.coordinator.start();
   Reflect.set(test.coordinator, "current", playingTrack());
   await test.coordinator.action(
     interaction(test.coordinator, "like_track", "playing"),
   );
-  const undo = {
-    ...interaction(
-      test.coordinator,
-      "unlike_track",
-      JSON.stringify({
-        title: "Worth Hearing Again",
-        artist: "Band",
-        discovery: true,
-      }),
-    ),
-    // The undo lives in an ephemeral of its own, so it never carries the
-    // player's timestamp and must not be turned away as stale.
-    messageTs: "99",
-    responseUrl: "https://hooks.slack.com/actions/test",
-  };
-  await test.coordinator.action(undo);
-  expect(test.unlikes).toEqual([
-    { userId: "host", title: "Worth Hearing Again", artist: "Band" },
-  ]);
-  expect(test.likes).toEqual([]);
-  const audited = test.audit.at(-1) as [
-    string,
-    string,
-    Record<string, unknown>,
-  ];
-  expect(audited[0]).toBe("track.unliked");
-  expect(audited[2]).toMatchObject({
+  const value = (
+    test.ephemeralCalls.at(-1)![4] as { elements?: { value?: string }[] }[]
+  )[1]!.elements![0]!.value;
+  // A like outlives the session it was made in, so the undo is handled by the
+  // app rather than here. What matters at this boundary is that the player
+  // does not claim an interaction it would then serialize behind playback and
+  // drop once the Huddle ends.
+  expect(
+    test.coordinator.handles({
+      ...interaction(test.coordinator, "unlike_track", value),
+      channelId: "channel",
+      messageTs: "ephemeral-ts",
+    }),
+  ).toBeFalse();
+  // And the payload carries what the app-level handler needs to act on it.
+  expect(parseLikeValue(value!)).toEqual({
+    sessionId: test.coordinator.id,
     title: "Worth Hearing Again",
     artist: "Band",
     discovery: true,
   });
-  expect(String(test.replacements.at(-1)![1])).toContain("Undone");
-
-  // Pressing it a second time should not claim to have done anything.
-  await test.coordinator.action(undo);
-  expect(String(test.replacements.at(-1)![1])).toBe(
-    "That like is already undone.",
-  );
   await test.coordinator.endFromSlack();
 });
 
-test("an undo from before the discovery flag existed still lands", async () => {
-  const test = setup();
-  await test.coordinator.start();
-  Reflect.set(test.coordinator, "current", playingTrack());
-  await test.coordinator.action(
-    interaction(test.coordinator, "like_track", "playing"),
-  );
+test("an undo payload from before the discovery flag still parses", () => {
   // A button rendered before the flag was carried, or for a track restored
   // after a restart, which loses it.
-  await test.coordinator.action({
-    ...interaction(
-      test.coordinator,
-      "unlike_track",
-      JSON.stringify({ title: "Worth Hearing Again", artist: "Band" }),
+  expect(
+    parseLikeValue(
+      JSON.stringify({
+        sessionId: "session",
+        title: "Worth Hearing Again",
+        artist: "Band",
+      }),
     ),
-    messageTs: "99",
-    responseUrl: "https://hooks.slack.com/actions/test",
+  ).toEqual({
+    sessionId: "session",
+    title: "Worth Hearing Again",
+    artist: "Band",
   });
-  expect(test.likes).toEqual([]);
-  const audited = test.audit.at(-1) as [
-    string,
-    string,
-    Record<string, unknown>,
-  ];
-  expect(audited[0]).toBe("track.unliked");
-  expect(audited[2]).not.toHaveProperty("discovery");
-  await test.coordinator.endFromSlack();
+  // Anything the app cannot act on is refused rather than half-read.
+  expect(parseLikeValue("not json")).toBeUndefined();
+  expect(
+    parseLikeValue(JSON.stringify({ title: "No Session", artist: "Band" })),
+  ).toBeUndefined();
 });
 
 test("a like that lands after the song has gone says so", async () => {

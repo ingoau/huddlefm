@@ -12,6 +12,7 @@ import { CompanionChannels } from "./companion-channels.ts";
 import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
+import { parseLikeValue } from "./coordinator-ui.ts";
 import { safeError } from "./error-message.ts";
 import { controlDenied } from "./local-control.ts";
 import { flushLogs, logger } from "./logger.ts";
@@ -790,6 +791,47 @@ async function cleanupEndedSession(sessionId: string) {
   }
 }
 
+// Taking back a like, from the ephemeral the like posted. Handled here rather
+// than on the Coordinator because neither end of it belongs to a session: a
+// like is stored against the listener and the song, and the Undo sits in a
+// message Slack keeps showing long after the Huddle it was made in has ended.
+// Only the person who pressed the button is ever shown it, and it only ever
+// touches their own likes, so there is nobody else to check it against.
+async function undoLike(interaction: Interaction) {
+  const like = parseLikeValue(interaction.value);
+  const removed =
+    like && store.unlikeTrack(interaction.userId, like.title, like.artist);
+  if (like && removed) {
+    void recommendations.refreshUser(interaction.userId);
+    audit.record("track.unliked", interaction.userId, {
+      sessionId: like.sessionId,
+      title: like.title,
+      artist: like.artist,
+      ...(like.discovery === undefined ? {} : { discovery: like.discovery }),
+    });
+  }
+  if (!interaction.responseUrl) return;
+  await slackApp
+    .replaceOriginal(
+      interaction.responseUrl,
+      !like
+        ? "That undo is no longer valid."
+        : removed
+          ? "Undone. That song is back to where it was in your recommendations."
+          : "That like is already undone.",
+    )
+    .catch((error) =>
+      log.warn(
+        {
+          event: "unlike_reply_failed",
+          userId: interaction.userId,
+          err: error,
+        },
+        "Could not answer a like undo",
+      ),
+    );
+}
+
 async function restoreEndedSession(interaction: Interaction) {
   const session = restorableSession(interaction.value);
   if (
@@ -1273,7 +1315,9 @@ slackApp.onSuggestion = (interaction) =>
 slackApp.onAction = (interaction) =>
   interaction.actionId === "restore_session"
     ? restoreEndedSession(interaction)
-    : coordinatorFor(interaction)?.action(interaction);
+    : interaction.actionId === "unlike_track"
+      ? undoLike(interaction)
+      : coordinatorFor(interaction)?.action(interaction);
 await slackApp.start();
 await slackHuddle.start((event) => {
   if (event.type === "DirectMessage") {

@@ -46,8 +46,10 @@ const listenBrainzSampleCount = 25;
 const recentAddLimit = 25;
 // An explicit like is the rarest and most deliberate signal the mix gets, and
 // the button is one way, so time is the only thing that takes one back. It
-// outlasts a play (14 days) and a skip (45) by enough to survive the play
-// fatigue that the extra airtime it earns piles up against it.
+// outlasts a play (14 days) and a skip (45) several times over, which is what
+// makes it hold: fatigue from the extra airtime a like earns still outweighs
+// it in the moment — a few fresh plays push a liked song well down — but that
+// fades in a fortnight, and the like is still there when it does.
 export const likeHalfLifeMs = 90 * 24 * 60 * 60_000;
 export const likeWindowMs = likeHalfLifeMs * 4;
 // Above the weight an added track carries: someone went out of their way to
@@ -736,11 +738,26 @@ export class RecommendationCatalog {
     // of being taken back, and carries no metadata: the track has been played
     // in a Huddle by definition, so resolving it finds the same video again.
     const now = Date.now();
+    // Rows are deduplicated the way the mix matches songs, not the way SQLite
+    // stores them: liking "Alpha (Official Video)" and later plain "Alpha" is
+    // two rows but one song, and pressing the button twice is not meant to be
+    // worth twice as much. Newest first, so the freshest press is the one kept.
+    const likedKeys = new Set<string>();
     const liked: TasteContribution[] = this.store
       .recentLikes([userId], now - likeWindowMs)
+      .filter((like) => {
+        const key = trackKey(like.title, like.artist);
+        if (likedKeys.has(key)) return false;
+        likedKeys.add(key);
+        return true;
+      })
       .map((like) => ({
         userId,
-        weight: likeWeight * 0.5 ** ((now - like.likedAt) / likeHalfLifeMs),
+        // Clamped like every other decay here: a clock that steps backwards
+        // must not make a like worth more than a fresh one.
+        weight:
+          likeWeight *
+          0.5 ** (Math.max(0, now - like.likedAt) / likeHalfLifeMs),
         source: "liked",
         title: like.title,
         artist: like.artist,

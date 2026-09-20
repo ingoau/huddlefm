@@ -1171,6 +1171,23 @@ test("liking the same song again refreshes it instead of stacking up", () => {
   expect(store.recentLikes(["host"], 9_001)).toEqual([]);
 });
 
+test("recent likes are capped so one listener cannot crowd out their own taste", () => {
+  const store = new Store(":memory:");
+  for (let index = 0; index < 60; index++)
+    store.likeTrack({
+      userId: "host",
+      title: `Song ${index}`,
+      artist: "Band",
+      likedAt: 1_000 + index,
+    });
+  const likes = store.recentLikes(["host"], 0);
+  expect(likes).toHaveLength(50);
+  // Newest first, so the cap drops the faded tail rather than the fresh end.
+  expect(likes[0]).toMatchObject({ title: "Song 59" });
+  expect(likes.at(-1)).toMatchObject({ title: "Song 10" });
+  expect(store.recentLikes(["host"], 0, 3)).toHaveLength(3);
+});
+
 test("a like can be taken back once", () => {
   const store = new Store(":memory:");
   store.likeTrack({ userId: "host", title: "Song", artist: "Band" });
