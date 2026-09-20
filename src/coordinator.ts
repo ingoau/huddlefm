@@ -53,6 +53,7 @@ import {
   escape,
   footerContext,
   icon,
+  likeValue,
   permissionLabels,
   plain,
   safeAuditError,
@@ -102,6 +103,10 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal.reason instanceof Error) throw signal.reason;
   throw new DOMException("This operation was aborted", "AbortError");
 }
+
+// What the person who pressed the like button hears back. Nobody else sees it,
+// so it says what the like is for rather than announcing it to the room.
+const likedNotice = "This will be recommended to you more";
 
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
@@ -570,6 +575,7 @@ export class Coordinator {
         seek_forward: () => this.seek(interaction, 10),
         volume_down: () => this.changeVolume(interaction, -0.05),
         volume_up: () => this.changeVolume(interaction, 0.05),
+        like_track: () => this.like(interaction),
         queue_move_up: () => this.reorder(interaction, -1),
         queue_move_down: () => this.reorder(interaction, 1),
         queue_play_next: () => this.playNext(interaction),
@@ -2211,6 +2217,90 @@ export class Coordinator {
         autoplayDiscoveryMaxInterval,
         this.autoplayDiscoveryInterval * 2,
       );
+  }
+
+  // A one-way, invisible "more of this". Nothing on the player changes: the
+  // button holds no state, so there is nothing for the room to read off it and
+  // nothing to re-render. Everyone sees the same card, and only the person who
+  // pressed it hears back — in an ephemeral, which is the one message Slack
+  // shows to a single person, and so the only place the undo can live.
+  //
+  // Taking it back is not handled here: a like outlives the session it was
+  // made in, and so must its undo.
+  private async like(interaction: Interaction) {
+    const entry = this.likeable(interaction.value);
+    if (!entry)
+      return this.notice(interaction.userId, "That song has already finished.");
+    this.store.likeTrack({
+      userId: interaction.userId,
+      title: entry.title,
+      artist: entry.artist,
+    });
+    void this.recommendations?.refreshUser(interaction.userId);
+    this.audit.record("track.liked", interaction.userId, {
+      sessionId: this.id,
+      ...auditTrack(entry),
+      ...(entry.discovery === undefined ? {} : { discovery: entry.discovery }),
+    });
+    this.log.info(
+      {
+        event: "track_liked",
+        entryId: entry.id,
+        sourceId: entry.sourceId,
+        userId: interaction.userId,
+      },
+      "Track liked",
+    );
+    // The row is already written, so a Slack failure here costs the listener
+    // their notice and their undo but must not fail the like itself.
+    await this.slack
+      .ephemeral(
+        this.room.uiChannelId,
+        interaction.userId,
+        likedNotice,
+        this.room.uiThreadTs,
+        [
+          { type: "section", text: { type: "mrkdwn", text: likedNotice } },
+          {
+            type: "actions",
+            block_id: "track_like",
+            elements: [
+              {
+                type: "button",
+                action_id: "unlike_track",
+                text: plain("Undo"),
+                value: likeValue({
+                  sessionId: this.id,
+                  title: entry.title,
+                  artist: entry.artist,
+                  ...(entry.discovery === undefined
+                    ? {}
+                    : { discovery: entry.discovery }),
+                }),
+              },
+            ],
+          },
+        ],
+      )
+      .catch((error) =>
+        this.log.warn(
+          {
+            event: "like_notice_failed",
+            userId: interaction.userId,
+            err: error,
+          },
+          "Could not post like notice",
+        ),
+      );
+  }
+
+  // The song a like button refers to. It is only ever rendered for whatever is
+  // playing, but a click takes a moment to arrive, by which time the song may
+  // have moved into history. A click for a song this session never played, or
+  // has long since forgotten, is the one the listener is told about.
+  private likeable(id: string) {
+    if (!id) return undefined;
+    return [this.current, ...this.history].find((entry) => entry?.id === id);
   }
 
   // Records the skip against the listener who made it, and against everyone
@@ -5185,6 +5275,16 @@ export class Coordinator {
                       action_id: "volume_up",
                       text: icon(":ms-speaker-loud-volume:"),
                       value: this.id,
+                    },
+                    // Carries the entry rather than the session: a click can
+                    // land after the song has rolled over, and it should like
+                    // the song they were listening to rather than whatever is
+                    // playing by the time it arrives.
+                    {
+                      type: "button",
+                      action_id: "like_track",
+                      text: icon("💖"),
+                      value: current.id,
                     },
                   ],
                 },

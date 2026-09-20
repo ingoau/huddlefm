@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { FatigueIndex } from "./fatigue.ts";
 import {
   applySkipPenalties,
+  likeHalfLifeMs,
+  likeWindowMs,
   mergeTaste,
   primaryArtist,
   RecommendationCatalog,
@@ -1484,5 +1486,208 @@ test("huddle mix ignores fatigue carried by listeners who are not here", async (
     "Beta",
     "Alpha",
   ]);
+  store.close();
+});
+
+function likeCatalog(store: Store) {
+  return new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) => ({
+        sourceInput: `https://music.youtube.com/watch?v=${title.toLowerCase().padEnd(11, "x")}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${title.toLowerCase().padEnd(11, "x")}`,
+        sourceId: title.toLowerCase().padEnd(11, "x"),
+        title,
+        artist,
+      }),
+      upNextTracks: async () => [],
+    } satisfies RecommendationTracks,
+    // A fixed draw keeps the sample in ranked order, so the only thing that
+    // can reorder these is the score itself.
+    { random: () => 0 },
+    (async (_input: unknown) =>
+      new Response("{}", { status: 404 })) as unknown as typeof fetch,
+  );
+}
+
+test("a like outweighs having added the song, and fades as it ages", async () => {
+  const build = (likedAt?: number) => {
+    const store = new Store(":memory:");
+    addPastTrack(store, "host", "Beta", "Second Band", "betabetabet");
+    if (likedAt !== undefined)
+      store.likeTrack({
+        userId: "host",
+        title: "Alpha",
+        artist: "First Band",
+        likedAt,
+      });
+    return { store, catalog: likeCatalog(store) };
+  };
+  const now = Date.now();
+
+  const plain = build();
+  const untouched = await plain.catalog.autoplayCandidates({
+    userIds: ["host"],
+  });
+  expect(untouched.map((track) => track.metadata.title)).toEqual(["Beta"]);
+  plain.store.close();
+
+  // Liking a song says more than having queued one, so it leads.
+  const fresh = build(now);
+  const liked = await fresh.catalog.autoplayCandidates({ userIds: ["host"] });
+  expect(liked.map((track) => track.metadata.title)).toEqual(["Alpha", "Beta"]);
+  const freshScore = liked[0]!.score;
+  fresh.store.close();
+
+  // The button is one way, so age is what takes a like back: one half-life on,
+  // it carries half the weight and no longer outranks an added song.
+  const aged = build(now - likeHalfLifeMs);
+  const faded = await aged.catalog.autoplayCandidates({ userIds: ["host"] });
+  expect(
+    faded.find((track) => track.metadata.title === "Alpha")!.score,
+  ).toBeCloseTo(freshScore / 2, 5);
+  expect(faded.map((track) => track.metadata.title)).toEqual(["Beta", "Alpha"]);
+  aged.store.close();
+
+  // Past the window the decay has taken it to nothing worth reading.
+  const forgotten = build(now - likeWindowMs - 1);
+  expect(
+    (await forgotten.catalog.autoplayCandidates({ userIds: ["host"] })).map(
+      (track) => track.metadata.title,
+    ),
+  ).toEqual(["Beta"]);
+  forgotten.store.close();
+});
+
+test("a liked song comes back in the listener's own favourites", async () => {
+  const store = new Store(":memory:");
+  store.likeTrack({ userId: "host", title: "Alpha", artist: "First Band" });
+  const catalog = likeCatalog(store);
+  await catalog.prefetchUser("host");
+  const recommendations = catalog.userRecommendations("host");
+  // A like is the listener seeing their own feedback come back as a
+  // recommendation, which is the only place it is ever visible.
+  expect(recommendations.favourites.map((track) => track.title)).toEqual([
+    "Alpha",
+  ]);
+  expect(recommendations.discover.map((track) => track.title)).toEqual([]);
+  store.close();
+});
+
+test("an aged like seeds its artist as weakly as it seeds the song", async () => {
+  // With no scrobbler connected, the artists someone liked are all the mix has
+  // to seed similar-artist lookups with, so the age of a like has to carry
+  // through to the seed. "Faded" is liked twice and "Fresh" once, so counting
+  // likes alone puts Faded ahead however old its likes are.
+  const discoverFor = async (fadedLikedAt: number) => {
+    const store = new Store(":memory:");
+    for (const title of ["Old One", "Old Two"])
+      store.likeTrack({
+        userId: "host",
+        title,
+        artist: "Faded",
+        likedAt: fadedLikedAt,
+      });
+    store.likeTrack({ userId: "host", title: "New One", artist: "Fresh" });
+    const videoId = (title: string) =>
+      title
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "")
+        .slice(0, 11)
+        .padEnd(11, "x");
+    const catalog = new RecommendationCatalog(
+      store,
+      {
+        searchSong: async (title: string, artist: string) => ({
+          sourceInput: `https://music.youtube.com/watch?v=${videoId(title)}`,
+          canonicalUrl: `https://music.youtube.com/watch?v=${videoId(title)}`,
+          sourceId: videoId(title),
+          title,
+          artist,
+        }),
+        upNextTracks: async () => [],
+      } satisfies RecommendationTracks,
+      { lastFmApiKey: "key", random: () => 0 },
+      (async (input: unknown) => {
+        const url = new URL(String(input));
+        const method = url.searchParams.get("method") ?? "";
+        const artist = url.searchParams.get("artist") ?? "";
+        if (method === "artist.getSimilar")
+          return Response.json({
+            similarartists: {
+              artist: [{ name: `${artist} Neighbour`, match: "1" }],
+            },
+          });
+        if (method === "artist.getTopTracks")
+          return Response.json({
+            toptracks: {
+              track: [{ name: `${artist} Hit`, artist: { name: artist } }],
+            },
+          });
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch,
+    );
+    await catalog.prefetchUser("host");
+    const titles = catalog
+      .userRecommendations("host")
+      .discover.map((track) => track.title);
+    store.close();
+    return titles;
+  };
+
+  const now = Date.now();
+  // All three likes fresh: two likes beat one, so Faded leads its neighbour in.
+  expect(await discoverFor(now)).toEqual([
+    "Faded Neighbour Hit",
+    "Fresh Neighbour Hit",
+  ]);
+
+  // The same two likes, three half-lives old. They are still the only thing
+  // seeding Faded, but what is left of them no longer outweighs one fresh
+  // like, so the order turns over.
+  expect(await discoverFor(now - likeHalfLifeMs * 3)).toEqual([
+    "Fresh Neighbour Hit",
+    "Faded Neighbour Hit",
+  ]);
+});
+
+test("liking the same song under two spellings is still one like", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Rival", "Other Band", "rivalrivalr");
+  // Two rows as far as SQLite is concerned, one song as far as the mix is
+  // concerned: the autoplay pick resolved to a differently-titled video than
+  // the one this listener had added, and they liked both airings.
+  store.likeTrack({
+    userId: "host",
+    title: "Alpha (Official Video)",
+    artist: "First Band",
+  });
+  store.likeTrack({
+    userId: "host",
+    title: "Alpha",
+    artist: "First Band feat. Guest",
+  });
+  expect(store.recentLikes(["host"], 0)).toHaveLength(2);
+  const catalog = likeCatalog(store);
+  const candidates = await catalog.autoplayCandidates({ userIds: ["host"] });
+  const alpha = candidates.find((track) =>
+    track.metadata.title.startsWith("Alpha"),
+  )!;
+  // One like's worth, not two.
+  expect(alpha.score).toBeCloseTo(3, 5);
+  store.close();
+});
+
+test("a like from a clock that stepped backwards is not worth more than a fresh one", async () => {
+  const store = new Store(":memory:");
+  store.likeTrack({
+    userId: "host",
+    title: "Alpha",
+    artist: "First Band",
+    likedAt: Date.now() + likeHalfLifeMs * 2,
+  });
+  const catalog = likeCatalog(store);
+  const candidates = await catalog.autoplayCandidates({ userIds: ["host"] });
+  expect(candidates[0]!.score).toBeCloseTo(3, 5);
   store.close();
 });

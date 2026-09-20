@@ -77,6 +77,12 @@ export const recentTrackLimit = 100;
 // How many distinct autoplayed songs count as "recent" when keeping the
 // mix's own output out of listeners' taste profiles.
 const recentAutomaticLimit = 500;
+// Likes are read newest first, so this is how far back an enthusiastic
+// listener's profile reaches. Every other taste source is capped too; without
+// one, somebody's own likes can crowd out everything else they have listened
+// to. Generous next to the 25 recent adds, since a like is rarer and the tail
+// past it has decayed to little in any case.
+const recentLikeLimit = 50;
 
 export const usageLabels = {
   added: "Songs added",
@@ -115,6 +121,13 @@ export type SkipRecord = {
   artist: string;
   weight: number;
   skippedAt: number;
+};
+
+export type LikeRecord = {
+  userId: string;
+  title: string;
+  artist: string;
+  likedAt: number;
 };
 
 type SavedTrack = {
@@ -373,6 +386,17 @@ export class Store {
         weight REAL NOT NULL,
         skipped_at INTEGER NOT NULL
       );
+      -- An explicit "more of this" from one listener. The button is one way
+      -- and shows nothing back, so it gets pressed again without meaning any
+      -- more than the first time: one row per listener per song, and a repeat
+      -- press only moves the date forward.
+      CREATE TABLE IF NOT EXISTS track_likes (
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        artist TEXT NOT NULL,
+        liked_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, title COLLATE NOCASE, artist COLLATE NOCASE)
+      );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
       CREATE INDEX IF NOT EXISTS tracks_session_status
@@ -391,6 +415,8 @@ export class Store {
         ON track_plays(session_id, played_at DESC);
       CREATE INDEX IF NOT EXISTS autoplay_skips_user_recent
         ON autoplay_skips(user_id, skipped_at DESC);
+      CREATE INDEX IF NOT EXISTS track_likes_user_recent
+        ON track_likes(user_id, liked_at DESC);
     `);
     this.ensureColumn("sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'");
     this.migrateAutoplayModes();
@@ -1373,6 +1399,58 @@ export class Store {
       );
   }
 
+  // Records that one listener wants more of a song. Pressing the button again
+  // is not a stronger opinion, only a fresher one, so the row is replaced
+  // rather than added to.
+  likeTrack(like: {
+    userId: string;
+    title: string;
+    artist: string;
+    likedAt?: number;
+  }) {
+    this.db
+      .query(
+        `INSERT INTO track_likes (user_id, title, artist, liked_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT DO UPDATE SET liked_at = excluded.liked_at`,
+      )
+      .run(like.userId, like.title, like.artist, like.likedAt ?? Date.now());
+  }
+
+  // Takes a like back. Returns whether there was one to take back, so an undo
+  // that arrives twice can say so instead of claiming to have done something.
+  unlikeTrack(userId: string, title: string, artist: string) {
+    const { changes } = this.db
+      .query(
+        `DELETE FROM track_likes
+        WHERE user_id = ? AND title = ? COLLATE NOCASE
+        AND artist = ? COLLATE NOCASE`,
+      )
+      .run(userId, title, artist);
+    return changes > 0;
+  }
+
+  // What these listeners have liked since `since`, newest first and capped like
+  // every other taste source. The like button is one way, so age is the only
+  // thing that softens one: the mix weighs each row by how long ago it was
+  // pressed, and past the cap what is left has decayed to little anyway.
+  recentLikes(
+    userIds: readonly string[],
+    since: number,
+    limit = recentLikeLimit,
+  ): LikeRecord[] {
+    if (!userIds.length) return [];
+    const slots = userIds.map(() => "?").join(", ");
+    return this.db
+      .query(
+        `SELECT user_id AS userId, title, artist, liked_at AS likedAt
+        FROM track_likes
+        WHERE user_id IN (${slots}) AND liked_at >= ?
+        ORDER BY liked_at DESC LIMIT ?`,
+      )
+      .all(...userIds, since, limit) as LikeRecord[];
+  }
+
   // What these listeners have heard since `since`, across every Huddle. Titles
   // and artists come back raw: the mix normalizes them itself, so changing how
   // songs are matched never needs the stored rows rewritten.
@@ -1419,13 +1497,20 @@ export class Store {
 
   // Rows older than the window the mix looks at have decayed to nothing, so
   // they are only taking up space.
-  pruneListeningMemory(playsBefore: number, skipsBefore: number) {
+  pruneListeningMemory(
+    playsBefore: number,
+    skipsBefore: number,
+    likesBefore: number,
+  ) {
     this.db
       .query("DELETE FROM track_plays WHERE played_at < ?")
       .run(playsBefore);
     this.db
       .query("DELETE FROM autoplay_skips WHERE skipped_at < ?")
       .run(skipsBefore);
+    this.db
+      .query("DELETE FROM track_likes WHERE liked_at < ?")
+      .run(likesBefore);
   }
 
   setTrack(
