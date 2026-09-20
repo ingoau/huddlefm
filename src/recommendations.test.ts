@@ -1573,3 +1573,80 @@ test("a liked song comes back in the listener's own favourites", async () => {
   expect(recommendations.discover.map((track) => track.title)).toEqual([]);
   store.close();
 });
+
+test("an aged like seeds its artist as weakly as it seeds the song", async () => {
+  // With no scrobbler connected, the artists someone liked are all the mix has
+  // to seed similar-artist lookups with, so the age of a like has to carry
+  // through to the seed. "Faded" is liked twice and "Fresh" once, so counting
+  // likes alone puts Faded ahead however old its likes are.
+  const discoverFor = async (fadedLikedAt: number) => {
+    const store = new Store(":memory:");
+    for (const title of ["Old One", "Old Two"])
+      store.likeTrack({
+        userId: "host",
+        title,
+        artist: "Faded",
+        likedAt: fadedLikedAt,
+      });
+    store.likeTrack({ userId: "host", title: "New One", artist: "Fresh" });
+    const videoId = (title: string) =>
+      title
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "")
+        .slice(0, 11)
+        .padEnd(11, "x");
+    const catalog = new RecommendationCatalog(
+      store,
+      {
+        searchSong: async (title: string, artist: string) => ({
+          sourceInput: `https://music.youtube.com/watch?v=${videoId(title)}`,
+          canonicalUrl: `https://music.youtube.com/watch?v=${videoId(title)}`,
+          sourceId: videoId(title),
+          title,
+          artist,
+        }),
+        upNextTracks: async () => [],
+      } satisfies RecommendationTracks,
+      { lastFmApiKey: "key", random: () => 0 },
+      (async (input: unknown) => {
+        const url = new URL(String(input));
+        const method = url.searchParams.get("method") ?? "";
+        const artist = url.searchParams.get("artist") ?? "";
+        if (method === "artist.getSimilar")
+          return Response.json({
+            similarartists: {
+              artist: [{ name: `${artist} Neighbour`, match: "1" }],
+            },
+          });
+        if (method === "artist.getTopTracks")
+          return Response.json({
+            toptracks: {
+              track: [{ name: `${artist} Hit`, artist: { name: artist } }],
+            },
+          });
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch,
+    );
+    await catalog.prefetchUser("host");
+    const titles = catalog
+      .userRecommendations("host")
+      .discover.map((track) => track.title);
+    store.close();
+    return titles;
+  };
+
+  const now = Date.now();
+  // All three likes fresh: two likes beat one, so Faded leads its neighbour in.
+  expect(await discoverFor(now)).toEqual([
+    "Faded Neighbour Hit",
+    "Fresh Neighbour Hit",
+  ]);
+
+  // The same two likes, three half-lives old. They are still the only thing
+  // seeding Faded, but what is left of them no longer outweighs one fresh
+  // like, so the order turns over.
+  expect(await discoverFor(now - likeHalfLifeMs * 3)).toEqual([
+    "Fresh Neighbour Hit",
+    "Faded Neighbour Hit",
+  ]);
+});

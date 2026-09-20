@@ -5802,9 +5802,15 @@ test("liking a song records it, answers only the listener, and leaves the card a
   expect(posted[2]).toBe("This will be recommended to you more");
   const blocks = JSON.stringify(posted[4]);
   expect(blocks).toContain('"action_id":"unlike_track"');
+  // The undo carries the song and the lane the pick came from, so taking a
+  // like back is attributable to the same lane the like was.
   expect(blocks).toContain(
     JSON.stringify(
-      JSON.stringify({ title: "Worth Hearing Again", artist: "Band" }),
+      JSON.stringify({
+        title: "Worth Hearing Again",
+        artist: "Band",
+        discovery: true,
+      }),
     ).slice(1, -1),
   );
   await test.coordinator.endFromSlack();
@@ -5821,7 +5827,11 @@ test("a like takes itself back, from a message the player never rendered", async
     ...interaction(
       test.coordinator,
       "unlike_track",
-      JSON.stringify({ title: "Worth Hearing Again", artist: "Band" }),
+      JSON.stringify({
+        title: "Worth Hearing Again",
+        artist: "Band",
+        discovery: true,
+      }),
     ),
     // The undo lives in an ephemeral of its own, so it never carries the
     // player's timestamp and must not be turned away as stale.
@@ -5833,7 +5843,17 @@ test("a like takes itself back, from a message the player never rendered", async
     { userId: "host", title: "Worth Hearing Again", artist: "Band" },
   ]);
   expect(test.likes).toEqual([]);
-  expect((test.audit.at(-1) as [string, string])[0]).toBe("track.unliked");
+  const audited = test.audit.at(-1) as [
+    string,
+    string,
+    Record<string, unknown>,
+  ];
+  expect(audited[0]).toBe("track.unliked");
+  expect(audited[2]).toMatchObject({
+    title: "Worth Hearing Again",
+    artist: "Band",
+    discovery: true,
+  });
   expect(String(test.replacements.at(-1)![1])).toContain("Undone");
 
   // Pressing it a second time should not claim to have done anything.
@@ -5841,6 +5861,35 @@ test("a like takes itself back, from a message the player never rendered", async
   expect(String(test.replacements.at(-1)![1])).toBe(
     "That like is already undone.",
   );
+  await test.coordinator.endFromSlack();
+});
+
+test("an undo from before the discovery flag existed still lands", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", playingTrack());
+  await test.coordinator.action(
+    interaction(test.coordinator, "like_track", "playing"),
+  );
+  // A button rendered before the flag was carried, or for a track restored
+  // after a restart, which loses it.
+  await test.coordinator.action({
+    ...interaction(
+      test.coordinator,
+      "unlike_track",
+      JSON.stringify({ title: "Worth Hearing Again", artist: "Band" }),
+    ),
+    messageTs: "99",
+    responseUrl: "https://hooks.slack.com/actions/test",
+  });
+  expect(test.likes).toEqual([]);
+  const audited = test.audit.at(-1) as [
+    string,
+    string,
+    Record<string, unknown>,
+  ];
+  expect(audited[0]).toBe("track.unliked");
+  expect(audited[2]).not.toHaveProperty("discovery");
   await test.coordinator.endFromSlack();
 });
 

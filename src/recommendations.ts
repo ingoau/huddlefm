@@ -53,6 +53,9 @@ export const likeWindowMs = likeHalfLifeMs * 4;
 // Above the weight an added track carries: someone went out of their way to
 // say so, about a song they were already being played.
 const likeWeight = 3;
+// What queueing a song says about someone's taste, and the unit the artist
+// fallback below counts in.
+const addedWeight = 2;
 const knownHistoryLimit = 1000;
 const upNextPerSeed = 10;
 
@@ -724,7 +727,9 @@ export class RecommendationCatalog {
     const settings = this.store.getUserScrobbling(userId);
     const added = this.store
       .recentTracks(userId, recentAddLimit)
-      .map((track) => contributionFromMetadata(track, userId, "huddlefm", 2));
+      .map((track) =>
+        contributionFromMetadata(track, userId, "huddlefm", addedWeight),
+      );
     // Liking a song is the only way to say "more of this" about something the
     // mix chose rather than something you queued, so it is the one positive
     // signal nothing else here can stand in for. A like fades with age instead
@@ -784,15 +789,19 @@ export class RecommendationCatalog {
       else artists.set(key, { ...artist });
     }
     // Without a scrobbler, the artists someone adds or likes are the best
-    // signal.
+    // signal. Counted on the same scale as the track weights, so an added song
+    // is worth one artist point and a like is worth what it is still worth:
+    // one that has nearly aged out seeds an artist as weakly as it seeds the
+    // song itself, rather than as strongly as a fresh one.
     if (!artists.size)
       for (const track of [...added, ...liked]) {
         const name = firstArtist(track.artist);
         const key = normalizeToken(name);
         if (!key) continue;
+        const score = track.weight / addedWeight;
         const existing = artists.get(key);
-        if (existing) existing.score += 1;
-        else artists.set(key, { name, score: 1 });
+        if (existing) existing.score += score;
+        else artists.set(key, { name, score });
       }
     return {
       contributions,

@@ -113,15 +113,25 @@ const ephemeralActions = new Set(["toggle_session_scrobbling", "unlike_track"]);
 
 // The undo on a like carries the song itself rather than the entry id: by the
 // time anyone presses it the entry may be long gone from this session, and a
-// like is stored against the song, not the queue row.
+// like is stored against the song, not the queue row. It carries the pick's
+// discovery flag too, so taking a like back is attributable to the same lane
+// the like was.
 function parseLikeValue(value: string) {
   try {
     const parsed: unknown = JSON.parse(value);
     if (!parsed || typeof parsed !== "object") return undefined;
-    const { title, artist } = parsed as { title?: unknown; artist?: unknown };
+    const { title, artist, discovery } = parsed as {
+      title?: unknown;
+      artist?: unknown;
+      discovery?: unknown;
+    };
     if (typeof title !== "string" || typeof artist !== "string")
       return undefined;
-    return { title, artist };
+    return {
+      title,
+      artist,
+      ...(typeof discovery === "boolean" ? { discovery } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -2285,6 +2295,9 @@ export class Coordinator {
               value: JSON.stringify({
                 title: entry.title,
                 artist: entry.artist,
+                ...(entry.discovery === undefined
+                  ? {}
+                  : { discovery: entry.discovery }),
               }),
             },
           ],
@@ -2307,6 +2320,9 @@ export class Coordinator {
         sessionId: this.id,
         title: track.title,
         artist: track.artist,
+        ...(track.discovery === undefined
+          ? {}
+          : { discovery: track.discovery }),
       });
     }
     if (!interaction.responseUrl) return;
