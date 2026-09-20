@@ -34,7 +34,7 @@ import {
 import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
-import { RecommendationCatalog } from "./recommendations.ts";
+import { likeWindowMs, RecommendationCatalog } from "./recommendations.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
 
 const resumeTtlMs = 3 * 60_000;
@@ -94,6 +94,7 @@ log.info({ event: "store_opened" }, "Store opened");
 store.pruneListeningMemory(
   Date.now() - playWindowMs,
   Date.now() - skipWindowMs,
+  Date.now() - likeWindowMs,
 );
 const scrobbling = new ScrobbleDispatcher(store, config);
 scrobbling.start();

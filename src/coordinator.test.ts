@@ -58,6 +58,8 @@ function setup(
   const sessionChanges: unknown[] = [];
   const recordedMessages: unknown[] = [];
   const rememberedSkips: unknown[] = [];
+  const likes: unknown[] = [];
+  const unlikes: unknown[] = [];
   let post = 0;
   let modal = 0;
   const slack = {
@@ -142,6 +144,28 @@ function setup(
       recordAutoplaySkip: (value: unknown) => {
         rememberedSkips.push(value);
       },
+      recentLikes: () => [],
+      likeTrack: (value: unknown) => {
+        likes.push(value);
+      },
+      unlikeTrack: (userId: string, title: string, artist: string) => {
+        unlikes.push({ userId, title, artist });
+        const index = likes.findIndex((like) => {
+          const value = like as {
+            userId: string;
+            title: string;
+            artist: string;
+          };
+          return (
+            value.userId === userId &&
+            value.title === title &&
+            value.artist === artist
+          );
+        });
+        if (index < 0) return false;
+        likes.splice(index, 1);
+        return true;
+      },
     } as unknown as Store);
   const lyrics =
     lyricsOverride ??
@@ -213,6 +237,8 @@ function setup(
     sessionChanges,
     recordedMessages,
     rememberedSkips,
+    likes,
+    unlikes,
   };
 }
 
@@ -5696,4 +5722,150 @@ test("falls back to the configured ducking mode when none was saved", async () =
   await result.coordinator.resume("restorer");
   expect(result.media).toContainEqual({ type: "ducking_mode", mode: "off" });
   await result.coordinator.endFromSlack();
+});
+
+function playingTrack() {
+  return {
+    id: "playing",
+    requesterId: "guest",
+    sourceInput: "https://example.com/likedlikedl",
+    canonicalUrl: "https://example.com/likedlikedl",
+    sourceId: "likedlikedl",
+    title: "Worth Hearing Again",
+    artist: "Band",
+    status: "playing",
+    filePath: "liked.opus",
+    automatic: true,
+    discovery: true,
+  };
+}
+
+test("the like button sits with the volume controls, and only while playing", async () => {
+  const result = setup({
+    resolve: async (value: string) => ({
+      sourceInput: value,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: value,
+      title: value,
+      artist: "Artist",
+    }),
+    prepare: async (_track: unknown, _directory: string, id: string) =>
+      `${id}.opus`,
+  } as unknown as TrackCatalog);
+  await result.coordinator.start();
+  // Nothing playing, so there is nothing to like.
+  expect(JSON.stringify(result.posted[0])).not.toContain(
+    '"action_id":"like_track"',
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  const player = JSON.stringify(result.updates.at(-1));
+  const volume = player.slice(
+    player.indexOf('"block_id":"volume_'),
+    player.indexOf('"block_id":"seek_'),
+  );
+  expect(volume).toContain('"action_id":"like_track"');
+  expect(volume).toContain("\ud83d\udc96");
+  await result.coordinator.endFromSlack();
+});
+
+test("liking a song records it, answers only the listener, and leaves the card alone", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", playingTrack());
+  const renders = test.updates.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "like_track", "playing"),
+  );
+  expect(test.likes).toEqual([
+    { userId: "host", title: "Worth Hearing Again", artist: "Band" },
+  ]);
+  // The button carries no state, so nothing about the shared card changes.
+  expect(test.updates).toHaveLength(renders);
+  const audited = test.audit.at(-1) as [
+    string,
+    string,
+    Record<string, unknown>,
+  ];
+  expect(audited[0]).toBe("track.liked");
+  expect(audited[1]).toBe("host");
+  expect(audited[2]).toMatchObject({
+    title: "Worth Hearing Again",
+    artist: "Band",
+    origin: "autoplay",
+    discovery: true,
+  });
+  // Only the person who pressed it hears back, and the undo comes with it.
+  const posted = test.ephemeralCalls.at(-1)!;
+  expect(posted[1]).toBe("host");
+  expect(posted[2]).toBe("This will be recommended to you more");
+  const blocks = JSON.stringify(posted[4]);
+  expect(blocks).toContain('"action_id":"unlike_track"');
+  expect(blocks).toContain(
+    JSON.stringify(
+      JSON.stringify({ title: "Worth Hearing Again", artist: "Band" }),
+    ).slice(1, -1),
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("a like takes itself back, from a message the player never rendered", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", playingTrack());
+  await test.coordinator.action(
+    interaction(test.coordinator, "like_track", "playing"),
+  );
+  const undo = {
+    ...interaction(
+      test.coordinator,
+      "unlike_track",
+      JSON.stringify({ title: "Worth Hearing Again", artist: "Band" }),
+    ),
+    // The undo lives in an ephemeral of its own, so it never carries the
+    // player's timestamp and must not be turned away as stale.
+    messageTs: "99",
+    responseUrl: "https://hooks.slack.com/actions/test",
+  };
+  await test.coordinator.action(undo);
+  expect(test.unlikes).toEqual([
+    { userId: "host", title: "Worth Hearing Again", artist: "Band" },
+  ]);
+  expect(test.likes).toEqual([]);
+  expect((test.audit.at(-1) as [string, string])[0]).toBe("track.unliked");
+  expect(String(test.replacements.at(-1)![1])).toContain("Undone");
+
+  // Pressing it a second time should not claim to have done anything.
+  await test.coordinator.action(undo);
+  expect(String(test.replacements.at(-1)![1])).toBe(
+    "That like is already undone.",
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("a like that lands after the song has gone says so", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", playingTrack());
+  await test.coordinator.action(
+    interaction(test.coordinator, "like_track", "already-finished"),
+  );
+  expect(test.likes).toEqual([]);
+  expect(test.ephemeral.at(-1)).toBe("That song has already finished.");
+  await test.coordinator.endFromSlack();
+});
+
+test("a like still lands once the song has moved into history", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "history", [playingTrack()]);
+  Reflect.set(test.coordinator, "current", undefined);
+  await test.coordinator.action(
+    interaction(test.coordinator, "like_track", "playing"),
+  );
+  expect(test.likes).toEqual([
+    { userId: "host", title: "Worth Hearing Again", artist: "Band" },
+  ]);
+  await test.coordinator.endFromSlack();
 });

@@ -44,6 +44,15 @@ const tracksPerSimilarArtist = 3;
 const listenBrainzFetchCount = 100;
 const listenBrainzSampleCount = 25;
 const recentAddLimit = 25;
+// An explicit like is the rarest and most deliberate signal the mix gets, and
+// the button is one way, so time is the only thing that takes one back. It
+// outlasts a play (14 days) and a skip (45) by enough to survive the play
+// fatigue that the extra airtime it earns piles up against it.
+export const likeHalfLifeMs = 90 * 24 * 60 * 60_000;
+export const likeWindowMs = likeHalfLifeMs * 4;
+// Above the weight an added track carries: someone went out of their way to
+// say so, about a song they were already being played.
+const likeWeight = 3;
 const knownHistoryLimit = 1000;
 const upNextPerSeed = 10;
 
@@ -121,6 +130,7 @@ export type RecommendationStore = Pick<
   | "getUserScrobbling"
   | "recentTracks"
   | "recentAutomaticTracks"
+  | "recentLikes"
   | "findPlayedTrack"
 >;
 
@@ -715,6 +725,21 @@ export class RecommendationCatalog {
     const added = this.store
       .recentTracks(userId, recentAddLimit)
       .map((track) => contributionFromMetadata(track, userId, "huddlefm", 2));
+    // Liking a song is the only way to say "more of this" about something the
+    // mix chose rather than something you queued, so it is the one positive
+    // signal nothing else here can stand in for. A like fades with age instead
+    // of being taken back, and carries no metadata: the track has been played
+    // in a Huddle by definition, so resolving it finds the same video again.
+    const now = Date.now();
+    const liked: TasteContribution[] = this.store
+      .recentLikes([userId], now - likeWindowMs)
+      .map((like) => ({
+        userId,
+        weight: likeWeight * 0.5 ** ((now - like.likedAt) / likeHalfLifeMs),
+        source: "liked",
+        title: like.title,
+        artist: like.artist,
+      }));
     // Autoplay picks get scrobbled for everyone in the room, so they would
     // otherwise turn up in every listener's recent listens and, boosted as a
     // shared taste, come straight back into the mix.
@@ -742,6 +767,7 @@ export class RecommendationCatalog {
     ]);
     const contributions = [
       ...added,
+      ...liked,
       ...lastFm.contributions,
       ...listenBrainz.contributions,
     ];
@@ -757,9 +783,10 @@ export class RecommendationCatalog {
       if (existing) existing.score += artist.score;
       else artists.set(key, { ...artist });
     }
-    // Without a scrobbler, the artists someone adds are the best signal.
+    // Without a scrobbler, the artists someone adds or likes are the best
+    // signal.
     if (!artists.size)
-      for (const track of added) {
+      for (const track of [...added, ...liked]) {
         const name = firstArtist(track.artist);
         const key = normalizeToken(name);
         if (!key) continue;

@@ -1125,9 +1125,57 @@ test("prunes listening memory that has decayed away", () => {
       weight: 1,
       skippedAt,
     });
-  store.pruneListeningMemory(5_000, 500);
+  for (const likedAt of [1_000, 9_000])
+    store.likeTrack({
+      userId: "host",
+      title: `Song ${likedAt}`,
+      artist: "Band",
+      likedAt,
+    });
+  store.pruneListeningMemory(5_000, 500, 500);
   expect(store.recentPlays(["host"], 0)).toHaveLength(1);
   expect(store.recentSkips(["host"], 0)).toHaveLength(2);
-  store.pruneListeningMemory(5_000, 5_000);
+  expect(store.recentLikes(["host"], 0)).toHaveLength(2);
+  store.pruneListeningMemory(5_000, 5_000, 5_000);
   expect(store.recentSkips(["host"], 0)).toHaveLength(1);
+  expect(store.recentLikes(["host"], 0)).toHaveLength(1);
+});
+
+test("liking the same song again refreshes it instead of stacking up", () => {
+  const store = new Store(":memory:");
+  // The button is one way and shows nothing back, so the same person presses
+  // it again on the same song. That is not a stronger opinion.
+  store.likeTrack({
+    userId: "host",
+    title: "Song",
+    artist: "Band",
+    likedAt: 1_000,
+  });
+  store.likeTrack({
+    userId: "host",
+    title: "SONG",
+    artist: "band",
+    likedAt: 9_000,
+  });
+  expect(store.recentLikes(["host"], 0)).toEqual([
+    { userId: "host", title: "Song", artist: "Band", likedAt: 9_000 },
+  ]);
+  // Somebody else liking it is their own row.
+  store.likeTrack({
+    userId: "guest",
+    title: "Song",
+    artist: "Band",
+    likedAt: 9_000,
+  });
+  expect(store.recentLikes(["host", "guest"], 0)).toHaveLength(2);
+  expect(store.recentLikes(["host"], 9_001)).toEqual([]);
+});
+
+test("a like can be taken back once", () => {
+  const store = new Store(":memory:");
+  store.likeTrack({ userId: "host", title: "Song", artist: "Band" });
+  expect(store.unlikeTrack("host", "song", "BAND")).toBeTrue();
+  expect(store.recentLikes(["host"], 0)).toEqual([]);
+  // An undo that arrives twice should not claim to have done anything.
+  expect(store.unlikeTrack("host", "Song", "Band")).toBeFalse();
 });
