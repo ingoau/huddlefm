@@ -147,6 +147,8 @@ let canvasTimer: ReturnType<typeof setInterval> | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let canvasUpdate: Promise<void> | undefined;
 let canvasPending = false;
+let reconcilingParticipants = false;
+let reconcileParticipantsPending = false;
 let shuttingDown = false;
 
 function updateCanvas() {
@@ -367,48 +369,60 @@ async function abandonSession(sessionId: string) {
 
 async function reconcileParticipants() {
   if (shuttingDown) return;
-  await Promise.all(
-    [...runtimes.values()].map(async (runtime) => {
-      const coordinator = runtime.coordinator;
-      if (!coordinator) return;
-      try {
-        const diff = await coordinator.reconcileParticipants(
-          await slackHuddle.participants(runtime.callId),
-        );
-        if (!diff) return;
-        const companionChannelId = coordinator.room.companionChannelId;
-        for (const userId of diff.added) {
-          store.addSessionParticipant(coordinator.id, userId);
-          if (companionChannelId)
-            void companions
-              .add(companionChannelId, userId)
-              .catch((error) =>
-                slackApp
-                  .dm(
-                    userId,
-                    `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
-                  )
-                  .catch(() => {}),
-              );
-        }
-        for (const userId of diff.removed) {
-          if (companionChannelId)
-            companions.removeLater(companionChannelId, userId);
-          store.removeSessionParticipant(coordinator.id, userId);
-        }
-      } catch (error) {
-        log.warn(
-          {
-            event: "participants_reconcile_failed",
-            sessionId: coordinator.id,
-            callId: runtime.callId,
-            err: error,
-          },
-          "Could not reconcile Huddle participants",
-        );
-      }
-    }),
-  );
+  if (reconcilingParticipants) {
+    reconcileParticipantsPending = true;
+    return;
+  }
+  reconcilingParticipants = true;
+  try {
+    do {
+      reconcileParticipantsPending = false;
+      await Promise.all(
+        [...runtimes.values()].map(async (runtime) => {
+          const coordinator = runtime.coordinator;
+          if (!coordinator) return;
+          try {
+            const diff = await coordinator.reconcileParticipants(
+              await slackHuddle.participants(runtime.callId),
+            );
+            if (!diff) return;
+            const companionChannelId = coordinator.room.companionChannelId;
+            for (const userId of diff.added) {
+              store.addSessionParticipant(coordinator.id, userId);
+              if (companionChannelId)
+                void companions
+                  .add(companionChannelId, userId)
+                  .catch((error) =>
+                    slackApp
+                      .dm(
+                        userId,
+                        `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
+                      )
+                      .catch(() => {}),
+                  );
+            }
+            for (const userId of diff.removed) {
+              if (companionChannelId)
+                companions.removeLater(companionChannelId, userId);
+              store.removeSessionParticipant(coordinator.id, userId);
+            }
+          } catch (error) {
+            log.warn(
+              {
+                event: "participants_reconcile_failed",
+                sessionId: coordinator.id,
+                callId: runtime.callId,
+                err: error,
+              },
+              "Could not reconcile Huddle participants",
+            );
+          }
+        }),
+      );
+    } while (reconcileParticipantsPending && !shuttingDown);
+  } finally {
+    reconcilingParticipants = false;
+  }
 }
 
 async function joinHuddle(

@@ -610,7 +610,12 @@ export class SlackHuddleAdapter {
   // events can miss joins and leaves, so this is the source of truth for
   // reconciling tracked participants.
   async participants(callId: string) {
-    const room = await this.roomInfo(callId);
+    const response = await this.roomInfo(callId);
+    if (response.ok !== true)
+      throw new Error(
+        `screenhero.rooms.info failed: ${String(response.error ?? "unknown_error")}`,
+      );
+    const room = object(response.room, "room");
     return participantIds(room.participants);
   }
 

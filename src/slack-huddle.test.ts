@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  SlackHuddleAdapter,
   activeHuddleRoom,
   channelAccess,
   huddleHasParticipant,
@@ -8,6 +9,38 @@ import {
   normalizeRealtimeEvent,
   roomOwnsThread,
 } from "./slack-huddle.ts";
+
+test("reads participants from the room info response envelope", async () => {
+  const originalFetch = globalThis.fetch;
+  const responses = [
+    Response.json({
+      ok: true,
+      participants: ["wrong-level"],
+      room: { participants: ["U1", { user_id: "U2" }] },
+    }),
+    Response.json({ ok: false, error: "invalid_auth" }),
+    Response.json({ ok: true }),
+  ];
+  globalThis.fetch = (() =>
+    Promise.resolve(responses.shift()!)) as unknown as typeof fetch;
+  const adapter = new SlackHuddleAdapter({
+    workspaceUrl: "https://slack.test",
+    xoxc: "token",
+    xoxd: "cookie",
+    mediaRegion: "us-east-1",
+  });
+  try {
+    await expect(adapter.participants("R123")).resolves.toEqual(["U1", "U2"]);
+    await expect(adapter.participants("R123")).rejects.toThrow(
+      "screenhero.rooms.info failed: invalid_auth",
+    );
+    await expect(adapter.participants("R123")).rejects.toThrow(
+      "Slack response is missing room",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("roomOwnsThread matches the UI thread and the original huddle thread", () => {
   const companionRoom = {
