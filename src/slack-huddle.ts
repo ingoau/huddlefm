@@ -616,6 +616,11 @@ export class SlackHuddleAdapter {
         `screenhero.rooms.info failed: ${String(response.error ?? "unknown_error")}`,
       );
     const room = object(response.room, "room");
+    // Reconciliation acts on this list, so a shape it cannot read has to
+    // fail rather than pass for an empty Huddle and evict everyone. A real
+    // Huddle is never empty while the bot is in it.
+    if (!Array.isArray(room.participants))
+      throw new Error("Slack response is missing room.participants");
     return participantIds(room.participants);
   }
 
