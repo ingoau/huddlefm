@@ -382,8 +382,13 @@ async function reconcileParticipants() {
           const coordinator = runtime.coordinator;
           if (!coordinator) return;
           try {
+            // Read the revision before the round trip: a member event that
+            // lands while Slack is answering makes this snapshot stale, and
+            // the coordinator drops it rather than undoing the newer event.
+            const version = coordinator.participantsVersion;
             const diff = await coordinator.reconcileParticipants(
               await slackHuddle.participants(runtime.callId),
+              version,
             );
             if (!diff) return;
             const companionChannelId = coordinator.room.companionChannelId;

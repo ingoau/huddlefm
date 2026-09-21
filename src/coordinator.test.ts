@@ -2167,6 +2167,51 @@ test("reconciling participants cancels the alone timeout when someone is actuall
   await result.coordinator.endFromSlack();
 });
 
+test("reconciling participants ignores a snapshot a join has overtaken", async () => {
+  const result = setup(undefined, {
+    aloneMs: 10,
+    idleMs: 100,
+    pausedMs: 100,
+    warningMs: 20,
+  });
+  await result.coordinator.start();
+  const version = result.coordinator.participantsVersion;
+  const pending = result.coordinator.reconcileParticipants(
+    ["bot", "host", "guest"],
+    version,
+  );
+  // A real join lands while the Slack round trip is in flight; member events
+  // apply synchronously, outside the coordinator queue.
+  result.coordinator.memberJoined("newbie");
+  expect(await pending).toBeUndefined();
+  expect(result.coordinator.hasParticipant("newbie")).toBe(true);
+  await result.coordinator.endFromSlack();
+});
+
+test("reconciling participants ignores a snapshot a leave has overtaken", async () => {
+  const result = setup(undefined, {
+    aloneMs: 10,
+    idleMs: 100,
+    pausedMs: 100,
+    warningMs: 20,
+  });
+  await result.coordinator.start();
+  await result.coordinator.memberLeft("guest");
+  const version = result.coordinator.participantsVersion;
+  const pending = result.coordinator.reconcileParticipants(
+    ["bot", "host"],
+    version,
+  );
+  // The last human leaves while the Slack round trip is in flight. Restoring
+  // the snapshot would cancel the alone timeout their leave just armed.
+  await result.coordinator.memberLeft("host");
+  expect(await pending).toBeUndefined();
+  expect(result.coordinator.hasParticipant("host")).toBe(false);
+  await until(() =>
+    result.media.some((value) => (value as { type?: string }).type === "leave"),
+  );
+});
+
 test("excluded users cannot participate, host, or scrobble", async () => {
   const store = new Store(":memory:");
   store.setListenBrainzToken("host", "token", "host");
