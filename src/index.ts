@@ -147,8 +147,8 @@ let canvasTimer: ReturnType<typeof setInterval> | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let canvasUpdate: Promise<void> | undefined;
 let canvasPending = false;
-let reconcilingParticipants = false;
-let reconcileParticipantsPending = false;
+const reconcilingSessions = new Set<string>();
+const reconcilePendingSessions = new Set<string>();
 let shuttingDown = false;
 
 function updateCanvas() {
@@ -367,67 +367,78 @@ async function abandonSession(sessionId: string) {
   pendingRestores.delete(sessionId);
 }
 
-async function reconcileParticipants() {
-  if (shuttingDown) return;
-  if (reconcilingParticipants) {
-    reconcileParticipantsPending = true;
+async function reconcileSessionParticipants(
+  coordinator: Coordinator,
+  callId: string,
+) {
+  // Read the revision before the round trip: a member event that lands while
+  // Slack is answering makes this snapshot stale, and the coordinator drops
+  // it rather than undoing the newer event.
+  const version = coordinator.participantsVersion;
+  const diff = await coordinator.reconcileParticipants(
+    await slackHuddle.participants(callId),
+    version,
+  );
+  if (!diff) return;
+  const companionChannelId = coordinator.room.companionChannelId;
+  for (const userId of diff.added) {
+    store.addSessionParticipant(coordinator.id, userId);
+    if (companionChannelId)
+      void companions
+        .add(companionChannelId, userId)
+        .catch((error) =>
+          slackApp
+            .dm(
+              userId,
+              `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
+            )
+            .catch(() => {}),
+        );
+  }
+  for (const userId of diff.removed) {
+    if (companionChannelId) companions.removeLater(companionChannelId, userId);
+    store.removeSessionParticipant(coordinator.id, userId);
+  }
+}
+
+// Sessions reconcile independently: one Huddle whose Slack call is slow, or
+// whose queue is busy, must never hold up or silence the others.
+async function reconcileParticipants(runtime: Runtime) {
+  const coordinator = runtime.coordinator;
+  if (!coordinator || shuttingDown) return;
+  if (reconcilingSessions.has(coordinator.id)) {
+    // The pass already running picks this request up when it finishes.
+    reconcilePendingSessions.add(coordinator.id);
     return;
   }
-  reconcilingParticipants = true;
+  reconcilingSessions.add(coordinator.id);
   try {
     do {
-      reconcileParticipantsPending = false;
-      await Promise.all(
-        [...runtimes.values()].map(async (runtime) => {
-          const coordinator = runtime.coordinator;
-          if (!coordinator) return;
-          try {
-            // Read the revision before the round trip: a member event that
-            // lands while Slack is answering makes this snapshot stale, and
-            // the coordinator drops it rather than undoing the newer event.
-            const version = coordinator.participantsVersion;
-            const diff = await coordinator.reconcileParticipants(
-              await slackHuddle.participants(runtime.callId),
-              version,
-            );
-            if (!diff) return;
-            const companionChannelId = coordinator.room.companionChannelId;
-            for (const userId of diff.added) {
-              store.addSessionParticipant(coordinator.id, userId);
-              if (companionChannelId)
-                void companions
-                  .add(companionChannelId, userId)
-                  .catch((error) =>
-                    slackApp
-                      .dm(
-                        userId,
-                        `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
-                      )
-                      .catch(() => {}),
-                  );
-            }
-            for (const userId of diff.removed) {
-              if (companionChannelId)
-                companions.removeLater(companionChannelId, userId);
-              store.removeSessionParticipant(coordinator.id, userId);
-            }
-          } catch (error) {
-            log.warn(
-              {
-                event: "participants_reconcile_failed",
-                sessionId: coordinator.id,
-                callId: runtime.callId,
-                err: error,
-              },
-              "Could not reconcile Huddle participants",
-            );
-          }
-        }),
-      );
-    } while (reconcileParticipantsPending && !shuttingDown);
+      reconcilePendingSessions.delete(coordinator.id);
+      try {
+        await reconcileSessionParticipants(coordinator, runtime.callId);
+      } catch (error) {
+        log.warn(
+          {
+            event: "participants_reconcile_failed",
+            sessionId: coordinator.id,
+            callId: runtime.callId,
+            err: error,
+          },
+          "Could not reconcile Huddle participants",
+        );
+      }
+    } while (reconcilePendingSessions.has(coordinator.id) && !shuttingDown);
   } finally {
-    reconcilingParticipants = false;
+    reconcilingSessions.delete(coordinator.id);
+    reconcilePendingSessions.delete(coordinator.id);
   }
+}
+
+function reconcileAllParticipants() {
+  if (shuttingDown) return;
+  for (const runtime of [...runtimes.values()])
+    void reconcileParticipants(runtime);
 }
 
 async function joinHuddle(
@@ -1388,8 +1399,8 @@ await slackApp.start();
 // Huddle member events ride the private realtime gateway, which drops them
 // whenever its socket cycles, so periodically and after every reconnect the
 // tracked participants are reconciled with Slack's actual Huddle membership.
-slackHuddle.onConnected = () => void reconcileParticipants();
-reconcileTimer = setInterval(() => void reconcileParticipants(), 60_000);
+slackHuddle.onConnected = reconcileAllParticipants;
+reconcileTimer = setInterval(reconcileAllParticipants, 60_000);
 await slackHuddle.start((event) => {
   if (event.type === "DirectMessage") {
     void handleIntegrationDm(event).catch((error) =>
