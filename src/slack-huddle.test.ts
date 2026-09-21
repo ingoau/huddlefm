@@ -20,6 +20,7 @@ test("reads participants from the room info response envelope", async () => {
     }),
     Response.json({ ok: false, error: "invalid_auth" }),
     Response.json({ ok: true }),
+    Response.json({ ok: true, room: { id: "R123" } }),
   ];
   globalThis.fetch = (() =>
     Promise.resolve(responses.shift()!)) as unknown as typeof fetch;
@@ -36,6 +37,9 @@ test("reads participants from the room info response envelope", async () => {
     );
     await expect(adapter.participants("R123")).rejects.toThrow(
       "Slack response is missing room",
+    );
+    await expect(adapter.participants("R123")).rejects.toThrow(
+      "Slack response is missing room.participants",
     );
   } finally {
     globalThis.fetch = originalFetch;
