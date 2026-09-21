@@ -634,6 +634,9 @@ export class SlackHuddleAdapter {
         method: "POST",
         headers: { cookie: `d=${this.config.xoxd}` },
         body: form,
+        // Reconciliation calls this on a timer, so a socket that dies without
+        // closing has to surface as a failed pass rather than a hung one.
+        signal: AbortSignal.timeout(10_000),
       },
     );
     if (!response.ok)
