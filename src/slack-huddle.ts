@@ -216,6 +216,9 @@ export class SlackHuddleAdapter {
   private stopping = false;
   private reconnectUrl?: string;
   private onEvent?: (event: HuddleEvent) => void;
+  // Fired after every successful (re)connect, so consumers can resync state
+  // for events the previous socket may have dropped.
+  onConnected?: () => void;
 
   constructor(
     private config: {
@@ -323,6 +326,7 @@ export class SlackHuddleAdapter {
         this.scheduleReconnect();
       });
     });
+    this.onConnected?.();
   }
 
   private gatewayUrl(enterpriseId: string) {
@@ -582,26 +586,8 @@ export class SlackHuddleAdapter {
       { event: "invite_join_started", channelId, callId },
       "Joining invited Slack Huddle",
     );
-    const form = new FormData();
-    form.set("token", this.config.xoxc);
-    form.set("room", callId);
-    form.set("_x_reason", "all-calls-store/conditional-fetch");
-    form.set("_x_mode", "online");
-    form.set("_x_sonic", "true");
-    form.set("_x_app_name", "client");
-
-    const response = await fetch(
-      new URL("/api/screenhero.rooms.info", this.config.workspaceUrl),
-      {
-        method: "POST",
-        headers: { cookie: `d=${this.config.xoxd}` },
-        body: form,
-      },
-    );
-    if (!response.ok)
-      throw new Error(`screenhero.rooms.info HTTP ${response.status}`);
     const joined = normalizeInvitedJoinResponse(
-      await response.json(),
+      await this.roomInfo(callId),
       channelId,
       freeWilly,
     );
@@ -618,6 +604,49 @@ export class SlackHuddleAdapter {
       "Joined invited Slack Huddle",
     );
     return joined;
+  }
+
+  // The actual participants of a Huddle, straight from Slack. Realtime member
+  // events can miss joins and leaves, so this is the source of truth for
+  // reconciling tracked participants.
+  async participants(callId: string) {
+    const response = await this.roomInfo(callId);
+    if (response.ok !== true)
+      throw new Error(
+        `screenhero.rooms.info failed: ${String(response.error ?? "unknown_error")}`,
+      );
+    const room = object(response.room, "room");
+    // Reconciliation acts on this list, so a shape it cannot read has to
+    // fail rather than pass for an empty Huddle and evict everyone. A real
+    // Huddle is never empty while the bot is in it.
+    if (!Array.isArray(room.participants))
+      throw new Error("Slack response is missing room.participants");
+    return participantIds(room.participants);
+  }
+
+  private async roomInfo(callId: string) {
+    const form = new FormData();
+    form.set("token", this.config.xoxc);
+    form.set("room", callId);
+    form.set("_x_reason", "all-calls-store/conditional-fetch");
+    form.set("_x_mode", "online");
+    form.set("_x_sonic", "true");
+    form.set("_x_app_name", "client");
+
+    const response = await fetch(
+      new URL("/api/screenhero.rooms.info", this.config.workspaceUrl),
+      {
+        method: "POST",
+        headers: { cookie: `d=${this.config.xoxd}` },
+        body: form,
+        // Reconciliation calls this on a timer, so a socket that dies without
+        // closing has to surface as a failed pass rather than a hung one.
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`screenhero.rooms.info HTTP ${response.status}`);
+    return object(await response.json(), "screenhero.rooms.info response");
   }
 
   async decline(channelId: string, callId: string) {
