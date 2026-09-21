@@ -216,6 +216,9 @@ export class SlackHuddleAdapter {
   private stopping = false;
   private reconnectUrl?: string;
   private onEvent?: (event: HuddleEvent) => void;
+  // Fired after every successful (re)connect, so consumers can resync state
+  // for events the previous socket may have dropped.
+  onConnected?: () => void;
 
   constructor(
     private config: {
@@ -323,6 +326,7 @@ export class SlackHuddleAdapter {
         this.scheduleReconnect();
       });
     });
+    this.onConnected?.();
   }
 
   private gatewayUrl(enterpriseId: string) {
@@ -582,6 +586,35 @@ export class SlackHuddleAdapter {
       { event: "invite_join_started", channelId, callId },
       "Joining invited Slack Huddle",
     );
+    const joined = normalizeInvitedJoinResponse(
+      await this.roomInfo(callId),
+      channelId,
+      freeWilly,
+    );
+    if (joined.huddleCallId !== callId)
+      throw new Error("screenhero.rooms.info returned the wrong Huddle");
+    log.info(
+      {
+        event: "invite_join_completed",
+        channelId,
+        callId,
+        participants: joined.participantIds.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Joined invited Slack Huddle",
+    );
+    return joined;
+  }
+
+  // The actual participants of a Huddle, straight from Slack. Realtime member
+  // events can miss joins and leaves, so this is the source of truth for
+  // reconciling tracked participants.
+  async participants(callId: string) {
+    const room = await this.roomInfo(callId);
+    return participantIds(room.participants);
+  }
+
+  private async roomInfo(callId: string) {
     const form = new FormData();
     form.set("token", this.config.xoxc);
     form.set("room", callId);
@@ -600,24 +633,7 @@ export class SlackHuddleAdapter {
     );
     if (!response.ok)
       throw new Error(`screenhero.rooms.info HTTP ${response.status}`);
-    const joined = normalizeInvitedJoinResponse(
-      await response.json(),
-      channelId,
-      freeWilly,
-    );
-    if (joined.huddleCallId !== callId)
-      throw new Error("screenhero.rooms.info returned the wrong Huddle");
-    log.info(
-      {
-        event: "invite_join_completed",
-        channelId,
-        callId,
-        participants: joined.participantIds.length,
-        durationMs: Date.now() - startedAt,
-      },
-      "Joined invited Slack Huddle",
-    );
-    return joined;
+    return object(await response.json(), "screenhero.rooms.info response");
   }
 
   async decline(channelId: string, callId: string) {

@@ -1596,6 +1596,35 @@ export class Coordinator {
     return changed;
   }
 
+  // Huddle member events arrive over the private realtime gateway, whose
+  // socket cycles can drop them, so the tracked set can drift from the actual
+  // Huddle. Applying the diff against the authoritative participant list also
+  // lets refreshIdle() re-evaluate the alone, idle, and paused timers.
+  reconcileParticipants(userIds: string[]) {
+    return this.enqueue(
+      (): { added: string[]; removed: string[] } | undefined => {
+        if (this.state === "ended" || this.state === "suspended") return;
+        const actual = new Set(
+          userIds.filter((id) => id !== this.botUserId && !this.isExcluded(id)),
+        );
+        actual.add(this.botUserId);
+        const removed = [...this.participants].filter((id) => !actual.has(id));
+        const added = [...actual].filter((id) => !this.participants.has(id));
+        if (!added.length && !removed.length) return;
+        this.log.info(
+          { event: "participants_reconciled", added, removed },
+          "Reconciled Huddle participants with Slack",
+        );
+        // Additions go first so a diff that both restores a missed join and
+        // removes a stale participant never announces an alone timeout the
+        // addition is about to cancel.
+        for (const userId of added) this.memberJoined(userId);
+        for (const userId of removed) this.memberLeft(userId);
+        return { added, removed };
+      },
+    );
+  }
+
   endFromSlack() {
     return this.enqueue(() => this.end(this.hostId, "huddle ended"));
   }
