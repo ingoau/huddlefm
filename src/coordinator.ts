@@ -143,6 +143,10 @@ function reshuffle<T>(items: T[]) {
 export class Coordinator {
   readonly id: string;
   readonly participants = new Set<string>();
+  // Bumped whenever tracked membership actually changes, so a reconciliation
+  // can tell that its snapshot of Slack's participant list went stale while
+  // it was in flight.
+  private participantsRevision = 0;
   private queue: Entry[] = [];
   private history: Entry[] = [];
   private current?: Entry;
@@ -1568,6 +1572,7 @@ export class Coordinator {
 
   memberJoined(userId: string) {
     if (this.isExcluded(userId)) return;
+    if (!this.participants.has(userId)) this.participantsRevision++;
     this.participants.add(userId);
     this.playbackScrobbling?.memberJoined(userId);
     void this.promptScrobbling(userId);
@@ -1581,7 +1586,7 @@ export class Coordinator {
 
   memberLeft(userId: string) {
     if (this.isExcluded(userId)) return;
-    this.participants.delete(userId);
+    if (this.participants.delete(userId)) this.participantsRevision++;
     this.playbackScrobbling?.memberLeft(userId);
     if (this.state === "suspended" || userId === this.botUserId) return;
     const changed =
@@ -1600,10 +1605,28 @@ export class Coordinator {
   // socket cycles can drop them, so the tracked set can drift from the actual
   // Huddle. Applying the diff against the authoritative participant list also
   // lets refreshIdle() re-evaluate the alone, idle, and paused timers.
-  reconcileParticipants(userIds: string[]) {
+  get participantsVersion() {
+    return this.participantsRevision;
+  }
+
+  reconcileParticipants(
+    userIds: string[],
+    version = this.participantsRevision,
+  ) {
     return this.enqueue(
       (): { added: string[]; removed: string[] } | undefined => {
         if (this.state === "ended" || this.state === "suspended") return;
+        // Member events apply synchronously, outside this queue, so a
+        // snapshot taken before the Slack round trip can already be stale by
+        // the time it gets here. Applying it would undo the newer event, so
+        // drop it and let the next pass reconcile a fresh snapshot.
+        if (version !== this.participantsRevision) {
+          this.log.debug(
+            { event: "participants_reconcile_stale", version },
+            "Discarded a stale Huddle participant snapshot",
+          );
+          return;
+        }
         const actual = new Set(
           userIds.filter((id) => id !== this.botUserId && !this.isExcluded(id)),
         );
