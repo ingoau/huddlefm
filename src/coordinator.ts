@@ -77,6 +77,11 @@ import {
   type IntegrationCommand,
 } from "./integration.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
+import {
+  changedSettings,
+  settingsChanges,
+  type Settings,
+} from "./settings-diff.ts";
 
 const endRestoreMs = 2 * 60_000;
 const searchDebounceMs = 300;
@@ -1321,6 +1326,7 @@ export class Coordinator {
           error: "Join the huddle before using the player.",
         };
       const changed: string[] = [];
+      const before = this.settingsSnapshot();
       if (
         patch.hostUserId !== undefined ||
         patch.permissionPreset !== undefined
@@ -1461,9 +1467,12 @@ export class Coordinator {
         changed.push(`hostId=${patch.hostUserId}`);
       }
       if (changed.length) {
+        const changes = settingsChanges(before, this.settingsSnapshot());
         this.audit.record("settings.changed", userId, {
           sessionId: this.id,
-          changed,
+          source: "agent",
+          changed: changedSettings(changes),
+          changes,
         });
         this.store.incrementUsage("settings");
         await this.render();
@@ -4905,6 +4914,19 @@ export class Coordinator {
     if (!settings.configured) return;
     const enabled = !settings.sessionEnabled;
     this.scrobbling.setSessionEnabled(this.id, interaction.userId, enabled);
+    this.audit.record("settings.changed", interaction.userId, {
+      sessionId: this.id,
+      source: "toggle",
+      changed: ["sessionScrobbling"],
+      changes: [
+        {
+          setting: "sessionScrobbling",
+          from: settings.sessionEnabled,
+          to: enabled,
+        },
+      ],
+    });
+    this.store.incrementUsage("settings");
     if (enabled) this.playbackScrobbling?.sessionEnabled(interaction.userId);
     if (interaction.responseUrl)
       await this.slack.deleteOriginal(interaction.responseUrl);
@@ -4919,6 +4941,43 @@ export class Coordinator {
         interaction.userId,
         `Scrobbling ${enabled ? "enabled" : "disabled"} for this session.`,
       );
+  }
+
+  /** The session settings, as recorded in audit and analytics events. */
+  private settingsSnapshot(): Settings {
+    return {
+      hostId: this.hostId ?? null,
+      volume: this.volume,
+      autoplay: this.autoplayMode,
+      loopMode: this.loopMode,
+      displayMode: this.displayMode,
+      transitionMode: this.transitionMode,
+      duckingMode: this.duckingMode,
+      anchorEnabled: this.anchorEnabled,
+      permissions: [...this.allowed].sort(),
+    };
+  }
+
+  /** The per-user scrobbling settings reachable from the settings modal. */
+  private scrobblingSnapshot(userId: string): Settings {
+    if (!this.scrobbling) return {};
+    try {
+      const settings = this.scrobbling.settings(userId, this.id);
+      return {
+        scrobblingMode: settings.mode,
+        huddleMix: settings.huddleMixOptIn,
+        lastFmScrobbling: settings.lastFmEnabled,
+        listenBrainzScrobbling: settings.listenBrainzEnabled,
+        listenBrainzConnected: settings.listenBrainzConnected,
+        sessionScrobbling: settings.sessionEnabled ?? false,
+      };
+    } catch (error) {
+      this.log.error(
+        { event: "scrobbling_snapshot_failed", userId, err: error },
+        "Could not read scrobbling settings",
+      );
+      return {};
+    }
   }
 
   private async settingsSubmission(interaction: Interaction) {
@@ -4947,16 +5006,8 @@ export class Coordinator {
         interaction.userId,
         "The selected host is not in this huddle.",
       );
-    const previous = {
-      hostId: this.hostId,
-      volume: this.volume,
-      autoplay: this.autoplayMode,
-      loopMode: this.loopMode,
-      transitionMode: this.transitionMode,
-      duckingMode: this.duckingMode,
-      anchorEnabled: this.anchorEnabled,
-      permissions: [...this.allowed],
-    };
+    const previous = this.settingsSnapshot();
+    const previousScrobbling = this.scrobblingSnapshot(interaction.userId);
     const value = interaction.state.volume?.percent?.value?.trim();
     if (value !== undefined && this.can(interaction.userId, "volume")) {
       const percent = Number(value);
@@ -5120,17 +5171,21 @@ export class Coordinator {
         await this.notice(interaction.userId, message(error));
       }
     }
+    const current = this.settingsSnapshot();
+    const changes = [
+      ...settingsChanges(previous, current),
+      ...settingsChanges(
+        previousScrobbling,
+        this.scrobblingSnapshot(interaction.userId),
+      ),
+    ];
     this.audit.record("settings.changed", interaction.userId, {
       sessionId: this.id,
+      source: "modal",
+      changed: changedSettings(changes),
+      changes,
       previous,
-      hostId: this.hostId,
-      volume: this.volume,
-      autoplay: this.autoplayMode,
-      loopMode: this.loopMode,
-      displayMode: this.displayMode,
-      duckingMode: this.duckingMode,
-      anchorEnabled: this.anchorEnabled,
-      permissions: [...this.allowed],
+      ...current,
     });
     this.store.incrementUsage("settings");
     if (!previous.anchorEnabled && this.anchorEnabled) await this.reanchor();
