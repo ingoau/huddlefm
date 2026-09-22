@@ -5974,3 +5974,72 @@ test("a like still lands once the song has moved into history", async () => {
   ]);
   await test.coordinator.endFromSlack();
 });
+
+test("saving settings audits the list of settings that changed", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    volume: { percent: { value: "80" } },
+    autoplay: { mode: { selected_option: { value: "related" } } },
+    loop: { mode: { selected_option: { value: "off" } } },
+  };
+  await test.coordinator.action(save);
+  const audited = test.audit.at(-1) as [
+    string,
+    string,
+    Record<string, unknown>,
+  ];
+  expect(audited[0]).toBe("settings.changed");
+  expect(audited[1]).toBe("host");
+  expect(audited[2]).toMatchObject({
+    source: "modal",
+    changed: ["volume", "autoplay"],
+    changes: [
+      { setting: "volume", from: 0.6, to: 0.8 },
+      { setting: "autoplay", from: "off", to: "related" },
+    ],
+  });
+
+  // Saving the same values again changes nothing, and says so.
+  await test.coordinator.action(save);
+  expect((test.audit.at(-1) as unknown[])[2]).toMatchObject({
+    changed: [],
+    changes: [],
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("agent settings changes are audited by setting name", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  expect(
+    await test.coordinator.agentUpdateSettings("host", {
+      duckingMode: "strong",
+      loopMode: "queue",
+    }),
+  ).toMatchObject({
+    ok: true,
+    changed: ["loopMode=queue", "duckingMode=strong"],
+  });
+  const audited = test.audit.at(-1) as [
+    string,
+    string,
+    Record<string, unknown>,
+  ];
+  expect(audited[0]).toBe("settings.changed");
+  expect(audited[2]).toMatchObject({
+    source: "agent",
+    changed: ["loopMode", "duckingMode"],
+    changes: [
+      { setting: "loopMode", from: "off", to: "queue" },
+      { setting: "duckingMode", from: "gentle", to: "strong" },
+    ],
+  });
+  await test.coordinator.endFromSlack();
+});
