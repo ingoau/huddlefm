@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import {
   looksLikeFilenameTitle,
   metadataLooksWeak,
   navidromeShare,
+  normalizeLoudness,
   normalizeToken,
   parseBulkLinkList,
   parseNavidromeShareInfo,
@@ -153,6 +154,70 @@ test("prefers embedded tags over filename metadata", () => {
   expect(track.artist).toBe("SoundHelix");
   expect(track.album).toBe("Demos");
 });
+
+const integratedLoudness = (filePath: string) => {
+  const analysis = Bun.spawnSync([
+    "ffmpeg",
+    "-hide_banner",
+    "-i",
+    filePath,
+    "-af",
+    "ebur128",
+    "-f",
+    "null",
+    "-",
+  ]);
+  const matches = [
+    ...analysis.stderr.toString().matchAll(/^\s+I:\s+(-?[\d.]+) LUFS/gm),
+  ];
+  return Number(matches.at(-1)?.[1]);
+};
+
+test.skipIf(!Bun.which("ffmpeg"))(
+  "normalizes quiet tracks in place, including ones already in Opus",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-loudness-"));
+    const filePath = join(directory, "entry.opus");
+    try {
+      const encoded = Bun.spawnSync([
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=5",
+        "-af",
+        "volume=-30dB",
+        "-c:a",
+        "libopus",
+        filePath,
+      ]);
+      expect(encoded.exitCode).toBe(0);
+      expect(integratedLoudness(filePath)).toBeLessThan(-40);
+      await normalizeLoudness(filePath, "entry");
+      expect(integratedLoudness(filePath)).toBeCloseTo(-14, 0);
+      expect(await readdir(directory)).toEqual(["entry.opus"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!Bun.which("ffmpeg"))(
+  "keeps the original audio when normalization fails",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-loudness-"));
+    const filePath = join(directory, "entry.opus");
+    try {
+      await writeFile(filePath, "not audio");
+      await normalizeLoudness(filePath, "entry");
+      expect(await readFile(filePath, "utf8")).toBe("not audio");
+      expect(await readdir(directory)).toEqual(["entry.opus"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
   "reads embedded tags from local files and proxied remote media",
