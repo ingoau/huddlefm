@@ -460,6 +460,10 @@ export class TrackCatalog {
       "--dump-single-json",
       "--skip-download",
       "--no-playlist",
+      // Match the format --extract-audio downloads so the size check
+      // measures the audio stream, not a merged video+audio format.
+      "--format",
+      "bestaudio/best",
       "--socket-timeout",
       "10",
       "--",
