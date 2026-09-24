@@ -1,5 +1,5 @@
 import YTMusic from "ytmusic-api";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { logger } from "./logger.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
@@ -123,13 +123,55 @@ function anonymousFailure(line: string) {
     .trim();
 }
 
-export const loudnessNormalizationArgs = (enabled = false) =>
-  enabled
-    ? [
-        "--postprocessor-args",
-        "ffmpeg:-c:a libopus -af loudnorm=I=-14:LRA=11:TP=-1",
-      ]
-    : [];
+// Normalizing is a nicety, so a track ffmpeg can't normalize still plays at
+// its original level instead of failing to prepare. It runs as its own step
+// rather than through yt-dlp, which skips conversion (and so normalization)
+// for downloads that are already Opus.
+export async function normalizeLoudness(
+  filePath: string,
+  entryId: string,
+  maxBytes: number,
+  signal?: AbortSignal,
+) {
+  const normalizedPath = filePath.replace(/\.[^.]+$/, ".normalized.opus");
+  try {
+    await run(
+      [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+        "-i",
+        filePath,
+        "-vn",
+        "-af",
+        "loudnorm=I=-14:LRA=11:TP=-1",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "160k",
+        normalizedPath,
+      ],
+      120_000,
+      signal,
+    );
+    // Re-encoding can grow a small file past the limit the download was held to.
+    if ((await stat(normalizedPath)).size > maxBytes)
+      throw new Error("Normalized track exceeds the download limit");
+    await rename(normalizedPath, filePath);
+  } catch (error) {
+    await rm(normalizedPath, { force: true });
+    if (signal?.aborted) throw error;
+    log.warn(
+      {
+        event: "loudness_normalization_failed",
+        entryId,
+        detail: trackFailureDetail(error),
+        err: error,
+      },
+      "Playing track without loudness normalization",
+    );
+  }
+}
 
 export function isYoutubeVideoId(id: string) {
   return /^[a-zA-Z0-9_-]{11}$/.test(id);
@@ -779,7 +821,6 @@ export class TrackCatalog {
       "--audio-quality",
       "0",
       ...(keepSource ? ["--keep-video"] : []),
-      ...loudnessNormalizationArgs(this.limits.loudnessNormalization),
       "--no-playlist",
       "--max-filesize",
       String(this.limits.downloadBytes),
@@ -836,7 +877,7 @@ export class TrackCatalog {
           }
         }
       }
-      const bytes = (await stat(filePath)).size;
+      let bytes = (await stat(filePath)).size;
       if (bytes > this.limits.downloadBytes)
         throw new TrackError("Track exceeds the download limit");
       const probe = await run(
@@ -859,6 +900,15 @@ export class TrackCatalog {
       if (duration > this.limits.durationSeconds)
         throw new TrackError("Track exceeds the duration limit");
       if (!track.duration) track.duration = duration;
+      if (this.limits.loudnessNormalization) {
+        await normalizeLoudness(
+          filePath,
+          entryId,
+          this.limits.downloadBytes,
+          signal,
+        );
+        bytes = (await stat(filePath)).size;
+      }
       let transition = {
         introSeconds: 0,
         outroSeconds: duration,
