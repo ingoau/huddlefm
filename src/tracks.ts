@@ -130,6 +130,7 @@ function anonymousFailure(line: string) {
 export async function normalizeLoudness(
   filePath: string,
   entryId: string,
+  maxBytes: number,
   signal?: AbortSignal,
 ) {
   const normalizedPath = filePath.replace(/\.[^.]+$/, ".normalized.opus");
@@ -153,6 +154,9 @@ export async function normalizeLoudness(
       120_000,
       signal,
     );
+    // Re-encoding can grow a small file past the limit the download was held to.
+    if ((await stat(normalizedPath)).size > maxBytes)
+      throw new Error("Normalized track exceeds the download limit");
     await rename(normalizedPath, filePath);
   } catch (error) {
     await rm(normalizedPath, { force: true });
@@ -869,7 +873,7 @@ export class TrackCatalog {
           }
         }
       }
-      const bytes = (await stat(filePath)).size;
+      let bytes = (await stat(filePath)).size;
       if (bytes > this.limits.downloadBytes)
         throw new TrackError("Track exceeds the download limit");
       const probe = await run(
@@ -892,8 +896,15 @@ export class TrackCatalog {
       if (duration > this.limits.durationSeconds)
         throw new TrackError("Track exceeds the duration limit");
       if (!track.duration) track.duration = duration;
-      if (this.limits.loudnessNormalization)
-        await normalizeLoudness(filePath, entryId, signal);
+      if (this.limits.loudnessNormalization) {
+        await normalizeLoudness(
+          filePath,
+          entryId,
+          this.limits.downloadBytes,
+          signal,
+        );
+        bytes = (await stat(filePath)).size;
+      }
       let transition = {
         introSeconds: 0,
         outroSeconds: duration,

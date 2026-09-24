@@ -194,8 +194,38 @@ test.skipIf(!Bun.which("ffmpeg"))(
       ]);
       expect(encoded.exitCode).toBe(0);
       expect(integratedLoudness(filePath)).toBeLessThan(-40);
-      await normalizeLoudness(filePath, "entry");
+      await normalizeLoudness(filePath, "entry", 100_000_000);
       expect(integratedLoudness(filePath)).toBeCloseTo(-14, 0);
+      expect(await readdir(directory)).toEqual(["entry.opus"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!Bun.which("ffmpeg"))(
+  "keeps the original audio when normalizing would exceed the download limit",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-loudness-"));
+    const filePath = join(directory, "entry.opus");
+    try {
+      const encoded = Bun.spawnSync([
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=5",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "16k",
+        filePath,
+      ]);
+      expect(encoded.exitCode).toBe(0);
+      const original = await readFile(filePath);
+      await normalizeLoudness(filePath, "entry", original.byteLength);
+      expect(await readFile(filePath)).toEqual(original);
       expect(await readdir(directory)).toEqual(["entry.opus"]);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -210,7 +240,7 @@ test.skipIf(!Bun.which("ffmpeg"))(
     const filePath = join(directory, "entry.opus");
     try {
       await writeFile(filePath, "not audio");
-      await normalizeLoudness(filePath, "entry");
+      await normalizeLoudness(filePath, "entry", 100_000_000);
       expect(await readFile(filePath, "utf8")).toBe("not audio");
       expect(await readdir(directory)).toEqual(["entry.opus"]);
     } finally {
