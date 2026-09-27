@@ -4,6 +4,8 @@ Allowlisted Slack users and bots can control a HuddleFM session by sending JSON 
 
 Set `INTEGRATION_USER_IDS` to a comma- or space-separated list of Slack user IDs. Senders who are not on the list are ignored with no reply.
 
+When `SLACK_CANVAS_ID` is also set, the stats canvas lists each integration by name and user ID, without mentioning it. Leave `integrations` out of `CANVAS_SECTIONS` to hide the list.
+
 ## Request control
 
 Send a top-level DM:

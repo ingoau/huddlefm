@@ -160,11 +160,14 @@ function updateCanvas() {
   }
   const startedAt = Date.now();
   log.debug({ event: "canvas_update_started" }, "Updating Slack Canvas");
-  canvasUpdate = Promise.resolve()
-    .then(() =>
+  canvasUpdate = canvasIntegrations()
+    .then((integrations) =>
       slackApp.updateCanvas(
         canvasId,
-        canvasMarkdown(store.canvasStats(), store.usageStats()),
+        canvasMarkdown(store.canvasStats(), store.usageStats(), {
+          integrations,
+          sections: config.canvasSections,
+        }),
       ),
     )
     .then(() =>
@@ -187,6 +190,17 @@ function updateCanvas() {
       }
     });
   return canvasUpdate;
+}
+
+function canvasIntegrations() {
+  if (!config.canvasSections.includes("integrations"))
+    return Promise.resolve([]);
+  return Promise.all(
+    [...config.integrationUserIds].map(async (id) => ({
+      id,
+      name: await slackApp.userName(id),
+    })),
+  );
 }
 
 type SocketData = { sessionId: string };
