@@ -766,7 +766,12 @@ export class Coordinator {
     }
   }
 
-  async agentAdd(userId: string, reference: string, signal?: AbortSignal) {
+  async agentAdd(
+    userId: string,
+    reference: string,
+    signal?: AbortSignal,
+    options: { awaitPreparation?: boolean } = {},
+  ) {
     throwIfAborted(signal);
     if (!this.canUsePlayer(userId))
       return {
@@ -878,6 +883,43 @@ export class Coordinator {
       throwIfAborted(signal);
     }
     signal?.addEventListener("abort", abortPreparations, { once: true });
+    const settled = this.settleAgentAdd(
+      committed,
+      signal,
+      abortPreparations,
+      rollback,
+    );
+    if (options.awaitPreparation !== false) return settled;
+    // Downloads can take minutes, so a caller that opts out gets its answer
+    // once the songs are queued; a song that later fails to prepare leaves the
+    // queue with a `queue.removed` event instead.
+    void settled.catch((error) =>
+      this.log.warn(
+        { event: "agent_add_settle_failed", userId, err: error },
+        "Could not finish adding tracks",
+      ),
+    );
+    return {
+      ok: true as const,
+      added: committed.pending.map(({ entry }) => ({
+        id: entry.id,
+        title: entry.title,
+        artist: entry.artist,
+      })),
+      ...(committed.omitted ? { omitted: committed.omitted } : {}),
+    };
+  }
+
+  private async settleAgentAdd(
+    committed: {
+      pending: { entry: Entry; controller: AbortController }[];
+      heldAutoplay: Entry[];
+      omitted?: number;
+    },
+    signal: AbortSignal | undefined,
+    abortPreparations: () => void,
+    rollback: () => Promise<void>,
+  ) {
     try {
       await Promise.all(
         committed.pending.map(({ entry, controller }) =>
@@ -1973,7 +2015,9 @@ export class Coordinator {
       case "add":
         if (!command.reference)
           return { ok: false as const, error: "reference is required." };
-        return this.agentAdd(userId, command.reference);
+        return this.agentAdd(userId, command.reference, undefined, {
+          awaitPreparation: false,
+        });
       case "remove":
         if (!command.trackId)
           return { ok: false as const, error: "trackId is required." };
@@ -2605,6 +2649,12 @@ export class Coordinator {
         this.queue = this.queue.filter((item) => item !== entry);
         this.queueChanged();
         this.store.setTrack(entry.id, { status: "failed" });
+        this.notifyIntegrations("queue.removed", {
+          id: entry.id,
+          title: entry.title,
+          artist: entry.artist,
+          reason: "failed",
+        });
         this.audit.record("track.failed", undefined, {
           sessionId: this.id,
           ...auditTrack(entry),
