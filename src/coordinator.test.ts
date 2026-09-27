@@ -3971,6 +3971,76 @@ test("agentAdd reports failure when preparation removes the track", async () => 
   await test.coordinator.endFromSlack();
 });
 
+test("integration add replies once songs are queued, before they download", async () => {
+  const download = Promise.withResolvers<string>();
+  const tracks = {
+    resolve: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: () => download.promise,
+  } as never;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["add"],
+      events: ["queue"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value: requestValue(test.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "add", reference: "ref_song" },
+    "10.0",
+    "Dbot",
+  );
+  const reply = test.dms.find(
+    (args) => (args[2] as { threadTs?: string })?.threadTs === "10.0",
+  );
+  const body = JSON.parse(String(reply?.[1]));
+  expect(body).toMatchObject({
+    ok: true,
+    type: "add",
+    added: [{ title: "Song", artist: "Artist" }],
+  });
+  const id = body.added[0].id;
+  expect(test.coordinator.agentStatus("host")).toMatchObject({
+    queue: [{ id, status: "preparing" }],
+  });
+
+  download.reject(new Error("private video"));
+  await Bun.sleep(0);
+  // Seeking runs on the session queue, so it lands after the failure cleanup.
+  await test.coordinator.agentSeek("host", 0);
+  const removed = test.dms
+    .map((args) => JSON.parse(String(args[1])))
+    .find((message) => message.event === "queue.removed");
+  expect(removed).toMatchObject({
+    type: "event",
+    payload: { id, title: "Song", reason: "failed" },
+  });
+  expect(test.coordinator.agentStatus("host")).toMatchObject({ queue: [] });
+  await test.coordinator.endFromSlack();
+});
+
 test("agentAdd truncates albums to remaining queue capacity", async () => {
   const album = Array.from({ length: 4 }, (_, index) => ({
     sourceInput: `https://example.com/${index}`,
