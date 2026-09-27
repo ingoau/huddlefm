@@ -1,3 +1,4 @@
+import { parseCanvasSections } from "./canvas.ts";
 import { parseDuckingMode } from "./ducking.ts";
 
 const required = [
@@ -55,6 +56,7 @@ export function loadConfig() {
       process.env.FORCE_COMPANION_CHANNEL_IDS,
     ),
     canvasId: process.env.SLACK_CANVAS_ID,
+    canvasSections: parseCanvasSections(process.env.CANVAS_SECTIONS),
     footer: optionalText(process.env.FOOTER),
     localControlToken: process.env.LOCAL_CONTROL_TOKEN,
     lastFmApiKey: process.env.LASTFM_API_KEY,
