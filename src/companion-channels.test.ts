@@ -48,6 +48,25 @@ function setup(accessible = false, restrictionFails = false) {
   };
 }
 
+function createSession(store: Store, companionChannelId?: string) {
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "companion",
+    threadTs: "",
+    ...(companionChannelId ? { companionChannelId } : {}),
+    creatorId: "creator",
+    volume: 0.6,
+  });
+}
+
+function runCleanup(manager: CompanionChannels, now: number) {
+  return (
+    manager as unknown as { cleanup(now: number): Promise<void> }
+  ).cleanup(now);
+}
+
 test("creates and reconciles a companion channel", async () => {
   const { store, manager, invited, removed, restricted, dms } = setup();
   expect(await manager.prepare("source", "host")).toBe("companion");
@@ -144,23 +163,13 @@ test("tells a participant when adding them to the companion channel fails", asyn
 
 test("cleans tracked members and messages after their deadlines", async () => {
   const { store, manager, removed, deleted } = setup();
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "companion",
-    threadTs: "",
-    creatorId: "creator",
-    volume: 0.6,
-  });
+  createSession(store);
   manager.recordMessage("session", "companion", "1.0");
   manager.removeLater("companion", "guest", 0);
   manager.endSession("session", "companion", ["host"]);
   manager.recordMessage("session", "companion", "2.0");
   const deadline = Date.now() + 10 * 60_000;
-  await (manager as unknown as { cleanup(now: number): Promise<void> }).cleanup(
-    deadline,
-  );
+  await runCleanup(manager, deadline);
   expect(removed).toEqual(["guest", "host"]);
   expect(deleted).toEqual(["1.0", "2.0"]);
   store.close();
@@ -168,15 +177,7 @@ test("cleans tracked members and messages after their deadlines", async () => {
 
 test("keeps companion player messages after a session is restored", async () => {
   const { store, manager, deleted } = setup();
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "companion",
-    threadTs: "",
-    creatorId: "creator",
-    volume: 0.6,
-  });
+  createSession(store);
   manager.recordMessage("session", "companion", "player");
   manager.endSession("session", "companion", ["host"]);
   manager.recordMessage("session", "companion", "recap");
@@ -184,9 +185,7 @@ test("keeps companion player messages after a session is restored", async () => 
   store.activateSession("session", "playing");
   manager.recordMessage("session", "companion", "restored-player");
   const deadline = Date.now() + 10 * 60_000;
-  await (manager as unknown as { cleanup(now: number): Promise<void> }).cleanup(
-    deadline,
-  );
+  await runCleanup(manager, deadline);
   expect(deleted).toEqual([]);
   expect(store.dueSessionMessages(deadline)).toEqual([]);
   store.close();
@@ -194,15 +193,7 @@ test("keeps companion player messages after a session is restored", async () => 
 
 test("activateSession during message cleanup prevents deletion", async () => {
   const { store, manager, deleted } = setup();
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "companion",
-    threadTs: "",
-    creatorId: "creator",
-    volume: 0.6,
-  });
+  createSession(store);
   manager.recordMessage("session", "companion", "player");
   manager.endSession("session", "companion", ["host"]);
   const deadline = Date.now() + 10 * 60_000;
@@ -219,9 +210,7 @@ test("activateSession during message cleanup prevents deletion", async () => {
     return claim(channelId, messageTs, now);
   };
 
-  await (manager as unknown as { cleanup(now: number): Promise<void> }).cleanup(
-    deadline,
-  );
+  await runCleanup(manager, deadline);
   expect(deleted).toEqual([]);
   expect(store.dueSessionMessages(deadline)).toEqual([]);
   expect(
@@ -253,23 +242,13 @@ test("failed delete after activateSession does not restore cleanup", async () =>
     },
     "bot",
   );
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "companion",
-    threadTs: "",
-    creatorId: "creator",
-    volume: 0.6,
-  });
+  createSession(store);
   manager.recordMessage("session", "companion", "player");
   manager.endSession("session", "companion", ["host"]);
   const deadline = Date.now() + 10 * 60_000;
   expect(store.dueSessionMessages(deadline)).toHaveLength(1);
 
-  await (manager as unknown as { cleanup(now: number): Promise<void> }).cleanup(
-    deadline,
-  );
+  await runCleanup(manager, deadline);
 
   expect(store.dueSessionMessages(deadline)).toEqual([]);
   expect(
@@ -320,9 +299,7 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
   );
   store.setCompanionChannel("source", "companion");
   manager.removeLater("companion", "user", 0);
-  const cleanup = (
-    manager as unknown as { cleanup(now: number): Promise<void> }
-  ).cleanup(10 * 60_000);
+  const cleanup = runCleanup(manager, 10 * 60_000);
   await kickStarted.promise;
   const rejoin = manager.add("companion", "user");
   releaseKick.resolve();
@@ -337,16 +314,7 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
 
 test("schedules persisted participants when abandoning a session", () => {
   const { store, manager } = setup();
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "companion",
-    threadTs: "",
-    companionChannelId: "companion",
-    creatorId: "creator",
-    volume: 0.6,
-  });
+  createSession(store, "companion");
   store.setSessionParticipants("session", ["bot", "host", "guest"]);
   manager.abandonSession("session");
   expect(
