@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -44,11 +44,19 @@ export type ScrobblingMode = (typeof scrobblingModes)[number];
 export const autoplayModes = ["off", "related", "huddle"] as const;
 export type AutoplayMode = (typeof autoplayModes)[number];
 
-export function parseAutoplayMode(value: unknown): AutoplayMode {
-  if (value === true || value === 1 || value === "1" || value === "related")
-    return "related";
-  if (value === "huddle") return "huddle";
-  return "off";
+export function modeOf<M extends string>(modes: readonly M[], value: unknown) {
+  return modes.includes(value as M) ? (value as M) : undefined;
+}
+
+// Autoplay and loop were on/off toggles before they became modes, so a stored
+// boolean still reads as the first non-off mode.
+function parseMode<M extends string>(modes: readonly M[], value: unknown): M {
+  if (value === true || value === 1 || value === "1") return modes[1]!;
+  return modeOf(modes, value) ?? modes[0]!;
+}
+
+export function parseAutoplayMode(value: unknown) {
+  return parseMode(autoplayModes, value);
 }
 
 export const autoplayModeLabels: Record<AutoplayMode, string> = {
@@ -60,11 +68,8 @@ export const autoplayModeLabels: Record<AutoplayMode, string> = {
 export const loopModes = ["off", "track", "queue"] as const;
 export type LoopMode = (typeof loopModes)[number];
 
-export function parseLoopMode(value: unknown): LoopMode {
-  if (value === true || value === 1 || value === "1" || value === "track")
-    return "track";
-  if (value === "queue") return "queue";
-  return "off";
+export function parseLoopMode(value: unknown) {
+  return parseMode(loopModes, value);
 }
 
 export const loopModeLabels: Record<LoopMode, string> = {
@@ -228,6 +233,131 @@ type PendingScrobble = {
     automatic?: boolean;
   };
 };
+
+type Row = Record<string, unknown>;
+
+type SessionSnapshot = {
+  state: string;
+  playbackSeconds: number;
+  displayMode: DisplayMode;
+  anchorEnabled: boolean;
+  queue: string[];
+};
+
+const sessionColumns = {
+  status: "status",
+  hostId: "host_id",
+  volume: "volume",
+  autoplay: "autoplay",
+  loopMode: "loop_mode",
+  transitionMode: "transition_mode",
+  duckingMode: "ducking_mode",
+  playbackSeconds: "playback_seconds",
+  listenedSeconds: "listened_seconds",
+  displayMode: "display_mode",
+  anchorEnabled: "anchor_enabled",
+};
+
+const trackColumns = {
+  status: "status",
+  filePath: "file_path",
+  title: "title",
+  artist: "artist",
+  album: "album",
+  duration: "duration",
+  artwork: "artwork",
+  introSeconds: "intro_seconds",
+  outroSeconds: "outro_seconds",
+  fadeInSeconds: "fade_in_seconds",
+  fadeOutSeconds: "fade_out_seconds",
+};
+
+const addedColumns = [
+  ["sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'"],
+  ["sessions", "loop_mode", "TEXT NOT NULL DEFAULT 'off'"],
+  ["sessions", "transition_mode", "TEXT NOT NULL DEFAULT 'none'"],
+  ["sessions", "ducking_mode", "TEXT"],
+  ["sessions", "resume_state", "TEXT"],
+  ["sessions", "resume_until", "INTEGER"],
+  ["sessions", "playback_seconds", "REAL NOT NULL DEFAULT 0"],
+  ["sessions", "listened_seconds", "REAL NOT NULL DEFAULT 0"],
+  ["sessions", "lyrics_enabled", "INTEGER NOT NULL DEFAULT 1"],
+  ["sessions", "display_mode", "TEXT NOT NULL DEFAULT 'default'"],
+  ["sessions", "anchor_enabled", "INTEGER NOT NULL DEFAULT 0"],
+  ["sessions", "end_text", "TEXT"],
+  ["sessions", "end_blocks", "TEXT"],
+  ["sessions", "source_channel_id", "TEXT"],
+  ["sessions", "huddle_thread_ts", "TEXT"],
+  ["sessions", "companion_channel_id", "TEXT"],
+  ["sessions", "message_cleanup_at", "INTEGER"],
+  ["tracks", "automatic", "INTEGER NOT NULL DEFAULT 0"],
+  ["tracks", "queue_position", "INTEGER"],
+  ["tracks", "intro_seconds", "REAL"],
+  ["tracks", "outro_seconds", "REAL"],
+  ["tracks", "fade_in_seconds", "REAL"],
+  ["tracks", "fade_out_seconds", "REAL"],
+  ["user_scrobbling", "mode", "TEXT NOT NULL DEFAULT 'always'"],
+  ["user_scrobbling", "huddle_mix_opt_in", "INTEGER NOT NULL DEFAULT 1"],
+] as const;
+
+// The SET clause and bindings for whichever of `fields` are present.
+function assignments(
+  columns: Record<string, string>,
+  fields: Record<string, unknown>,
+) {
+  const set = Object.entries(fields).filter(
+    ([field, value]) => field in columns && value !== undefined,
+  );
+  return {
+    sql: set.map(([field]) => `${columns[field]} = ?`).join(", "),
+    values: set.map(([, value]) =>
+      typeof value === "boolean" ? Number(value) : value,
+    ) as SQLQueryBindings[],
+  };
+}
+
+// Optional columns become absent keys rather than undefined ones, so a saved
+// record round-trips through JSON and `toHaveProperty` the same way.
+function compact<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as T;
+}
+
+function slots(values: readonly unknown[]) {
+  return values.map(() => "?").join(", ");
+}
+
+function text(value: unknown) {
+  return value ? String(value) : undefined;
+}
+
+function numeric(value: unknown) {
+  return value === null ? undefined : Number(value);
+}
+
+function savedTrack(track: Row) {
+  return compact({
+    id: String(track.id),
+    requesterId: String(track.requester_id),
+    sourceInput: String(track.source_input),
+    canonicalUrl: String(track.canonical_url),
+    sourceId: String(track.source_id),
+    title: String(track.title),
+    artist: String(track.artist),
+    album: text(track.album),
+    duration: numeric(track.duration),
+    artwork: text(track.artwork),
+    automatic: track.automatic ? true : undefined,
+    status: String(track.status),
+    filePath: text(track.file_path),
+    introSeconds: numeric(track.intro_seconds),
+    outroSeconds: numeric(track.outro_seconds),
+    fadeInSeconds: numeric(track.fade_in_seconds),
+    fadeOutSeconds: numeric(track.fade_out_seconds),
+    queuePosition: numeric(track.queue_position),
+  } satisfies SavedTrack);
+}
 
 export class Store {
   db: Database;
@@ -418,74 +548,21 @@ export class Store {
       CREATE INDEX IF NOT EXISTS track_likes_user_recent
         ON track_likes(user_id, liked_at DESC);
     `);
-    this.ensureColumn("sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'");
-    this.migrateAutoplayModes();
-    this.ensureColumn("sessions", "loop_mode", "TEXT NOT NULL DEFAULT 'off'");
-    this.ensureColumn(
-      "sessions",
-      "transition_mode",
-      "TEXT NOT NULL DEFAULT 'none'",
-    );
-    this.ensureColumn("sessions", "ducking_mode", "TEXT");
-    this.ensureColumn("sessions", "resume_state", "TEXT");
-    this.ensureColumn("sessions", "resume_until", "INTEGER");
-    this.ensureColumn(
-      "sessions",
-      "playback_seconds",
-      "REAL NOT NULL DEFAULT 0",
-    );
-    this.ensureColumn(
-      "sessions",
-      "listened_seconds",
-      "REAL NOT NULL DEFAULT 0",
-    );
-    this.ensureColumn(
-      "sessions",
-      "lyrics_enabled",
-      "INTEGER NOT NULL DEFAULT 1",
-    );
+    // Columns added since the tables were first created, in the order they
+    // were added so older databases end up with the same layout.
     const hadDisplayMode = this.hasColumn("sessions", "display_mode");
-    this.ensureColumn(
-      "sessions",
-      "display_mode",
-      "TEXT NOT NULL DEFAULT 'default'",
-    );
+    for (const [table, column, definition] of addedColumns)
+      this.ensureColumn(table, column, definition);
+    this.migrateAutoplayModes();
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
       );
-    this.ensureColumn(
-      "sessions",
-      "anchor_enabled",
-      "INTEGER NOT NULL DEFAULT 0",
-    );
-    this.ensureColumn("sessions", "end_text", "TEXT");
-    this.ensureColumn("sessions", "end_blocks", "TEXT");
-    this.ensureColumn("sessions", "source_channel_id", "TEXT");
-    this.ensureColumn("sessions", "huddle_thread_ts", "TEXT");
-    this.ensureColumn("sessions", "companion_channel_id", "TEXT");
-    this.ensureColumn("sessions", "message_cleanup_at", "INTEGER");
-    this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.db.run(`CREATE INDEX IF NOT EXISTS tracks_requester_recent
       ON tracks(requester_id, automatic, created_at DESC)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS tracks_played_title_artist
       ON tracks(title COLLATE NOCASE, artist COLLATE NOCASE, created_at DESC)
       WHERE status = 'played'`);
-    this.ensureColumn("tracks", "queue_position", "INTEGER");
-    this.ensureColumn("tracks", "intro_seconds", "REAL");
-    this.ensureColumn("tracks", "outro_seconds", "REAL");
-    this.ensureColumn("tracks", "fade_in_seconds", "REAL");
-    this.ensureColumn("tracks", "fade_out_seconds", "REAL");
-    this.ensureColumn(
-      "user_scrobbling",
-      "mode",
-      "TEXT NOT NULL DEFAULT 'always'",
-    );
-    this.ensureColumn(
-      "user_scrobbling",
-      "huddle_mix_opt_in",
-      "INTEGER NOT NULL DEFAULT 1",
-    );
   }
 
   createSession(session: {
@@ -608,13 +685,10 @@ export class Store {
   }
 
   sessionCompanionChannel(sessionId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT companion_channel_id AS channelId FROM sessions WHERE id = ?",
-        )
-        .get(sessionId) as { channelId: string | null } | null
-    )?.channelId;
+    return this.scalar<string | null>(
+      "SELECT companion_channel_id FROM sessions WHERE id = ?",
+      sessionId,
+    );
   }
 
   setSession(
@@ -633,86 +707,49 @@ export class Store {
       anchorEnabled?: boolean;
     },
   ) {
-    if (fields.status !== undefined)
-      this.db
-        .query("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?")
-        .run(fields.status, Date.now(), sessionId);
-    if (fields.hostId !== undefined)
-      this.db
-        .query("UPDATE sessions SET host_id = ?, updated_at = ? WHERE id = ?")
-        .run(fields.hostId, Date.now(), sessionId);
-    if (fields.volume !== undefined)
-      this.db
-        .query("UPDATE sessions SET volume = ?, updated_at = ? WHERE id = ?")
-        .run(fields.volume, Date.now(), sessionId);
-    if (fields.autoplay !== undefined)
-      this.db
-        .query("UPDATE sessions SET autoplay = ?, updated_at = ? WHERE id = ?")
-        .run(fields.autoplay, Date.now(), sessionId);
-    if (fields.loopMode !== undefined)
-      this.db
-        .query("UPDATE sessions SET loop_mode = ?, updated_at = ? WHERE id = ?")
-        .run(fields.loopMode, Date.now(), sessionId);
-    if (fields.transitionMode !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET transition_mode = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.transitionMode, Date.now(), sessionId);
-    if (fields.duckingMode !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET ducking_mode = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.duckingMode, Date.now(), sessionId);
-    if (fields.playbackSeconds !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET playback_seconds = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.playbackSeconds, Date.now(), sessionId);
-    if (fields.listenedSeconds !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET listened_seconds = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.listenedSeconds, Date.now(), sessionId);
-    if (fields.displayMode !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET display_mode = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.displayMode, Date.now(), sessionId);
-    if (fields.anchorEnabled !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET anchor_enabled = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.anchorEnabled ? 1 : 0, Date.now(), sessionId);
+    const { sql, values } = assignments(sessionColumns, fields);
+    if (!sql) return;
+    this.db
+      .query(`UPDATE sessions SET ${sql}, updated_at = ? WHERE id = ?`)
+      .run(...values, Date.now(), sessionId);
   }
 
   suspendSession(
     sessionId: string,
-    state: {
-      state: string;
-      playbackSeconds: number;
-      displayMode: DisplayMode;
-      anchorEnabled: boolean;
-      queue: string[];
-    },
+    state: SessionSnapshot,
+    resumeUntil: number,
+  ) {
+    this.saveSnapshot(sessionId, "suspended", state, resumeUntil);
+  }
+
+  endSession(
+    sessionId: string,
+    state: SessionSnapshot & { listenedSeconds: number },
+    resumeUntil: number,
+  ) {
+    this.saveSnapshot(sessionId, "ended", state, resumeUntil);
+  }
+
+  private saveSnapshot(
+    sessionId: string,
+    status: string,
+    state: SessionSnapshot & { listenedSeconds?: number },
     resumeUntil: number,
   ) {
     this.db.transaction(() => {
       this.db
         .query(
           `UPDATE sessions SET
-        status = 'suspended', resume_state = ?, resume_until = ?, playback_seconds = ?,
-        display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`,
+        status = ?, resume_state = ?, resume_until = ?, playback_seconds = ?,
+        listened_seconds = COALESCE(?, listened_seconds), display_mode = ?,
+        anchor_enabled = ?, updated_at = ? WHERE id = ?`,
         )
         .run(
+          status,
           state.state,
           resumeUntil,
           state.playbackSeconds,
+          state.listenedSeconds ?? null,
           state.displayMode,
           state.anchorEnabled ? 1 : 0,
           Date.now(),
@@ -738,39 +775,6 @@ export class Store {
       "UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?",
     );
     queue.forEach((id, index) => position.run(index, id, sessionId));
-  }
-
-  endSession(
-    sessionId: string,
-    state: {
-      state: string;
-      playbackSeconds: number;
-      listenedSeconds: number;
-      displayMode: DisplayMode;
-      anchorEnabled: boolean;
-      queue: string[];
-    },
-    resumeUntil: number,
-  ) {
-    this.db.transaction(() => {
-      this.db
-        .query(
-          `UPDATE sessions SET
-        status = 'ended', resume_state = ?, resume_until = ?, playback_seconds = ?,
-        listened_seconds = ?, display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`,
-        )
-        .run(
-          state.state,
-          resumeUntil,
-          state.playbackSeconds,
-          state.listenedSeconds,
-          state.displayMode,
-          state.anchorEnabled ? 1 : 0,
-          Date.now(),
-          sessionId,
-        );
-      this.writeQueueOrder(sessionId, state.queue);
-    })();
   }
 
   setEndMessage(
@@ -884,9 +888,7 @@ export class Store {
   }
 
   needsUsageBackfill() {
-    return !this.db
-      .query("SELECT 1 FROM data_migrations WHERE name = ?")
-      .get("audit-usage-v1");
+    return !this.migrated("audit-usage-v1");
   }
 
   importUsage(counts: UsageCounts) {
@@ -898,16 +900,14 @@ export class Store {
       );
       for (const [event, count] of Object.entries(counts))
         insert.run(event, count);
-      this.db
-        .query("INSERT INTO data_migrations (name, completed_at) VALUES (?, ?)")
-        .run("audit-usage-v1", Date.now());
+      this.completeMigration("audit-usage-v1");
     })();
   }
 
   resumableSessions(now: number, ttlMs: number) {
     const rows = this.db
       .query(`SELECT * FROM sessions WHERE status != 'ended'`)
-      .all() as Record<string, unknown>[];
+      .all() as Row[];
     return this.savedSessions(rows, now, ttlMs, true);
   }
 
@@ -916,13 +916,13 @@ export class Store {
       .query(
         `SELECT * FROM sessions WHERE status = 'ended' AND resume_until IS NOT NULL`,
       )
-      .all() as Record<string, unknown>[];
+      .all() as Row[];
     return this.savedSessions(rows, Number.NEGATIVE_INFINITY, 0, false)
       .sessions;
   }
 
   private savedSessions(
-    rows: Record<string, unknown>[],
+    rows: Row[],
     now: number,
     ttlMs: number,
     expire: boolean,
@@ -944,41 +944,10 @@ export class Store {
         WHERE session_id = ? AND status IN ('playing', 'ready', 'preparing', 'played')
         ORDER BY CASE WHEN status = 'playing' THEN -1 ELSE COALESCE(queue_position, created_at) END`,
           )
-          .all(id) as Record<string, unknown>[]
-      ).map((track) => ({
-        id: String(track.id),
-        requesterId: String(track.requester_id),
-        sourceInput: String(track.source_input),
-        canonicalUrl: String(track.canonical_url),
-        sourceId: String(track.source_id),
-        title: String(track.title),
-        artist: String(track.artist),
-        ...(track.album ? { album: String(track.album) } : {}),
-        ...(track.duration === null
-          ? {}
-          : { duration: Number(track.duration) }),
-        ...(track.artwork ? { artwork: String(track.artwork) } : {}),
-        ...(track.automatic ? { automatic: true } : {}),
-        status: String(track.status),
-        ...(track.file_path ? { filePath: String(track.file_path) } : {}),
-        ...(track.intro_seconds === null
-          ? {}
-          : { introSeconds: Number(track.intro_seconds) }),
-        ...(track.outro_seconds === null
-          ? {}
-          : { outroSeconds: Number(track.outro_seconds) }),
-        ...(track.fade_in_seconds === null
-          ? {}
-          : { fadeInSeconds: Number(track.fade_in_seconds) }),
-        ...(track.fade_out_seconds === null
-          ? {}
-          : { fadeOutSeconds: Number(track.fade_out_seconds) }),
-        ...(track.queue_position === null
-          ? {}
-          : { queuePosition: Number(track.queue_position) }),
-      }));
+          .all(id) as Row[]
+      ).map(savedTrack);
       return [
-        {
+        compact({
           id,
           huddleId: String(row.huddle_id),
           callId: String(row.call_id),
@@ -986,36 +955,27 @@ export class Store {
           threadTs: String(row.thread_ts),
           sourceChannelId: String(row.source_channel_id ?? row.channel_id),
           huddleThreadTs: String(row.huddle_thread_ts ?? row.thread_ts),
-          ...(row.companion_channel_id
-            ? { companionChannelId: String(row.companion_channel_id) }
-            : {}),
+          companionChannelId: text(row.companion_channel_id),
           uiTs: String(row.ui_ts ?? ""),
           revision: Number(row.revision),
           creatorId: String(row.creator_id),
-          ...(row.host_id ? { hostId: String(row.host_id) } : {}),
+          hostId: text(row.host_id),
           state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
           autoplay: parseAutoplayMode(row.autoplay),
           loopMode: parseLoopMode(row.loop_mode),
-          transitionMode: transitionModes.includes(
-            row.transition_mode as TransitionMode,
-          )
-            ? (row.transition_mode as TransitionMode)
-            : "none",
-          ...(duckingModes.includes(row.ducking_mode as DuckingMode)
-            ? { duckingMode: row.ducking_mode as DuckingMode }
-            : {}),
-          displayMode: displayModes.includes(row.display_mode as DisplayMode)
-            ? (row.display_mode as DisplayMode)
-            : "default",
+          transitionMode:
+            modeOf(transitionModes, row.transition_mode) ?? "none",
+          duckingMode: modeOf(duckingModes, row.ducking_mode),
+          displayMode: modeOf(displayModes, row.display_mode) ?? "default",
           anchorEnabled: Boolean(row.anchor_enabled),
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
           resumeUntil: deadline,
-          ...(row.end_text ? { endText: String(row.end_text) } : {}),
-          ...(row.end_blocks
-            ? { endBlocks: JSON.parse(String(row.end_blocks)) as unknown[] }
-            : {}),
+          endText: text(row.end_text),
+          endBlocks: row.end_blocks
+            ? (JSON.parse(String(row.end_blocks)) as unknown[])
+            : undefined,
           permissions: (
             this.db
               .query(
@@ -1024,7 +984,7 @@ export class Store {
               .all(id) as { capability: string }[]
           ).map((value) => value.capability),
           tracks,
-        } satisfies SavedSession,
+        } satisfies SavedSession),
       ];
     });
     if (expiredIds.length)
@@ -1060,23 +1020,17 @@ export class Store {
   }
 
   companionChannel(sourceChannelId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT channel_id AS channelId FROM companion_channels WHERE source_channel_id = ?",
-        )
-        .get(sourceChannelId) as { channelId: string } | null
-    )?.channelId;
+    return this.scalar<string>(
+      "SELECT channel_id FROM companion_channels WHERE source_channel_id = ?",
+      sourceChannelId,
+    );
   }
 
   sourceChannelForCompanion(channelId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT source_channel_id AS sourceChannelId FROM companion_channels WHERE channel_id = ?",
-        )
-        .get(channelId) as { sourceChannelId: string } | null
-    )?.sourceChannelId;
+    return this.scalar<string>(
+      "SELECT source_channel_id FROM companion_channels WHERE channel_id = ?",
+      channelId,
+    );
   }
 
   setCompanionChannel(sourceChannelId: string, channelId: string) {
@@ -1132,13 +1086,11 @@ export class Store {
   }
 
   companionRemovalDeadline(channelId: string, userId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT due_at AS dueAt FROM companion_removals WHERE channel_id = ? AND user_id = ?",
-        )
-        .get(channelId, userId) as { dueAt: number } | null
-    )?.dueAt;
+    return this.scalar<number>(
+      "SELECT due_at FROM companion_removals WHERE channel_id = ? AND user_id = ?",
+      channelId,
+      userId,
+    );
   }
 
   completeCompanionRemoval(channelId: string, userId: string, dueAt: number) {
@@ -1440,12 +1392,11 @@ export class Store {
     limit = recentLikeLimit,
   ): LikeRecord[] {
     if (!userIds.length) return [];
-    const slots = userIds.map(() => "?").join(", ");
     return this.db
       .query(
         `SELECT user_id AS userId, title, artist, liked_at AS likedAt
         FROM track_likes
-        WHERE user_id IN (${slots}) AND liked_at >= ?
+        WHERE user_id IN (${slots(userIds)}) AND liked_at >= ?
         ORDER BY liked_at DESC LIMIT ?`,
       )
       .all(...userIds, since, limit) as LikeRecord[];
@@ -1456,12 +1407,11 @@ export class Store {
   // songs are matched never needs the stored rows rewritten.
   recentPlays(userIds: readonly string[], since: number): PlayRecord[] {
     if (!userIds.length) return [];
-    const slots = userIds.map(() => "?").join(", ");
     return this.db
       .query(
         `SELECT user_id AS userId, title, artist, played_at AS playedAt
         FROM track_plays
-        WHERE user_id IN (${slots}) AND played_at >= ?
+        WHERE user_id IN (${slots(userIds)}) AND played_at >= ?
         ORDER BY played_at DESC`,
       )
       .all(...userIds, since) as PlayRecord[];
@@ -1484,12 +1434,11 @@ export class Store {
 
   recentSkips(userIds: readonly string[], since: number): SkipRecord[] {
     if (!userIds.length) return [];
-    const slots = userIds.map(() => "?").join(", ");
     return this.db
       .query(
         `SELECT user_id AS userId, title, artist, weight, skipped_at AS skippedAt
         FROM autoplay_skips
-        WHERE user_id IN (${slots}) AND skipped_at >= ?
+        WHERE user_id IN (${slots(userIds)}) AND skipped_at >= ?
         ORDER BY skipped_at DESC`,
       )
       .all(...userIds, since) as SkipRecord[];
@@ -1529,50 +1478,9 @@ export class Store {
       fadeOutSeconds?: number;
     },
   ) {
-    if (fields.status !== undefined)
-      this.db
-        .query("UPDATE tracks SET status = ? WHERE id = ?")
-        .run(fields.status, id);
-    if (fields.filePath !== undefined)
-      this.db
-        .query("UPDATE tracks SET file_path = ? WHERE id = ?")
-        .run(fields.filePath, id);
-    if (fields.title !== undefined)
-      this.db
-        .query("UPDATE tracks SET title = ? WHERE id = ?")
-        .run(fields.title, id);
-    if (fields.artist !== undefined)
-      this.db
-        .query("UPDATE tracks SET artist = ? WHERE id = ?")
-        .run(fields.artist, id);
-    if (fields.album !== undefined)
-      this.db
-        .query("UPDATE tracks SET album = ? WHERE id = ?")
-        .run(fields.album, id);
-    if (fields.duration !== undefined)
-      this.db
-        .query("UPDATE tracks SET duration = ? WHERE id = ?")
-        .run(fields.duration, id);
-    if (fields.artwork !== undefined)
-      this.db
-        .query("UPDATE tracks SET artwork = ? WHERE id = ?")
-        .run(fields.artwork, id);
-    if (fields.introSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET intro_seconds = ? WHERE id = ?")
-        .run(fields.introSeconds, id);
-    if (fields.outroSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET outro_seconds = ? WHERE id = ?")
-        .run(fields.outroSeconds, id);
-    if (fields.fadeInSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET fade_in_seconds = ? WHERE id = ?")
-        .run(fields.fadeInSeconds, id);
-    if (fields.fadeOutSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET fade_out_seconds = ? WHERE id = ?")
-        .run(fields.fadeOutSeconds, id);
+    const { sql, values } = assignments(trackColumns, fields);
+    if (!sql) return;
+    this.db.query(`UPDATE tracks SET ${sql} WHERE id = ?`).run(...values, id);
   }
 
   removeTrack(id: string) {
@@ -1591,7 +1499,7 @@ export class Store {
   getUserScrobbling(userId: string): UserScrobbling {
     const row = this.db
       .query("SELECT * FROM user_scrobbling WHERE user_id = ?")
-      .get(userId) as Record<string, unknown> | null;
+      .get(userId) as Row | null;
     if (!row)
       return {
         lastFmEnabled: false,
@@ -1599,44 +1507,27 @@ export class Store {
         huddleMixOptIn: true,
         mode: "always",
       };
-    return {
-      ...(row.lastfm_username
-        ? { lastFmUsername: String(row.lastfm_username) }
-        : {}),
-      ...(row.lastfm_session_key
-        ? { lastFmSessionKey: String(row.lastfm_session_key) }
-        : {}),
+    return compact({
+      lastFmUsername: text(row.lastfm_username),
+      lastFmSessionKey: text(row.lastfm_session_key),
       lastFmEnabled: Boolean(row.lastfm_enabled),
-      ...(row.lastfm_pending_token
-        ? { lastFmPendingToken: String(row.lastfm_pending_token) }
-        : {}),
-      ...(row.lastfm_pending_at
-        ? { lastFmPendingAt: Number(row.lastfm_pending_at) }
-        : {}),
-      ...(row.listenbrainz_username
-        ? { listenBrainzUsername: String(row.listenbrainz_username) }
-        : {}),
-      ...(row.listenbrainz_token
-        ? { listenBrainzToken: String(row.listenbrainz_token) }
-        : {}),
+      lastFmPendingToken: text(row.lastfm_pending_token),
+      lastFmPendingAt: row.lastfm_pending_at
+        ? Number(row.lastfm_pending_at)
+        : undefined,
+      listenBrainzUsername: text(row.listenbrainz_username),
+      listenBrainzToken: text(row.listenbrainz_token),
       listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
       huddleMixOptIn:
         row.huddle_mix_opt_in === undefined
           ? true
           : Boolean(row.huddle_mix_opt_in),
-      mode: scrobblingModes.includes(row.mode as ScrobblingMode)
-        ? (row.mode as ScrobblingMode)
-        : "always",
-    };
+      mode: modeOf(scrobblingModes, row.mode) ?? "always",
+    });
   }
 
   setScrobblingMode(userId: string, mode: ScrobblingMode) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET mode = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(mode, Date.now(), userId);
+    this.updateUserScrobbling(userId, "mode = ?", mode);
   }
 
   getSessionScrobbling(sessionId: string, userId: string) {
@@ -1658,78 +1549,63 @@ export class Store {
   }
 
   setHuddleMixOptIn(userId: string, enabled: boolean) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET huddle_mix_opt_in = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(enabled ? 1 : 0, Date.now(), userId);
+    this.updateUserScrobbling(userId, "huddle_mix_opt_in = ?", enabled ? 1 : 0);
   }
 
   setLastFmPending(userId: string, token: string, startedAt: number) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET lastfm_pending_token = ?, lastfm_pending_at = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(token, startedAt, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      "lastfm_pending_token = ?, lastfm_pending_at = ?",
+      token,
+      startedAt,
+    );
   }
 
   connectLastFm(userId: string, username: string, sessionKey: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        `UPDATE user_scrobbling SET lastfm_username = ?, lastfm_session_key = ?, lastfm_enabled = 1,
-      lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`,
-      )
-      .run(username, sessionKey, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      `lastfm_username = ?, lastfm_session_key = ?, lastfm_enabled = 1,
+      lastfm_pending_token = NULL, lastfm_pending_at = NULL`,
+      username,
+      sessionKey,
+    );
   }
 
   disconnectLastFm(userId: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        `UPDATE user_scrobbling SET lastfm_username = NULL, lastfm_session_key = NULL,
-      lastfm_enabled = 0, lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`,
-      )
-      .run(Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      `lastfm_username = NULL, lastfm_session_key = NULL, lastfm_enabled = 0,
+      lastfm_pending_token = NULL, lastfm_pending_at = NULL`,
+    );
   }
 
   setLastFmEnabled(userId: string, enabled: boolean) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET lastfm_enabled = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(enabled ? 1 : 0, Date.now(), userId);
+    this.updateUserScrobbling(userId, "lastfm_enabled = ?", enabled ? 1 : 0);
   }
 
   setListenBrainzToken(userId: string, token: string, username: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET listenbrainz_token = ?, listenbrainz_username = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(token, username, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      "listenbrainz_token = ?, listenbrainz_username = ?",
+      token,
+      username,
+    );
   }
 
   disconnectListenBrainz(userId: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        `UPDATE user_scrobbling SET listenbrainz_username = NULL, listenbrainz_token = NULL,
-      listenbrainz_enabled = 0, updated_at = ? WHERE user_id = ?`,
-      )
-      .run(Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      `listenbrainz_username = NULL, listenbrainz_token = NULL,
+      listenbrainz_enabled = 0`,
+    );
   }
 
   setListenBrainzEnabled(userId: string, enabled: boolean) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET listenbrainz_enabled = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(enabled ? 1 : 0, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      "listenbrainz_enabled = ?",
+      enabled ? 1 : 0,
+    );
   }
 
   queueScrobble(
@@ -1767,7 +1643,7 @@ export class Store {
           `SELECT id, session_id, user_id, service, listened_at, attempts, track FROM scrobbles
       WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY listened_at, created_at`,
         )
-        .all(now) as Record<string, unknown>[]
+        .all(now) as Row[]
     ).map(
       (row) =>
         ({
@@ -1823,10 +1699,7 @@ export class Store {
   }
 
   private migrateAutoplayModes() {
-    const done = this.db
-      .query("SELECT 1 FROM data_migrations WHERE name = ?")
-      .get("autoplay-modes-v1");
-    if (done) return;
+    if (this.migrated("autoplay-modes-v1")) return;
     this.db
       .query(
         `UPDATE sessions SET autoplay = CASE
@@ -1836,9 +1709,19 @@ export class Store {
         END`,
       )
       .run();
+    this.completeMigration("autoplay-modes-v1");
+  }
+
+  private migrated(name: string) {
+    return Boolean(
+      this.db.query("SELECT 1 FROM data_migrations WHERE name = ?").get(name),
+    );
+  }
+
+  private completeMigration(name: string) {
     this.db
       .query("INSERT INTO data_migrations (name, completed_at) VALUES (?, ?)")
-      .run("autoplay-modes-v1", Date.now());
+      .run(name, Date.now());
   }
 
   private ensureColumn(table: string, column: string, definition: string) {
@@ -1852,11 +1735,25 @@ export class Store {
     ).some((value) => value.name === column);
   }
 
-  private ensureUserScrobbling(userId: string) {
+  // The first column of the first matching row, or undefined without one.
+  private scalar<T>(sql: string, ...params: SQLQueryBindings[]) {
+    return this.db.query(sql).values(...params)[0]?.[0] as T | undefined;
+  }
+
+  private updateUserScrobbling(
+    userId: string,
+    assignments: string,
+    ...values: SQLQueryBindings[]
+  ) {
     this.db
       .query(
         "INSERT OR IGNORE INTO user_scrobbling (user_id, updated_at) VALUES (?, ?)",
       )
       .run(userId, Date.now());
+    this.db
+      .query(
+        `UPDATE user_scrobbling SET ${assignments}, updated_at = ? WHERE user_id = ?`,
+      )
+      .run(...values, Date.now(), userId);
   }
 }

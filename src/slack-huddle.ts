@@ -36,13 +36,8 @@ function participantIds(value: unknown) {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
     if (typeof entry === "string") return [entry];
-    if (
-      entry &&
-      typeof entry === "object" &&
-      typeof (entry as { user_id?: unknown }).user_id === "string"
-    )
-      return [(entry as { user_id: string }).user_id];
-    return [];
+    const userId = (entry as { user_id?: unknown } | null)?.user_id;
+    return typeof userId === "string" ? [userId] : [];
   });
 }
 
@@ -109,19 +104,63 @@ function text(value: unknown, name: string) {
   return value;
 }
 
-export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
-  const root = object(raw, "response");
-  if (root.ok !== true)
+// Throws unless Slack answered ok, or with an error after which retrying
+// could never change the outcome.
+function checked(
+  method: string,
+  result: Record<string, unknown>,
+  settled: readonly string[] = [],
+) {
+  if (result.ok !== true && !settled.includes(String(result.error)))
     throw new Error(
-      `rooms.join failed: ${String(root.error ?? "unknown_error")}`,
+      `${method} failed: ${String(result.error ?? "unknown_error")}`,
     );
+  return result;
+}
 
+function formData(fields: Record<string, string>) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.set(key, value);
+  return form;
+}
+
+// Fields the Slack desktop client sends alongside its own API calls.
+function clientFields(reason: string) {
+  return {
+    _x_reason: reason,
+    _x_mode: "online",
+    _x_sonic: "true",
+    _x_app_name: "client",
+  };
+}
+
+function chimeMeeting(value: unknown, name: string) {
+  const meeting = { ...object(value, name) };
+  if (meeting.MeetingFeatures === null) delete meeting.MeetingFeatures;
+  return meeting;
+}
+
+async function authTest(workspaceUrl: string, token: string, cookie?: string) {
+  const response = await fetch(new URL("/api/auth.test", workspaceUrl), {
+    method: "POST",
+    headers: cookie ? { cookie: `d=${cookie}` } : undefined,
+    body: new URLSearchParams({ token }),
+  });
+  const result = (await response.json()) as {
+    ok?: boolean;
+    error?: string;
+    user_id?: string;
+    team_id?: string;
+  };
+  return { ...result, status: response.status };
+}
+
+export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
+  const root = checked("rooms.join", object(raw, "response"));
   const call = object(root.call, "call");
   const freeWilly = object(call.free_willy, "call.free_willy");
   const canvas = object(root.canvas, "canvas");
   const huddle = object(root.huddle, "huddle");
-  const meeting = { ...object(freeWilly.meeting, "call.free_willy.meeting") };
-  if (meeting.MeetingFeatures === null) delete meeting.MeetingFeatures;
 
   return {
     huddleCallId: text(call.call_id, "call.call_id"),
@@ -130,7 +169,7 @@ export function normalizeJoinResponse(raw: unknown): JoinedHuddle {
     participantIds: participantIds(huddle.participants),
     uiChannelId: text(canvas.thread_channel_id, "canvas.thread_channel_id"),
     uiThreadTs: text(canvas.root_thread_ts, "canvas.root_thread_ts"),
-    chimeMeeting: meeting,
+    chimeMeeting: chimeMeeting(freeWilly.meeting, "call.free_willy.meeting"),
     chimeAttendee: object(freeWilly.attendee, "call.free_willy.attendee"),
   };
 }
@@ -140,15 +179,11 @@ export function normalizeInvitedJoinResponse(
   channelId: string,
   freeWilly: Record<string, unknown>,
 ): JoinedHuddle {
-  const root = object(raw, "screenhero.rooms.info response");
-  if (root.ok !== true)
-    throw new Error(
-      `screenhero.rooms.info failed: ${String(root.error ?? "unknown_error")}`,
-    );
-
+  const root = checked(
+    "screenhero.rooms.info",
+    object(raw, "screenhero.rooms.info response"),
+  );
   const room = object(root.room, "room");
-  const meeting = { ...object(freeWilly.meeting, "free_willy.meeting") };
-  if (meeting.MeetingFeatures === null) delete meeting.MeetingFeatures;
   const callId = text(room.id, "room.id");
 
   return {
@@ -161,7 +196,7 @@ export function normalizeInvitedJoinResponse(
       room.thread_root_ts ?? room.canvas_thread_ts,
       "room.thread_root_ts",
     ),
-    chimeMeeting: meeting,
+    chimeMeeting: chimeMeeting(freeWilly.meeting, "free_willy.meeting"),
     chimeAttendee: object(freeWilly.attendee, "free_willy.attendee"),
   };
 }
@@ -177,19 +212,19 @@ export function channelAccess(channel?: {
 }
 
 // Kick outcomes after which the member can never be removed by retrying.
-const kickSettledErrors = new Set([
+const kickSettledErrors = [
   "not_in_channel",
   "user_not_in_channel",
   "channel_not_found",
   "is_archived",
-]);
+];
 
 // Reaction removal outcomes that already leave the reaction off the message.
-const unreactSettledErrors = new Set([
+const unreactSettledErrors = [
   "no_reaction",
   "message_not_found",
   "channel_not_found",
-]);
+];
 
 export function companionChannelName(channelId: string, suffix?: string) {
   return `huddlefm-${channelId.toLowerCase()}${suffix ? `-${suffix}` : ""}`;
@@ -251,21 +286,13 @@ export class SlackHuddleAdapter {
       { event: "connection_started", attempt: this.reconnectAttempts + 1 },
       "Connecting Slack Huddle realtime API",
     );
-    const response = await fetch(
-      new URL("/api/auth.test", this.config.workspaceUrl),
-      {
-        method: "POST",
-        headers: { cookie: `d=${this.config.xoxd}` },
-        body: new URLSearchParams({ token: this.config.xoxc }),
-      },
+    const auth = await authTest(
+      this.config.workspaceUrl,
+      this.config.xoxc,
+      this.config.xoxd,
     );
-    const auth = (await response.json()) as {
-      ok?: boolean;
-      error?: string;
-      team_id?: string;
-    };
     if (!auth.ok || !auth.team_id)
-      throw new Error(`Selfbot auth failed: ${auth.error ?? response.status}`);
+      throw new Error(`Selfbot auth failed: ${auth.error ?? auth.status}`);
 
     const url = this.reconnectUrl
       ? new URL(this.reconnectUrl)
@@ -370,13 +397,10 @@ export class SlackHuddleAdapter {
   }
 
   async ensureChannelAccess(channelId: string) {
-    const info = await this.api("conversations.info", { channel: channelId });
-    if (info.ok !== true) {
-      if (info.error === "channel_not_found") return false;
-      throw new Error(
-        `conversations.info failed: ${String(info.error ?? "unknown_error")}`,
-      );
-    }
+    const info = await this.api("conversations.info", { channel: channelId }, [
+      "channel_not_found",
+    ]);
+    if (info.ok !== true) return false;
     const access = channelAccess(object(info.channel, "channel"));
     if (access === "ready") {
       log.debug(
@@ -392,11 +416,7 @@ export class SlackHuddleAdapter {
       );
       return false;
     }
-    const joined = await this.api("conversations.join", { channel: channelId });
-    if (joined.ok !== true)
-      throw new Error(
-        `conversations.join failed: ${String(joined.error ?? "unknown_error")}`,
-      );
+    await this.api("conversations.join", { channel: channelId });
     log.info({ event: "channel_joined", channelId }, "Joined Slack channel");
     return true;
   }
@@ -408,48 +428,52 @@ export class SlackHuddleAdapter {
       const result = await this.api(
         "conversations.create",
         companionChannelRequest(name, this.config.teamId),
+        ["name_taken"],
       );
       if (result.ok === true) {
         const channelId = text(
           object(result.channel, "conversations.create.channel").id,
           "conversations.create.channel.id",
         );
-        await this.api("conversations.setTopic", {
-          channel: channelId,
-          topic: `HuddleFM controls for <#${sourceChannelId}>. Membership and messages are managed automatically.`,
-        });
+        // The channel is usable without its topic, so a failed update is
+        // logged rather than thrown, which would orphan the new channel.
+        try {
+          const topic = await this.call("conversations.setTopic", {
+            channel: channelId,
+            topic: `HuddleFM controls for <#${sourceChannelId}>. Membership and messages are managed automatically.`,
+          });
+          if (topic.ok !== true)
+            log.warn(
+              {
+                event: "topic_failed",
+                channelId,
+                sourceChannelId,
+                error: topic.error,
+              },
+              "Could not set companion channel topic",
+            );
+        } catch (err) {
+          log.warn(
+            { event: "topic_failed", channelId, sourceChannelId, err },
+            "Could not set companion channel topic",
+          );
+        }
         return channelId;
       }
-      if (result.error !== "name_taken")
-        throw new Error(
-          `conversations.create failed: ${String(result.error ?? "unknown_error")}`,
-        );
       suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 6);
     }
   }
 
   async restrictCompanionPosting(channelId: string, userId: string) {
+    const form = formData({
+      token: this.config.xoxc,
+      channel_id: channelId,
+      prefs: JSON.stringify(companionPostingPrefs(userId)),
+      ...clientFields("channel-options-ia-posting-permission-modal-contents"),
+    });
     let error = "unknown_error";
     for (let attempt = 0; attempt < 5; attempt++) {
-      const form = new FormData();
-      form.set("token", this.config.xoxc);
-      form.set("channel_id", channelId);
-      form.set("prefs", JSON.stringify(companionPostingPrefs(userId)));
-      form.set(
-        "_x_reason",
-        "channel-options-ia-posting-permission-modal-contents",
-      );
-      form.set("_x_mode", "online");
-      form.set("_x_sonic", "true");
-      form.set("_x_app_name", "client");
-      const response = await fetch(
-        new URL("/api/channels.prefs.set", this.config.workspaceUrl),
-        {
-          method: "POST",
-          headers: { cookie: `d=${this.config.xoxd}` },
-          body: form,
-        },
-      );
+      const response = await this.post("/api/channels.prefs.set", form);
       let result: Record<string, unknown> | undefined;
       try {
         if (response.ok)
@@ -465,26 +489,20 @@ export class SlackHuddleAdapter {
   }
 
   async inviteToChannel(channelId: string, userId: string) {
-    const result = await this.api("conversations.invite", {
-      channel: channelId,
-      users: userId,
-    });
-    if (result.ok === true) return true;
-    if (result.error === "already_in_channel") return false;
-    throw new Error(
-      `conversations.invite failed: ${String(result.error ?? "unknown_error")}`,
+    const result = await this.api(
+      "conversations.invite",
+      { channel: channelId, users: userId },
+      ["already_in_channel"],
     );
+    return result.ok === true;
   }
 
   async removeFromChannel(channelId: string, userId: string) {
-    const result = await this.api("conversations.kick", {
-      channel: channelId,
-      user: userId,
-    });
-    if (result.ok !== true && !kickSettledErrors.has(String(result.error)))
-      throw new Error(
-        `conversations.kick failed: ${String(result.error ?? "unknown_error")}`,
-      );
+    await this.api(
+      "conversations.kick",
+      { channel: channelId, user: userId },
+      kickSettledErrors,
+    );
   }
 
   async activeHuddleRoom(channelId: string, threadTs: string) {
@@ -494,46 +512,38 @@ export class SlackHuddleAdapter {
       limit: "1",
       inclusive: "true",
     });
-    if (replies.ok !== true)
-      throw new Error(
-        `conversations.replies failed: ${String(replies.error ?? "unknown_error")}`,
-      );
     return activeHuddleRoom(replies, threadTs);
   }
 
   async react(channelId: string, messageTs: string, name: string) {
-    const result = await this.api("reactions.add", {
-      channel: channelId,
-      timestamp: messageTs,
-      name,
-    });
-    if (result.ok !== true && result.error !== "already_reacted")
-      throw new Error(
-        `reactions.add failed: ${String(result.error ?? "unknown_error")}`,
-      );
+    await this.api(
+      "reactions.add",
+      { channel: channelId, timestamp: messageTs, name },
+      ["already_reacted"],
+    );
   }
 
   async unreact(channelId: string, messageTs: string, name: string) {
-    const result = await this.api("reactions.remove", {
-      channel: channelId,
-      timestamp: messageTs,
-      name,
-    });
-    if (result.ok !== true && !unreactSettledErrors.has(String(result.error)))
-      throw new Error(
-        `reactions.remove failed: ${String(result.error ?? "unknown_error")}`,
-      );
+    await this.api(
+      "reactions.remove",
+      { channel: channelId, timestamp: messageTs, name },
+      unreactSettledErrors,
+    );
   }
 
-  private async api(method: string, fields: Record<string, string>) {
+  private async api(
+    method: string,
+    fields: Record<string, string>,
+    settled?: readonly string[],
+  ) {
+    return checked(method, await this.call(method, fields), settled);
+  }
+
+  private async call(method: string, fields: Record<string, string>) {
     const startedAt = Date.now();
-    const response = await fetch(
-      new URL(`/api/${method}`, this.config.workspaceUrl),
-      {
-        method: "POST",
-        headers: { cookie: `d=${this.config.xoxd}` },
-        body: new URLSearchParams({ token: this.config.xoxc, ...fields }),
-      },
+    const response = await this.post(
+      `/api/${method}`,
+      new URLSearchParams({ token: this.config.xoxc, ...fields }),
     );
     if (!response.ok) throw new Error(`${method} HTTP ${response.status}`);
     log.debug(
@@ -543,22 +553,30 @@ export class SlackHuddleAdapter {
     return object(await response.json(), method);
   }
 
+  private post(
+    path: string,
+    body: FormData | URLSearchParams,
+    signal?: AbortSignal,
+  ) {
+    return fetch(new URL(path, this.config.workspaceUrl), {
+      method: "POST",
+      headers: { cookie: `d=${this.config.xoxd}` },
+      body,
+      signal,
+    });
+  }
+
   async join(channelId: string) {
     const startedAt = Date.now();
     log.info({ event: "join_started", channelId }, "Joining Slack Huddle");
-    const form = new FormData();
-    form.set("channel_id", channelId);
-    form.set("regions", this.config.mediaRegion);
-    form.set("token", this.config.xoxc);
-    form.set("multidevice", "true");
-
-    const response = await fetch(
-      new URL("/api/rooms.join", this.config.workspaceUrl),
-      {
-        method: "POST",
-        headers: { cookie: `d=${this.config.xoxd}` },
-        body: form,
-      },
+    const response = await this.post(
+      "/api/rooms.join",
+      formData({
+        channel_id: channelId,
+        regions: this.config.mediaRegion,
+        token: this.config.xoxc,
+        multidevice: "true",
+      }),
     );
     if (!response.ok) throw new Error(`rooms.join HTTP ${response.status}`);
     const joined = normalizeJoinResponse(await response.json());
@@ -610,11 +628,10 @@ export class SlackHuddleAdapter {
   // events can miss joins and leaves, so this is the source of truth for
   // reconciling tracked participants.
   async participants(callId: string) {
-    const response = await this.roomInfo(callId);
-    if (response.ok !== true)
-      throw new Error(
-        `screenhero.rooms.info failed: ${String(response.error ?? "unknown_error")}`,
-      );
+    const response = checked(
+      "screenhero.rooms.info",
+      await this.roomInfo(callId),
+    );
     const room = object(response.room, "room");
     // Reconciliation acts on this list, so a shape it cannot read has to
     // fail rather than pass for an empty Huddle and evict everyone. A real
@@ -625,24 +642,16 @@ export class SlackHuddleAdapter {
   }
 
   private async roomInfo(callId: string) {
-    const form = new FormData();
-    form.set("token", this.config.xoxc);
-    form.set("room", callId);
-    form.set("_x_reason", "all-calls-store/conditional-fetch");
-    form.set("_x_mode", "online");
-    form.set("_x_sonic", "true");
-    form.set("_x_app_name", "client");
-
-    const response = await fetch(
-      new URL("/api/screenhero.rooms.info", this.config.workspaceUrl),
-      {
-        method: "POST",
-        headers: { cookie: `d=${this.config.xoxd}` },
-        body: form,
-        // Reconciliation calls this on a timer, so a socket that dies without
-        // closing has to surface as a failed pass rather than a hung one.
-        signal: AbortSignal.timeout(10_000),
-      },
+    const response = await this.post(
+      "/api/screenhero.rooms.info",
+      formData({
+        token: this.config.xoxc,
+        room: callId,
+        ...clientFields("all-calls-store/conditional-fetch"),
+      }),
+      // Reconciliation calls this on a timer, so a socket that dies without
+      // closing has to surface as a failed pass rather than a hung one.
+      AbortSignal.timeout(10_000),
     );
     if (!response.ok)
       throw new Error(`screenhero.rooms.info HTTP ${response.status}`);
@@ -650,20 +659,15 @@ export class SlackHuddleAdapter {
   }
 
   async decline(channelId: string, callId: string) {
-    const form = new FormData();
-    form.set("token", this.config.xoxc);
-    form.set("response", "decline");
-    form.set("channel_id", channelId);
-    form.set("room_id", callId);
-    form.set("_x_reason", "respond-to-huddle-invite");
-
-    const response = await fetch(
-      new URL("/api/rooms.inviteResponse", this.config.workspaceUrl),
-      {
-        method: "POST",
-        headers: { cookie: `d=${this.config.xoxd}` },
-        body: form,
-      },
+    const response = await this.post(
+      "/api/rooms.inviteResponse",
+      formData({
+        token: this.config.xoxc,
+        response: "decline",
+        channel_id: channelId,
+        room_id: callId,
+        _x_reason: "respond-to-huddle-invite",
+      }),
     );
     const result = object(await response.json(), "invite response");
     if (!response.ok || result.ok !== true)
@@ -749,33 +753,23 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
       };
     }
   }
-  if (event.type === "sh_room_leave") {
+  if (event.type === "sh_room_leave" || event.type === "sh_room_join") {
     const room = event.room as Record<string, unknown> | undefined;
     const huddle = event.huddle as Record<string, unknown> | undefined;
     const callId = event.call_id ?? room?.call_id ?? room?.id ?? huddle?.id;
     if (typeof callId !== "string" || typeof event.user !== "string") return;
     return {
-      type: "MemberLeft",
+      type: event.type === "sh_room_join" ? "MemberJoined" : "MemberLeft",
       callId,
       userId: event.user,
     };
-  }
-  if (event.type === "sh_room_join") {
-    const room = event.room as Record<string, unknown> | undefined;
-    const huddle = event.huddle as Record<string, unknown> | undefined;
-    const callId = event.call_id ?? room?.call_id ?? room?.id ?? huddle?.id;
-    if (typeof callId !== "string" || typeof event.user !== "string") return;
-    return { type: "MemberJoined", callId, userId: event.user };
   }
   if (event.type === "sh_room_update") {
     const huddle = event.huddle as Record<string, unknown> | undefined;
     const room = event.room as Record<string, unknown> | undefined;
     const callId = room?.call_id ?? huddle?.id;
     if ((huddle?.has_ended || huddle?.date_end) && typeof callId === "string")
-      return {
-        type: "HuddleEnded",
-        callId,
-      };
+      return { type: "HuddleEnded", callId };
   }
 }
 
@@ -786,10 +780,7 @@ export function activeHuddleRoom(
   const messages = object(raw, "replies").messages;
   if (!Array.isArray(messages)) return;
   const root = messages.find(
-    (message) =>
-      message &&
-      typeof message === "object" &&
-      (message as { ts?: unknown }).ts === threadTs,
+    (message) => (message as { ts?: unknown } | null)?.ts === threadTs,
   ) as Record<string, unknown> | undefined;
   if (
     root?.subtype !== "huddle_thread" ||
@@ -825,21 +816,9 @@ export async function verifySlackIdentity(config: {
     "Verifying Slack credentials",
   );
   const auth = async (token: string, cookie?: string) => {
-    const response = await fetch(
-      new URL("/api/auth.test", config.workspaceUrl),
-      {
-        method: "POST",
-        headers: cookie ? { cookie: `d=${cookie}` } : undefined,
-        body: new URLSearchParams({ token }),
-      },
-    );
-    const result = (await response.json()) as {
-      ok?: boolean;
-      error?: string;
-      user_id?: string;
-    };
+    const result = await authTest(config.workspaceUrl, token, cookie);
     if (!result.ok || !result.user_id)
-      throw new Error(`auth.test failed: ${result.error ?? response.status}`);
+      throw new Error(`auth.test failed: ${result.error ?? result.status}`);
     return result.user_id;
   };
 

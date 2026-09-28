@@ -75,20 +75,31 @@ export class Analytics {
     return new Analytics(client, await installationId(idPath), onError);
   }
 
-  capture(event: string, context: Context = {}) {
+  // Client errors are reported, never thrown at the caller.
+  private send(operation: (client: Client) => void) {
     if (!this.client) return;
     try {
-      this.client.capture({
-        distinctId: context.distinctId ?? this.systemId,
-        event,
-        properties: sanitize({
-          ...context.properties,
-          ...(context.sessionId ? { $session_id: context.sessionId } : {}),
-        }) as Properties,
-      });
+      operation(this.client);
     } catch (error) {
       this.onError(error);
     }
+  }
+
+  private contextProperties(context: Context) {
+    return sanitize({
+      ...context.properties,
+      ...(context.sessionId ? { $session_id: context.sessionId } : {}),
+    }) as Properties;
+  }
+
+  capture(event: string, context: Context = {}) {
+    this.send((client) =>
+      client.capture({
+        distinctId: context.distinctId ?? this.systemId,
+        event,
+        properties: this.contextProperties(context),
+      }),
+    );
   }
 
   audit(event: string, actorId: string | undefined, details: Properties) {
@@ -113,15 +124,12 @@ export class Analytics {
   }
 
   setPersonProperties(distinctId: string, properties: Properties) {
-    if (!this.client) return;
-    try {
-      this.client.setPersonProperties({
+    this.send((client) =>
+      client.setPersonProperties({
         distinctId,
         properties: sanitize(properties) as Properties,
-      });
-    } catch (error) {
-      this.onError(error);
-    }
+      }),
+    );
   }
 
   exception(error: unknown, context: Context = {}) {
@@ -133,22 +141,15 @@ export class Analytics {
     const sanitized = new Error(safeError(error));
     if (error instanceof Error) {
       sanitized.name = error.name;
-      sanitized.stack = error.stack
-        ? redactSecrets(error.stack)
-        : sanitized.stack;
+      if (error.stack) sanitized.stack = redactSecrets(error.stack);
     }
-    try {
-      this.client.captureException(
+    this.send((client) =>
+      client.captureException(
         sanitized,
         context.distinctId ?? this.systemId,
-        sanitize({
-          ...context.properties,
-          ...(context.sessionId ? { $session_id: context.sessionId } : {}),
-        }) as Properties,
-      );
-    } catch (captureError) {
-      this.onError(captureError);
-    }
+        this.contextProperties(context),
+      ),
+    );
   }
 
   async shutdown() {

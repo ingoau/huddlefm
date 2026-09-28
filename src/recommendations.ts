@@ -23,16 +23,13 @@ const searchConcurrency = 3;
 // Personal recommendations: each lane keeps a rolling pool that decays between
 // builds, and a sample is drawn once per build so the modal is stable until the
 // pool actually changes.
-const discoverPoolSize = 45;
-const favouritesPoolSize = 45;
-const discoverSampleSize = 30;
-const favouritesSampleSize = 30;
+const poolSize = 45;
+const sampleSize = 30;
 // A lane whose visible sample has dropped to half is topped up, but not
 // more often than this, so a thin lane does not rebuild on every play.
 const laneDepletionThreshold = 15;
 const depletionRebuildIntervalMs = 60_000;
-const discoverResolveAttempts = 25;
-const favouritesResolveAttempts = 25;
+const poolResolveAttempts = 25;
 const poolDecay = 0.7;
 const newcomerShare = 1 / 3;
 const trackSeedCount = 5;
@@ -72,9 +69,7 @@ const mixArtistRunDamping = 0.5;
 const mixFairnessWeight = 1;
 const skipTrackPenalty = 0.2;
 const skipArtistPenalty = 0.6;
-// Contributions from similarity lookups carry these ids instead of a real
-// listener, so they must not count as a seed.
-const syntheticUsers = new Set(["similar", "related"]);
+const lanes = ["discover", "favourites"] as const;
 
 export type TasteTrack = {
   title: string;
@@ -171,6 +166,8 @@ type UserPool = {
   builtAt: number;
 };
 
+type Resolved = { track: ScoredTrack; metadata: TrackMetadata };
+
 type CacheEntry<T> = {
   value: T;
   expires: number;
@@ -186,6 +183,9 @@ type CacheEntry<T> = {
 export function trackKey(title: string, artist: string) {
   return `${normalizeToken(primaryArtist(artist))}\0${normalizeToken(stripCredits(title))}`;
 }
+
+const keyOf = (track: { title: string; artist: string }) =>
+  trackKey(track.title, track.artist);
 
 const creditPattern =
   /\s*[([]\s*(?:feat|ft|featuring|with)\.?\s[^)\]]*[)\]]|\s+(?:feat|ft|featuring)\.?\s.*$/i;
@@ -214,18 +214,16 @@ export function mergeTaste(tracks: TasteContribution[]): ScoredTrack[] {
   const byKey = new Map<string, ScoredTrack>();
   for (const track of tracks) {
     if (!track.title.trim() || !track.artist.trim()) continue;
-    const key = trackKey(track.title, track.artist);
+    const key = keyOf(track);
     const existing = byKey.get(key);
     if (!existing) {
       byKey.set(key, {
         title: track.title,
         artist: track.artist,
-        ...(track.album ? { album: track.album } : {}),
         ...(track.sourceId ? { sourceId: track.sourceId } : {}),
         ...(track.sourceInput ? { sourceInput: track.sourceInput } : {}),
         ...(track.canonicalUrl ? { canonicalUrl: track.canonicalUrl } : {}),
-        ...(track.artwork ? { artwork: track.artwork } : {}),
-        ...(track.duration ? { duration: track.duration } : {}),
+        ...details(track),
         score: track.weight,
         userIds: [track.userId],
         sources: [track.source],
@@ -260,11 +258,7 @@ export function skipSets(skipped: SkipPenalties = {}) {
         normalizeToken(firstArtist(artist)),
       ),
     ),
-    keys: new Set(
-      [...(skipped.tracks ?? [])].map((track) =>
-        trackKey(track.title, track.artist),
-      ),
-    ),
+    keys: new Set([...(skipped.tracks ?? [])].map(keyOf)),
   };
 }
 
@@ -278,7 +272,7 @@ export function applySkipPenalties(
       let { score } = track;
       if (track.sourceId && penalties.sourceIds.has(track.sourceId))
         score *= 0.05;
-      if (penalties.keys.has(trackKey(track.title, track.artist))) score *= 0.1;
+      if (penalties.keys.has(keyOf(track))) score *= 0.1;
       if (penalties.artists.has(normalizeToken(firstArtist(track.artist))))
         score *= 0.35;
       return { ...track, score };
@@ -394,6 +388,14 @@ export class RecommendationCatalog {
     this.random = config.random ?? Math.random;
   }
 
+  // A score-weighted draw with this catalog's random source.
+  private draw<T extends { score: number }>(
+    items: readonly T[],
+    count: number,
+  ) {
+    return weightedSample(items, count, (item) => item.score, this.random);
+  }
+
   huddleMixOptedIn(userId: string) {
     return this.store.getUserScrobbling(userId).huddleMixOptIn !== false;
   }
@@ -472,7 +474,7 @@ export class RecommendationCatalog {
       result[lane].length < laneDepletionThreshold &&
       sample[lane].length > result[lane].length;
     if (
-      (depleted("discover") || depleted("favourites")) &&
+      lanes.some(depleted) &&
       Date.now() - entry.value.builtAt > depletionRebuildIntervalMs
     )
       entry.expires = 0;
@@ -515,17 +517,11 @@ export class RecommendationCatalog {
     const { nowPlaying } = options;
     const [profiles, similar, similarArtists, related] = await Promise.all([
       Promise.all(listeners.map((userId) => this.userTaste(userId))),
-      nowPlaying
-        ? this.similarTracks(nowPlaying.title, nowPlaying.artist)
-        : Promise.resolve([] as TasteContribution[]),
-      nowPlaying
-        ? this.similarArtistTracks(nowPlaying.artist, 1)
-        : Promise.resolve([] as TasteContribution[]),
+      nowPlaying ? this.similarTracks(nowPlaying.title, nowPlaying.artist) : [],
+      nowPlaying ? this.similarArtistTracks(nowPlaying.artist, 1) : [],
       nowPlaying?.sourceId && isYoutubeVideoId(nowPlaying.sourceId)
-        ? this.tracks
-            .upNextTracks(nowPlaying.sourceId)
-            .catch(() => [] as TrackMetadata[])
-        : Promise.resolve([] as TrackMetadata[]),
+        ? this.tracks.upNextTracks(nowPlaying.sourceId).catch(() => [])
+        : [],
     ]);
     const knownBy = new Map<string, TasteProfile>();
     listeners.forEach((userId, index) => knownBy.set(userId, profiles[index]!));
@@ -569,12 +565,7 @@ export class RecommendationCatalog {
         ...relatedNudge,
       ]),
       options.skipped,
-    ).filter(
-      (track) =>
-        !nowPlaying ||
-        trackKey(track.title, track.artist) !==
-          trackKey(nowPlaying.title, nowPlaying.artist),
-    );
+    ).filter((track) => !nowPlaying || keyOf(track) !== keyOf(nowPlaying));
     if (nowPlaying) {
       // Following the same artist makes a nice segue once; after a run it
       // gets samey.
@@ -612,71 +603,52 @@ export class RecommendationCatalog {
       for (const track of ranked)
         track.score *= options.fatigue.multiplier(track, listeners);
     ranked.sort((a, b) => b.score - a.score);
-    const recentKeys = new Set(
-      (options.recent ?? []).map((track) =>
-        trackKey(track.title, track.artist),
-      ),
-    );
-    const eligible = ranked.filter(
-      (track) => !recentKeys.has(trackKey(track.title, track.artist)),
-    );
-    const isDiscovery = (track: ScoredTrack) =>
-      !known.has(trackKey(track.title, track.artist));
+    const recentKeys = new Set((options.recent ?? []).map(keyOf));
+    const eligible = ranked.filter((track) => !recentKeys.has(keyOf(track)));
+    const isDiscovery = (track: ScoredTrack) => !known.has(keyOf(track));
     // A track counts as a seed for each listener who has actually played it,
     // which is a stronger signal than merely turning up in their similar
     // tracks or Discover pool.
-    const playedBy = (track: ScoredTrack) => {
-      const key = trackKey(track.title, track.artist);
-      return listeners.filter((userId) => knownBy.get(userId)!.known.has(key));
-    };
-    const finish = (
-      candidate: AutoplayCandidate & { track: ScoredTrack },
-      discovery: boolean,
-    ): AutoplayCandidate => {
-      const { track, ...rest } = candidate;
-      const played = playedBy(track);
+    const finish = ({ track, metadata }: Resolved): AutoplayCandidate => {
+      const key = keyOf(track);
+      const played = listeners.filter((userId) =>
+        knownBy.get(userId)!.known.has(key),
+      );
       return {
-        ...rest,
-        discovery,
+        sourceId: metadata.sourceId,
+        score: track.score,
         seedCount: Math.max(1, played.length),
+        discovery: isDiscovery(track),
         listenerIds: track.userIds.filter((userId) => knownBy.has(userId)),
+        metadata,
       };
     };
     // Candidates come back in the sampled order, which the caller keeps:
     // re-sorting by score here would put the same track first every pick.
-    if (!options.discover) {
+    const results: AutoplayCandidate[] = [];
+    const resolveLane = async (tracks: ScoredTrack[], limit: number) => {
       const resolved = await this.resolvePlayable(
-        this.sampleByScore(eligible),
+        this.sampleByScore(tracks),
         excluded,
-        mixCandidateLimit,
+        limit,
         mixResolveAttempts,
       );
-      return resolved.map((candidate) =>
-        finish(candidate, isDiscovery(candidate.track)),
+      for (const candidate of resolved) {
+        excluded.add(candidate.metadata.sourceId);
+        results.push(finish(candidate));
+      }
+    };
+    if (!options.discover) await resolveLane(eligible, mixCandidateLimit);
+    else {
+      // A discovery turn: lead with tracks nobody in the huddle has listened
+      // to, then fall back to the usual ranking.
+      await resolveLane(eligible.filter(isDiscovery), mixDiscoveryLimit);
+      await resolveLane(
+        eligible.filter((track) => !isDiscovery(track)),
+        mixCandidateLimit - results.length,
       );
     }
-    // A discovery turn: lead with tracks nobody in the huddle has listened
-    // to, then fall back to the usual ranking.
-    const discoveries = await this.resolvePlayable(
-      this.sampleByScore(eligible.filter(isDiscovery)),
-      excluded,
-      mixDiscoveryLimit,
-      mixResolveAttempts,
-    );
-    const seen = new Set([
-      ...excluded,
-      ...discoveries.map((candidate) => candidate.sourceId),
-    ]);
-    const rest = await this.resolvePlayable(
-      this.sampleByScore(eligible.filter((track) => !isDiscovery(track))),
-      seen,
-      mixCandidateLimit - discoveries.length,
-      mixResolveAttempts,
-    );
-    return [
-      ...discoveries.map((candidate) => finish(candidate, true)),
-      ...rest.map((candidate) => finish(candidate, false)),
-    ];
+    return results;
   }
 
   // Reorders the strongest candidates with a score-weighted draw, so the
@@ -685,12 +657,7 @@ export class RecommendationCatalog {
   private sampleByScore(ranked: ScoredTrack[]) {
     const window = ranked.slice(0, mixResolveAttempts);
     return [
-      ...weightedSample(
-        window,
-        window.length,
-        (track) => track.score,
-        this.random,
-      ),
+      ...this.draw(window, window.length),
       ...ranked.slice(mixResolveAttempts),
     ];
   }
@@ -700,19 +667,18 @@ export class RecommendationCatalog {
   penalize(userId: string, track: { title: string; artist: string }) {
     const pool = this.pools.get(userId)?.value;
     if (!pool) return;
-    const key = trackKey(track.title, track.artist);
+    const key = keyOf(track);
     const artist = normalizeToken(primaryArtist(track.artist));
     const punish = (entry: PoolTrack) => {
       if (entry.key === key) entry.score *= skipTrackPenalty;
       else if (normalizeToken(primaryArtist(entry.metadata.artist)) === artist)
         entry.score *= skipArtistPenalty;
     };
-    pool.discover.forEach(punish);
-    pool.favourites.forEach(punish);
-    const keep = (entry: PlayableRecommendation) =>
-      trackKey(entry.title, entry.artist) !== key;
-    pool.sample.discover = pool.sample.discover.filter(keep);
-    pool.sample.favourites = pool.sample.favourites.filter(keep);
+    const keep = (entry: PlayableRecommendation) => keyOf(entry) !== key;
+    for (const lane of lanes) {
+      pool[lane].forEach(punish);
+      pool.sample[lane] = pool.sample[lane].filter(keep);
+    }
   }
 
   private userTaste(userId: string) {
@@ -746,7 +712,7 @@ export class RecommendationCatalog {
     const liked: TasteContribution[] = this.store
       .recentLikes([userId], now - likeWindowMs)
       .filter((like) => {
-        const key = trackKey(like.title, like.artist);
+        const key = keyOf(like);
         if (likedKeys.has(key)) return false;
         likedKeys.add(key);
         return true;
@@ -765,11 +731,7 @@ export class RecommendationCatalog {
     // Autoplay picks get scrobbled for everyone in the room, so they would
     // otherwise turn up in every listener's recent listens and, boosted as a
     // shared taste, come straight back into the mix.
-    const autoplayed = new Set(
-      this.store
-        .recentAutomaticTracks()
-        .map((track) => trackKey(track.title, track.artist)),
-    );
+    const autoplayed = new Set(this.store.recentAutomaticTracks().map(keyOf));
     const warn = (event: string, text: string) => (error: unknown) => {
       log.warn({ event, userId, err: error }, text);
       return emptyProfile();
@@ -794,17 +756,19 @@ export class RecommendationCatalog {
       ...listenBrainz.contributions,
     ];
     const known = new Set([
-      ...contributions.map((track) => trackKey(track.title, track.artist)),
+      ...contributions.map(keyOf),
       ...lastFm.known,
       ...listenBrainz.known,
     ]);
     const artists = new Map<string, TasteArtist>();
-    for (const artist of [...lastFm.artists, ...listenBrainz.artists]) {
-      const key = normalizeToken(artist.name);
+    const addArtist = (name: string, score: number) => {
+      const key = normalizeToken(name);
       const existing = artists.get(key);
-      if (existing) existing.score += artist.score;
-      else artists.set(key, { ...artist });
-    }
+      if (existing) existing.score += score;
+      else artists.set(key, { name, score });
+    };
+    for (const artist of [...lastFm.artists, ...listenBrainz.artists])
+      addArtist(artist.name, artist.score);
     // Without a scrobbler, the artists someone adds or likes are the best
     // signal. Counted on the same scale as the track weights, so an added song
     // is worth one artist point and a like is worth what it is still worth:
@@ -813,12 +777,7 @@ export class RecommendationCatalog {
     if (!artists.size)
       for (const track of [...added, ...liked]) {
         const name = firstArtist(track.artist);
-        const key = normalizeToken(name);
-        if (!key) continue;
-        const score = track.weight / addedWeight;
-        const existing = artists.get(key);
-        if (existing) existing.score += score;
-        else artists.set(key, { name, score });
+        if (normalizeToken(name)) addArtist(name, track.weight / addedWeight);
       }
     return {
       contributions,
@@ -832,22 +791,16 @@ export class RecommendationCatalog {
     const previous = this.pools.get(userId)?.value ?? emptyPool();
     const consumed = this.consumed.get(userId) ?? new Set<string>();
     const recent = this.store.recentTracks(userId, recentAddLimit);
-    const recentKeys = new Set(
-      recent.map((track) => trackKey(track.title, track.artist)),
-    );
+    const recentKeys = new Set(recent.map(keyOf));
     const profile = await this.userTaste(userId);
     const taste = mergeTaste(profile.contributions);
-    const trackSeeds = weightedSample(
+    const trackSeeds = this.draw(
       taste.slice(0, trackSeedWindow),
       trackSeedCount,
-      (track) => track.score,
-      this.random,
     );
-    const artistSeeds = weightedSample(
+    const artistSeeds = this.draw(
       profile.artists.slice(0, artistSeedWindow),
       artistSeedCount,
-      (artist) => artist.score,
-      this.random,
     );
     const topArtistScore = profile.artists[0]?.score || 1;
     const upNextSeeds = recent
@@ -894,15 +847,14 @@ export class RecommendationCatalog {
       ),
     ];
     const isKnown = (track: TasteTrack & { listened?: boolean }) =>
-      track.listened === true ||
-      profile.known.has(trackKey(track.title, track.artist));
+      track.listened === true || profile.known.has(keyOf(track));
     const discoverRanked = mergeTaste(
       discovered.filter((track) => !isKnown(track)),
     );
     const favouritesRanked = mergeTaste([
       ...profile.contributions,
       ...discovered.filter(isKnown),
-    ]).filter((track) => !recentKeys.has(trackKey(track.title, track.artist)));
+    ]).filter((track) => !recentKeys.has(keyOf(track)));
     const excludedIds = new Set([
       ...consumed,
       ...recent.map((track) => track.sourceId),
@@ -912,16 +864,12 @@ export class RecommendationCatalog {
     const discover = await this.mergePool(
       previous.discover.filter((track) => !profile.known.has(track.key)),
       discoverRanked,
-      discoverPoolSize,
-      discoverResolveAttempts,
       excludedIds,
     );
     for (const track of discover) excludedIds.add(track.metadata.sourceId);
     const favourites = await this.mergePool(
       previous.favourites.filter((track) => !recentKeys.has(track.key)),
       favouritesRanked,
-      favouritesPoolSize,
-      favouritesResolveAttempts,
       excludedIds,
     );
     const now = Date.now();
@@ -938,18 +886,8 @@ export class RecommendationCatalog {
       this.playable.set(track.id, track.metadata);
     }
     const sample = {
-      discover: weightedSample(
-        discover,
-        discoverSampleSize,
-        (track) => track.score,
-        this.random,
-      ).map(playableFromPool),
-      favourites: weightedSample(
-        favourites,
-        favouritesSampleSize,
-        (track) => track.score,
-        this.random,
-      ).map(playableFromPool),
+      discover: this.draw(discover, sampleSize).map(playableFromPool),
+      favourites: this.draw(favourites, sampleSize).map(playableFromPool),
     };
     log.info(
       {
@@ -965,13 +903,11 @@ export class RecommendationCatalog {
 
   // Folds this build's ranking into the previous pool: old entries decay,
   // re-recommended ones are bumped, and a bounded number of newcomers are
-  // resolved. The result is the top `size` by score, with a share reserved
-  // for this build's newcomers so incumbents cannot lock the pool.
+  // resolved. The result is the top `poolSize` by score, with a share
+  // reserved for this build's newcomers so incumbents cannot lock the pool.
   private async mergePool(
     previous: PoolTrack[],
     ranked: ScoredTrack[],
-    size: number,
-    attempts: number,
     excluded: Set<string>,
   ) {
     const pool = new Map<string, PoolTrack>();
@@ -981,7 +917,7 @@ export class RecommendationCatalog {
     }
     const newcomers: ScoredTrack[] = [];
     for (const track of ranked) {
-      const key = trackKey(track.title, track.artist);
+      const key = keyOf(track);
       const existing = pool.get(key);
       if (existing) {
         existing.score =
@@ -997,31 +933,30 @@ export class RecommendationCatalog {
     const resolved = await this.resolvePlayable(
       newcomers,
       seen,
-      size,
-      attempts,
+      poolSize,
+      poolResolveAttempts,
     );
     const fresh: PoolTrack[] = [];
-    for (const candidate of resolved) {
-      const key = trackKey(candidate.track.title, candidate.track.artist);
-      const track = {
+    for (const { track, metadata } of resolved) {
+      const entry = {
         id: `rec_${crypto.randomUUID()}`,
-        key,
-        score: candidate.score,
-        sources: candidate.track.sources,
-        metadata: candidate.metadata,
+        key: keyOf(track),
+        score: track.score,
+        sources: track.sources,
+        metadata,
       };
-      pool.set(key, track);
-      fresh.push(track);
+      pool.set(entry.key, entry);
+      fresh.push(entry);
     }
     const byScore = (a: PoolTrack, b: PoolTrack) => b.score - a.score;
     const reserved = fresh
       .sort(byScore)
-      .slice(0, Math.ceil(size * newcomerShare));
+      .slice(0, Math.ceil(poolSize * newcomerShare));
     const keptIds = new Set(reserved.map((track) => track.id));
     const rest = [...pool.values()]
       .filter((track) => !keptIds.has(track.id))
       .sort(byScore)
-      .slice(0, Math.max(0, size - reserved.length));
+      .slice(0, Math.max(0, poolSize - reserved.length));
     return [...reserved, ...rest].sort(byScore);
   }
 
@@ -1033,16 +968,13 @@ export class RecommendationCatalog {
   ) {
     const seen = new Set(excluded);
     const seenKeys = new Set<string>();
-    const results: (AutoplayCandidate & {
-      track: ScoredTrack;
-      rank: number;
-    })[] = [];
+    const results: (Resolved & { rank: number })[] = [];
     await mapPool(
       ranked.slice(0, attempts).map((track, rank) => ({ track, rank })),
       searchConcurrency,
       async ({ track, rank }) => {
         if (results.length >= limit) return;
-        const key = trackKey(track.title, track.artist);
+        const key = keyOf(track);
         if (seenKeys.has(key)) return;
         if (track.sourceId && seen.has(track.sourceId)) return;
         const metadata = await this.resolveTrack(track);
@@ -1050,63 +982,32 @@ export class RecommendationCatalog {
           return;
         seen.add(metadata.sourceId);
         seenKeys.add(key);
-        seenKeys.add(trackKey(metadata.title, metadata.artist));
-        results.push({
-          sourceId: metadata.sourceId,
-          score: track.score,
-          seedCount: Math.max(
-            1,
-            track.userIds.filter((id) => !syntheticUsers.has(id)).length,
-          ),
-          discovery: false,
-          listenerIds: track.userIds.filter((id) => !syntheticUsers.has(id)),
-          metadata,
-          track,
-          rank,
-        });
+        seenKeys.add(keyOf(metadata));
+        results.push({ track, metadata, rank });
       },
     );
     // Lookups finish out of order; hand back the caller's order.
-    return results
-      .sort((a, b) => a.rank - b.rank)
-      .map(({ rank: _, ...candidate }) => candidate);
+    return results.sort((a, b) => a.rank - b.rank);
   }
 
   // Turns a title/artist pair into playable metadata: a track that already
   // carries a YouTube id is used as-is, then the memo, then anything this
   // workspace has played before, and only then a YouTube Music search.
   private async resolveTrack(track: TasteTrack) {
-    if (
-      track.sourceId &&
-      track.sourceInput &&
-      track.canonicalUrl &&
-      isYoutubeVideoId(track.sourceId)
-    )
-      return {
-        sourceInput: track.sourceInput,
-        canonicalUrl: track.canonicalUrl,
-        sourceId: track.sourceId,
-        title: track.title,
-        artist: track.artist,
-        ...(track.album ? { album: track.album } : {}),
-        ...(track.duration ? { duration: track.duration } : {}),
-        ...(track.artwork ? { artwork: track.artwork } : {}),
-      } satisfies TrackMetadata;
-    const key = trackKey(track.title, track.artist);
+    const { sourceId, sourceInput, canonicalUrl } = track;
+    if (sourceId && sourceInput && canonicalUrl && isYoutubeVideoId(sourceId))
+      return playableMetadata({
+        ...track,
+        sourceId,
+        sourceInput,
+        canonicalUrl,
+      });
+    const key = keyOf(track);
     const memo = this.searches.get(key);
     if (memo) return memo.value;
     const played = this.store.findPlayedTrack(track.title, track.artist);
     if (played && isYoutubeVideoId(played.sourceId)) {
-      const metadata: TrackMetadata = {
-        sourceInput: played.sourceInput,
-        canonicalUrl: played.canonicalUrl,
-        sourceId: played.sourceId,
-        title: played.title,
-        artist: played.artist,
-        ...(played.album ? { album: played.album } : {}),
-        ...(played.duration ? { duration: played.duration } : {}),
-        ...(played.artwork ? { artwork: played.artwork } : {}),
-      };
+      const metadata = playableMetadata(played);
       this.searches.set(key, metadata);
       return metadata;
     }
@@ -1145,48 +1046,32 @@ export class RecommendationCatalog {
         limit: String(knownHistoryLimit),
       }).catch(() => undefined),
     ]);
-    const known = asArray(
-      (allTime?.toptracks as { track?: unknown })?.track,
-    ).flatMap((row) => {
-      const track = lastFmTrack(row);
-      return track ? [trackKey(track.title, track.artist)] : [];
-    });
-    const topTracks = asArray(
-      (top.toptracks as { track?: unknown })?.track,
-    ).flatMap((row) => {
-      const track = lastFmTrack(row);
-      if (!track) return [];
-      const playcount = Number((row as { playcount?: unknown }).playcount ?? 0);
-      return [
-        {
-          userId,
-          source: "lastfm",
-          weight: 1.5 + Math.log10(Math.max(1, playcount) + 1),
-          ...track,
-        },
-      ];
-    });
-    const recentTracks = asArray(
-      (recent.recenttracks as { track?: unknown })?.track,
-    ).flatMap((row) => {
-      const track = lastFmTrack(row);
-      if (!track || autoplayed.has(trackKey(track.title, track.artist)))
-        return [];
-      return [{ userId, source: "lastfm", weight: 1, ...track }];
-    });
-    const topArtists = asArray(
-      (artists?.topartists as { artist?: unknown })?.artist,
-    ).flatMap((row) => {
-      const name = lastFmArtist(row).trim();
-      if (!name) return [];
-      const playcount = Number((row as { playcount?: unknown }).playcount ?? 0);
-      return [{ name, score: 1 + Math.log10(Math.max(1, playcount) + 1) }];
-    });
+    const listener = { userId, source: "lastfm" };
     return {
       ...emptyProfile(),
-      contributions: [...topTracks, ...recentTracks],
-      known: new Set(known),
-      artists: topArtists,
+      contributions: [
+        ...contributionsFrom(
+          rows(top, "toptracks", "track"),
+          lastFmTrack,
+          listener,
+          (row) => 1.5 + logCount(row.playcount),
+        ),
+        ...contributionsFrom(
+          rows(recent, "recenttracks", "track"),
+          lastFmTrack,
+          listener,
+          () => 1,
+          autoplayed,
+        ),
+      ],
+      known: new Set(
+        parsed(rows(allTime, "toptracks", "track"), lastFmTrack).map(keyOf),
+      ),
+      artists: artistsFrom(
+        rows(artists, "topartists", "artist"),
+        lastFmArtist,
+        (row) => row.playcount,
+      ),
     };
   }
 
@@ -1198,18 +1083,16 @@ export class RecommendationCatalog {
       .load(
         `similar\0${trackKey(title, seed)}`,
         async () => {
-          const result = await this.lastFm("track.getSimilar", {
-            track: title,
-            artist: seed,
-            limit: "20",
-          }).catch(lastFmNotFound);
-          if (!result) return [];
-          return asArray(
-            (result.similartracks as { track?: unknown })?.track,
-          ).flatMap((row) => {
+          const similar = await this.lastFmRows(
+            "track.getSimilar",
+            { track: title, artist: seed, limit: "20" },
+            "similartracks",
+            "track",
+          );
+          return similar.flatMap((row) => {
             const track = lastFmTrack(row);
             if (!track) return [];
-            const match = Number((row as { match?: unknown }).match ?? 0);
+            const match = Number(row.match ?? 0);
             return [{ ...track, ...(match > 0 ? { match } : {}) }];
           });
         },
@@ -1235,17 +1118,16 @@ export class RecommendationCatalog {
     const neighbours = await this.artistLookups.load(
       `similar-artists\0${normalizeToken(seed)}`,
       async () => {
-        const result = await this.lastFm("artist.getSimilar", {
-          artist: seed,
-          limit: String(similarArtistsPerSeed),
-        }).catch(lastFmNotFound);
-        if (!result) return [];
-        return asArray(
-          (result.similarartists as { artist?: unknown })?.artist,
-        ).flatMap((row) => {
+        const similar = await this.lastFmRows(
+          "artist.getSimilar",
+          { artist: seed, limit: String(similarArtistsPerSeed) },
+          "similarartists",
+          "artist",
+        );
+        return similar.flatMap((row) => {
           const name = lastFmArtist(row).trim();
           if (!name) return [];
-          const match = Number((row as { match?: unknown }).match ?? 0);
+          const match = Number(row.match ?? 0);
           return [{ name, match: match > 0 ? match : 0.5 }];
         });
       },
@@ -1255,19 +1137,19 @@ export class RecommendationCatalog {
       neighbours.map(async (neighbour) => {
         const tracks = await this.lookups.load(
           `top-tracks\0${normalizeToken(neighbour.name)}`,
-          async () => {
-            const result = await this.lastFm("artist.getTopTracks", {
-              artist: neighbour.name,
-              limit: String(tracksPerSimilarArtist),
-            }).catch(lastFmNotFound);
-            if (!result) return [];
-            return asArray(
-              (result.toptracks as { track?: unknown })?.track,
-            ).flatMap((row) => {
-              const track = lastFmTrack(row);
-              return track ? [track] : [];
-            });
-          },
+          async () =>
+            parsed(
+              await this.lastFmRows(
+                "artist.getTopTracks",
+                {
+                  artist: neighbour.name,
+                  limit: String(tracksPerSimilarArtist),
+                },
+                "toptracks",
+                "track",
+              ),
+              lastFmTrack,
+            ),
           [],
         );
         return tracks.map(({ match: _, ...track }, index) => ({
@@ -1288,93 +1170,60 @@ export class RecommendationCatalog {
     autoplayed = new Set<string>(),
   ) {
     if (!username) return emptyProfile();
-    const headers = token ? { authorization: `Token ${token}` } : undefined;
+    const headers = tokenHeaders(token);
     const user = encodeURIComponent(username);
+    const get = (path: string) =>
+      this.json(`${listenBrainzEndpoint}${path}`, headers).catch(
+        () => undefined,
+      );
     const [listens, stats, artists, recommendations, allTime] =
       await Promise.all([
-        this.json(
-          `${listenBrainzEndpoint}/user/${user}/listens?count=50`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/stats/user/${user}/recordings?range=quarter`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/stats/user/${user}/artists?range=quarter&count=${artistSeedWindow}`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/cf/recommendation/user/${user}/recording?count=${listenBrainzFetchCount}`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/stats/user/${user}/recordings?range=all_time&count=${knownHistoryLimit}`,
-          headers,
-        ).catch(() => undefined),
+        get(`/user/${user}/listens?count=50`),
+        get(`/stats/user/${user}/recordings?range=quarter`),
+        get(
+          `/stats/user/${user}/artists?range=quarter&count=${artistSeedWindow}`,
+        ),
+        get(
+          `/cf/recommendation/user/${user}/recording?count=${listenBrainzFetchCount}`,
+        ),
+        get(
+          `/stats/user/${user}/recordings?range=all_time&count=${knownHistoryLimit}`,
+        ),
       ]);
-    const known = asArray(
-      (allTime?.payload as { recordings?: unknown })?.recordings,
-    ).flatMap((row) => {
-      const track = listenBrainzTrack(row);
-      return track ? [trackKey(track.title, track.artist)] : [];
-    });
-    const recent = asArray(
-      (listens?.payload as { listens?: unknown })?.listens,
-    ).flatMap((row) => {
-      const track = listenBrainzTrack(
-        (row as { track_metadata?: unknown }).track_metadata,
-      );
-      if (!track || autoplayed.has(trackKey(track.title, track.artist)))
-        return [];
-      return [{ userId, source: "listenbrainz", weight: 1, ...track }];
-    });
-    const top = asArray(
-      (stats?.payload as { recordings?: unknown })?.recordings,
-    ).flatMap((row) => {
-      const track = listenBrainzTrack(row);
-      if (!track) return [];
-      const count = Number(
-        (row as { listen_count?: unknown }).listen_count ?? 0,
-      );
-      return [
-        {
-          userId,
-          source: "listenbrainz",
-          weight: 1.5 + Math.log10(Math.max(1, count) + 1),
-          ...track,
-        },
-      ];
-    });
-    const topArtists = asArray(
-      (artists?.payload as { artists?: unknown })?.artists,
-    ).flatMap((row) => {
-      const name = String(
-        (row as { artist_name?: unknown }).artist_name ?? "",
-      ).trim();
-      if (!name) return [];
-      const count = Number(
-        (row as { listen_count?: unknown }).listen_count ?? 0,
-      );
-      return [{ name, score: 1 + Math.log10(Math.max(1, count) + 1) }];
-    });
-    const mbids = asArray(
-      (recommendations?.payload as { mbids?: unknown })?.mbids,
-    ).flatMap((row) => {
-      const mbid = String(
-        (row as { recording_mbid?: unknown }).recording_mbid ?? "",
-      );
+    const listener = { userId, source: "listenbrainz" };
+    const mbids = rows(recommendations, "payload", "mbids").flatMap((row) => {
+      const mbid = String(row.recording_mbid ?? "");
       if (!/^[0-9a-f-]{36}$/i.test(mbid)) return [];
-      const score = Number((row as { score?: unknown }).score ?? 0);
-      const listened = Boolean(
-        (row as { latest_listened_at?: unknown }).latest_listened_at,
-      );
+      const score = Number(row.score ?? 0);
+      const listened = Boolean(row.latest_listened_at);
       return [{ mbid, score: Number.isFinite(score) ? score : 0, listened }];
     });
     return {
-      contributions: [...recent, ...top],
-      known: new Set(known),
-      artists: topArtists,
+      contributions: [
+        ...contributionsFrom(
+          rows(listens, "payload", "listens"),
+          (row) => listenBrainzTrack(row.track_metadata),
+          listener,
+          () => 1,
+          autoplayed,
+        ),
+        ...contributionsFrom(
+          rows(stats, "payload", "recordings"),
+          listenBrainzTrack,
+          listener,
+          (row) => 1.5 + logCount(row.listen_count),
+        ),
+      ],
+      known: new Set(
+        parsed(rows(allTime, "payload", "recordings"), listenBrainzTrack).map(
+          keyOf,
+        ),
+      ),
+      artists: artistsFrom(
+        rows(artists, "payload", "artists"),
+        (row) => row.artist_name,
+        (row) => row.listen_count,
+      ),
       listenBrainz: mbids,
     };
   }
@@ -1402,22 +1251,18 @@ export class RecommendationCatalog {
       .map((row) => row.mbid)
       .filter((mbid) => !this.recordings.get(mbid));
     if (missing.length) {
-      const settings = this.store.getUserScrobbling(userId);
-      const headers = settings.listenBrainzToken
-        ? { authorization: `Token ${settings.listenBrainzToken}` }
-        : undefined;
       const result = await this.json(
         `${listenBrainzEndpoint}/metadata/recording/?recording_mbids=${missing.map(encodeURIComponent).join(",")}&inc=artist%20release`,
-        headers,
+        tokenHeaders(this.store.getUserScrobbling(userId).listenBrainzToken),
       ).catch(() => undefined);
-      const rows =
+      const found =
         result && typeof result === "object"
           ? (result as Record<string, unknown>)
           : {};
       for (const mbid of missing)
         this.recordings.set(
           mbid,
-          listenBrainzMetadata(rows[mbid] ?? rows[mbid.toLowerCase()]),
+          listenBrainzMetadata(found[mbid] ?? found[mbid.toLowerCase()]),
         );
     }
     return picked.flatMap((row) => {
@@ -1450,6 +1295,17 @@ export class RecommendationCatalog {
         Number(result?.error ?? 0),
       );
     return result;
+  }
+
+  // A Last.fm list lookup where "not found" is simply an empty answer.
+  private async lastFmRows(
+    method: string,
+    params: Record<string, string>,
+    outer: string,
+    inner: string,
+  ) {
+    const result = await this.lastFm(method, params).catch(lastFmNotFound);
+    return result ? rows(result, outer, inner) : [];
   }
 
   private async json(url: string, headers?: Record<string, string>) {
@@ -1551,18 +1407,83 @@ function contributionFromMetadata(
     source,
     title: track.title,
     artist: track.artist,
-    ...(track.album ? { album: track.album } : {}),
     sourceId: track.sourceId,
     sourceInput: track.sourceInput,
     canonicalUrl: track.canonicalUrl,
-    ...(track.artwork ? { artwork: track.artwork } : {}),
-    ...(track.duration ? { duration: track.duration } : {}),
+    ...details(track),
   };
 }
 
-function asArray(value: unknown) {
-  if (!value) return [];
-  return Array.isArray(value) ? value : [value];
+// The optional track fields, carried only when set so a later merge can fill
+// them in.
+function details(track: Pick<TrackMetadata, "album" | "duration" | "artwork">) {
+  return {
+    ...(track.album ? { album: track.album } : {}),
+    ...(track.duration ? { duration: track.duration } : {}),
+    ...(track.artwork ? { artwork: track.artwork } : {}),
+  };
+}
+
+function playableMetadata(track: TrackMetadata): TrackMetadata {
+  return {
+    sourceInput: track.sourceInput,
+    canonicalUrl: track.canonicalUrl,
+    sourceId: track.sourceId,
+    title: track.title,
+    artist: track.artist,
+    ...details(track),
+  };
+}
+
+type Row = Record<string, unknown>;
+type RowParser = (row: Row) => TasteTrack | undefined;
+
+// Digs a list out of a provider response; a single item comes back bare.
+function rows(value: unknown, outer: string, inner: string): Row[] {
+  const list = (value as Record<string, Row> | undefined)?.[outer]?.[inner];
+  return Array.isArray(list) ? list : list ? [list as Row] : [];
+}
+
+function parsed(rows: Row[], parse: RowParser) {
+  return rows.flatMap((row) => {
+    const track = parse(row);
+    return track ? [track] : [];
+  });
+}
+
+// One listener's rows as contributions, minus what does not parse and, when
+// given, the songs the mix itself chose for them.
+function contributionsFrom(
+  rows: Row[],
+  parse: RowParser,
+  listener: { userId: string; source: string },
+  weight: (row: Row) => number,
+  skip?: Set<string>,
+): TasteContribution[] {
+  return rows.flatMap((row) => {
+    const track = parse(row);
+    if (!track || skip?.has(keyOf(track))) return [];
+    return [{ ...listener, weight: weight(row), ...track }];
+  });
+}
+
+function artistsFrom(
+  rows: Row[],
+  name: (row: Row) => unknown,
+  count: (row: Row) => unknown,
+): TasteArtist[] {
+  return rows.flatMap((row) => {
+    const artist = String(name(row) ?? "").trim();
+    return artist ? [{ name: artist, score: 1 + logCount(count(row)) }] : [];
+  });
+}
+
+function tokenHeaders(token?: string) {
+  return token ? { authorization: `Token ${token}` } : undefined;
+}
+
+function logCount(value: unknown) {
+  return Math.log10(Math.max(1, Number(value ?? 0)) + 1);
 }
 
 function lastFmArtist(value: unknown) {
@@ -1575,21 +1496,33 @@ function lastFmArtist(value: unknown) {
   return "";
 }
 
-function lastFmTrack(value: unknown): TasteTrack | undefined {
-  if (!value || typeof value !== "object") return;
-  const row = value as {
-    name?: unknown;
-    artist?: unknown;
-    album?: unknown;
+function tasteTrack(
+  title: unknown,
+  artist: unknown,
+  album: unknown,
+): TasteTrack | undefined {
+  const name = String(title ?? "").trim();
+  const credit = String(artist ?? "").trim();
+  if (!name || !credit) return;
+  const release = String(album ?? "").trim();
+  return {
+    title: name,
+    artist: credit,
+    ...(release ? { album: release } : {}),
   };
-  const title = String(row.name ?? "").trim();
-  const artist = lastFmArtist(row.artist).trim();
-  if (!title || !artist) return;
-  const album = lastFmArtist(row.album).trim();
-  return { title, artist, ...(album ? { album } : {}) };
 }
 
-function listenBrainzTrack(value: unknown): TasteTrack | undefined {
+function lastFmTrack(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const row = value as { name?: unknown; artist?: unknown; album?: unknown };
+  return tasteTrack(
+    row.name,
+    lastFmArtist(row.artist),
+    lastFmArtist(row.album),
+  );
+}
+
+function listenBrainzTrack(value: unknown) {
   if (!value || typeof value !== "object") return;
   const row = value as {
     track_name?: unknown;
@@ -1597,26 +1530,22 @@ function listenBrainzTrack(value: unknown): TasteTrack | undefined {
     artist_name?: unknown;
     release_name?: unknown;
   };
-  const title = String(row.track_name ?? row.recording_name ?? "").trim();
-  const artist = String(row.artist_name ?? "").trim();
-  if (!title || !artist) return;
-  const album = String(row.release_name ?? "").trim();
-  return { title, artist, ...(album ? { album } : {}) };
+  return tasteTrack(
+    row.track_name ?? row.recording_name,
+    row.artist_name,
+    row.release_name,
+  );
 }
 
-function listenBrainzMetadata(value: unknown): TasteTrack | undefined {
+function listenBrainzMetadata(value: unknown) {
   if (!value || typeof value !== "object") return;
   const row = value as {
     recording?: { name?: unknown };
     artist?: { name?: unknown }[] | { name?: unknown };
     release?: { name?: unknown };
   };
-  const title = String(row.recording?.name ?? "").trim();
-  const artistValue = Array.isArray(row.artist) ? row.artist[0] : row.artist;
-  const artist = String(artistValue?.name ?? "").trim();
-  if (!title || !artist) return;
-  const album = String(row.release?.name ?? "").trim();
-  return { title, artist, ...(album ? { album } : {}) };
+  const artist = Array.isArray(row.artist) ? row.artist[0] : row.artist;
+  return tasteTrack(row.recording?.name, artist?.name, row.release?.name);
 }
 
 async function mapPool<T>(

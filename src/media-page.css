@@ -76,9 +76,6 @@ body {
 header {
   position: absolute;
 }
-#cover {
-  z-index: 1;
-}
 #lyrics-frame,
 #timeline,
 header {
@@ -86,6 +83,7 @@ header {
 }
 
 #cover {
+  z-index: 1;
   inset: 0;
   border-radius: 0;
   background: rgb(255 255 255 / 0.06) center / cover;

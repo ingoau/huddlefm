@@ -16,6 +16,7 @@ import {
   parseDuckingMode,
   type DuckDecision,
 } from "./ducking.ts";
+import { errorMessage } from "./error-message.ts";
 import { volumeGain } from "./volume.ts";
 import "./media-page.css";
 
@@ -319,38 +320,55 @@ function clearTransitionTimers() {
   fadeTimer = undefined;
 }
 
+function setDeckGain(value: Deck, level: number) {
+  const now = audioContext.currentTime;
+  value.gain.gain.cancelScheduledValues(now);
+  value.gain.gain.setValueAtTime(level, now);
+}
+
 function cancelTransition(keepId = currentId) {
   clearTransitionTimers();
   transitioning = false;
-  const now = audioContext.currentTime;
   for (const [entryId, value] of decks) {
-    value.gain.gain.cancelScheduledValues(now);
-    value.gain.gain.setValueAtTime(entryId === keepId ? 1 : 0, now);
+    setDeckGain(value, entryId === keepId ? 1 : 0);
     if (entryId !== keepId) value.audio.pause();
   }
+}
+
+function currentDeck() {
+  return currentId ? decks.get(currentId) : undefined;
+}
+
+function resetLyricState() {
+  pendingLyrics = undefined;
+  pendingNoLyrics = undefined;
+  lyricsAvailable = undefined;
+  lyricPriority = Infinity;
+}
+
+function showTrack(titleText: string, artistText: string, artworkUrl?: string) {
+  title.textContent = titleText;
+  artist.textContent = artistText;
+  const image = artworkUrl ? `url(${JSON.stringify(artworkUrl)})` : "";
+  artwork.style.backgroundImage = image;
+  cover.style.backgroundImage = image;
 }
 
 function stop() {
   clearTransitionTimers();
   transitioning = false;
   transition++;
-  pendingLyrics = undefined;
-  pendingNoLyrics = undefined;
-  lyricsAvailable = undefined;
+  resetLyricState();
   stage.classList.remove("changing");
   currentId = undefined;
   nextEntry = undefined;
   currentOutro = undefined;
   currentFadeOut = 0;
-  lyricPriority = Infinity;
   for (const [entryId, value] of decks) dispose(entryId, value);
   lyrics.source = null;
   clearLyrics();
   void applyDisplayMode();
-  title.textContent = "Ready for music";
-  artist.textContent = "Waiting for the next track";
-  artwork.style.backgroundImage = "";
-  cover.style.backgroundImage = "";
+  showTrack("Ready for music", "Waiting for the next track");
   progress.style.transform = "scaleX(0)";
   elapsed.textContent = "0:00";
   duration.textContent = "0:00";
@@ -365,7 +383,7 @@ function formatTime(seconds: number) {
 }
 
 function updateProgress() {
-  const player = currentId ? decks.get(currentId)?.audio : undefined;
+  const player = currentDeck()?.audio;
   const amount =
     player && Number.isFinite(player.duration) && player.duration > 0
       ? player.currentTime / player.duration
@@ -390,7 +408,7 @@ function updateProgress() {
       transitionTimer = setTimeout(
         () => {
           transitionTimer = undefined;
-          const current = currentId ? decks.get(currentId)?.audio : undefined;
+          const current = currentDeck()?.audio;
           if (!current || current.paused || currentOutro === undefined) return;
           const transitionAt = currentOutro - adaptiveCrossfadeSeconds();
           if (current.currentTime < transitionAt - 0.02) return;
@@ -418,8 +436,17 @@ function adaptiveCrossfadeSeconds() {
 function transitionFailed(error: unknown) {
   send("track_error", {
     entryId: nextEntry?.entryId,
-    message: error instanceof Error ? error.message : String(error),
+    message: errorMessage(error),
   });
+}
+
+// One quarter of a sine period sampled evenly, so a cosine fade-out and a sine
+// fade-in keep a constant combined power across the crossfade.
+function fadeCurve(shape: (angle: number) => number) {
+  const steps = 64;
+  return Float32Array.from({ length: steps }, (_, index) =>
+    shape((index / (steps - 1)) * (Math.PI / 2)),
+  );
 }
 
 async function beginTransition() {
@@ -443,21 +470,8 @@ async function beginTransition() {
     return send("transition", { entryId: previousId });
   }
   const now = audioContext.currentTime;
-  const steps = 64;
-  previous.gain.gain.setValueCurveAtTime(
-    Float32Array.from({ length: steps }, (_, index) =>
-      Math.cos((index / (steps - 1)) * (Math.PI / 2)),
-    ),
-    now,
-    duration,
-  );
-  next.gain.gain.setValueCurveAtTime(
-    Float32Array.from({ length: steps }, (_, index) =>
-      Math.sin((index / (steps - 1)) * (Math.PI / 2)),
-    ),
-    now,
-    duration,
-  );
+  previous.gain.gain.setValueCurveAtTime(fadeCurve(Math.cos), now, duration);
+  next.gain.gain.setValueCurveAtTime(fadeCurve(Math.sin), now, duration);
   handoffTimer = setTimeout(() => {
     handoffTimer = undefined;
     if (!transitioning || currentId !== previousId) return;
@@ -503,12 +517,6 @@ function markLyricsUnavailable() {
   lyricsAvailable = false;
 }
 
-function takePendingLyrics() {
-  const message = pendingLyrics;
-  pendingLyrics = undefined;
-  return message;
-}
-
 async function join(payload: {
   sessionId: string;
   meeting: Record<string, unknown>;
@@ -536,11 +544,7 @@ async function join(payload: {
           status.textContent = "joined";
           send("joined");
         })
-        .catch((error) =>
-          send("fatal", {
-            message: error instanceof Error ? error.message : String(error),
-          }),
-        );
+        .catch((error) => send("fatal", { message: errorMessage(error) }));
     },
     metricsDidReceive: (report) => {
       if (!audioReported) {
@@ -619,44 +623,38 @@ socket.addEventListener("message", async (event) => {
     }
     if (message.type === "play") {
       const change = ++transition;
-      pendingLyrics = undefined;
-      pendingNoLyrics = undefined;
-      lyricsAvailable = undefined;
+      resetLyricState();
       stage.classList.add("changing");
       tone?.stop();
       const alreadyPlaying = currentId === message.entryId;
-      if (!alreadyPlaying) cancelTransition(message.entryId);
-      const previous = !alreadyPlaying && currentId && decks.get(currentId);
-      if (previous) previous.audio.pause();
+      if (!alreadyPlaying) {
+        cancelTransition(message.entryId);
+        currentDeck()?.audio.pause();
+      }
       currentId = message.entryId;
       currentOutro = message.outroSeconds;
       currentFadeOut = message.fadeOutSeconds ?? 0;
-      lyricPriority = Infinity;
       const next = deck(message.entryId, message.url);
       const player = next.audio;
-      if (!alreadyPlaying) player.currentTime = 0;
-      const now = audioContext.currentTime;
       if (!alreadyPlaying) {
-        next.gain.gain.cancelScheduledValues(now);
-        next.gain.gain.setValueAtTime(1, now);
+        player.currentTime = 0;
+        setDeckGain(next, 1);
         await player.play();
       }
       send("playing", { entryId: message.entryId });
       await new Promise((resolve) => setTimeout(resolve, 220));
       if (change !== transition || currentId !== message.entryId) return;
-      title.textContent = message.title;
-      artist.textContent = message.requesterLabel
-        ? `${message.artist} — ${message.requesterLabel}`
-        : message.artist;
-      artwork.style.backgroundImage = message.artwork
-        ? `url(${JSON.stringify(message.artwork)})`
-        : "";
-      cover.style.backgroundImage = message.artwork
-        ? `url(${JSON.stringify(message.artwork)})`
-        : "";
+      showTrack(
+        message.title,
+        message.requesterLabel
+          ? `${message.artist} — ${message.requesterLabel}`
+          : message.artist,
+        message.artwork,
+      );
       clearLyrics();
       lyrics.source = player;
-      const queuedLyrics = takePendingLyrics();
+      const queuedLyrics = pendingLyrics;
+      pendingLyrics = undefined;
       if (queuedLyrics && queuedLyrics.entryId === message.entryId)
         showLyrics(queuedLyrics);
       else if (pendingNoLyrics === message.entryId) markLyricsUnavailable();
@@ -677,9 +675,7 @@ socket.addEventListener("message", async (event) => {
       // otherwise mute position reports until playback passed the old end.
       current.pastRestartThreshold = player.currentTime > 5;
       current.lastReportedSecond = -1;
-      const now = audioContext.currentTime;
-      current.gain.gain.cancelScheduledValues(now);
-      current.gain.gain.setValueAtTime(1, now);
+      setDeckGain(current, 1);
       await player.play();
       send("playing", { entryId: message.entryId });
     }
@@ -712,12 +708,12 @@ socket.addEventListener("message", async (event) => {
       send("paused");
     }
     if (message.type === "resume") {
-      if (currentId) await decks.get(currentId)?.audio.play();
+      await currentDeck()?.audio.play();
       send("playing", { entryId: currentId });
     }
     if (message.type === "seek" && currentId) {
       cancelTransition();
-      const current = decks.get(currentId)!;
+      const current = currentDeck()!;
       const seconds =
         message.seconds ?? current.audio.currentTime + message.offset;
       current.audio.currentTime = Math.max(
@@ -753,15 +749,11 @@ socket.addEventListener("message", async (event) => {
     }
   } catch (error) {
     status.textContent = "error";
-    const details = {
-      entryId: currentId,
-      message: error instanceof Error ? error.message : String(error),
-    };
     send(
       message.type === "play" || message.type === "resume"
         ? "track_error"
         : "fatal",
-      details,
+      { entryId: currentId, message: errorMessage(error) },
     );
   }
 });

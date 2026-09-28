@@ -2,9 +2,23 @@ import { appendFile, readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { logger } from "./logger.ts";
-import type { UsageCounts } from "./store.ts";
+import { usageLabels, type UsageCounts, type UsageKey } from "./store.ts";
 
 const log = logger.child({ component: "audit" });
+
+const usageEvents: Record<string, UsageKey> = {
+  "track.added": "added",
+  "track.removed": "removed",
+  "track.skipped": "next",
+  "track.previous": "previous",
+  "playback.paused": "paused",
+  "playback.resumed": "resumed",
+  "volume.changed": "volume",
+  "queue.reordered": "reordered",
+  "queue.shuffled": "shuffled",
+  "queue.cleared": "cleared",
+  "settings.changed": "settings",
+};
 
 export class AuditLog {
   private pending = Promise.resolve();
@@ -56,46 +70,22 @@ export class AuditLog {
   async historicalUsage() {
     await this.flush();
     let malformed = 0;
-    const counts = {
-      added: 0,
-      removed: 0,
-      next: 0,
-      previous: 0,
-      forward: 0,
-      back: 0,
-      paused: 0,
-      resumed: 0,
-      volume: 0,
-      reordered: 0,
-      shuffled: 0,
-      cleared: 0,
-      settings: 0,
-    };
-    const contents = await readFile(this.path, "utf8").catch((error) => {
-      if (
-        error &&
-        typeof error === "object" &&
-        "code" in error &&
-        error.code === "ENOENT"
-      )
-        return "";
-      throw error;
-    });
-    for (const line of contents.split("\n")) {
+    const counts = Object.fromEntries(
+      Object.keys(usageLabels).map((key) => [key, 0]),
+    ) as UsageCounts;
+    const contents = await readFile(this.path, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error?.code === "ENOENT") return "";
+        throw error;
+      },
+    );
+    const lines = contents.split("\n");
+    for (const line of lines) {
       if (!line) continue;
       try {
         const entry = JSON.parse(line);
-        if (entry.event === "track.added") counts.added++;
-        if (entry.event === "track.removed") counts.removed++;
-        if (entry.event === "track.skipped") counts.next++;
-        if (entry.event === "track.previous") counts.previous++;
-        if (entry.event === "playback.paused") counts.paused++;
-        if (entry.event === "playback.resumed") counts.resumed++;
-        if (entry.event === "volume.changed") counts.volume++;
-        if (entry.event === "queue.reordered") counts.reordered++;
-        if (entry.event === "queue.shuffled") counts.shuffled++;
-        if (entry.event === "queue.cleared") counts.cleared++;
-        if (entry.event === "settings.changed") counts.settings++;
+        const key = usageEvents[entry.event];
+        if (key) counts[key]++;
         if (entry.event === "playback.seeked") {
           if (Number(entry.seconds) > Number(entry.previous)) counts.forward++;
           if (Number(entry.seconds) < Number(entry.previous)) counts.back++;
@@ -105,13 +95,9 @@ export class AuditLog {
       }
     }
     log.info(
-      {
-        event: "usage_loaded",
-        malformed,
-        entries: contents.split("\n").length - 1,
-      },
+      { event: "usage_loaded", malformed, entries: lines.length - 1 },
       "Loaded historical audit usage",
     );
-    return counts satisfies UsageCounts;
+    return counts;
   }
 }

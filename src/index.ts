@@ -108,11 +108,7 @@ log.info(
   },
   "Loaded resumable sessions",
 );
-await Promise.all(
-  saved.expiredIds.map((id) =>
-    rm(`data/media/${id}`, { recursive: true, force: true }),
-  ),
-);
+await Promise.all(saved.expiredIds.map(removeMediaFiles));
 const catalog = new TrackCatalog(config);
 const lyrics = new LyricsCatalog();
 const recommendations = new RecommendationCatalog(store, catalog, config);
@@ -239,34 +235,36 @@ async function handleIntegrationDm(event: {
   if (event.userId === botUserId) return;
   if (!isAllowlisted(config.integrationUserIds, event.userId, event.botId))
     return;
+  const reply = (body: Record<string, unknown>) =>
+    slackApp.dm(event.userId, integrationReply(event.messageTs, body), {
+      channelId: event.channelId,
+      threadTs: event.messageTs,
+    });
   const parsed = parseIntegrationMessage(event.text);
   if (!parsed.ok) {
     if (parsed.error === "ignored") return;
     const { ok: _ok, error, ...rest } = parsed;
-    await slackApp.dm(
-      event.userId,
-      integrationReply(event.messageTs, { ok: false, error, ...rest }),
-      { channelId: event.channelId, threadTs: event.messageTs },
-    );
+    await reply({ ok: false, error, ...rest });
     return;
   }
   const coordinators = activeCoordinators();
   const command = parsed.command;
-  if (command.type === "request_control") {
-    const coordinator = coordinators.find((session) =>
-      session.ownsChannel(command.channel!),
-    );
-    if (!coordinator) {
-      await slackApp.dm(
-        event.userId,
-        integrationReply(event.messageTs, {
-          ok: false,
-          error: "session_not_found",
-        }),
-        { channelId: event.channelId, threadTs: event.messageTs },
-      );
-      return;
-    }
+  const granted = coordinators.filter((session) =>
+    session.hasGrant(event.userId),
+  );
+  const coordinator =
+    command.type === "request_control"
+      ? coordinators.find((session) => session.ownsChannel(command.channel!))
+      : command.channel
+        ? coordinators.find(
+            (session) =>
+              session.ownsChannel(command.channel!) &&
+              session.hasGrant(event.userId),
+          )
+        : granted.length === 1
+          ? granted[0]
+          : undefined;
+  if (coordinator) {
     await coordinator.handleIntegrationCommand(
       event.userId,
       command,
@@ -275,45 +273,20 @@ async function handleIntegrationDm(event: {
     );
     return;
   }
-  const granted = coordinators.filter((session) =>
-    session.hasGrant(event.userId),
-  );
-  const coordinator = command.channel
-    ? coordinators.find(
-        (session) =>
-          session.ownsChannel(command.channel!) &&
-          session.hasGrant(event.userId),
-      )
-    : granted.length === 1
-      ? granted[0]
-      : undefined;
-  if (!coordinator) {
-    const error =
-      command.channel &&
-      coordinators.some((session) => session.ownsChannel(command.channel!))
-        ? "not_granted"
-        : command.channel
-          ? "session_not_found"
-          : granted.length > 1
-            ? "channel_required"
-            : "not_granted";
-    await slackApp.dm(
-      event.userId,
-      integrationReply(event.messageTs, {
-        ok: false,
-        type: command.type,
-        error,
-      }),
-      { channelId: event.channelId, threadTs: event.messageTs },
-    );
+  if (command.type === "request_control") {
+    await reply({ ok: false, error: "session_not_found" });
     return;
   }
-  await coordinator.handleIntegrationCommand(
-    event.userId,
-    command,
-    event.messageTs,
-    event.channelId,
-  );
+  const error =
+    command.channel &&
+    coordinators.some((session) => session.ownsChannel(command.channel!))
+      ? "not_granted"
+      : command.channel
+        ? "session_not_found"
+        : granted.length > 1
+          ? "channel_required"
+          : "not_granted";
+  await reply({ ok: false, type: command.type, error });
 }
 
 function runtimeForCall(callId: string) {
@@ -322,6 +295,45 @@ function runtimeForCall(callId: string) {
       runtime.callId === callId ||
       runtime.coordinator?.room.huddleId === callId,
   );
+}
+
+function runtimeForToken(token: string) {
+  return [...runtimes.values()].find(
+    (runtime) => runtime.bootstrap.bridgeToken === token,
+  );
+}
+
+function notFound() {
+  return new Response("Not found", { status: 404 });
+}
+
+async function discardRuntime(runtime: Runtime) {
+  await runtime.browser.close();
+  runtimes.delete(runtime.bootstrap.sessionId);
+}
+
+function removeMediaFiles(sessionId: string) {
+  return rm(`data/media/${sessionId}`, { recursive: true, force: true });
+}
+
+function savedHuddleRoom(saved: SavedSession) {
+  return slackHuddle.activeHuddleRoom(
+    saved.sourceChannelId ?? saved.channelId,
+    saved.huddleThreadTs ?? saved.threadTs,
+  );
+}
+
+function addCompanionMember(channelId: string, userId: string) {
+  void companions
+    .add(channelId, userId)
+    .catch((error) =>
+      slackApp
+        .dm(
+          userId,
+          `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
+        )
+        .catch(() => {}),
+    );
 }
 
 async function migrateControls(runtime: Runtime) {
@@ -377,7 +389,7 @@ async function migrateControls(runtime: Runtime) {
 async function abandonSession(sessionId: string) {
   companions.abandonSession(sessionId);
   store.expireSession(sessionId);
-  await rm(`data/media/${sessionId}`, { recursive: true, force: true });
+  await removeMediaFiles(sessionId);
   pendingRestores.delete(sessionId);
 }
 
@@ -397,17 +409,7 @@ async function reconcileSessionParticipants(
   const companionChannelId = coordinator.room.companionChannelId;
   for (const userId of diff.added) {
     store.addSessionParticipant(coordinator.id, userId);
-    if (companionChannelId)
-      void companions
-        .add(companionChannelId, userId)
-        .catch((error) =>
-          slackApp
-            .dm(
-              userId,
-              `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
-            )
-            .catch(() => {}),
-        );
+    if (companionChannelId) addCompanionMember(companionChannelId, userId);
   }
   for (const userId of diff.removed) {
     if (companionChannelId) companions.removeLater(companionChannelId, userId);
@@ -590,8 +592,7 @@ async function joinHuddle(
         "Media page joined Chime",
       );
     } catch (error) {
-      await runtime.browser.close();
-      runtimes.delete(bootstrap.sessionId);
+      await discardRuntime(runtime);
       throw error;
     } finally {
       clearTimeout(timer);
@@ -618,8 +619,7 @@ async function joinHuddle(
           clearTimeout(timer);
           runtime!.leaveGate = undefined;
         }
-        await runtime!.browser.close();
-        runtimes.delete(bootstrap.sessionId);
+        await discardRuntime(runtime!);
       },
       restored,
       scrobbling,
@@ -652,8 +652,7 @@ async function joinHuddle(
         properties: { mediaSessionId: bootstrap.sessionId },
       });
     } catch (error) {
-      await runtime.browser.close();
-      runtimes.delete(bootstrap.sessionId);
+      await discardRuntime(runtime);
       throw error;
     }
     log.info(
@@ -722,30 +721,24 @@ async function joinHuddle(
 }
 
 async function restoreSession(saved: SavedSession) {
-  if (Date.now() >= saved.resumeUntil) {
+  const abandon = async (event: string, analytics: string, message: string) => {
     await abandonSession(saved.id);
-    log.info(
-      { event: "restore_expired", sessionId: saved.id },
+    log.info({ event, sessionId: saved.id }, message);
+    captureAnalytics(analytics, { sessionId: saved.id });
+  };
+  if (Date.now() >= saved.resumeUntil)
+    return abandon(
+      "restore_expired",
+      "session.restore_expired",
       "Expired interrupted session",
     );
-    captureAnalytics("session.restore_expired", { sessionId: saved.id });
-    return;
-  }
-  const room = await slackHuddle.activeHuddleRoom(
-    saved.sourceChannelId ?? saved.channelId,
-    saved.huddleThreadTs ?? saved.threadTs,
-  );
-  if (!room) {
-    await abandonSession(saved.id);
-    log.info(
-      { event: "restore_huddle_ended", sessionId: saved.id },
+  const room = await savedHuddleRoom(saved);
+  if (!room)
+    return abandon(
+      "restore_huddle_ended",
+      "session.restore_huddle_ended",
       "Expired session because its Huddle ended",
     );
-    captureAnalytics("session.restore_huddle_ended", {
-      sessionId: saved.id,
-    });
-    return;
-  }
   await joinHuddle(
     saved.sourceChannelId ?? saved.channelId,
     saved.hostId ?? saved.creatorId,
@@ -811,6 +804,22 @@ function restorableSession(sessionId: string) {
   return store.restorableSessions().find((session) => session.id === sessionId);
 }
 
+function hasRestoreButton(block: unknown) {
+  return (
+    block &&
+    typeof block === "object" &&
+    "elements" in block &&
+    Array.isArray(block.elements) &&
+    block.elements.some(
+      (element) =>
+        element &&
+        typeof element === "object" &&
+        "action_id" in element &&
+        element.action_id === "restore_session",
+    )
+  );
+}
+
 function scheduleEndCleanup(sessionId: string) {
   clearTimeout(endCleanupTimers.get(sessionId));
   const session = restorableSession(sessionId);
@@ -850,22 +859,7 @@ async function cleanupEndedSession(sessionId: string) {
         session.channelId,
         session.uiTs,
         session.endText,
-        session.endBlocks.filter(
-          (block) =>
-            !(
-              block &&
-              typeof block === "object" &&
-              "elements" in block &&
-              Array.isArray(block.elements) &&
-              block.elements.some(
-                (element) =>
-                  element &&
-                  typeof element === "object" &&
-                  "action_id" in element &&
-                  element.action_id === "restore_session",
-              )
-            ),
-        ),
+        session.endBlocks.filter((block) => !hasRestoreButton(block)),
       );
   } catch (error) {
     log.error(
@@ -874,7 +868,7 @@ async function cleanupEndedSession(sessionId: string) {
     );
   } finally {
     store.expireSession(sessionId);
-    await rm(`data/media/${sessionId}`, { recursive: true, force: true });
+    await removeMediaFiles(sessionId);
     log.info(
       { event: "ended_session_cleaned", sessionId },
       "Ended session cleaned up",
@@ -931,14 +925,16 @@ async function restoreEndedSession(interaction: Interaction) {
     interaction.messageTs !== session.uiTs
   )
     return;
-  if (Date.now() >= session.resumeUntil) {
-    await cleanupEndedSession(session.id);
-    await slackApp.ephemeral(
+  const notify = (text: string) =>
+    slackApp.ephemeral(
       session.channelId,
       interaction.userId,
-      "That session can no longer be restored.",
+      text,
       session.threadTs,
     );
+  if (Date.now() >= session.resumeUntil) {
+    await cleanupEndedSession(session.id);
+    await notify("That session can no longer be restored.");
     return;
   }
   if (restoring.has(session.id)) return;
@@ -957,17 +953,9 @@ async function restoreEndedSession(interaction: Interaction) {
     sessionId: session.id,
   });
   try {
-    const room = await slackHuddle.activeHuddleRoom(
-      session.sourceChannelId ?? session.channelId,
-      session.huddleThreadTs ?? session.threadTs,
-    );
+    const room = await savedHuddleRoom(session);
     if (!room) {
-      await slackApp.ephemeral(
-        session.channelId,
-        interaction.userId,
-        "That Huddle is no longer active.",
-        session.threadTs,
-      );
+      await notify("That Huddle is no longer active.");
       return;
     }
     if (!huddleHasParticipant(room, interaction.userId)) {
@@ -979,12 +967,7 @@ async function restoreEndedSession(interaction: Interaction) {
         },
         "Manual restore refused because the user is not in the Huddle",
       );
-      await slackApp.ephemeral(
-        session.channelId,
-        interaction.userId,
-        "Join the Huddle first, then I can restore that session.",
-        session.threadTs,
-      );
+      await notify("Join the Huddle first, then I can restore that session.");
       return;
     }
     await joinHuddle(
@@ -1021,12 +1004,7 @@ async function restoreEndedSession(interaction: Interaction) {
       },
       "Manual session restore failed",
     );
-    await slackApp.ephemeral(
-      session.channelId,
-      interaction.userId,
-      `I couldn’t restore that session: ${safeError(error)}`,
-      session.threadTs,
-    );
+    await notify(`I couldn’t restore that session: ${safeError(error)}`);
   } finally {
     restoring.delete(session.id);
   }
@@ -1111,17 +1089,14 @@ async function joinMentionedHuddle(
     { type: "ThreadActivity" }
   >,
 ) {
+  const notify = (text: string) =>
+    slackApp.ephemeral(event.channelId, event.userId, text, event.threadTs);
   const room = await slackHuddle.activeHuddleRoom(
     event.channelId,
     event.threadTs,
   );
   if (!room) {
-    await slackApp.ephemeral(
-      event.channelId,
-      event.userId,
-      "This isn’t an active Huddle thread.",
-      event.threadTs,
-    );
+    await notify("This isn’t an active Huddle thread.");
     return false;
   }
   if (
@@ -1140,11 +1115,8 @@ async function joinMentionedHuddle(
       },
       "Huddle join refused because the user is not in the Huddle",
     );
-    await slackApp.ephemeral(
-      event.channelId,
-      event.userId,
+    await notify(
       "Join the Huddle first, then mention me and I’ll bring the music.",
-      event.threadTs,
     );
     return false;
   }
@@ -1254,24 +1226,24 @@ const server = Bun.serve<SocketData>({
   },
   async fetch(request, server) {
     const url = new URL(request.url);
+    const token = url.searchParams.get("token") ?? "";
+    const runtime = runtimeForToken(token);
     if (url.pathname.startsWith("/audio/")) {
-      const entryId = url.pathname.slice(7);
-      const token = url.searchParams.get("token") ?? "";
-      const path = [...runtimes.values()]
-        .find((runtime) => runtime.bootstrap.bridgeToken === token)
-        ?.coordinator?.audioPath(entryId, token);
+      const path = runtime?.coordinator?.audioPath(
+        url.pathname.slice(7),
+        token,
+      );
       return path
         ? new Response(Bun.file(path), {
             headers: { "cache-control": "no-store" },
           })
-        : new Response("Not found", { status: 404 });
+        : notFound();
     }
     if (url.pathname.startsWith("/artwork/")) {
-      const entryId = url.pathname.slice(9);
-      const token = url.searchParams.get("token") ?? "";
-      const path = [...runtimes.values()]
-        .find((runtime) => runtime.bootstrap.bridgeToken === token)
-        ?.coordinator?.artworkPath(entryId, token);
+      const path = runtime?.coordinator?.artworkPath(
+        url.pathname.slice(9),
+        token,
+      );
       return path && (await Bun.file(path).exists())
         ? new Response(Bun.file(path), {
             headers: {
@@ -1279,15 +1251,9 @@ const server = Bun.serve<SocketData>({
               "content-type": "image/jpeg",
             },
           })
-        : new Response("Not found", { status: 404 });
+        : notFound();
     }
-    if (url.pathname !== "/bridge")
-      return new Response("Not found", { status: 404 });
-    const token = url.searchParams.get("token");
-    const runtime = [...runtimes.values()].find(
-      (runtime) => runtime.bootstrap.bridgeToken === token,
-    );
-    if (!runtime) return new Response("Not found", { status: 404 });
+    if (url.pathname !== "/bridge" || !runtime) return notFound();
     return server.upgrade(request, {
       data: { sessionId: runtime.bootstrap.sessionId },
     })
@@ -1317,40 +1283,27 @@ const server = Bun.serve<SocketData>({
       if (!runtime) return socket.close();
       const message = JSON.parse(String(raw));
       runtime.mediaState = { type: message.type, details: message.details };
-      if (
-        message.sessionId === runtime.bootstrap.sessionId &&
-        message.type === "joined"
-      )
-        runtime.joinGate?.resolve();
-      if (
-        message.sessionId === runtime.bootstrap.sessionId &&
-        (message.type === "fatal" || message.type === "ended")
-      )
-        runtime.joinGate?.reject(
-          new Error(`Chime join failed: ${detailMessage(message.details)}`),
-        );
-      if (
-        message.sessionId === runtime.bootstrap.sessionId &&
-        message.type === "ended"
-      )
-        runtime.leaveGate?.resolve();
+      const ownSession = message.sessionId === runtime.bootstrap.sessionId;
+      const detail = detailMessage(message.details);
+      if (ownSession && message.type === "joined") runtime.joinGate?.resolve();
+      if (ownSession && (message.type === "fatal" || message.type === "ended"))
+        runtime.joinGate?.reject(new Error(`Chime join failed: ${detail}`));
+      if (ownSession && message.type === "ended") runtime.leaveGate?.resolve();
       if (message.type === "ready")
         socket.send(
           JSON.stringify({ type: "bootstrap", payload: runtime.bootstrap }),
         );
-      if (message.sessionId === runtime.bootstrap.sessionId)
+      if (ownSession)
         runtime.coordinator?.mediaEvent(message.type, message.details);
       const fields = {
         event: "media_message",
         mediaSessionId: runtime.bootstrap.sessionId,
         mediaEvent: String(message.type),
-        ...(message.type === "fatal"
-          ? { error: detailMessage(message.details) }
-          : {}),
+        ...(message.type === "fatal" ? { error: detail } : {}),
       };
       if (message.type === "fatal")
         log.error(
-          { ...fields, err: new Error(detailMessage(message.details)) },
+          { ...fields, err: new Error(detail) },
           "Media page reported fatal error",
         );
       else if (message.type === "playback_position")
@@ -1464,21 +1417,31 @@ await slackHuddle.start((event) => {
       const settleMention = mentionReaction(event.channelId, event.messageTs);
       const bare = isBareMention(event.text, botUserId);
       const coordinator = runtime?.coordinator;
+      const failed = (name: string, message: string) => (error: unknown) => {
+        settleMention(false);
+        log.error(
+          {
+            event: name,
+            channelId: event.channelId,
+            userId: event.userId,
+            err: error,
+          },
+          message,
+        );
+      };
+      const hintFailed = (name: string, message: string) => (error: unknown) =>
+        log.warn(
+          { event: name, channelId: event.channelId, err: error },
+          message,
+        );
+      const actionFailed = failed(
+        "mention_action_failed",
+        "Could not handle Huddle mention",
+      );
       if (!coordinator) {
         void joinMentionedHuddle(event)
           .then((joined) => settleMention(joined))
-          .catch((error) => {
-            settleMention(false);
-            log.error(
-              {
-                event: "mention_action_failed",
-                channelId: event.channelId,
-                userId: event.userId,
-                err: error,
-              },
-              "Could not handle Huddle mention",
-            );
-          });
+          .catch(actionFailed);
       } else if (bare) {
         const companionId = coordinator.room.companionChannelId;
         const mentionedInHuddleThread =
@@ -1492,13 +1455,9 @@ await slackHuddle.start((event) => {
             `Player controls are in <#${companionId}>. Mention me here with a request to control the session.`,
             event.threadTs,
             companionId,
-          ).catch((error) =>
-            log.warn(
-              {
-                event: "companion_mention_hint_failed",
-                channelId: event.channelId,
-                err: error,
-              },
+          ).catch(
+            hintFailed(
+              "companion_mention_hint_failed",
               "Could not send companion channel mention hint",
             ),
           );
@@ -1506,18 +1465,7 @@ await slackHuddle.start((event) => {
         void coordinator
           .repost()
           .then(() => settleMention(true))
-          .catch((error) => {
-            settleMention(false);
-            log.error(
-              {
-                event: "mention_action_failed",
-                channelId: event.channelId,
-                userId: event.userId,
-                err: error,
-              },
-              "Could not handle Huddle mention",
-            );
-          });
+          .catch(actionFailed);
       } else if (!agentConfigured()) {
         settleMention(false);
         void mentionEphemeral(
@@ -1526,13 +1474,9 @@ await slackHuddle.start((event) => {
           "AI controls aren’t configured. Set OPENROUTER_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
           event.threadTs,
           coordinator.room.companionChannelId,
-        ).catch((error) =>
-          log.warn(
-            {
-              event: "agent_unconfigured_notice_failed",
-              channelId: event.channelId,
-              err: error,
-            },
+        ).catch(
+          hintFailed(
+            "agent_unconfigured_notice_failed",
             "Could not send agent configuration notice",
           ),
         );
@@ -1553,18 +1497,9 @@ await slackHuddle.start((event) => {
               coordinator.room.companionChannelId,
             );
           })
-          .catch((error) => {
-            settleMention(false);
-            log.error(
-              {
-                event: "mention_agent_failed",
-                channelId: event.channelId,
-                userId: event.userId,
-                err: error,
-              },
-              "Could not handle agent mention",
-            );
-          });
+          .catch(
+            failed("mention_agent_failed", "Could not handle agent mention"),
+          );
       }
     }
     if (!mentioned) runtime?.coordinator?.threadActivity(event.userId);
@@ -1631,16 +1566,10 @@ await slackHuddle.start((event) => {
     runtime.coordinator.memberJoined(event.userId);
     store.addSessionParticipant(runtime.coordinator.id, event.userId);
     if (runtime.coordinator.room.companionChannelId)
-      void companions
-        .add(runtime.coordinator.room.companionChannelId, event.userId)
-        .catch((error) =>
-          slackApp
-            .dm(
-              event.userId,
-              `I couldn’t add you to the HuddleFM controls channel: ${safeError(error)}`,
-            )
-            .catch(() => {}),
-        );
+      addCompanionMember(
+        runtime.coordinator.room.companionChannelId,
+        event.userId,
+      );
   }
   if (event.type === "MemberLeft") {
     if (runtime.coordinator.room.companionChannelId)

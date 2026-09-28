@@ -3,7 +3,12 @@ import {
   capture as captureAnalytics,
   setPersonProperties,
 } from "./analytics.ts";
-import { scrobblingModes, type ScrobblingMode, type Store } from "./store.ts";
+import {
+  scrobblingModes,
+  type ScrobblingMode,
+  type Store,
+  type UserScrobbling,
+} from "./store.ts";
 import { logger } from "./logger.ts";
 
 const lastFmEndpoint = "https://ws.audioscrobbler.com/2.0/";
@@ -20,18 +25,27 @@ export type ScrobbleTrack = {
   automatic?: boolean;
 };
 
-class LastFmError extends Error {
+type Service = "lastfm" | "listenbrainz";
+const services: Service[] = ["lastfm", "listenbrainz"];
+
+class ScrobbleError extends Error {
   constructor(
+    readonly service: Service,
     readonly code: number,
     message: string,
   ) {
     super(message);
   }
-}
 
-class ListenBrainzError extends Error {
-  constructor(readonly status: number) {
-    super(`ListenBrainz HTTP ${status}`);
+  // The user's credentials no longer work, so the service is switched off.
+  get authFailed() {
+    return this.code === (this.service === "lastfm" ? 9 : 401);
+  }
+
+  get retryable() {
+    return this.service === "lastfm"
+      ? [11, 16, 29].includes(this.code)
+      : this.code === 429 || this.code >= 500;
   }
 }
 
@@ -92,15 +106,7 @@ export class ScrobbleDispatcher {
     if (!scrobblingModes.includes(mode)) throw new Error("Invalid mode");
     this.store.setScrobblingMode(userId, mode);
     if (mode !== "always") this.store.clearPendingUserScrobbles(userId);
-    log.info(
-      { event: "mode_changed", userId, mode },
-      "Scrobbling mode changed",
-    );
-    captureAnalytics("scrobbling.mode_changed", {
-      distinctId: userId,
-      properties: { mode },
-    });
-    this.syncAnalyticsUser(userId);
+    this.changed(userId, "mode_changed", "Scrobbling mode changed", { mode });
   }
 
   setHuddleMixOptIn(userId: string, enabled: boolean) {
@@ -169,20 +175,14 @@ export class ScrobbleDispatcher {
     if (!session?.key || !session.name)
       throw new Error("Last.fm returned no session");
     this.store.connectLastFm(userId, session.name, session.key);
-    log.info({ event: "lastfm_connected", userId }, "Last.fm connected");
-    captureAnalytics("scrobbling.lastfm_connected", { distinctId: userId });
-    this.syncAnalyticsUser(userId);
+    this.changed(userId, "lastfm_connected", "Last.fm connected");
     return session.name;
   }
 
   disconnectLastFm(userId: string) {
     this.store.disconnectLastFm(userId);
     this.store.clearPendingScrobbles(userId, "lastfm");
-    log.info({ event: "lastfm_disconnected", userId }, "Last.fm disconnected");
-    captureAnalytics("scrobbling.lastfm_disconnected", {
-      distinctId: userId,
-    });
-    this.syncAnalyticsUser(userId);
+    this.changed(userId, "lastfm_disconnected", "Last.fm disconnected");
   }
 
   setLastFmEnabled(userId: string, enabled: boolean) {
@@ -191,15 +191,12 @@ export class ScrobbleDispatcher {
       throw new Error("Connect Last.fm before enabling scrobbling");
     this.store.setLastFmEnabled(userId, enabled);
     if (!enabled) this.store.clearPendingScrobbles(userId, "lastfm");
-    log.info(
-      { event: "lastfm_setting_changed", userId, enabled },
+    this.changed(
+      userId,
+      "lastfm_setting_changed",
       "Last.fm scrobbling setting changed",
+      { enabled },
     );
-    captureAnalytics("scrobbling.lastfm_setting_changed", {
-      distinctId: userId,
-      properties: { enabled },
-    });
-    this.syncAnalyticsUser(userId);
   }
 
   async setListenBrainz(
@@ -231,34 +228,23 @@ export class ScrobbleDispatcher {
       );
     this.store.setListenBrainzEnabled(userId, enabled);
     if (!enabled) this.store.clearPendingScrobbles(userId, "listenbrainz");
-    log.info(
-      {
-        event: "listenbrainz_setting_changed",
-        userId,
-        enabled,
-        connected: Boolean(username),
-      },
+    this.changed(
+      userId,
+      "listenbrainz_setting_changed",
       "ListenBrainz setting changed",
+      { enabled, connected: Boolean(username) },
     );
-    captureAnalytics("scrobbling.listenbrainz_setting_changed", {
-      distinctId: userId,
-      properties: { enabled, connected: Boolean(username) },
-    });
-    this.syncAnalyticsUser(userId);
     return username;
   }
 
   disconnectListenBrainz(userId: string) {
     this.store.disconnectListenBrainz(userId);
     this.store.clearPendingScrobbles(userId, "listenbrainz");
-    log.info(
-      { event: "listenbrainz_disconnected", userId },
+    this.changed(
+      userId,
+      "listenbrainz_disconnected",
       "ListenBrainz disconnected",
     );
-    captureAnalytics("scrobbling.listenbrainz_disconnected", {
-      distinctId: userId,
-    });
-    this.syncAnalyticsUser(userId);
   }
 
   syncAnalyticsUser(userId: string) {
@@ -274,6 +260,20 @@ export class ScrobbleDispatcher {
     if (this.analyticsUsers.get(userId) === snapshot) return;
     this.analyticsUsers.set(userId, snapshot);
     setPersonProperties(userId, properties);
+  }
+
+  private changed(
+    userId: string,
+    event: string,
+    text: string,
+    properties?: Record<string, unknown>,
+  ) {
+    log.info({ event, userId, ...properties }, text);
+    captureAnalytics(`scrobbling.${event}`, {
+      distinctId: userId,
+      ...(properties ? { properties } : {}),
+    });
+    this.syncAnalyticsUser(userId);
   }
 
   nowPlaying(userIds: Iterable<string>, track: ScrobbleTrack) {
@@ -323,38 +323,28 @@ export class ScrobbleDispatcher {
     this.rememberListen(sessionId, userId, track, listenedAt);
     if (!this.sessionEnabled(sessionId, userId)) return true;
     const settings = this.store.getUserScrobbling(userId);
-    if (
-      settings.lastFmEnabled &&
-      settings.lastFmSessionKey &&
-      (track.duration === undefined || track.duration > 30)
-    )
+    const lastFm = enabled(settings, "lastfm");
+    const listenBrainz = enabled(settings, "listenbrainz");
+    const queue = (service: Service) =>
       this.store.queueScrobble(
         sessionId,
         track.id,
         userId,
-        "lastfm",
+        service,
         listenedAt,
         track,
       );
-    if (settings.listenBrainzEnabled && settings.listenBrainzToken)
-      this.store.queueScrobble(
-        sessionId,
-        track.id,
-        userId,
-        "listenbrainz",
-        listenedAt,
-        track,
-      );
+    if (lastFm && (track.duration === undefined || track.duration > 30))
+      queue("lastfm");
+    if (listenBrainz) queue("listenbrainz");
     log.debug(
       {
         event: "eligible_listen_queued",
         sessionId,
         userId,
         trackId: track.id,
-        lastFm: Boolean(settings.lastFmEnabled && settings.lastFmSessionKey),
-        listenBrainz: Boolean(
-          settings.listenBrainzEnabled && settings.listenBrainzToken,
-        ),
+        lastFm,
+        listenBrainz,
       },
       "Eligible listen queued",
     );
@@ -374,30 +364,23 @@ export class ScrobbleDispatcher {
   private async sendNowPlaying(userId: string, track: ScrobbleTrack) {
     const settings = this.store.getUserScrobbling(userId);
     const errors: unknown[] = [];
-    if (settings.lastFmEnabled && settings.lastFmSessionKey)
+    for (const service of services) {
+      if (!enabled(settings, service)) continue;
       try {
-        await this.lastFm(
-          "track.updateNowPlaying",
-          trackParams(track, settings.lastFmSessionKey),
-        );
+        await this.submit(service, settings, track);
       } catch (error) {
-        if (error instanceof LastFmError && error.code === 9)
-          this.disconnectLastFm(userId);
+        if (error instanceof ScrobbleError && error.authFailed)
+          void this.revoke(service, userId);
         errors.push(error);
       }
-    if (settings.listenBrainzEnabled && settings.listenBrainzToken)
-      try {
-        await this.listenBrainz(
-          settings.listenBrainzToken,
-          "playing_now",
-          track,
-        );
-      } catch (error) {
-        if (error instanceof ListenBrainzError && error.status === 401)
-          this.setListenBrainz(userId, undefined, false);
-        errors.push(error);
-      }
+    }
     if (errors.length) throw errors[0];
+  }
+
+  // Switches a service off once its credentials stop working.
+  private async revoke(service: Service, userId: string) {
+    if (service === "lastfm") this.disconnectLastFm(userId);
+    else await this.setListenBrainz(userId, undefined, false);
   }
 
   private async flushPending() {
@@ -409,29 +392,12 @@ export class ScrobbleDispatcher {
       );
     for (const item of pending) {
       const settings = this.store.getUserScrobbling(item.userId);
+      const service: Service =
+        item.service === "lastfm" ? "lastfm" : "listenbrainz";
       try {
         if (!this.sessionEnabled(item.sessionId, item.userId)) continue;
-        if (item.service === "lastfm") {
-          if (!settings.lastFmEnabled || !settings.lastFmSessionKey) continue;
-          const result = await this.lastFm("track.scrobble", {
-            ...trackParams(item.track, settings.lastFmSessionKey),
-            timestamp: String(item.listenedAt),
-            ...(item.track.automatic ? { chosenByUser: "0" } : {}),
-          });
-          const scrobbles = result.scrobbles as
-            { "@attr"?: { ignored?: number | string } } | undefined;
-          if (Number(scrobbles?.["@attr"]?.ignored))
-            throw new LastFmError(0, "Last.fm ignored the scrobble");
-        } else {
-          if (!settings.listenBrainzEnabled || !settings.listenBrainzToken)
-            continue;
-          await this.listenBrainz(
-            settings.listenBrainzToken,
-            "single",
-            item.track,
-            item.listenedAt,
-          );
-        }
+        if (!enabled(settings, service)) continue;
+        await this.submit(service, settings, item.track, item.listenedAt);
         this.store.finishScrobble(item.id, "sent");
         log.info(
           {
@@ -445,20 +411,11 @@ export class ScrobbleDispatcher {
           "Scrobble submitted",
         );
       } catch (error) {
-        if (error instanceof LastFmError && error.code === 9) {
-          this.disconnectLastFm(item.userId);
+        if (error instanceof ScrobbleError && error.authFailed) {
+          await this.revoke(service, item.userId);
           continue;
         }
-        if (error instanceof ListenBrainzError && error.status === 401) {
-          await this.setListenBrainz(item.userId, undefined, false);
-          continue;
-        }
-        const retry =
-          error instanceof LastFmError
-            ? error.code === 11 || error.code === 16 || error.code === 29
-            : !(error instanceof ListenBrainzError) ||
-              error.status === 429 ||
-              error.status >= 500;
+        const retry = !(error instanceof ScrobbleError) || error.retryable;
         if (retry)
           this.store.retryScrobble(
             item.id,
@@ -482,6 +439,36 @@ export class ScrobbleDispatcher {
         if (retry) break;
       }
     }
+  }
+
+  // Sends a now-playing update, or a scrobble when `listenedAt` is given.
+  private async submit(
+    service: Service,
+    settings: UserScrobbling,
+    track: ScrobbleTrack,
+    listenedAt?: number,
+  ) {
+    if (service === "listenbrainz")
+      return this.listenBrainz(
+        settings.listenBrainzToken!,
+        listenedAt === undefined ? "playing_now" : "single",
+        track,
+        listenedAt,
+      );
+    const params = trackParams(track, settings.lastFmSessionKey!);
+    if (listenedAt === undefined) {
+      await this.lastFm("track.updateNowPlaying", params);
+      return;
+    }
+    const result = await this.lastFm("track.scrobble", {
+      ...params,
+      timestamp: String(listenedAt),
+      ...(track.automatic ? { chosenByUser: "0" } : {}),
+    });
+    const scrobbles = result.scrobbles as
+      { "@attr"?: { ignored?: number | string } } | undefined;
+    if (Number(scrobbles?.["@attr"]?.ignored))
+      throw new ScrobbleError("lastfm", 0, "Last.fm ignored the scrobble");
   }
 
   private async lastFm(method: string, params: Record<string, string> = {}) {
@@ -509,7 +496,8 @@ export class ScrobbleDispatcher {
       message?: string;
     };
     if (!response.ok || result.error)
-      throw new LastFmError(
+      throw new ScrobbleError(
+        "lastfm",
         result.error ?? response.status,
         result.message ?? `HTTP ${response.status}`,
       );
@@ -551,24 +539,28 @@ export class ScrobbleDispatcher {
         }),
       },
     );
-    if (!response.ok) throw new ListenBrainzError(response.status);
+    if (!response.ok)
+      throw new ScrobbleError(
+        "listenbrainz",
+        response.status,
+        `ListenBrainz HTTP ${response.status}`,
+      );
   }
 }
+
+type Listener = {
+  listenedAt: number;
+  seconds: number;
+  active: boolean;
+  reported?: boolean;
+};
 
 export class PlaybackScrobbler {
   private current?: {
     track: ScrobbleTrack;
     playing: boolean;
     lastPosition: number;
-    listeners: Map<
-      string,
-      {
-        listenedAt: number;
-        seconds: number;
-        active: boolean;
-        reported?: boolean;
-      }
-    >;
+    listeners: Map<string, Listener>;
   };
 
   constructor(
@@ -583,28 +575,11 @@ export class PlaybackScrobbler {
     playing = true,
     position = 0,
   ) {
-    const listeners = new Map<
-      string,
-      {
-        listenedAt: number;
-        seconds: number;
-        active: boolean;
-        reported?: boolean;
-      }
-    >();
+    const listeners = new Map<string, Listener>();
     for (const userId of userIds)
-      if (userId !== this.botUserId)
-        listeners.set(userId, {
-          listenedAt: Math.floor(Date.now() / 1000),
-          seconds: 0,
-          active: true,
-        });
+      if (userId !== this.botUserId) listeners.set(userId, newListener());
     this.current = { track, playing, lastPosition: position, listeners };
-    if (playing)
-      this.dispatcher.nowPlaying(
-        this.enabledListeners(listeners.keys()),
-        track,
-      );
+    this.announce(listeners.keys());
   }
 
   memberJoined(userId: string) {
@@ -612,17 +587,8 @@ export class PlaybackScrobbler {
     const existing = this.current.listeners.get(userId);
     if (existing?.active) return;
     if (existing) existing.active = true;
-    else
-      this.current.listeners.set(userId, {
-        listenedAt: Math.floor(Date.now() / 1000),
-        seconds: 0,
-        active: true,
-      });
-    if (
-      this.current.playing &&
-      this.dispatcher.sessionEnabled(this.sessionId, userId)
-    )
-      this.dispatcher.nowPlaying([userId], this.current.track);
+    else this.current.listeners.set(userId, newListener());
+    this.announce([userId]);
   }
 
   memberLeft(userId: string) {
@@ -637,10 +603,7 @@ export class PlaybackScrobbler {
   resume() {
     if (!this.current) return;
     this.current.playing = true;
-    this.dispatcher.nowPlaying(
-      this.enabledListeners(this.current.listeners.keys()),
-      this.current.track,
-    );
+    this.announce(this.current.listeners.keys());
   }
 
   sessionEnabled(userId: string) {
@@ -655,11 +618,7 @@ export class PlaybackScrobbler {
   settingsEnabled(userId: string) {
     const listener = this.current?.listeners.get(userId);
     if (listener) listener.reported = false;
-    if (
-      this.current?.playing &&
-      this.dispatcher.sessionEnabled(this.sessionId, userId)
-    )
-      this.dispatcher.nowPlaying([userId], this.current.track);
+    this.announce([userId]);
   }
 
   position(seconds: number) {
@@ -684,10 +643,28 @@ export class PlaybackScrobbler {
     this.current = undefined;
   }
 
-  private *enabledListeners(userIds: Iterable<string>) {
-    for (const userId of userIds)
-      if (this.dispatcher.sessionEnabled(this.sessionId, userId)) yield userId;
+  // Tells the listeners who scrobble here what is playing, if anything is.
+  private announce(userIds: Iterable<string>) {
+    if (!this.current?.playing) return;
+    const enabled = [...userIds].filter((userId) =>
+      this.dispatcher.sessionEnabled(this.sessionId, userId),
+    );
+    this.dispatcher.nowPlaying(enabled, this.current.track);
   }
+}
+
+function newListener(): Listener {
+  return {
+    listenedAt: Math.floor(Date.now() / 1000),
+    seconds: 0,
+    active: true,
+  };
+}
+
+function enabled(settings: UserScrobbling, service: Service) {
+  return service === "lastfm"
+    ? Boolean(settings.lastFmEnabled && settings.lastFmSessionKey)
+    : Boolean(settings.listenBrainzEnabled && settings.listenBrainzToken);
 }
 
 function trackParams(track: ScrobbleTrack, sessionKey: string) {

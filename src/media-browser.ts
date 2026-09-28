@@ -83,11 +83,13 @@ export class MediaBrowser {
     this.context = await this.pool.context();
     this.page = await this.context.newPage();
     this.page.on("console", (message) => {
-      const fields = { event: "page_console", browserLevel: message.type() };
-      const text = redactSecrets(message.text());
-      if (message.type() === "error") pageLog.error(fields, text);
-      else if (message.type() === "warning") pageLog.warn(fields, text);
-      else pageLog.debug(fields, text);
+      const type = message.type();
+      const level =
+        type === "error" ? "error" : type === "warning" ? "warn" : "debug";
+      pageLog[level](
+        { event: "page_console", browserLevel: type },
+        redactSecrets(message.text()),
+      );
     });
     this.page.on("pageerror", (error) =>
       pageLog.error({ event: "page_error", err: error }, "Media page failed"),

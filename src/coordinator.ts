@@ -28,7 +28,6 @@ import {
   type DuckingMode,
   type LoopMode,
   type SavedSession,
-  type ScrobblingMode,
   type TransitionMode,
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
@@ -47,19 +46,29 @@ import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
 import type { WorkspaceAdmins } from "./workspace-admins.ts";
 import {
+  actions,
+  addedBy,
+  artworkIcon,
   auditTrack,
+  button,
+  capitalize,
   confirm,
+  context,
   elapsed,
   escape,
   footerContext,
   icon,
+  input,
   likeValue,
+  modeSelect,
   permissionLabels,
   plain,
   safeAuditError,
+  section,
   sectionBlocks,
   songCount,
-  staticSelect,
+  toggle,
+  when,
 } from "./coordinator-ui.ts";
 import {
   eventGroup,
@@ -103,6 +112,44 @@ type Entry = TrackMetadata & {
   fadeOutSeconds?: number;
 };
 
+type InputState = Interaction["state"][string][string];
+
+// The option a select block holds, when it is one of `modes`.
+function selected<Mode extends string>(
+  state: InputState | undefined,
+  modes: readonly Mode[],
+) {
+  const value = state?.selected_option?.value as Mode | undefined;
+  return value && modes.includes(value) ? value : undefined;
+}
+
+// Whether a single-option checkbox block is ticked, or undefined when the
+// block was not part of the submission.
+function checked(state: InputState | undefined) {
+  if (!state) return undefined;
+  return (
+    state.selected_options?.some((option) => option.value === "enabled") ??
+    false
+  );
+}
+
+// The object without its undefined fields, for spreading into records that
+// distinguish an absent field from an unset one.
+function defined<Value extends object>(value: Value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as Partial<Value>;
+}
+
+// A modal's private metadata, or nothing when it is missing or malformed.
+function parseMetadata(metadata: string | undefined): Record<string, unknown> {
+  try {
+    return JSON.parse(metadata || "{}");
+  } catch {
+    return {};
+  }
+}
+
 function throwIfAborted(signal?: AbortSignal) {
   if (!signal?.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
@@ -112,6 +159,22 @@ function throwIfAborted(signal?: AbortSignal) {
 // What the person who pressed the like button hears back. Nobody else sees it,
 // so it says what the like is for rather than announcing it to the room.
 const likedNotice = "This will be recommended to you more";
+
+const autoplayDescriptions: Record<AutoplayMode, string> = {
+  off: "Do not queue recommendations",
+  related: "Continue from songs requested in this huddle",
+  huddle: "Mix what people in this huddle listen to",
+};
+const loopDescriptions: Record<LoopMode, string> = {
+  off: "Do not repeat",
+  track: "Restart the current song when it ends",
+  queue: "Move finished songs back to the end of the queue",
+};
+const duckingDescriptions: Record<DuckingMode, string> = {
+  off: "Keep playing at full volume",
+  gentle: "Dip the music under the conversation",
+  strong: "Drop the music well back while people talk",
+};
 
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
@@ -358,21 +421,21 @@ export class Coordinator {
   async resume(actorId?: string) {
     const startedAt = Date.now();
     this.log.info({ event: "resume_started" }, "Resuming session");
-    const missing = await Promise.all(
-      [this.current, ...this.queue]
-        .filter(Boolean)
-        .map(async (entry) =>
-          entry!.filePath && (await Bun.file(entry!.filePath).exists())
-            ? undefined
-            : entry,
+    const missingEntries = (
+      await Promise.all(
+        [this.current, ...this.queue].map(async (entry) =>
+          entry &&
+          !(entry.filePath && (await Bun.file(entry.filePath).exists()))
+            ? entry
+            : undefined,
         ),
-    );
-    if (this.current && missing.includes(this.current)) {
-      this.current!.status = "preparing";
-      this.queue.unshift(this.current!);
+      )
+    ).filter((entry): entry is Entry => Boolean(entry));
+    if (this.current && missingEntries.includes(this.current)) {
+      this.current.status = "preparing";
+      this.queue.unshift(this.current);
       this.current = undefined;
     }
-    const missingEntries = missing.filter(Boolean) as Entry[];
     for (const entry of missingEntries) {
       entry.status = "preparing";
       entry.filePath = undefined;
@@ -434,22 +497,10 @@ export class Coordinator {
     const controller = new AbortController();
     this.preparations.set(entry.id, controller);
     try {
-      const prepared = this.tracks.prepare(
-        entry,
-        `data/media/${this.id}`,
-        entry.id,
-        controller.signal,
-        this.preparationPriority(entry),
-      );
-      const filePath = await prepared;
+      const filePath = await this.download(entry, controller);
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
-        if (
-          this.state === "ended" ||
-          this.state === "suspended" ||
-          !this.queue.includes(entry)
-        )
-          return;
+        if (this.inactive() || !this.queue.includes(entry)) return;
         this.prepared(entry, filePath);
         if (!this.current) await this.startNext();
         else {
@@ -477,22 +528,8 @@ export class Coordinator {
         "Restored track preparation failed",
       );
       await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (
-          this.state === "ended" ||
-          this.state === "suspended" ||
-          !this.queue.includes(entry)
-        )
-          return;
-        this.queue = this.queue.filter((track) => track !== entry);
-        this.queueChanged();
-        this.store.setTrack(entry.id, { status: "failed" });
-        this.audit.record("track.failed", undefined, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-          reason: safeAuditError(error),
-        });
-        if (!this.current) await this.startNext();
+        if (this.dropFailed(entry, error) && !this.current)
+          await this.startNext();
       });
     }
   }
@@ -521,11 +558,7 @@ export class Coordinator {
     if (interaction.value === this.id) return true;
     const action = parseIntegrationActionValue(interaction.value);
     if (action?.sessionId === this.id) return true;
-    try {
-      return JSON.parse(interaction.metadata || "{}").sessionId === this.id;
-    } catch {
-      return false;
-    }
+    return parseMetadata(interaction.metadata).sessionId === this.id;
   }
 
   async action(interaction: Interaction) {
@@ -679,7 +712,6 @@ export class Coordinator {
         ok: false as const,
         error: "Join the huddle before using the player.",
       };
-    const capabilities = [...this.allowed];
     const host = this.hostId === userId || this.isManager(userId);
     const grant = this.integrations.get(userId);
     const scrobbling = this.scrobbling?.settings(userId, this.id);
@@ -700,9 +732,7 @@ export class Coordinator {
         ? "all (host/manager)"
         : grant
           ? [...grant.permissions]
-          : capabilities.length
-            ? capabilities
-            : [],
+          : [...this.allowed],
       nowPlaying: this.current
         ? {
             id: this.current.id,
@@ -784,7 +814,7 @@ export class Coordinator {
         ok: false as const,
         error: "You do not have permission to add that.",
       };
-    if (this.state === "ended" || this.state === "suspended")
+    if (this.inactive())
       return { ok: false as const, error: "This session is not active." };
     let selection: TrackMetadata | TrackMetadata[];
     try {
@@ -806,8 +836,7 @@ export class Coordinator {
       };
     const committed = await this.enqueue(async () => {
       throwIfAborted(signal);
-      if (this.state === "ended" || this.state === "suspended") return;
-      if (!this.can(userId, needed)) return;
+      if (this.inactive() || !this.can(userId, needed)) return;
       const heldAutoplay = this.takeQueuedAutoplay();
       let pending: { entry: Entry; controller: AbortController }[] = [];
       try {
@@ -820,33 +849,7 @@ export class Coordinator {
           this.restoreQueuedAutoplay(heldAutoplay);
           return { error: fit.error };
         }
-        const entries = fit.items.map((metadata) => ({
-          ...metadata,
-          id: crypto.randomUUID(),
-          requesterId: userId,
-          status: "preparing",
-        }));
-        pending = entries.map((entry) => {
-          const controller = new AbortController();
-          this.preparations.set(entry.id, controller);
-          this.queue.push(entry);
-          this.store.addTrack({
-            ...entry,
-            sessionId: this.id,
-            status: entry.status,
-          });
-          this.audit.record("track.added", userId, {
-            sessionId: this.id,
-            ...auditTrack(entry),
-          });
-          this.notifyIntegrations("queue.added", {
-            id: entry.id,
-            title: entry.title,
-            artist: entry.artist,
-          });
-          this.store.incrementUsage("added");
-          return { entry, controller };
-        });
+        pending = this.stageEntries(userId, fit.items);
         await this.render();
         this.queueChanged();
         throwIfAborted(signal);
@@ -968,34 +971,12 @@ export class Coordinator {
       const entry = this.queue.find((track) => track.id === trackId);
       if (!entry)
         return { ok: false as const, error: "That track is not in the queue." };
-      if (
-        !this.can(userId, "manage-queue") &&
-        !(entry.requesterId === userId && this.can(userId, "remove-own"))
-      )
+      if (!this.canRemove(userId, entry))
         return {
           ok: false as const,
           error: "You do not have permission for that.",
         };
-      this.queue.splice(this.queue.indexOf(entry), 1);
-      this.preparations.get(entry.id)?.abort();
-      this.store.removeTrack(entry.id);
-      if (entry.automatic) this.rejectSkipped(entry, userId);
-      this.audit.record("track.removed", userId, {
-        sessionId: this.id,
-        ...auditTrack(entry),
-      });
-      this.notifyIntegrations("queue.removed", {
-        id: entry.id,
-        title: entry.title,
-        artist: entry.artist,
-      });
-      this.store.incrementUsage("removed");
-      this.queueChanged();
-      await this.releaseMedia(entry);
-      await this.render();
-      this.syncPreloads();
-      this.refreshIdle();
-      this.scheduleAutoplay();
+      await this.removeEntry(userId, entry);
       return {
         ok: true as const,
         removed: { title: entry.title, artist: entry.artist },
@@ -1015,13 +996,7 @@ export class Coordinator {
   ) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "manage-queue"))
-        return {
-          ok: false as const,
-          error: this.canUsePlayer(userId)
-            ? "You do not have permission for that."
-            : "Join the huddle before using the player.",
-        };
+      if (!this.can(userId, "manage-queue")) return this.denied(userId);
       const index = this.queue.findIndex((track) => track.id === trackId);
       if (index < 0)
         return { ok: false as const, error: "That track is not in the queue." };
@@ -1053,29 +1028,17 @@ export class Coordinator {
           position: index + 1,
           title: this.queue[index]!.title,
         };
-      const [entry] = this.queue.splice(index, 1);
-      this.queue.splice(target, 0, entry!);
-      this.audit.record("queue.reordered", userId, {
-        sessionId: this.id,
-        trackId,
-        from: index,
-        to: target,
-        ...(options.playNext ? { reason: "play_next" } : {}),
-      });
-      this.notifyIntegrations("queue.reordered", {
-        trackId,
-        from: index,
-        to: target,
-      });
-      this.store.incrementUsage("reordered");
-      this.queueChanged();
-      await this.render();
-      this.syncPreloads();
+      const entry = await this.moveEntry(
+        userId,
+        index,
+        target,
+        Boolean(options.playNext),
+      );
       return {
         ok: true as const,
         position: target + 1,
-        title: entry!.title,
-        artist: entry!.artist,
+        title: entry.title,
+        artist: entry.artist,
       };
     });
   }
@@ -1083,13 +1046,7 @@ export class Coordinator {
   async agentShuffle(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "manage-queue"))
-        return {
-          ok: false as const,
-          error: this.canUsePlayer(userId)
-            ? "You do not have permission for that."
-            : "Join the huddle before using the player.",
-        };
+      if (!this.can(userId, "manage-queue")) return this.denied(userId);
       const shuffled = await this.applyShuffle(userId);
       if (!shuffled)
         return {
@@ -1103,64 +1060,18 @@ export class Coordinator {
   async agentClear(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "clear"))
-        return {
-          ok: false as const,
-          error: this.canUsePlayer(userId)
-            ? "You do not have permission for that."
-            : "Join the huddle before using the player.",
-        };
-      this.autoplayGeneration++;
-      this.autoplayPending = false;
-      const cleared = this.queue;
-      const count = cleared.length;
-      this.queue = [];
-      for (const entry of cleared) {
-        this.preparations.get(entry.id)?.abort();
-        this.store.removeTrack(entry.id);
-      }
-      await this.releaseMedia(...cleared);
-      this.queueChanged();
-      this.audit.record("queue.cleared", userId, {
-        sessionId: this.id,
-        count,
-      });
-      this.notifyIntegrations("queue.cleared", { count });
-      this.store.incrementUsage("cleared");
-      await this.render();
-      this.syncPreloads();
-      this.refreshIdle();
-      this.scheduleAutoplay();
-      return { ok: true as const, cleared: count };
+      if (!this.can(userId, "clear")) return this.denied(userId);
+      return { ok: true as const, cleared: await this.clearQueue(userId) };
     });
   }
 
   async agentSkip(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "skip"))
-        return {
-          ok: false as const,
-          error: this.canUsePlayer(userId)
-            ? "You do not have permission for that."
-            : "Join the huddle before using the player.",
-        };
+      if (!this.can(userId, "skip")) return this.denied(userId);
       if (!this.current)
         return { ok: false as const, error: "Nothing is playing." };
-      const skipped = this.current;
-      this.audit.record("track.skipped", userId, {
-        sessionId: this.id,
-        ...auditTrack(skipped),
-      });
-      this.notifyIntegrations("track.skipped", {
-        id: skipped.id,
-        title: skipped.title,
-        artist: skipped.artist,
-      });
-      this.store.incrementUsage("next");
-      this.rejectSkipped(skipped, userId);
-      await this.advance("skipped");
-      this.scheduleAutoplay();
+      const skipped = await this.skipCurrent(userId);
       return {
         ok: true as const,
         skipped: { title: skipped.title, artist: skipped.artist },
@@ -1174,48 +1085,17 @@ export class Coordinator {
   async agentPrevious(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "skip"))
-        return {
-          ok: false as const,
-          error: this.canUsePlayer(userId)
-            ? "You do not have permission for that."
-            : "Join the huddle before using the player.",
-        };
-      if (this.current && (this.playbackSeconds > 5 || !this.history.length)) {
-        this.audit.record("track.previous", userId, {
-          sessionId: this.id,
-          ...auditTrack(this.current),
-          restarted: true,
-        });
-        this.store.incrementUsage("previous");
-        this.playbackSeconds = 0;
-        this.sendMedia({ type: "seek", seconds: 0 });
+      if (!this.can(userId, "skip")) return this.denied(userId);
+      const result = await this.goBack(userId);
+      if (!result) return { ok: false as const, error: "Nothing is playing." };
+      if (result.restarted)
         return {
           ok: true as const,
           restarted: true,
-          title: this.current.title,
-          artist: this.current.artist,
+          title: result.restarted.title,
+          artist: result.restarted.artist,
         };
-      }
-      if (!this.history.length)
-        return { ok: false as const, error: "Nothing is playing." };
-      const prior = this.history.pop()!;
-      this.audit.record("track.previous", userId, {
-        sessionId: this.id,
-        ...auditTrack(prior),
-      });
-      this.store.incrementUsage("previous");
-      if (this.current) {
-        this.current.status = "ready";
-        this.queue.unshift(this.current);
-        this.store.setTrack(this.current.id, { status: "ready" });
-      }
-      this.current = undefined;
-      prior.status = "ready";
-      this.queue.unshift(prior);
-      this.store.setTrack(prior.id, { status: "ready" });
-      await this.startNext();
-      const playing = this.current ?? prior;
+      const playing = this.current ?? result.prior;
       return {
         ok: true as const,
         nowPlaying: { title: playing.title, artist: playing.artist },
@@ -1248,60 +1128,22 @@ export class Coordinator {
   }
 
   private async applyPause(userId: string, next: "paused" | "playing") {
-    if (!this.can(userId, "pause") || !this.current)
-      return {
-        ok: false as const,
-        error: !this.canUsePlayer(userId)
-          ? "Join the huddle before using the player."
-          : !this.can(userId, "pause")
-            ? "You do not have permission for that."
-            : "Nothing is playing.",
-      };
-    if (this.state === next) return { ok: true as const, state: this.state };
-    this.state = next;
-    if (this.state === "paused") this.playbackScrobbling?.pause();
-    else this.playbackScrobbling?.resume();
-    this.sendMedia({ type: this.state === "paused" ? "pause" : "resume" });
-    this.store.setSession(this.id, { status: this.state });
-    this.audit.record(
-      `playback.${this.state === "paused" ? "paused" : "resumed"}`,
-      userId,
-      { sessionId: this.id, trackId: this.current.id },
-    );
-    this.store.incrementUsage(this.state === "paused" ? "paused" : "resumed");
-    this.notifyIntegrations(
-      this.state === "paused" ? "playback.paused" : "playback.resumed",
-      { state: this.state },
-    );
-    await this.render();
-    this.refreshIdle();
+    if (!this.can(userId, "pause")) return this.denied(userId);
+    if (!this.current)
+      return { ok: false as const, error: "Nothing is playing." };
+    if (this.state !== next) await this.setPlayback(userId, next);
     return { ok: true as const, state: this.state };
   }
 
   async agentSeek(userId: string, seconds: number, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "skip") || !this.current)
-        return {
-          ok: false as const,
-          error: !this.canUsePlayer(userId)
-            ? "Join the huddle before using the player."
-            : !this.can(userId, "skip")
-              ? "You do not have permission for that."
-              : "Nothing is playing.",
-        };
+      if (!this.can(userId, "skip")) return this.denied(userId);
+      if (!this.current)
+        return { ok: false as const, error: "Nothing is playing." };
       if (!Number.isFinite(seconds))
         return { ok: false as const, error: "Seconds must be a number." };
-      const previous = this.playbackSeconds;
-      this.playbackSeconds = Math.max(0, previous + seconds);
-      this.sendMedia({ type: "seek", offset: seconds });
-      this.audit.record("playback.seeked", userId, {
-        sessionId: this.id,
-        trackId: this.current.id,
-        previous,
-        seconds: this.playbackSeconds,
-      });
-      this.store.incrementUsage(seconds > 0 ? "forward" : "back");
+      this.seekBy(userId, seconds);
       return {
         ok: true as const,
         playbackSeconds: this.playbackSeconds,
@@ -1312,32 +1154,13 @@ export class Coordinator {
   async agentSetVolume(userId: string, percent: number, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
-      if (!this.can(userId, "volume"))
-        return {
-          ok: false as const,
-          error: this.canUsePlayer(userId)
-            ? "You do not have permission for that."
-            : "Join the huddle before using the player.",
-        };
+      if (!this.can(userId, "volume")) return this.denied(userId);
       if (!Number.isFinite(percent) || percent < 0 || percent > 100)
         return {
           ok: false as const,
           error: "Volume must be between 0 and 100.",
         };
-      const previous = this.volume;
-      this.volume = Math.round(percent * 100) / 10_000;
-      this.sendMedia({ type: "volume", value: this.volume });
-      this.store.setSession(this.id, { volume: this.volume });
-      this.audit.record("volume.changed", userId, {
-        sessionId: this.id,
-        previous,
-        volume: this.volume,
-      });
-      this.store.incrementUsage("volume");
-      this.notifyIntegrations("volume.changed", {
-        volumePercent: Math.round(this.volume * 100),
-      });
-      await this.render();
+      await this.setVolume(userId, Math.round(percent * 100) / 10_000);
       return {
         ok: true as const,
         volumePercent: Math.round(this.volume * 100),
@@ -1367,18 +1190,16 @@ export class Coordinator {
           ok: false as const,
           error: "Join the huddle before using the player.",
         };
-      const changed: string[] = [];
       const before = this.settingsSnapshot();
       if (
-        patch.hostUserId !== undefined ||
-        patch.permissionPreset !== undefined
-      ) {
-        if (!this.settingsAdmin(userId))
-          return {
-            ok: false as const,
-            error: "Only the host can change permissions or transfer host.",
-          };
-      }
+        (patch.hostUserId !== undefined ||
+          patch.permissionPreset !== undefined) &&
+        !this.settingsAdmin(userId)
+      )
+        return {
+          ok: false as const,
+          error: "Only the host can change permissions or transfer host.",
+        };
       if (
         (patch.displayMode !== undefined ||
           patch.autoplay !== undefined ||
@@ -1410,12 +1231,15 @@ export class Coordinator {
         return { ok: false as const, error: "Invalid ducking mode." };
       if (patch.loopMode !== undefined && !loopModes.includes(patch.loopMode))
         return { ok: false as const, error: "Invalid loop mode." };
+      if (
+        patch.autoplayMode !== undefined &&
+        !autoplayModes.includes(patch.autoplayMode)
+      )
+        return { ok: false as const, error: "Invalid autoplay mode." };
       const permissionPreset =
         patch.permissionPreset === undefined
           ? undefined
-          : permissionPresets[
-              patch.permissionPreset as keyof typeof permissionPresets
-            ];
+          : permissionPresets[patch.permissionPreset];
       if (patch.permissionPreset !== undefined && !permissionPreset)
         return { ok: false as const, error: "Invalid permission preset." };
       if (patch.hostUserId !== undefined) {
@@ -1430,82 +1254,20 @@ export class Coordinator {
             error: "That user is not in this huddle.",
           };
       }
-      if (
-        patch.displayMode !== undefined &&
-        patch.displayMode !== this.displayMode
-      ) {
-        this.displayMode = patch.displayMode;
-        this.sendMedia({ type: "display_mode", mode: patch.displayMode });
-        this.store.setSession(this.id, { displayMode: patch.displayMode });
-        changed.push(`displayMode=${patch.displayMode}`);
-      }
-      if (
-        patch.autoplayMode !== undefined &&
-        !autoplayModes.includes(patch.autoplayMode)
-      )
-        return { ok: false as const, error: "Invalid autoplay mode." };
-      const nextAutoplay =
-        patch.autoplayMode ??
-        (patch.autoplay === undefined
-          ? undefined
-          : parseAutoplayMode(patch.autoplay));
-      if (nextAutoplay !== undefined && nextAutoplay !== this.autoplayMode) {
-        this.autoplayMode = nextAutoplay;
-        this.store.setSession(this.id, { autoplay: nextAutoplay });
-        if (nextAutoplay === "off") await this.removeQueuedAutoplay();
-        changed.push(`autoplay=${nextAutoplay}`);
-      }
-      if (patch.loopMode !== undefined && patch.loopMode !== this.loopMode) {
-        this.loopMode = patch.loopMode;
-        this.store.setSession(this.id, { loopMode: patch.loopMode });
-        if (patch.loopMode !== "off") await this.removeQueuedAutoplay();
-        this.syncPreloads();
-        changed.push(`loopMode=${patch.loopMode}`);
-      }
-      if (patch.transitionMode !== undefined) {
-        this.transitionMode = patch.transitionMode;
-        this.sendMedia({
-          type: "transition_mode",
-          mode: patch.transitionMode,
-        });
-        this.store.setSession(this.id, {
-          transitionMode: patch.transitionMode,
-        });
-        changed.push(`transitionMode=${patch.transitionMode}`);
-      }
-      if (
-        patch.duckingMode !== undefined &&
-        patch.duckingMode !== this.duckingMode
-      ) {
-        this.duckingMode = patch.duckingMode;
-        this.sendMedia({ type: "ducking_mode", mode: patch.duckingMode });
-        this.store.setSession(this.id, { duckingMode: patch.duckingMode });
-        changed.push(`duckingMode=${patch.duckingMode}`);
-      }
-      if (
-        patch.anchorEnabled !== undefined &&
-        patch.anchorEnabled !== this.anchorEnabled
-      ) {
-        if (!patch.anchorEnabled) clearTimeout(this.anchorTimer);
-        this.anchorEnabled = patch.anchorEnabled;
-        this.store.setSession(this.id, {
-          anchorEnabled: patch.anchorEnabled,
-        });
-        changed.push(`anchorEnabled=${patch.anchorEnabled}`);
-      }
+      const changed = await this.applySettings({
+        ...patch,
+        autoplayMode:
+          patch.autoplayMode ??
+          (patch.autoplay === undefined
+            ? undefined
+            : parseAutoplayMode(patch.autoplay)),
+      });
       if (permissionPreset) {
-        this.allowed = new Set(permissionPreset);
-        for (const capability of capabilities)
-          this.store.setPermission(
-            this.id,
-            capability,
-            this.allowed.has(capability),
-          );
+        this.setPermissions(permissionPreset);
         changed.push(`permissions=${patch.permissionPreset}`);
       }
       if (patch.hostUserId !== undefined) {
-        this.hostId = patch.hostUserId;
-        this.store.setSession(this.id, { hostId: patch.hostUserId });
+        this.setHost(patch.hostUserId);
         changed.push(`hostId=${patch.hostUserId}`);
       }
       if (changed.length) {
@@ -1545,10 +1307,7 @@ export class Coordinator {
           ok: false as const,
           error: "Join the huddle before taking over.",
         };
-      this.hostId = userId;
-      this.store.setSession(this.id, { hostId: userId });
-      this.audit.record("host.claimed", userId, { sessionId: this.id });
-      await this.render();
+      await this.takeHost(userId);
       return { ok: true as const, hostId: userId };
     });
   }
@@ -1666,7 +1425,7 @@ export class Coordinator {
   ) {
     return this.enqueue(
       (): { added: string[]; removed: string[] } | undefined => {
-        if (this.state === "ended" || this.state === "suspended") return;
+        if (this.inactive()) return;
         // Member events apply synchronously, outside this queue, so a
         // snapshot taken before the Slack round trip can already be stale by
         // the time it gets here. Applying it would undo the newer event, so
@@ -1705,7 +1464,7 @@ export class Coordinator {
 
   suspendForRestart(resumeUntil: number) {
     return this.enqueue(async () => {
-      if (this.state === "ended" || this.state === "suspended") return;
+      if (this.inactive()) return;
       const startedAt = Date.now();
       this.log.info(
         { event: "suspend_started" },
@@ -1724,17 +1483,7 @@ export class Coordinator {
       const state = this.state;
       this.state = "suspended";
       this.playbackScrobbling?.pause();
-      this.autoplayGeneration++;
-      this.autoplayPending = false;
-      for (const controller of this.preparations.values()) controller.abort();
-      this.preparations.clear();
-      clearTimeout(this.idleTimer);
-      clearTimeout(this.idleWarningTimer);
-      clearTimeout(this.aloneTimer);
-      clearTimeout(this.pausedTimer);
-      clearTimeout(this.pausedWarningTimer);
-      clearTimeout(this.anchorTimer);
-      clearTimeout(this.renderTimer);
+      this.stopWork();
       this.store.suspendSession(
         this.id,
         {
@@ -1848,6 +1597,21 @@ export class Coordinator {
     return this.isParticipantOrManager(userId) || this.integrations.has(userId);
   }
 
+  private inactive() {
+    return this.state === "ended" || this.state === "suspended";
+  }
+
+  // What an agent hears when it lacks a capability: outsiders are told to
+  // join, and everyone else that this is not theirs to do.
+  private denied(userId: string) {
+    return {
+      ok: false as const,
+      error: this.canUsePlayer(userId)
+        ? "You do not have permission for that."
+        : "Join the huddle before using the player.",
+    };
+  }
+
   async requestIntegrationControl(options: {
     userId: string;
     channel: string;
@@ -1856,7 +1620,7 @@ export class Coordinator {
     dmChannelId: string;
     requestTs: string;
   }) {
-    if (this.state === "ended" || this.state === "suspended")
+    if (this.inactive())
       return this.replyIntegration(options, {
         ok: false,
         error: "session_inactive",
@@ -1868,10 +1632,7 @@ export class Coordinator {
         message: "This session has no host to approve the request.",
       });
     const existing = this.pendingIntegrations.get(options.userId);
-    if (existing) {
-      clearTimeout(existing.timer);
-      this.pendingIntegrations.delete(options.userId);
-    }
+    if (existing) this.dropPending(existing);
     const requestId = crypto.randomUUID();
     const pending = {
       id: requestId,
@@ -1918,8 +1679,7 @@ export class Coordinator {
       try {
         await this.slack.dm(this.hostId, text, { blocks });
       } catch (fallbackError) {
-        clearTimeout(pending.timer);
-        this.pendingIntegrations.delete(options.userId);
+        this.dropPending(pending);
         this.log.warn(
           {
             event: "integration_prompt_failed",
@@ -1973,32 +1733,26 @@ export class Coordinator {
         type: command.type,
         error: "not_granted",
       });
-    if (this.state === "ended" || this.state === "suspended")
+    if (this.inactive())
       return this.replyIntegration(target, {
         ok: false,
         type: command.type,
         error: "session_inactive",
       });
+    let result: Parameters<typeof wrapIntegrationResult>[2];
     try {
       // Commands check permissions synchronously, and a grant holder may also
       // be a workspace admin.
       await this.primeManager(userId);
-      const result = await this.runIntegrationCommand(userId, command);
-      return this.slack.dm(
-        userId,
-        wrapIntegrationResult(command.type, requestTs, result),
-        { channelId: dmChannelId, threadTs: requestTs },
-      );
+      result = await this.runIntegrationCommand(userId, command);
     } catch (error) {
-      return this.slack.dm(
-        userId,
-        wrapIntegrationResult(command.type, requestTs, {
-          ok: false,
-          error: message(error),
-        }),
-        { channelId: dmChannelId, threadTs: requestTs },
-      );
+      result = { ok: false, error: message(error) };
     }
+    return this.slack.dm(
+      userId,
+      wrapIntegrationResult(command.type, requestTs, result),
+      { channelId: dmChannelId, threadTs: requestTs },
+    );
   }
 
   private async runIntegrationCommand(
@@ -2069,25 +1823,12 @@ export class Coordinator {
     }
   }
 
+  // The agent status without the fields that only Slack-side agents need.
   private integrationStatus(userId: string) {
     const status = this.agentStatus(userId);
     if (!status.ok) return status;
-    return {
-      ok: true as const,
-      state: status.state,
-      volumePercent: status.volumePercent,
-      playbackSeconds: status.playbackSeconds,
-      displayMode: status.displayMode,
-      autoplay: status.autoplay,
-      loopMode: status.loopMode,
-      transitionMode: status.transitionMode,
-      duckingMode: status.duckingMode,
-      anchorEnabled: status.anchorEnabled,
-      yourCapabilities: status.yourCapabilities,
-      nowPlaying: status.nowPlaying,
-      queue: status.queue,
-      queueLimit: status.queueLimit,
-    };
+    const { hostId: _hostId, youAreHost, scrobbling, ...shared } = status;
+    return shared;
   }
 
   private isIntegrationAction(actionId: string) {
@@ -2116,24 +1857,17 @@ export class Coordinator {
         interaction.userId,
         "That control request is no longer pending.",
       );
+    this.dropPending(pending);
     if (interaction.actionId === "integration_decline") {
-      clearTimeout(pending.timer);
-      this.pendingIntegrations.delete(pending.userId);
       await this.replyIntegration(pending, {
         ok: true,
         type: "grant_declined",
       });
-      if (interaction.responseUrl)
-        await this.slack
-          .replaceOriginal(
-            interaction.responseUrl,
-            `Declined <@${pending.userId}>'s control request.`,
-          )
-          .catch(() => {});
-      return;
+      return this.replaceOriginal(
+        interaction,
+        `Declined <@${pending.userId}>'s control request.`,
+      );
     }
-    clearTimeout(pending.timer);
-    this.pendingIntegrations.delete(pending.userId);
     this.integrations.set(pending.userId, {
       permissions: new Set(pending.permissions),
       events: new Set(pending.events),
@@ -2151,19 +1885,28 @@ export class Coordinator {
       ...(status.ok ? status : {}),
     });
     await this.render();
-    if (interaction.responseUrl)
-      await this.slack
-        .replaceOriginal(
-          interaction.responseUrl,
-          `Granted <@${pending.userId}> control of this session.`,
-          integrationGrantedBlocks({
-            sessionId: this.id,
-            requestId: pending.id,
-            userId: pending.userId,
-            permissions: pending.permissions,
-          }),
-        )
-        .catch(() => {});
+    await this.replaceOriginal(
+      interaction,
+      `Granted <@${pending.userId}> control of this session.`,
+      integrationGrantedBlocks({
+        sessionId: this.id,
+        requestId: pending.id,
+        userId: pending.userId,
+        permissions: pending.permissions,
+      }),
+    );
+  }
+
+  // Rewrites the ephemeral a host answered from, when Slack still lets us.
+  private async replaceOriginal(
+    interaction: Interaction,
+    text: string,
+    blocks?: unknown[],
+  ) {
+    if (!interaction.responseUrl) return;
+    await this.slack
+      .replaceOriginal(interaction.responseUrl, text, blocks)
+      .catch(() => {});
   }
 
   private async revokeIntegration(requestId: string, interaction: Interaction) {
@@ -2186,19 +1929,20 @@ export class Coordinator {
       { ok: true, type: "grant_revoked" },
     );
     await this.render();
-    if (interaction.responseUrl)
-      await this.slack
-        .replaceOriginal(
-          interaction.responseUrl,
-          `Revoked <@${userId}>'s control of this session.`,
-        )
-        .catch(() => {});
+    await this.replaceOriginal(
+      interaction,
+      `Revoked <@${userId}>'s control of this session.`,
+    );
     if (interaction.viewId && interaction.viewHash)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+      await this.updateSettings(interaction);
+  }
+
+  private dropPending(pending: {
+    userId: string;
+    timer: ReturnType<typeof setTimeout>;
+  }) {
+    clearTimeout(pending.timer);
+    this.pendingIntegrations.delete(pending.userId);
   }
 
   private replyIntegration(
@@ -2235,6 +1979,19 @@ export class Coordinator {
           ),
         );
     }
+  }
+
+  private notifyTrack(
+    event: string,
+    entry: Entry,
+    extra: Record<string, unknown> = {},
+  ) {
+    this.notifyIntegrations(event, {
+      id: entry.id,
+      title: entry.title,
+      artist: entry.artist,
+      ...extra,
+    });
   }
 
   private dropIntegrations(event: "session.ended" | "session.suspended") {
@@ -2342,10 +2099,12 @@ export class Coordinator {
       artist: entry.artist,
     });
     void this.recommendations?.refreshUser(interaction.userId);
+    const discovery =
+      entry.discovery === undefined ? {} : { discovery: entry.discovery };
     this.audit.record("track.liked", interaction.userId, {
       sessionId: this.id,
       ...auditTrack(entry),
-      ...(entry.discovery === undefined ? {} : { discovery: entry.discovery }),
+      ...discovery,
     });
     this.log.info(
       {
@@ -2365,26 +2124,17 @@ export class Coordinator {
         likedNotice,
         this.room.uiThreadTs,
         [
-          { type: "section", text: { type: "mrkdwn", text: likedNotice } },
-          {
-            type: "actions",
-            block_id: "track_like",
-            elements: [
-              {
-                type: "button",
-                action_id: "unlike_track",
-                text: plain("Undo"),
-                value: likeValue({
-                  sessionId: this.id,
-                  title: entry.title,
-                  artist: entry.artist,
-                  ...(entry.discovery === undefined
-                    ? {}
-                    : { discovery: entry.discovery }),
-                }),
-              },
-            ],
-          },
+          section(likedNotice),
+          actions("track_like", [
+            button("unlike_track", plain("Undo"), {
+              value: likeValue({
+                sessionId: this.id,
+                title: entry.title,
+                artist: entry.artist,
+                ...discovery,
+              }),
+            }),
+          ]),
         ],
       )
       .catch((error) =>
@@ -2478,7 +2228,7 @@ export class Coordinator {
     const value = searchValue || recommendId || recentId;
     if (!value) return;
     const accepted = await this.enqueue(async () => {
-      if (this.state === "ended" || this.state === "suspended") return false;
+      if (this.inactive()) return false;
       if (interaction.messageTs && interaction.messageTs !== this.uiTs) {
         await this.notice(
           interaction.userId,
@@ -2508,12 +2258,20 @@ export class Coordinator {
     }
     const tracks = Array.isArray(selection) ? selection : [selection];
     const capability = Array.isArray(selection) ? "add-bulk" : "add";
+    await this.queueRequested(interaction, capability, tracks);
+  }
+
+  // Queues what a user asked for, displacing any autoplay pick, and prepares
+  // it. `total` is how many songs they asked for, when some were dropped
+  // before resolving.
+  private async queueRequested(
+    interaction: Interaction,
+    capability: string,
+    tracks: TrackMetadata[],
+    total = tracks.length,
+  ) {
     const pending = await this.enqueue(async () => {
-      if (
-        this.state === "ended" ||
-        this.state === "suspended" ||
-        !(await this.require(interaction, capability))
-      )
+      if (this.inactive() || !(await this.require(interaction, capability)))
         return;
       await this.removeQueuedAutoplay();
       const fit = this.fitBatchToQueue(tracks);
@@ -2521,50 +2279,52 @@ export class Coordinator {
         await this.notice(interaction.userId, fit.error);
         return;
       }
-      const entries = fit.items.map((metadata) => ({
-        ...metadata,
-        id: crypto.randomUUID(),
-        requesterId: interaction.userId,
-        status: "preparing",
-      }));
-      const pending = entries.map((entry) => {
-        const controller = new AbortController();
-        this.preparations.set(entry.id, controller);
-        this.queue.push(entry);
-        this.store.addTrack({
-          ...entry,
-          sessionId: this.id,
-          status: entry.status,
-        });
-        this.audit.record("track.added", interaction.userId, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-        });
-        this.notifyIntegrations("queue.added", {
-          id: entry.id,
-          title: entry.title,
-          artist: entry.artist,
-        });
-        this.store.incrementUsage("added");
-        return { entry, controller };
-      });
+      const pending = this.stageEntries(interaction.userId, fit.items);
       if (pending.length)
         void this.recommendations?.refreshUser(interaction.userId);
       await this.render();
       this.queueChanged();
-      return { pending, omitted: fit.omitted, total: tracks.length };
+      return pending;
     });
     if (!pending) return;
-    if (pending.omitted)
+    if (pending.length < total)
       await this.notice(
         interaction.userId,
-        `Added ${pending.total - pending.omitted} of ${pending.total} songs; the rest did not fit.`,
+        `Added ${pending.length} of ${total} songs; the rest did not fit.`,
       );
     await Promise.all(
-      pending.pending.map(({ entry, controller }) =>
+      pending.map(({ entry, controller }) =>
         this.prepareManual(entry, controller),
       ),
     );
+  }
+
+  // Puts requested tracks on the queue, recorded and announced, and hands
+  // back each with the controller that cancels its preparation.
+  private stageEntries(userId: string, items: TrackMetadata[]) {
+    return items.map((metadata) => {
+      const entry: Entry = {
+        ...metadata,
+        id: crypto.randomUUID(),
+        requesterId: userId,
+        status: "preparing",
+      };
+      const controller = new AbortController();
+      this.preparations.set(entry.id, controller);
+      this.queue.push(entry);
+      this.store.addTrack({
+        ...entry,
+        sessionId: this.id,
+        status: entry.status,
+      });
+      this.audit.record("track.added", userId, {
+        sessionId: this.id,
+        ...auditTrack(entry),
+      });
+      this.notifyTrack("queue.added", entry);
+      this.store.incrementUsage("added");
+      return { entry, controller };
+    });
   }
 
   // Media that is removed, private, blocked, or cancelled mid-preparation is an
@@ -2591,21 +2351,11 @@ export class Coordinator {
       },
       "Preparing queued track",
     );
-    const prepared = this.tracks.prepare(
-      entry,
-      `data/media/${this.id}`,
-      entry.id,
-      controller.signal,
-      this.preparationPriority(entry),
-    );
+    const prepared = this.download(entry, controller);
     try {
       const filePath = await prepared;
       await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (this.state === "suspended") return;
-        if (this.state === "ended" || !this.queue.includes(entry))
-          return removePreparedMedia(filePath);
-        this.prepared(entry, filePath);
+        if (!(await this.acceptPrepared(entry, filePath))) return;
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
@@ -2638,28 +2388,8 @@ export class Coordinator {
         "Queued track preparation failed",
       );
       await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (
-          this.state === "ended" ||
-          this.state === "suspended" ||
-          !this.queue.includes(entry)
-        )
-          return;
-        entry.status = "failed";
-        this.queue = this.queue.filter((item) => item !== entry);
-        this.queueChanged();
-        this.store.setTrack(entry.id, { status: "failed" });
-        this.notifyIntegrations("queue.removed", {
-          id: entry.id,
-          title: entry.title,
-          artist: entry.artist,
-          reason: "failed",
-        });
-        this.audit.record("track.failed", undefined, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-          reason: safeAuditError(error),
-        });
+        if (!this.dropFailed(entry, error)) return;
+        this.notifyTrack("queue.removed", entry, { reason: "failed" });
         await this.notice(
           entry.requesterId,
           `Could not prepare ${entry.title}: ${message(error)}`,
@@ -2674,31 +2404,65 @@ export class Coordinator {
     }
   }
 
+  private download(entry: Entry, controller: AbortController) {
+    return this.tracks.prepare(
+      entry,
+      `data/media/${this.id}`,
+      entry.id,
+      controller.signal,
+      this.preparationPriority(entry),
+    );
+  }
+
+  // Takes in a finished download, or discards it when the session no longer
+  // wants the track. A suspended session keeps the file for its resume.
+  private async acceptPrepared(entry: Entry, filePath: string) {
+    this.preparations.delete(entry.id);
+    if (this.state === "suspended") return false;
+    if (this.state === "ended" || !this.queue.includes(entry)) {
+      await removePreparedMedia(filePath);
+      return false;
+    }
+    this.prepared(entry, filePath);
+    return true;
+  }
+
+  // Drops a track whose preparation failed, unless the session has already
+  // moved on from it. Says whether it was still queued.
+  private dropFailed(entry: Entry, error: unknown) {
+    this.preparations.delete(entry.id);
+    if (this.inactive() || !this.queue.includes(entry)) return false;
+    entry.status = "failed";
+    this.queue = this.queue.filter((track) => track !== entry);
+    this.queueChanged();
+    this.store.setTrack(entry.id, { status: "failed" });
+    this.audit.record("track.failed", undefined, {
+      sessionId: this.id,
+      ...auditTrack(entry),
+      reason: safeAuditError(error),
+    });
+    return true;
+  }
+
   // When someone pressed Play something, a mix that produces nothing falls
   // back to a random currently-popular song, and they hear about it if even
   // that fails.
   private scheduleAutoplay(playSomethingBy?: string) {
-    const context =
-      this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "";
+    const context = this.autoplayContext();
     const seeds = [this.current, ...[...this.history].reverse()]
       .flatMap((track) => (track && !track.automatic ? [track.sourceId] : []))
       .filter((id, index, all) => all.indexOf(id) === index)
       .slice(0, 3);
-    const huddleMix = this.autoplayMode === "huddle" && this.recommendations;
     if (
       !this.autoplayOn() ||
       this.loopMode !== "off" ||
       this.autoplayPending ||
-      this.state === "ended" ||
-      this.state === "suspended" ||
-      this.queue.some((track) => !track.automatic) ||
-      this.queue.some((track) => track.automatic) ||
-      this.queue.length + Number(Boolean(this.current)) >=
-        this.config.queueLimit
+      this.inactive() ||
+      !this.autoplayHasRoom()
     )
       return;
     if (this.autoplayMode === "related" && (!context || !seeds.length)) return;
-    if (this.autoplayMode === "huddle" && !huddleMix) return;
+    if (this.autoplayMode === "huddle" && !this.recommendations) return;
     const generation = this.autoplayGeneration;
     this.autoplayPending = true;
     this.queueRender();
@@ -2741,6 +2505,19 @@ export class Coordinator {
       },
       "Finding autoplay recommendation",
     );
+    const giveUp = async (reason: string) => {
+      this.audit.record("autoplay.recommendation_failed", undefined, {
+        sessionId: this.id,
+        seedSourceIds: seeds,
+        reason,
+      });
+      if (playSomethingBy)
+        await this.notice(
+          playSomethingBy,
+          "Could not find anything to play; add a song to get started.",
+        );
+      return false;
+    };
     try {
       const recent = this.history.slice(-autoplayRecentWindow);
       const excluded = new Set([
@@ -2847,11 +2624,6 @@ export class Coordinator {
         );
         if (played !== undefined) return played;
       }
-      this.audit.record("autoplay.recommendation_failed", undefined, {
-        sessionId: this.id,
-        seedSourceIds: seeds,
-        reason: "no usable recommendations",
-      });
       this.log.warn(
         {
           event: "autoplay_recommendation_unavailable",
@@ -2859,18 +2631,8 @@ export class Coordinator {
         },
         "No usable autoplay recommendation found",
       );
-      if (playSomethingBy)
-        await this.notice(
-          playSomethingBy,
-          "Could not find anything to play; add a song to get started.",
-        );
-      return false;
+      return await giveUp("no usable recommendations");
     } catch (error) {
-      this.audit.record("autoplay.recommendation_failed", undefined, {
-        sessionId: this.id,
-        seedSourceIds: seeds,
-        reason: safeAuditError(error),
-      });
       this.logTrackFailure(
         {
           event: "autoplay_recommendation_failed",
@@ -2879,12 +2641,7 @@ export class Coordinator {
         error,
         "Autoplay recommendation failed",
       );
-      if (playSomethingBy)
-        await this.notice(
-          playSomethingBy,
-          "Could not find anything to play; add a song to get started.",
-        );
-      return false;
+      return giveUp(safeAuditError(error));
     }
   }
 
@@ -2956,12 +2713,7 @@ export class Coordinator {
           autoplayMode: this.autoplayMode,
           ...auditTrack(entry),
         });
-        this.notifyIntegrations("queue.added", {
-          id: entry.id,
-          title: entry.title,
-          artist: entry.artist,
-          automatic: true,
-        });
+        this.notifyTrack("queue.added", entry, { automatic: true });
         await this.render();
         this.queueChanged();
         return { entry, controller };
@@ -2991,35 +2743,32 @@ export class Coordinator {
     return (
       this.autoplayOn() &&
       generation === this.autoplayGeneration &&
-      this.state !== "ended" &&
-      this.state !== "suspended" &&
-      (this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "") ===
-        context &&
-      !this.queue.some((track) => !track.automatic) &&
-      !this.queue.some((track) => track.automatic) &&
-      this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit
+      !this.inactive() &&
+      this.autoplayContext() === context &&
+      this.autoplayHasRoom()
+    );
+  }
+
+  // The song an autoplay pick would follow on from.
+  private autoplayContext() {
+    return this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "";
+  }
+
+  // Autoplay only ever tops up an empty queue, one song at a time.
+  private autoplayHasRoom() {
+    return (
+      !this.queue.length &&
+      Number(Boolean(this.current)) < this.config.queueLimit
     );
   }
 
   private async prepareAutoplay(entry: Entry, controller: AbortController) {
     const startedAt = Date.now();
-    const prepared = this.tracks.prepare(
-      entry,
-      `data/media/${this.id}`,
-      entry.id,
-      controller.signal,
-      this.preparationPriority(entry),
-    );
+    const prepared = this.download(entry, controller);
     try {
       const filePath = await prepared;
       return await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (this.state === "suspended") return false;
-        if (this.state === "ended" || !this.queue.includes(entry)) {
-          await removePreparedMedia(filePath);
-          return false;
-        }
-        this.prepared(entry, filePath);
+        if (!(await this.acceptPrepared(entry, filePath))) return false;
         if (!this.current) await this.startNext();
         else {
           await this.render();
@@ -3047,22 +2796,7 @@ export class Coordinator {
         "Autoplay track preparation failed",
       );
       return this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (
-          this.state === "ended" ||
-          this.state === "suspended" ||
-          !this.queue.includes(entry)
-        )
-          return false;
-        entry.status = "failed";
-        this.queue = this.queue.filter((track) => track !== entry);
-        this.queueChanged();
-        this.store.setTrack(entry.id, { status: "failed" });
-        this.audit.record("track.failed", undefined, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-          reason: safeAuditError(error),
-        });
+        if (!this.dropFailed(entry, error)) return false;
         if (!this.current) await this.startNext();
         else await this.render();
         return false;
@@ -3070,9 +2804,13 @@ export class Coordinator {
     }
   }
 
-  private takeQueuedAutoplay() {
+  private cancelAutoplay() {
     this.autoplayGeneration++;
     this.autoplayPending = false;
+  }
+
+  private takeQueuedAutoplay() {
+    this.cancelAutoplay();
     const automatic = this.queue.filter((track) => track.automatic);
     this.queue = this.queue.filter((track) => !track.automatic);
     if (automatic.length) this.queueChanged();
@@ -3175,11 +2913,7 @@ export class Coordinator {
       sessionId: this.id,
       ...auditTrack(next),
     });
-    this.notifyIntegrations("track.started", {
-      id: next.id,
-      title: next.title,
-      artist: next.artist,
-    });
+    this.notifyTrack("track.started", next);
     this.notifyIntegrations("playback.playing", { state: "playing" });
     this.log.info(
       {
@@ -3237,10 +2971,7 @@ export class Coordinator {
   }
 
   artworkPath(entryId: string, token: string) {
-    if (token !== this.mediaToken) return;
-    const filePath = [this.current, ...this.queue, ...this.history].find(
-      (entry) => entry?.id === entryId,
-    )?.filePath;
+    const filePath = this.audioPath(entryId, token);
     return filePath ? embeddedArtworkPath(filePath) : undefined;
   }
 
@@ -3365,11 +3096,7 @@ export class Coordinator {
           ...auditTrack(this.current),
           looped: "track",
         });
-        this.notifyIntegrations("track.finished", {
-          id: this.current.id,
-          title: this.current.title,
-          artist: this.current.artist,
-        });
+        this.notifyTrack("track.finished", this.current);
         this.playbackSeconds = 0;
         this.store.setSession(this.id, {
           listenedSeconds: this.listenedSeconds,
@@ -3381,11 +3108,7 @@ export class Coordinator {
           introSeconds: this.current.introSeconds ?? 0,
         });
         this.playbackScrobbling?.start(this.current, this.participants);
-        this.notifyIntegrations("track.started", {
-          id: this.current.id,
-          title: this.current.title,
-          artist: this.current.artist,
-        });
+        this.notifyTrack("track.started", this.current);
         await this.render();
         return;
       }
@@ -3404,11 +3127,7 @@ export class Coordinator {
           sessionId: this.id,
           ...auditTrack(this.current),
         });
-        this.notifyIntegrations("track.finished", {
-          id: this.current.id,
-          title: this.current.title,
-          artist: this.current.artist,
-        });
+        this.notifyTrack("track.finished", this.current);
       }
       if (reason === "track_error" || reason === "stalled") {
         this.audit.record("track.failed", undefined, {
@@ -3433,6 +3152,12 @@ export class Coordinator {
         this.current.filePath
       ) {
         const finished = this.current;
+        const transition = defined({
+          introSeconds: finished.introSeconds,
+          outroSeconds: finished.outroSeconds,
+          fadeInSeconds: finished.fadeInSeconds,
+          fadeOutSeconds: finished.fadeOutSeconds,
+        });
         const looping: Entry = {
           sourceInput: finished.sourceInput,
           canonicalUrl: finished.canonicalUrl,
@@ -3447,20 +3172,9 @@ export class Coordinator {
           id: crypto.randomUUID(),
           requesterId: finished.requesterId,
           ...(finished.automatic ? { automatic: true } : {}),
-          status: finished.filePath ? "ready" : "queued",
-          ...(finished.filePath ? { filePath: finished.filePath } : {}),
-          ...(finished.introSeconds !== undefined
-            ? { introSeconds: finished.introSeconds }
-            : {}),
-          ...(finished.outroSeconds !== undefined
-            ? { outroSeconds: finished.outroSeconds }
-            : {}),
-          ...(finished.fadeInSeconds !== undefined
-            ? { fadeInSeconds: finished.fadeInSeconds }
-            : {}),
-          ...(finished.fadeOutSeconds !== undefined
-            ? { fadeOutSeconds: finished.fadeOutSeconds }
-            : {}),
+          status: "ready",
+          filePath: finished.filePath,
+          ...transition,
         };
         this.queue.push(looping);
         this.store.addTrack({
@@ -3468,23 +3182,11 @@ export class Coordinator {
           sessionId: this.id,
           status: looping.status,
         });
-        if (looping.filePath)
-          this.store.setTrack(looping.id, {
-            status: "ready",
-            filePath: looping.filePath,
-            ...(looping.introSeconds !== undefined
-              ? { introSeconds: looping.introSeconds }
-              : {}),
-            ...(looping.outroSeconds !== undefined
-              ? { outroSeconds: looping.outroSeconds }
-              : {}),
-            ...(looping.fadeInSeconds !== undefined
-              ? { fadeInSeconds: looping.fadeInSeconds }
-              : {}),
-            ...(looping.fadeOutSeconds !== undefined
-              ? { fadeOutSeconds: looping.fadeOutSeconds }
-              : {}),
-          });
+        this.store.setTrack(looping.id, {
+          status: "ready",
+          filePath: looping.filePath,
+          ...transition,
+        });
         this.queueChanged();
       }
     }
@@ -3500,66 +3202,81 @@ export class Coordinator {
         interaction.userId,
         "Nothing was playing when you pressed Next.",
       );
-    const skipped = this.current;
-    this.audit.record("track.skipped", interaction.userId, {
+    await this.skipCurrent(interaction.userId);
+  }
+
+  // Skips the playing track. Callers have checked that one is playing.
+  private async skipCurrent(userId: string) {
+    const skipped = this.current!;
+    this.audit.record("track.skipped", userId, {
       sessionId: this.id,
       ...auditTrack(skipped),
     });
-    this.notifyIntegrations("track.skipped", {
-      id: skipped.id,
-      title: skipped.title,
-      artist: skipped.artist,
-    });
+    this.notifyTrack("track.skipped", skipped);
     this.store.incrementUsage("next");
-    this.rejectSkipped(skipped, interaction.userId);
+    this.rejectSkipped(skipped, userId);
     await this.advance("skipped");
     this.scheduleAutoplay();
+    return skipped;
   }
 
   private async previous(interaction: Interaction) {
     if (!(await this.require(interaction, "skip"))) return;
-    if (this.current && (this.playbackSeconds > 5 || !this.history.length)) {
-      this.audit.record("track.previous", interaction.userId, {
+    if (!(await this.goBack(interaction.userId)))
+      return this.notice(
+        interaction.userId,
+        "Nothing was playing when you pressed Previous.",
+      );
+  }
+
+  // Restarts the playing track once it is a few seconds in, and otherwise
+  // returns to the one before it. Reports which happened, or nothing when
+  // there was nowhere to go back to.
+  private async goBack(userId: string) {
+    const current = this.current;
+    if (current && (this.playbackSeconds > 5 || !this.history.length)) {
+      this.audit.record("track.previous", userId, {
         sessionId: this.id,
-        ...auditTrack(this.current),
+        ...auditTrack(current),
         restarted: true,
       });
       this.store.incrementUsage("previous");
       this.playbackSeconds = 0;
       this.sendMedia({ type: "seek", seconds: 0 });
-      return;
+      return { restarted: current };
     }
-    if (!this.history.length)
-      return this.notice(
-        interaction.userId,
-        "Nothing was playing when you pressed Previous.",
-      );
+    if (!this.history.length) return;
     const prior = this.history.pop()!;
-    this.audit.record("track.previous", interaction.userId, {
+    this.audit.record("track.previous", userId, {
       sessionId: this.id,
       ...auditTrack(prior),
     });
     this.store.incrementUsage("previous");
-    if (this.current) {
-      this.current.status = "ready";
-      this.queue.unshift(this.current);
-      this.store.setTrack(this.current.id, { status: "ready" });
-    }
+    if (this.current) this.requeue(this.current);
     this.current = undefined;
-    prior.status = "ready";
-    this.queue.unshift(prior);
-    this.store.setTrack(prior.id, { status: "ready" });
+    this.requeue(prior);
     await this.startNext();
+    return { prior };
+  }
+
+  private requeue(entry: Entry) {
+    entry.status = "ready";
+    this.queue.unshift(entry);
+    this.store.setTrack(entry.id, { status: "ready" });
   }
 
   private async seek(interaction: Interaction, offset: number) {
     if (!(await this.require(interaction, "skip")) || !this.current) return;
+    this.seekBy(interaction.userId, offset);
+  }
+
+  private seekBy(userId: string, offset: number) {
     const previous = this.playbackSeconds;
     this.playbackSeconds = Math.max(0, previous + offset);
     this.sendMedia({ type: "seek", offset });
-    this.audit.record("playback.seeked", interaction.userId, {
+    this.audit.record("playback.seeked", userId, {
       sessionId: this.id,
-      trackId: this.current.id,
+      trackId: this.current!.id,
       previous,
       seconds: this.playbackSeconds,
     });
@@ -3568,44 +3285,63 @@ export class Coordinator {
 
   private async toggle(interaction: Interaction) {
     if (!(await this.require(interaction, "pause")) || !this.current) return;
-    this.state = this.state === "paused" ? "playing" : "paused";
-    if (this.state === "paused") this.playbackScrobbling?.pause();
-    else this.playbackScrobbling?.resume();
-    this.sendMedia({ type: this.state === "paused" ? "pause" : "resume" });
-    this.store.setSession(this.id, { status: this.state });
-    this.audit.record(
-      `playback.${this.state === "paused" ? "paused" : "resumed"}`,
+    await this.setPlayback(
       interaction.userId,
-      { sessionId: this.id, trackId: this.current.id },
+      this.state === "paused" ? "playing" : "paused",
     );
-    this.store.incrementUsage(this.state === "paused" ? "paused" : "resumed");
-    this.notifyIntegrations(
-      this.state === "paused" ? "playback.paused" : "playback.resumed",
-      { state: this.state },
-    );
+  }
+
+  private async setPlayback(userId: string, next: "paused" | "playing") {
+    this.state = next;
+    const paused = next === "paused";
+    const event = `playback.${paused ? "paused" : "resumed"}`;
+    if (paused) this.playbackScrobbling?.pause();
+    else this.playbackScrobbling?.resume();
+    this.sendMedia({ type: paused ? "pause" : "resume" });
+    this.store.setSession(this.id, { status: next });
+    this.audit.record(event, userId, {
+      sessionId: this.id,
+      trackId: this.current!.id,
+    });
+    this.store.incrementUsage(paused ? "paused" : "resumed");
+    this.notifyIntegrations(event, { state: next });
     await this.render();
     this.refreshIdle();
   }
 
   private async changeVolume(interaction: Interaction, delta: number) {
     if (!(await this.require(interaction, "volume"))) return;
-    const previous = this.volume;
-    this.volume = Math.max(
-      0,
-      Math.min(1, Math.round((this.volume + delta) * 10_000) / 10_000),
+    await this.setVolume(
+      interaction.userId,
+      Math.max(
+        0,
+        Math.min(1, Math.round((this.volume + delta) * 10_000) / 10_000),
+      ),
     );
-    this.sendMedia({ type: "volume", value: this.volume });
-    this.store.setSession(this.id, { volume: this.volume });
-    this.audit.record("volume.changed", interaction.userId, {
+  }
+
+  private async setVolume(userId: string, volume: number) {
+    const previous = this.volume;
+    this.volume = volume;
+    this.sendMedia({ type: "volume", value: volume });
+    this.store.setSession(this.id, { volume });
+    this.audit.record("volume.changed", userId, {
       sessionId: this.id,
       previous,
-      volume: this.volume,
+      volume,
     });
     this.store.incrementUsage("volume");
     this.notifyIntegrations("volume.changed", {
-      volumePercent: Math.round(this.volume * 100),
+      volumePercent: Math.round(volume * 100),
     });
     await this.render();
+  }
+
+  private canRemove(userId: string, entry: Entry) {
+    return (
+      this.can(userId, "manage-queue") ||
+      (entry.requesterId === userId && this.can(userId, "remove-own"))
+    );
   }
 
   private async remove(interaction: Interaction) {
@@ -3616,13 +3352,7 @@ export class Coordinator {
       );
     const entry = this.queue.find((track) => track.id === interaction.value);
     if (!entry) return;
-    if (
-      !this.can(interaction.userId, "manage-queue") &&
-      !(
-        entry.requesterId === interaction.userId &&
-        this.can(interaction.userId, "remove-own")
-      )
-    ) {
+    if (!this.canRemove(interaction.userId, entry)) {
       this.audit.record("action.denied", interaction.userId, {
         sessionId: this.id,
         capability: "manage-queue",
@@ -3632,19 +3362,23 @@ export class Coordinator {
         "You do not have permission for that.",
       );
     }
+    await this.removeEntry(interaction.userId, entry, interaction);
+  }
+
+  private async removeEntry(
+    userId: string,
+    entry: Entry,
+    interaction?: Interaction,
+  ) {
     this.queue.splice(this.queue.indexOf(entry), 1);
     this.preparations.get(entry.id)?.abort();
     this.store.removeTrack(entry.id);
-    if (entry.automatic) this.rejectSkipped(entry, interaction.userId);
-    this.audit.record("track.removed", interaction.userId, {
+    if (entry.automatic) this.rejectSkipped(entry, userId);
+    this.audit.record("track.removed", userId, {
       sessionId: this.id,
       ...auditTrack(entry),
     });
-    this.notifyIntegrations("queue.removed", {
-      id: entry.id,
-      title: entry.title,
-      artist: entry.artist,
-    });
+    this.notifyTrack("queue.removed", entry);
     this.store.incrementUsage("removed");
     this.queueChanged(interaction);
     await this.releaseMedia(entry);
@@ -3666,25 +3400,7 @@ export class Coordinator {
     );
     const target = index + direction;
     if (index < 0 || target < 0 || target >= this.queue.length) return;
-    [this.queue[index], this.queue[target]] = [
-      this.queue[target]!,
-      this.queue[index]!,
-    ];
-    this.audit.record("queue.reordered", interaction.userId, {
-      sessionId: this.id,
-      trackId: interaction.value,
-      from: index,
-      to: target,
-    });
-    this.notifyIntegrations("queue.reordered", {
-      trackId: interaction.value,
-      from: index,
-      to: target,
-    });
-    this.store.incrementUsage("reordered");
-    this.queueChanged(interaction);
-    await this.render();
-    this.syncPreloads();
+    await this.moveEntry(interaction.userId, index, target, false, interaction);
   }
 
   private async playNext(interaction: Interaction) {
@@ -3698,24 +3414,35 @@ export class Coordinator {
       (track) => track.id === interaction.value,
     );
     if (index <= 0) return;
-    const [entry] = this.queue.splice(index, 1);
-    this.queue.unshift(entry!);
-    this.audit.record("queue.reordered", interaction.userId, {
+    await this.moveEntry(interaction.userId, index, 0, true, interaction);
+  }
+
+  private async moveEntry(
+    userId: string,
+    from: number,
+    to: number,
+    playNext: boolean,
+    interaction?: Interaction,
+  ) {
+    const [entry] = this.queue.splice(from, 1);
+    this.queue.splice(to, 0, entry!);
+    this.audit.record("queue.reordered", userId, {
       sessionId: this.id,
-      trackId: interaction.value,
-      from: index,
-      to: 0,
-      reason: "play_next",
+      trackId: entry!.id,
+      from,
+      to,
+      ...(playNext ? { reason: "play_next" } : {}),
     });
     this.notifyIntegrations("queue.reordered", {
-      trackId: interaction.value,
-      from: index,
-      to: 0,
+      trackId: entry!.id,
+      from,
+      to,
     });
     this.store.incrementUsage("reordered");
     this.queueChanged(interaction);
     await this.render();
     this.syncPreloads();
+    return entry!;
   }
 
   private async shuffleQueue(interaction: Interaction) {
@@ -3766,8 +3493,11 @@ export class Coordinator {
 
   private async clear(interaction: Interaction) {
     if (!(await this.require(interaction, "clear"))) return;
-    this.autoplayGeneration++;
-    this.autoplayPending = false;
+    await this.clearQueue(interaction.userId);
+  }
+
+  private async clearQueue(userId: string) {
+    this.cancelAutoplay();
     const cleared = this.queue;
     const count = cleared.length;
     this.queue = [];
@@ -3777,16 +3507,14 @@ export class Coordinator {
     }
     await this.releaseMedia(...cleared);
     this.queueChanged();
-    this.audit.record("queue.cleared", interaction.userId, {
-      sessionId: this.id,
-      count,
-    });
+    this.audit.record("queue.cleared", userId, { sessionId: this.id, count });
     this.notifyIntegrations("queue.cleared", { count });
     this.store.incrementUsage("cleared");
     await this.render();
     this.syncPreloads();
     this.refreshIdle();
     this.scheduleAutoplay();
+    return count;
   }
 
   private async addModal(interaction: Interaction) {
@@ -3819,7 +3547,6 @@ export class Coordinator {
           value: track.id,
         })),
       }));
-    const canBulk = this.can(interaction.userId, "add-bulk");
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
       callback_id: "add_track_to_queue",
@@ -3828,71 +3555,53 @@ export class Coordinator {
       submit: plain("Add"),
       close: plain("Cancel"),
       blocks: [
-        {
-          type: "input",
-          block_id: "track",
-          optional: Boolean(recent.length || recommendedGroups.length),
-          label: plain("Song, album, playlist, or link"),
-          element: {
+        input(
+          "track",
+          "Song, album, playlist, or link",
+          {
             type: "external_select",
             action_id: "selection",
             placeholder: plain("Search or paste a link"),
             min_query_length: 3,
             focus_on_load: true,
           },
-        },
-        ...(recommendedGroups.length
-          ? [
-              {
-                type: "input",
-                block_id: "recommend",
-                optional: true,
-                label: plain("Recommended for you"),
-                element: {
-                  type: "static_select",
-                  action_id: "selection",
-                  placeholder: plain("Choose a recommendation"),
-                  option_groups: recommendedGroups,
-                },
-              },
-            ]
-          : []),
-        ...(recent.length
-          ? [
-              {
-                type: "input",
-                block_id: "recent",
-                optional: true,
-                label: plain("Recent songs"),
-                element: {
-                  type: "static_select",
-                  action_id: "selection",
-                  placeholder: plain("Choose a recent song"),
-                  options: recent.map((track) => ({
-                    text: plain(
-                      `${track.title} — ${track.artist}`.slice(0, 75),
-                    ),
-                    value: track.id,
-                  })),
-                },
-              },
-            ]
-          : []),
-        ...(canBulk
-          ? [
-              {
-                type: "actions",
-                block_id: "bulk_add",
-                elements: [
-                  {
-                    type: "button",
-                    action_id: "open_bulk_add",
-                    text: plain("Add in bulk"),
-                  },
-                ],
-              },
-            ]
-          : []),
+          { optional: Boolean(recent.length || recommendedGroups.length) },
+        ),
+        ...when(
+          recommendedGroups.length,
+          input(
+            "recommend",
+            "Recommended for you",
+            {
+              type: "static_select",
+              action_id: "selection",
+              placeholder: plain("Choose a recommendation"),
+              option_groups: recommendedGroups,
+            },
+            { optional: true },
+          ),
+        ),
+        ...when(
+          recent.length,
+          input(
+            "recent",
+            "Recent songs",
+            {
+              type: "static_select",
+              action_id: "selection",
+              placeholder: plain("Choose a recent song"),
+              options: recent.map((track) => ({
+                text: plain(`${track.title} — ${track.artist}`.slice(0, 75)),
+                value: track.id,
+              })),
+            },
+            { optional: true },
+          ),
+        ),
+        ...when(
+          this.can(interaction.userId, "add-bulk"),
+          actions("bulk_add", [button("open_bulk_add", plain("Add in bulk"))]),
+        ),
       ],
     });
   }
@@ -3916,14 +3625,10 @@ export class Coordinator {
       submit: plain("Add"),
       close: plain("Cancel"),
       blocks: [
-        {
-          type: "input",
-          block_id: "links",
-          label: plain("Track links"),
-          hint: plain(
-            "One HTTP(S) link per line. Blank lines and # comments are ignored.",
-          ),
-          element: {
+        input(
+          "links",
+          "Track links",
+          {
             type: "plain_text_input",
             action_id: "text",
             multiline: true,
@@ -3932,7 +3637,10 @@ export class Coordinator {
               "https://example.com/a.mp3\nhttps://example.com/b.mp3",
             ),
           },
-        },
+          {
+            hint: "One HTTP(S) link per line. Blank lines and # comments are ignored.",
+          },
+        ),
       ],
     };
   }
@@ -3974,7 +3682,7 @@ export class Coordinator {
       return;
     }
     const capacity = await this.enqueue(async () => {
-      if (this.state === "ended" || this.state === "suspended") return;
+      if (this.inactive()) return;
       if (!(await this.require(interaction, "add-bulk"))) return;
       const available =
         this.availableQueueSlots() +
@@ -3986,9 +3694,8 @@ export class Coordinator {
       return available;
     });
     if (!capacity) return;
-    const selectedLinks = links.slice(0, capacity);
     const tracks: TrackMetadata[] = [];
-    for (const link of selectedLinks) {
+    for (const link of links.slice(0, capacity)) {
       try {
         tracks.push(await this.tracks.resolveUrl(link));
       } catch (error) {
@@ -3998,67 +3705,7 @@ export class Coordinator {
         );
       }
     }
-    const pending = await this.enqueue(async () => {
-      if (
-        this.state === "ended" ||
-        this.state === "suspended" ||
-        !(await this.require(interaction, "add-bulk"))
-      )
-        return;
-      await this.removeQueuedAutoplay();
-      const fit = this.fitBatchToQueue(tracks);
-      if ("error" in fit) {
-        await this.notice(interaction.userId, fit.error);
-        return;
-      }
-      const entries = fit.items.map((metadata) => ({
-        ...metadata,
-        id: crypto.randomUUID(),
-        requesterId: interaction.userId,
-        status: "preparing",
-      }));
-      const pending = entries.map((entry) => {
-        const controller = new AbortController();
-        this.preparations.set(entry.id, controller);
-        this.queue.push(entry);
-        this.store.addTrack({
-          ...entry,
-          sessionId: this.id,
-          status: entry.status,
-        });
-        this.audit.record("track.added", interaction.userId, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-        });
-        this.notifyIntegrations("queue.added", {
-          id: entry.id,
-          title: entry.title,
-          artist: entry.artist,
-        });
-        this.store.incrementUsage("added");
-        return { entry, controller };
-      });
-      if (pending.length)
-        void this.recommendations?.refreshUser(interaction.userId);
-      await this.render();
-      this.queueChanged();
-      return {
-        pending,
-        omitted: links.length - fit.items.length,
-        total: links.length,
-      };
-    });
-    if (!pending) return;
-    if (pending.omitted)
-      await this.notice(
-        interaction.userId,
-        `Added ${pending.total - pending.omitted} of ${pending.total} songs; the rest did not fit.`,
-      );
-    await Promise.all(
-      pending.pending.map(({ entry, controller }) =>
-        this.prepareManual(entry, controller),
-      ),
-    );
+    await this.queueRequested(interaction, "add-bulk", tracks, links.length);
   }
 
   private async queueModal(interaction: Interaction) {
@@ -4096,17 +3743,12 @@ export class Coordinator {
       submit: plain("Move"),
       close: plain("Cancel"),
       blocks: [
-        {
-          type: "input",
-          block_id: "position",
-          label: plain(`Position (1–${this.queue.length})`),
-          element: {
-            type: "plain_text_input",
-            action_id: "value",
-            initial_value: String(position),
-            placeholder: plain("For example, 3"),
-          },
-        },
+        input("position", `Position (1–${this.queue.length})`, {
+          type: "plain_text_input",
+          action_id: "value",
+          initial_value: String(position),
+          placeholder: plain("For example, 3"),
+        }),
       ],
     });
   }
@@ -4138,29 +3780,13 @@ export class Coordinator {
       );
     const from = this.queue.indexOf(entry);
     const to = position - 1;
-    if (from !== to) {
-      this.queue.splice(from, 1);
-      this.queue.splice(to, 0, entry);
-      this.audit.record("queue.reordered", interaction.userId, {
-        sessionId: this.id,
-        trackId: entry.id,
-        from,
-        to,
-      });
-      this.notifyIntegrations("queue.reordered", {
-        trackId: entry.id,
-        from,
-        to,
-      });
-      this.store.incrementUsage("reordered");
-      this.syncPreloads();
-      await this.render();
-    }
-    this.queueChanged();
+    if (from === to) return this.queueChanged();
+    await this.moveEntry(interaction.userId, from, to, false);
   }
 
   private queueView(userId: string) {
     const manages = this.can(userId, "manage-queue");
+    const last = this.queue.length - 1;
     return {
       type: "modal",
       callback_id: "manage_queue",
@@ -4170,116 +3796,62 @@ export class Coordinator {
       close: plain("Close"),
       blocks: this.queue.length
         ? [
-            ...(manages && this.shufflableCount() > 1
-              ? [
-                  {
-                    type: "actions",
-                    block_id: "queue_shuffle",
-                    elements: [
-                      {
-                        type: "button",
-                        action_id: "shuffle_queue",
-                        text: plain("Shuffle"),
-                        value: this.id,
-                      },
-                    ],
-                  },
-                ]
-              : []),
+            ...when(
+              manages && this.shufflableCount() > 1,
+              actions("queue_shuffle", [
+                button("shuffle_queue", plain("Shuffle"), { value: this.id }),
+              ]),
+            ),
             ...this.queue.flatMap((track, index) => {
+              const value = track.id;
               const controls = [
-                ...(manages && index
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_play_next",
-                        text: plain("Play next"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages && index
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_move_up",
-                        text: plain("Up"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages && index < this.queue.length - 1
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_move_down",
-                        text: plain("Down"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_move_to_position",
-                        text: plain("Move to…"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages ||
-                (track.requesterId === userId && this.can(userId, "remove-own"))
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "remove_queue_track",
-                        text: plain("Remove"),
-                        style: "danger",
-                        value: track.id,
-                      },
-                    ]
-                  : []),
+                ...when(
+                  manages && index,
+                  button("queue_play_next", plain("Play next"), { value }),
+                ),
+                ...when(
+                  manages && index,
+                  button("queue_move_up", plain("Up"), { value }),
+                ),
+                ...when(
+                  manages && index < last,
+                  button("queue_move_down", plain("Down"), { value }),
+                ),
+                ...when(
+                  manages,
+                  button("queue_move_to_position", plain("Move to…"), {
+                    value,
+                  }),
+                ),
+                ...when(
+                  this.canRemove(userId, track),
+                  button("remove_queue_track", plain("Remove"), {
+                    style: "danger",
+                    value,
+                  }),
+                ),
               ];
               return [
-                {
-                  type: "section",
-                  block_id: `queue_item_${track.id}`,
-                  text: {
-                    type: "mrkdwn",
-                    text: `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.automatic ? "Autoplay recommendation" : `Added by <@${track.requesterId}>`}`,
-                  },
-                },
-                ...(controls.length
-                  ? [
-                      {
-                        type: "actions",
-                        block_id: `queue_actions_${track.id}`,
-                        elements: controls,
-                      },
-                    ]
-                  : []),
+                section(
+                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${addedBy(track)}`,
+                  `queue_item_${track.id}`,
+                ),
+                ...when(
+                  controls.length,
+                  actions(`queue_actions_${track.id}`, controls),
+                ),
               ];
             }),
           ]
-        : [
-            {
-              type: "section",
-              text: { type: "mrkdwn", text: "The queue is empty." },
-            },
-          ],
+        : [section("The queue is empty.")],
     };
   }
 
   private validQueueView(interaction: Interaction) {
-    try {
-      return (
-        interaction.viewId &&
-        JSON.parse(interaction.metadata).sessionId === this.id
-      );
-    } catch {
-      return false;
-    }
+    return (
+      interaction.viewId &&
+      parseMetadata(interaction.metadata).sessionId === this.id
+    );
   }
 
   private rememberQueueView(interaction: Interaction) {
@@ -4364,13 +3936,20 @@ export class Coordinator {
     );
   }
 
+  // Redraws the settings modal an interaction came from.
+  private updateSettings(interaction: Interaction, page?: number) {
+    return this.slack.updateModal(
+      interaction.viewId!,
+      interaction.viewHash,
+      this.settingsViewFor(interaction, page),
+    );
+  }
+
   private integrationSettingsPage(interaction: Interaction) {
-    try {
-      const page = JSON.parse(interaction.metadata || "{}").integrationPage;
-      return Number.isInteger(page) && page > 0 ? page : 0;
-    } catch {
-      return 0;
-    }
+    const page = parseMetadata(interaction.metadata).integrationPage;
+    return typeof page === "number" && Number.isInteger(page) && page > 0
+      ? page
+      : 0;
   }
 
   private async integrationGrantsPage(interaction: Interaction) {
@@ -4381,12 +3960,7 @@ export class Coordinator {
       );
     const parsed = parseIntegrationSettingsPage(interaction.value);
     if (!parsed || parsed.sessionId !== this.id) return;
-    if (interaction.viewId)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction, parsed.page),
-      );
+    if (interaction.viewId) await this.updateSettings(interaction, parsed.page);
   }
 
   private settingsView(userId: string, integrationPage = 0) {
@@ -4403,413 +3977,262 @@ export class Coordinator {
       sessionEnabled: false,
     };
     const admin = this.settingsAdmin(userId);
-    const canChangeVolume = this.can(userId, "volume");
-    const canConfigure = this.can(userId, "configure-settings");
-    const canEnd = this.can(userId, "end-session");
+    const value = this.id;
     const sessionBlocks = [
       { type: "header", text: plain("Session") },
-      ...(canChangeVolume
-        ? [
-            {
-              type: "input",
-              block_id: "volume",
-              label: plain("Volume (%)"),
-              element: {
-                type: "plain_text_input",
-                action_id: "percent",
-                initial_value: String(Math.round(this.volume * 10_000) / 100),
-              },
-            },
-          ]
-        : []),
-      ...(canConfigure
-        ? [
-            {
-              type: "input",
-              block_id: "display",
-              label: plain("Display mode"),
-              element: staticSelect(
-                "mode",
-                displayModes.map((mode) => ({
-                  text: plain(mode[0]!.toUpperCase() + mode.slice(1)),
-                  value: mode,
-                })),
-                this.displayMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "autoplay",
-              optional: true,
-              label: plain("Autoplay"),
-              hint: plain("Play recommendations when the queue is empty"),
-              element: staticSelect(
-                "mode",
-                autoplayModes.map((mode) => ({
-                  text: plain(autoplayModeLabels[mode]),
-                  value: mode,
-                  description: plain(
-                    mode === "related"
-                      ? "Continue from songs requested in this huddle"
-                      : mode === "huddle"
-                        ? "Mix what people in this huddle listen to"
-                        : "Do not queue recommendations",
-                  ),
-                })),
-                this.autoplayMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "loop",
-              optional: true,
-              label: plain("Loop"),
-              hint: plain("Repeat the current track or cycle the queue"),
-              element: staticSelect(
-                "mode",
-                loopModes.map((mode) => ({
-                  text: plain(loopModeLabels[mode]),
-                  value: mode,
-                  description: plain(
-                    mode === "track"
-                      ? "Restart the current song when it ends"
-                      : mode === "queue"
-                        ? "Move finished songs back to the end of the queue"
-                        : "Do not repeat",
-                  ),
-                })),
-                this.loopMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "transition",
-              label: plain("Transitions"),
-              element: staticSelect(
-                "mode",
-                transitionModes.map((mode) => ({
-                  text: plain(
-                    mode === "none"
-                      ? "Disabled"
-                      : mode === "adaptive"
-                        ? "Adaptive crossfade"
-                        : mode[0]!.toUpperCase() + mode.slice(1),
-                  ),
-                  value: mode,
-                })),
-                this.transitionMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "ducking",
-              label: plain("Auto-duck"),
-              hint: plain("Lower the music while someone is speaking"),
-              element: staticSelect(
-                "mode",
-                duckingModes.map((mode) => ({
-                  text: plain(duckingModeLabels[mode]),
-                  value: mode,
-                  description: plain(
-                    mode === "gentle"
-                      ? "Dip the music under the conversation"
-                      : mode === "strong"
-                        ? "Drop the music well back while people talk"
-                        : "Keep playing at full volume",
-                  ),
-                })),
-                this.duckingMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "anchor",
-              optional: true,
-              label: plain("Thread position"),
-              element: {
-                type: "checkboxes",
-                action_id: "enabled",
-                options: [
-                  {
-                    text: plain("Keep player at bottom of thread"),
-                    value: "enabled",
-                  },
-                ],
-                initial_options: this.anchorEnabled
-                  ? [
-                      {
-                        text: plain("Keep player at bottom of thread"),
-                        value: "enabled",
-                      },
-                    ]
-                  : [],
-              },
-            },
-          ]
-        : []),
-      ...(canEnd
-        ? [
-            {
-              type: "actions",
-              block_id: "session_actions",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "end_session",
-                  text: plain("End session"),
-                  style: "danger",
-                  value: this.id,
-                  confirm: confirm(
-                    "End playback?",
-                    "This stops playback and ends the session.",
-                    "End",
-                  ),
-                },
-              ],
-            },
-          ]
-        : []),
-      ...(admin
-        ? [
-            { type: "header", text: plain("Permissions") },
-            {
-              type: "input",
-              block_id: "host",
-              optional: true,
-              label: plain("Transfer host"),
-              element: {
-                type: "users_select",
-                action_id: "user",
-                ...(this.hostId ? { initial_user: this.hostId } : {}),
-              },
-            },
-            {
-              type: "input",
-              block_id: "permission_preset",
-              optional: true,
-              label: plain("Apply permission preset"),
-              hint: plain("Saving overwrites the custom permissions below."),
-              element: {
-                type: "static_select",
-                action_id: "selected",
-                placeholder: plain("Choose a preset"),
-                options: (
-                  [
-                    ["default", "Default"],
-                    ["host-only", "Host only"],
-                    ["collaborative", "Collaborative"],
-                    ["communism", "Communism"],
-                  ] satisfies [string, string][]
-                ).map(([value, label]) => ({ text: plain(label), value })),
-              },
-            },
-            {
-              type: "input",
-              block_id: "permissions",
-              optional: true,
-              label: plain("Everyone else may"),
-              element: {
-                type: "checkboxes",
-                action_id: "selected",
-                options: capabilities.map((value) => ({
-                  text: plain(permissionLabels[value]),
-                  value,
-                })),
-                initial_options: capabilities
-                  .filter((value) => this.allowed.has(value))
-                  .map((value) => ({
-                    text: plain(permissionLabels[value]),
-                    value,
-                  })),
-              },
-            },
-          ]
-        : []),
+      ...when(
+        this.can(userId, "volume"),
+        input("volume", "Volume (%)", {
+          type: "plain_text_input",
+          action_id: "percent",
+          initial_value: String(Math.round(this.volume * 10_000) / 100),
+        }),
+      ),
+      ...when(
+        this.can(userId, "configure-settings"),
+        input(
+          "display",
+          "Display mode",
+          modeSelect(displayModes, this.displayMode, capitalize),
+        ),
+        input(
+          "autoplay",
+          "Autoplay",
+          modeSelect(
+            autoplayModes,
+            this.autoplayMode,
+            (mode) => autoplayModeLabels[mode],
+            autoplayDescriptions,
+          ),
+          {
+            optional: true,
+            hint: "Play recommendations when the queue is empty",
+          },
+        ),
+        input(
+          "loop",
+          "Loop",
+          modeSelect(
+            loopModes,
+            this.loopMode,
+            (mode) => loopModeLabels[mode],
+            loopDescriptions,
+          ),
+          {
+            optional: true,
+            hint: "Repeat the current track or cycle the queue",
+          },
+        ),
+        input(
+          "transition",
+          "Transitions",
+          modeSelect(transitionModes, this.transitionMode, (mode) =>
+            mode === "none"
+              ? "Disabled"
+              : mode === "adaptive"
+                ? "Adaptive crossfade"
+                : capitalize(mode),
+          ),
+        ),
+        input(
+          "ducking",
+          "Auto-duck",
+          modeSelect(
+            duckingModes,
+            this.duckingMode,
+            (mode) => duckingModeLabels[mode],
+            duckingDescriptions,
+          ),
+          { hint: "Lower the music while someone is speaking" },
+        ),
+        input(
+          "anchor",
+          "Thread position",
+          toggle(
+            "enabled",
+            "Keep player at bottom of thread",
+            this.anchorEnabled,
+          ),
+          { optional: true },
+        ),
+      ),
+      ...when(
+        this.can(userId, "end-session"),
+        actions("session_actions", [
+          button("end_session", plain("End session"), {
+            style: "danger",
+            value,
+            confirm: confirm(
+              "End playback?",
+              "This stops playback and ends the session.",
+              "End",
+            ),
+          }),
+        ]),
+      ),
+      ...when(
+        admin,
+        { type: "header", text: plain("Permissions") },
+        input(
+          "host",
+          "Transfer host",
+          {
+            type: "users_select",
+            action_id: "user",
+            ...(this.hostId ? { initial_user: this.hostId } : {}),
+          },
+          { optional: true },
+        ),
+        input(
+          "permission_preset",
+          "Apply permission preset",
+          {
+            type: "static_select",
+            action_id: "selected",
+            placeholder: plain("Choose a preset"),
+            options: (
+              [
+                ["default", "Default"],
+                ["host-only", "Host only"],
+                ["collaborative", "Collaborative"],
+                ["communism", "Communism"],
+              ] satisfies [string, string][]
+            ).map(([value, label]) => ({ text: plain(label), value })),
+          },
+          {
+            optional: true,
+            hint: "Saving overwrites the custom permissions below.",
+          },
+        ),
+        input(
+          "permissions",
+          "Everyone else may",
+          {
+            type: "checkboxes",
+            action_id: "selected",
+            options: capabilities.map((value) => ({
+              text: plain(permissionLabels[value]),
+              value,
+            })),
+            initial_options: capabilities
+              .filter((value) => this.allowed.has(value))
+              .map((value) => ({
+                text: plain(permissionLabels[value]),
+                value,
+              })),
+          },
+          { optional: true },
+        ),
+      ),
     ];
     const userBlocks = [
       { type: "header", text: plain("User settings") },
-      {
-        type: "input",
-        block_id: "huddle_mix",
-        optional: true,
-        label: plain("Huddle mix"),
-        hint: plain(
-          "Last.fm, ListenBrainz, and songs you've added. Only used while you're in the huddle, and never shown as yours.",
+      input(
+        "huddle_mix",
+        "Huddle mix",
+        toggle(
+          "enabled",
+          "Include my listening in Huddle mix",
+          settings.huddleMixOptIn,
         ),
-        element: {
-          type: "checkboxes",
-          action_id: "enabled",
-          options: [
-            {
-              text: plain("Include my listening in Huddle mix"),
-              value: "enabled",
-            },
-          ],
-          initial_options: settings.huddleMixOptIn
-            ? [
-                {
-                  text: plain("Include my listening in Huddle mix"),
-                  value: "enabled",
-                },
-              ]
-            : [],
+        {
+          optional: true,
+          hint: "Last.fm, ListenBrainz, and songs you've added. Only used while you're in the huddle, and never shown as yours.",
         },
-      },
-      ...(settings.configured
-        ? [
-            {
-              type: "input",
-              block_id: "scrobbling_mode",
-              label: plain("Scrobbling mode"),
-              hint: plain("Sets the default for each Huddle"),
-              element: staticSelect(
-                "mode",
-                scrobblingModes.map((mode) => ({
-                  text: plain(
-                    mode === "ask"
-                      ? "Ask every time"
-                      : mode[0]!.toUpperCase() + mode.slice(1),
-                  ),
-                  value: mode,
-                })),
-                settings.mode,
-              ),
-            },
-            {
-              type: "actions",
-              block_id: "session_scrobbling",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "toggle_session_scrobbling",
-                  text: plain(
-                    `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
-                  ),
-                  value: this.id,
-                },
-              ],
-            },
-          ]
-        : []),
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: settings.lastFmConnected
-            ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
-            : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
-        },
-      },
+      ),
+      ...when(
+        settings.configured,
+        input(
+          "scrobbling_mode",
+          "Scrobbling mode",
+          modeSelect(scrobblingModes, settings.mode, (mode) =>
+            mode === "ask" ? "Ask every time" : capitalize(mode),
+          ),
+          { hint: "Sets the default for each Huddle" },
+        ),
+        actions("session_scrobbling", [
+          button(
+            "toggle_session_scrobbling",
+            plain(
+              `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
+            ),
+            { value },
+          ),
+        ]),
+      ),
+      section(
+        settings.lastFmConnected
+          ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
+          : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
+      ),
       ...(settings.lastFmConnected
         ? [
-            {
-              type: "input",
-              block_id: "lastfm_scrobbling",
-              optional: true,
-              label: plain("Last.fm scrobbling"),
-              element: {
-                type: "checkboxes",
-                action_id: "enabled",
-                options: [{ text: plain("Enabled"), value: "enabled" }],
-                initial_options: settings.lastFmEnabled
-                  ? [{ text: plain("Enabled"), value: "enabled" }]
-                  : [],
-              },
-            },
-            {
-              type: "actions",
-              block_id: "lastfm_actions",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "disconnect_lastfm",
-                  text: plain("Disconnect"),
-                  style: "danger",
-                  value: this.id,
-                  confirm: confirm(
-                    "Disconnect Last.fm?",
-                    "This removes your saved Last.fm login.",
-                    "Disconnect",
-                  ),
-                },
-              ],
-            },
+            input(
+              "lastfm_scrobbling",
+              "Last.fm scrobbling",
+              toggle("enabled", "Enabled", settings.lastFmEnabled),
+              { optional: true },
+            ),
+            actions("lastfm_actions", [
+              button("disconnect_lastfm", plain("Disconnect"), {
+                style: "danger",
+                value,
+                confirm: confirm(
+                  "Disconnect Last.fm?",
+                  "This removes your saved Last.fm login.",
+                  "Disconnect",
+                ),
+              }),
+            ]),
           ]
-        : settings.lastFmAvailable
-          ? [
-              {
-                type: "actions",
-                block_id: "lastfm_actions",
-                elements: [
-                  {
-                    type: "button",
-                    action_id: "connect_lastfm",
-                    text: plain("Log in to Last.fm"),
-                    value: this.id,
-                  },
-                ],
-              },
-            ]
-          : []),
-      {
-        type: "input",
-        block_id: "listenbrainz_scrobbling",
-        optional: true,
-        label: plain("ListenBrainz scrobbling"),
-        hint: plain(
-          settings.listenBrainzConnected
+        : when(
+            settings.lastFmAvailable,
+            actions("lastfm_actions", [
+              button("connect_lastfm", plain("Log in to Last.fm"), { value }),
+            ]),
+          )),
+      input(
+        "listenbrainz_scrobbling",
+        "ListenBrainz scrobbling",
+        toggle("enabled", "Enabled", settings.listenBrainzEnabled),
+        {
+          optional: true,
+          hint: settings.listenBrainzConnected
             ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
             : "Uses your ListenBrainz user token",
-        ),
-        element: {
-          type: "checkboxes",
-          action_id: "enabled",
-          options: [{ text: plain("Enabled"), value: "enabled" }],
-          initial_options: settings.listenBrainzEnabled
-            ? [{ text: plain("Enabled"), value: "enabled" }]
-            : [],
         },
-      },
-      {
-        type: "input",
-        block_id: "listenbrainz_token",
-        optional: true,
-        label: plain("ListenBrainz API key / user token"),
-        hint: plain(
-          settings.listenBrainzConnected
-            ? "Leave blank to keep the saved token"
-            : "Find it in ListenBrainz settings",
-        ),
-        element: {
+      ),
+      input(
+        "listenbrainz_token",
+        "ListenBrainz API key / user token",
+        {
           type: "plain_text_input",
           action_id: "value",
           placeholder: plain(
             settings.listenBrainzConnected ? "Saved" : "Paste token",
           ),
         },
-      },
-      ...(settings.listenBrainzConnected
-        ? [
-            {
-              type: "actions",
-              block_id: "listenbrainz_actions",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "disconnect_listenbrainz",
-                  text: plain("Remove token"),
-                  style: "danger",
-                  value: this.id,
-                  confirm: confirm(
-                    "Remove ListenBrainz token?",
-                    "This disables ListenBrainz scrobbling and removes your saved token.",
-                    "Remove",
-                  ),
-                },
-              ],
-            },
-          ]
-        : []),
+        {
+          optional: true,
+          hint: settings.listenBrainzConnected
+            ? "Leave blank to keep the saved token"
+            : "Find it in ListenBrainz settings",
+        },
+      ),
+      ...when(
+        settings.listenBrainzConnected,
+        actions("listenbrainz_actions", [
+          button("disconnect_listenbrainz", plain("Remove token"), {
+            style: "danger",
+            value,
+            confirm: confirm(
+              "Remove ListenBrainz token?",
+              "This disables ListenBrainz scrobbling and removes your saved token.",
+              "Remove",
+            ),
+          }),
+        ]),
+      ),
     ];
     const integrationBlocks = admin
       ? integrationSettingsBlocks({
@@ -4850,32 +4273,18 @@ export class Coordinator {
         title: plain("Connect Last.fm"),
         close: plain("Cancel"),
         blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: "Authorize HuddleFM in Last.fm, return here, then press Continue.",
-            },
-          },
-          {
-            type: "actions",
-            block_id: "lastfm_login_actions",
-            elements: [
-              {
-                type: "button",
-                action_id: "open_lastfm_authorization",
-                text: plain("Authorize Last.fm"),
-                url,
-              },
-              {
-                type: "button",
-                action_id: "continue_lastfm",
-                text: plain("Continue"),
-                style: "primary",
-                value: this.id,
-              },
-            ],
-          },
+          section(
+            "Authorize HuddleFM in Last.fm, return here, then press Continue.",
+          ),
+          actions("lastfm_login_actions", [
+            button("open_lastfm_authorization", plain("Authorize Last.fm"), {
+              url,
+            }),
+            button("continue_lastfm", plain("Continue"), {
+              style: "primary",
+              value: this.id,
+            }),
+          ]),
         ],
       });
     } catch (error) {
@@ -4903,15 +4312,7 @@ export class Coordinator {
           type: "modal",
           title: plain("Connect Last.fm"),
           close: plain("Done"),
-          blocks: [
-            {
-              type: "section",
-              text: {
-                type: "mrkdwn",
-                text: `Connected as *${escape(username)}*.`,
-              },
-            },
-          ],
+          blocks: [section(`Connected as *${escape(username)}*.`)],
         });
       if (interaction.previousViewId)
         await this.slack.updateModal(
@@ -4940,22 +4341,14 @@ export class Coordinator {
     if (!this.scrobbling) return;
     this.scrobbling.disconnectLastFm(interaction.userId);
     if (interaction.viewId && interaction.viewHash)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+      await this.updateSettings(interaction);
   }
 
   private async disconnectListenBrainz(interaction: Interaction) {
     if (!this.scrobbling) return;
     this.scrobbling.disconnectListenBrainz(interaction.userId);
     if (interaction.viewId && interaction.viewHash)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+      await this.updateSettings(interaction);
   }
 
   private async toggleSessionScrobbling(interaction: Interaction) {
@@ -4980,12 +4373,7 @@ export class Coordinator {
     if (enabled) this.playbackScrobbling?.sessionEnabled(interaction.userId);
     if (interaction.responseUrl)
       await this.slack.deleteOriginal(interaction.responseUrl);
-    if (interaction.viewId)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+    if (interaction.viewId) await this.updateSettings(interaction);
     else
       await this.notice(
         interaction.userId,
@@ -5070,91 +4458,31 @@ export class Coordinator {
       this.sendMedia({ type: "volume", value: this.volume });
       this.store.setSession(this.id, { volume: this.volume });
     }
-    if (this.can(interaction.userId, "configure-settings")) {
-      const displayMode = interaction.state.display?.mode?.selected_option
-        ?.value as DisplayMode | undefined;
-      if (
-        displayMode &&
-        displayModes.includes(displayMode) &&
-        displayMode !== this.displayMode
-      ) {
-        this.displayMode = displayMode;
-        this.sendMedia({ type: "display_mode", mode: displayMode });
-        this.store.setSession(this.id, { displayMode });
-      }
-      const autoplayMode = interaction.state.autoplay?.mode?.selected_option
-        ?.value as AutoplayMode | undefined;
-      if (autoplayMode && autoplayModes.includes(autoplayMode)) {
-        if (autoplayMode !== this.autoplayMode) {
-          this.autoplayMode = autoplayMode;
-          this.store.setSession(this.id, { autoplay: autoplayMode });
-          if (autoplayMode === "off") await this.removeQueuedAutoplay();
-        }
-      }
-      const loopMode = interaction.state.loop?.mode?.selected_option?.value as
-        LoopMode | undefined;
-      if (loopMode && loopModes.includes(loopMode)) {
-        if (loopMode !== this.loopMode) {
-          this.loopMode = loopMode;
-          this.store.setSession(this.id, { loopMode });
-          if (loopMode !== "off") await this.removeQueuedAutoplay();
-          this.syncPreloads();
-        }
-      }
-      const transitionMode = interaction.state.transition?.mode?.selected_option
-        ?.value as TransitionMode | undefined;
-      if (transitionMode && transitionModes.includes(transitionMode)) {
-        this.transitionMode = transitionMode;
-        this.sendMedia({ type: "transition_mode", mode: transitionMode });
-        this.store.setSession(this.id, { transitionMode });
-      }
-      const duckingMode = interaction.state.ducking?.mode?.selected_option
-        ?.value as DuckingMode | undefined;
-      if (
-        duckingMode &&
-        duckingModes.includes(duckingMode) &&
-        duckingMode !== this.duckingMode
-      ) {
-        this.duckingMode = duckingMode;
-        this.sendMedia({ type: "ducking_mode", mode: duckingMode });
-        this.store.setSession(this.id, { duckingMode });
-      }
-      const anchorState = interaction.state.anchor?.enabled;
-      if (anchorState) {
-        const anchorEnabled =
-          anchorState.selected_options?.some(
-            (option) => option.value === "enabled",
-          ) ?? false;
-        if (!anchorEnabled) clearTimeout(this.anchorTimer);
-        this.anchorEnabled = anchorEnabled;
-        this.store.setSession(this.id, { anchorEnabled });
-      }
-    }
+    const { state } = interaction;
+    if (this.can(interaction.userId, "configure-settings"))
+      await this.applySettings({
+        displayMode: selected(state.display?.mode, displayModes),
+        autoplayMode: selected(state.autoplay?.mode, autoplayModes),
+        loopMode: selected(state.loop?.mode, loopModes),
+        transitionMode: selected(state.transition?.mode, transitionModes),
+        duckingMode: selected(state.ducking?.mode, duckingModes),
+        anchorEnabled: checked(state.anchor?.enabled),
+      });
     const preset = admin
-      ? interaction.state.permission_preset?.selected?.selected_option?.value
+      ? state.permission_preset?.selected?.selected_option?.value
       : undefined;
-    const selected = admin
-      ? interaction.state.permissions?.selected?.selected_options
+    const chosen = admin
+      ? state.permissions?.selected?.selected_options
       : undefined;
-    if (preset || selected) {
-      this.allowed = new Set(
-        preset
-          ? permissionPresets[preset as keyof typeof permissionPresets]
-          : (selected!
-              .map((option) => option.value)
-              .filter(Boolean) as string[]),
+    if (preset)
+      this.setPermissions(
+        permissionPresets[preset as keyof typeof permissionPresets],
       );
-      for (const capability of capabilities)
-        this.store.setPermission(
-          this.id,
-          capability,
-          this.allowed.has(capability),
-        );
-    }
-    if (nextHost) {
-      this.hostId = nextHost;
-      this.store.setSession(this.id, { hostId: nextHost });
-    }
+    else if (chosen)
+      this.setPermissions(
+        chosen.map((option) => option.value).filter(Boolean) as string[],
+      );
+    if (nextHost) this.setHost(nextHost);
     if (this.scrobbling) {
       try {
         const userSettings = this.scrobbling.settings(
@@ -5162,43 +4490,27 @@ export class Coordinator {
           this.id,
         );
         let newlyEnabled = false;
-        const mode = interaction.state.scrobbling_mode?.mode?.selected_option
-          ?.value as ScrobblingMode | undefined;
-        if (mode && scrobblingModes.includes(mode))
-          this.scrobbling.setMode(interaction.userId, mode);
-        const huddleMixState = interaction.state.huddle_mix?.enabled;
-        if (huddleMixState) {
-          const optedIn =
-            huddleMixState.selected_options?.some(
-              (option) => option.value === "enabled",
-            ) ?? false;
+        const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
+        if (mode) this.scrobbling.setMode(interaction.userId, mode);
+        const optedIn = checked(state.huddle_mix?.enabled);
+        if (optedIn !== undefined)
           this.scrobbling.setHuddleMixOptIn(interaction.userId, optedIn);
+        const lastFm = checked(state.lastfm_scrobbling?.enabled);
+        if (lastFm !== undefined) {
+          newlyEnabled ||= lastFm && !userSettings.lastFmEnabled;
+          this.scrobbling.setLastFmEnabled(interaction.userId, lastFm);
         }
-        const lastFmState = interaction.state.lastfm_scrobbling?.enabled;
-        if (lastFmState) {
-          const enabled =
-            lastFmState.selected_options?.some(
-              (option) => option.value === "enabled",
-            ) ?? false;
-          newlyEnabled ||= enabled && !userSettings.lastFmEnabled;
-          this.scrobbling.setLastFmEnabled(interaction.userId, enabled);
-        }
-        const listenBrainzState =
-          interaction.state.listenbrainz_scrobbling?.enabled;
+        const listenBrainz = checked(state.listenbrainz_scrobbling?.enabled);
         const listenBrainzToken =
-          interaction.state.listenbrainz_token?.value?.value?.trim();
-        if (listenBrainzState) {
-          const enabled =
-            listenBrainzState.selected_options?.some(
-              (option) => option.value === "enabled",
-            ) ?? false;
+          state.listenbrainz_token?.value?.value?.trim();
+        if (listenBrainz !== undefined) {
           newlyEnabled ||=
-            enabled &&
+            listenBrainz &&
             (!userSettings.listenBrainzEnabled || Boolean(listenBrainzToken));
           await this.scrobbling.setListenBrainz(
             interaction.userId,
             listenBrainzToken || undefined,
-            enabled,
+            listenBrainz,
           );
         }
         const sessionEnabled = this.scrobbling.sessionEnabled(
@@ -5243,11 +4555,90 @@ export class Coordinator {
     this.scheduleAutoplay();
   }
 
+  // Applies the session settings present in `patch`, leaving alone any that
+  // already hold that value, and names each one changed as `key=value`.
+  private async applySettings(patch: {
+    displayMode?: DisplayMode;
+    autoplayMode?: AutoplayMode;
+    loopMode?: LoopMode;
+    transitionMode?: TransitionMode;
+    duckingMode?: DuckingMode;
+    anchorEnabled?: boolean;
+  }) {
+    const changed: string[] = [];
+    const {
+      displayMode,
+      autoplayMode,
+      loopMode,
+      transitionMode,
+      duckingMode,
+      anchorEnabled,
+    } = patch;
+    if (displayMode !== undefined && displayMode !== this.displayMode) {
+      this.displayMode = displayMode;
+      this.sendMedia({ type: "display_mode", mode: displayMode });
+      this.store.setSession(this.id, { displayMode });
+      changed.push(`displayMode=${displayMode}`);
+    }
+    if (autoplayMode !== undefined && autoplayMode !== this.autoplayMode) {
+      this.autoplayMode = autoplayMode;
+      this.store.setSession(this.id, { autoplay: autoplayMode });
+      if (autoplayMode === "off") await this.removeQueuedAutoplay();
+      changed.push(`autoplay=${autoplayMode}`);
+    }
+    if (loopMode !== undefined && loopMode !== this.loopMode) {
+      this.loopMode = loopMode;
+      this.store.setSession(this.id, { loopMode });
+      if (loopMode !== "off") await this.removeQueuedAutoplay();
+      this.syncPreloads();
+      changed.push(`loopMode=${loopMode}`);
+    }
+    if (transitionMode !== undefined) {
+      this.transitionMode = transitionMode;
+      this.sendMedia({ type: "transition_mode", mode: transitionMode });
+      this.store.setSession(this.id, { transitionMode });
+      changed.push(`transitionMode=${transitionMode}`);
+    }
+    if (duckingMode !== undefined && duckingMode !== this.duckingMode) {
+      this.duckingMode = duckingMode;
+      this.sendMedia({ type: "ducking_mode", mode: duckingMode });
+      this.store.setSession(this.id, { duckingMode });
+      changed.push(`duckingMode=${duckingMode}`);
+    }
+    if (anchorEnabled !== undefined && anchorEnabled !== this.anchorEnabled) {
+      if (!anchorEnabled) clearTimeout(this.anchorTimer);
+      this.anchorEnabled = anchorEnabled;
+      this.store.setSession(this.id, { anchorEnabled });
+      changed.push(`anchorEnabled=${anchorEnabled}`);
+    }
+    return changed;
+  }
+
+  private setPermissions(allowed: Iterable<string>) {
+    this.allowed = new Set(allowed);
+    for (const capability of capabilities)
+      this.store.setPermission(
+        this.id,
+        capability,
+        this.allowed.has(capability),
+      );
+  }
+
   private async hostLeft() {
     const hostId = this.hostId;
-    this.hostId = undefined;
-    this.store.setSession(this.id, { hostId: null });
+    this.setHost(undefined);
     this.audit.record("host.left", hostId, { sessionId: this.id });
+    await this.render();
+  }
+
+  private setHost(hostId: string | undefined) {
+    this.hostId = hostId;
+    this.store.setSession(this.id, { hostId: hostId ?? null });
+  }
+
+  private async takeHost(userId: string) {
+    this.setHost(userId);
+    this.audit.record("host.claimed", userId, { sessionId: this.id });
     await this.render();
   }
 
@@ -5289,17 +4680,11 @@ export class Coordinator {
         interaction.userId,
         "Join the huddle before taking over.",
       );
-    this.hostId = interaction.userId;
-    this.store.setSession(this.id, { hostId: interaction.userId });
-    this.audit.record("host.claimed", interaction.userId, {
-      sessionId: this.id,
-    });
-    await this.render();
+    await this.takeHost(interaction.userId);
   }
 
   private async render() {
-    if (!this.uiTs || this.state === "ended" || this.state === "suspended")
-      return;
+    if (!this.uiTs || this.inactive()) return;
     this.revision++;
     await this.slack.update(
       this.room.uiChannelId,
@@ -5319,7 +4704,7 @@ export class Coordinator {
   }
 
   private async reanchor(previousChannelId = this.room.uiChannelId) {
-    if (this.state === "ended" || this.state === "suspended") return;
+    if (this.inactive()) return;
     const revision = ++this.revision;
     const old = this.uiTs;
     const current = await this.post(
@@ -5352,6 +4737,7 @@ export class Coordinator {
     // Nothing playing, queued, or being chosen: offer to start something
     // instead of controls that have nothing to act on.
     const idle = !current && !next && !this.autoplayPending;
+    const value = this.id;
     return [
       {
         type: "container",
@@ -5362,139 +4748,55 @@ export class Coordinator {
             ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}`
             : "Ready for music",
         ),
-        ...(current?.artwork
-          ? {
-              icon: {
-                type: "image",
-                image_url: current.artwork,
-                alt_text: `${current.title} artwork`,
-              },
-            }
-          : {}),
+        ...artworkIcon(current),
         child_blocks: [
           ...(current
             ? [
-                {
-                  type: "context",
-                  block_id: `current_status_${id}`,
-                  elements: [
-                    {
-                      type: "mrkdwn",
-                      text: current.automatic
-                        ? "Autoplay recommendation"
-                        : `Added by <@${current.requesterId}>`,
-                    },
-                  ],
-                },
+                context(`current_status_${id}`, addedBy(current)),
+                actions(`playback_${id}`, [
+                  button("previous_track", icon(":ms-skip-back:"), { value }),
+                  button(
+                    "toggle_playback",
+                    icon(this.state === "paused" ? ":ms-play:" : ":ms-pause:"),
+                    { style: "primary", value },
+                  ),
+                  button("next_track", icon(":ms-skip-forward:"), { value }),
+                ]),
+                actions(`volume_${id}`, [
+                  button("volume_down", icon(":ms-speaker-low-volume:"), {
+                    value,
+                  }),
+                  button("volume_up", icon(":ms-speaker-loud-volume:"), {
+                    value,
+                  }),
+                  // Carries the entry rather than the session: a click can
+                  // land after the song has rolled over, and it should like
+                  // the song they were listening to rather than whatever is
+                  // playing by the time it arrives.
+                  button("like_track", icon("💖"), { value: current.id }),
+                ]),
+                actions(`seek_${id}`, [
+                  button("seek_back", icon(":ms-rewind:"), { value }),
+                  button("seek_forward", icon(":ms-fast-forward:"), { value }),
+                ]),
               ]
-            : []),
-          ...(current
-            ? [
-                {
-                  type: "actions",
-                  block_id: `playback_${id}`,
-                  elements: [
-                    {
-                      type: "button",
-                      action_id: "previous_track",
-                      text: icon(":ms-skip-back:"),
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "toggle_playback",
-                      text: icon(
-                        this.state === "paused" ? ":ms-play:" : ":ms-pause:",
-                      ),
-                      style: "primary",
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "next_track",
-                      text: icon(":ms-skip-forward:"),
-                      value: this.id,
-                    },
-                  ],
-                },
-                {
-                  type: "actions",
-                  block_id: `volume_${id}`,
-                  elements: [
-                    {
-                      type: "button",
-                      action_id: "volume_down",
-                      text: icon(":ms-speaker-low-volume:"),
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "volume_up",
-                      text: icon(":ms-speaker-loud-volume:"),
-                      value: this.id,
-                    },
-                    // Carries the entry rather than the session: a click can
-                    // land after the song has rolled over, and it should like
-                    // the song they were listening to rather than whatever is
-                    // playing by the time it arrives.
-                    {
-                      type: "button",
-                      action_id: "like_track",
-                      text: icon("💖"),
-                      value: current.id,
-                    },
-                  ],
-                },
-                {
-                  type: "actions",
-                  block_id: `seek_${id}`,
-                  elements: [
-                    {
-                      type: "button",
-                      action_id: "seek_back",
-                      text: icon(":ms-rewind:"),
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "seek_forward",
-                      text: icon(":ms-fast-forward:"),
-                      value: this.id,
-                    },
-                  ],
-                },
-              ]
-            : idle
-              ? [
-                  {
-                    type: "actions",
-                    block_id: `play_something_${id}`,
-                    elements: [
-                      {
-                        type: "button",
-                        action_id: "play_something",
-                        text: plain("Play something"),
-                        style: "primary",
-                        value: this.id,
-                      },
-                    ],
-                  },
-                ]
-              : []),
-          {
-            type: "context",
-            block_id: `volume_status_${id}`,
-            elements: [
-              {
-                type: "mrkdwn",
-                text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
-                  this.integrations.size
-                    ? ` · Controlling: ${[...this.integrations.keys()].map((id) => `<@${id}>`).join(", ")}`
-                    : ""
-                }`,
-              },
-            ],
-          },
+            : when(
+                idle,
+                actions(`play_something_${id}`, [
+                  button("play_something", plain("Play something"), {
+                    style: "primary",
+                    value,
+                  }),
+                ]),
+              )),
+          context(
+            `volume_status_${id}`,
+            `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
+              this.integrations.size
+                ? ` · Controlling: ${[...this.integrations.keys()].map((id) => `<@${id}>`).join(", ")}`
+                : ""
+            }`,
+          ),
         ],
       },
       {
@@ -5514,87 +4816,35 @@ export class Coordinator {
               ? "Autoplay is picking a recommendation"
               : "Add a song to keep the music going",
         ),
-        ...(next?.artwork
-          ? {
-              icon: {
-                type: "image",
-                image_url: next.artwork,
-                alt_text: `${next.title} artwork`,
-              },
-            }
-          : {}),
+        ...artworkIcon(next),
         child_blocks: [
-          {
-            type: "context",
-            block_id: `queue_status_${id}`,
-            elements: [
-              {
-                type: "mrkdwn",
-                text: `${next ? `${next.automatic ? "Autoplay recommendation" : `Added by <@${next.requesterId}>`} · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue`,
-              },
-            ],
-          },
-          {
-            type: "actions",
-            block_id: `add_${id}`,
-            elements: [
-              {
-                type: "button",
-                action_id: "open_add_to_queue",
-                text: plain("Add to queue"),
-                value: this.id,
-              },
-            ],
-          },
-          {
-            type: "actions",
-            block_id: `actions_${id}`,
-            elements: [
-              {
-                type: "button",
-                action_id: "view_full_queue",
-                text: plain("Queue"),
-                value: this.id,
-              },
-              ...(this.shufflableCount() > 1
-                ? [
-                    {
-                      type: "button",
-                      action_id: "shuffle_queue",
-                      text: plain("Shuffle"),
-                      value: this.id,
-                    },
-                  ]
-                : []),
-              {
-                type: "button",
-                action_id: "clear_queue",
-                text: plain("Clear"),
-                value: this.id,
-                confirm: confirm(
-                  "Clear queue?",
-                  "This removes every upcoming track.",
-                  "Clear",
-                ),
-              },
-              ...(!this.hostId
-                ? [
-                    {
-                      type: "button",
-                      action_id: "claim_host",
-                      text: plain("Take over"),
-                      value: this.id,
-                    },
-                  ]
-                : []),
-              {
-                type: "button",
-                action_id: "open_settings",
-                text: plain("Settings"),
-                value: this.id,
-              },
-            ],
-          },
+          context(
+            `queue_status_${id}`,
+            `${next ? `${addedBy(next)} · ` : ""}${songCount(this.queue.length)} in queue`,
+          ),
+          actions(`add_${id}`, [
+            button("open_add_to_queue", plain("Add to queue"), { value }),
+          ]),
+          actions(`actions_${id}`, [
+            button("view_full_queue", plain("Queue"), { value }),
+            ...when(
+              this.shufflableCount() > 1,
+              button("shuffle_queue", plain("Shuffle"), { value }),
+            ),
+            button("clear_queue", plain("Clear"), {
+              value,
+              confirm: confirm(
+                "Clear queue?",
+                "This removes every upcoming track.",
+                "Clear",
+              ),
+            }),
+            ...when(
+              !this.hostId,
+              button("claim_host", plain("Take over"), { value }),
+            ),
+            button("open_settings", plain("Settings"), { value }),
+          ]),
           ...footerContext(this.config.footer, `footer_${id}`),
         ],
       },
@@ -5623,26 +4873,14 @@ export class Coordinator {
         "Do you want to scrobble your listening in this Huddle?",
         this.room.uiThreadTs,
         [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: "Do you want to scrobble your listening in this Huddle?",
-            },
-          },
-          {
-            type: "actions",
-            block_id: "session_scrobbling_prompt",
-            elements: [
-              {
-                type: "button",
-                action_id: "toggle_session_scrobbling",
-                text: plain("Enable scrobbling for this session"),
-                style: "primary",
-                value: this.id,
-              },
-            ],
-          },
+          section("Do you want to scrobble your listening in this Huddle?"),
+          actions("session_scrobbling_prompt", [
+            button(
+              "toggle_session_scrobbling",
+              plain("Enable scrobbling for this session"),
+              { style: "primary", value: this.id },
+            ),
+          ]),
         ],
       )
       .catch((error) =>
@@ -5654,18 +4892,13 @@ export class Coordinator {
   }
 
   private refreshIdle() {
-    if (this.state === "ended" || this.state === "suspended") return;
-    const alone = ![...this.participants].some((id) => id !== this.botUserId);
-    if (alone && !this.aloneTimer) {
-      void this.post(
-        this.room.uiChannelId,
-        this.room.uiThreadTs,
+    if (this.inactive()) return;
+    const alone = () =>
+      ![...this.participants].some((id) => id !== this.botUserId);
+    if (alone() && !this.aloneTimer) {
+      this.warnLeaving(
+        "alone",
         "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
-      ).catch((error) =>
-        this.log.warn(
-          { event: "alone_notice_failed", err: error },
-          "Could not post alone timeout notice",
-        ),
       );
       this.log.debug(
         { event: "alone_timeout_scheduled", timeoutMs: this.config.aloneMs },
@@ -5675,90 +4908,92 @@ export class Coordinator {
         () =>
           void this.enqueue(async () => {
             this.aloneTimer = undefined;
-            if (![...this.participants].some((id) => id !== this.botUserId))
-              await this.end(undefined, "alone timeout");
+            if (alone()) await this.end(undefined, "alone timeout");
           }),
         this.config.aloneMs,
       );
-    } else if (!alone) {
+    } else if (!alone()) {
       clearTimeout(this.aloneTimer);
       this.aloneTimer = undefined;
     }
+    this.holdLeaveTimer(
+      "idle",
+      () => !this.current,
+      this.config.idleMs,
+      "Nothing is playing, so I’ll leave in 2 minutes.",
+    );
+    this.holdLeaveTimer(
+      "paused",
+      () => this.state === "paused",
+      this.config.pausedMs,
+      "Playback is paused, so I’ll leave in 2 minutes.",
+    );
+  }
 
-    if (!this.current && !this.idleTimer) {
-      this.idleWarningTimer = setTimeout(
-        () => {
-          this.idleWarningTimer = undefined;
-          if (!this.current)
-            void this.post(
-              this.room.uiChannelId,
-              this.room.uiThreadTs,
-              "Nothing is playing, so I’ll leave in 2 minutes.",
-            ).catch((error) =>
-              this.log.warn(
-                { event: "idle_notice_failed", err: error },
-                "Could not post idle timeout notice",
-              ),
-            );
-        },
-        Math.max(0, this.config.idleMs - this.config.warningMs),
-      );
-      this.idleTimer = setTimeout(
-        () =>
-          void this.enqueue(async () => {
-            this.idleTimer = undefined;
-            if (!this.current) await this.end(undefined, "idle timeout");
-          }),
-        this.config.idleMs,
-      );
-      this.log.debug(
-        { event: "idle_timeout_scheduled", timeoutMs: this.config.idleMs },
-        "Idle timeout scheduled",
-      );
-    } else if (this.current) {
-      clearTimeout(this.idleTimer);
-      this.idleTimer = undefined;
-      clearTimeout(this.idleWarningTimer);
-      this.idleWarningTimer = undefined;
+  // Keeps a leave timer running, with a warning partway through, for as long
+  // as `still()` holds, and drops both the moment it stops holding.
+  private holdLeaveTimer(
+    kind: "idle" | "paused",
+    still: () => boolean,
+    timeoutMs: number,
+    warning: string,
+  ) {
+    const timer = `${kind}Timer` as const;
+    const warningTimer = `${kind}WarningTimer` as const;
+    if (!still()) {
+      clearTimeout(this[timer]);
+      this[timer] = undefined;
+      clearTimeout(this[warningTimer]);
+      this[warningTimer] = undefined;
+      return;
     }
+    if (this[timer]) return;
+    this[warningTimer] = setTimeout(
+      () => {
+        this[warningTimer] = undefined;
+        if (still()) this.warnLeaving(kind, warning);
+      },
+      Math.max(0, timeoutMs - this.config.warningMs),
+    );
+    this[timer] = setTimeout(
+      () =>
+        void this.enqueue(async () => {
+          this[timer] = undefined;
+          if (still()) await this.end(undefined, `${kind} timeout`);
+        }),
+      timeoutMs,
+    );
+    this.log.debug(
+      { event: `${kind}_timeout_scheduled`, timeoutMs },
+      `${capitalize(kind)} timeout scheduled`,
+    );
+  }
 
-    if (this.state === "paused" && !this.pausedTimer) {
-      this.pausedWarningTimer = setTimeout(
-        () => {
-          this.pausedWarningTimer = undefined;
-          if (this.state === "paused")
-            void this.post(
-              this.room.uiChannelId,
-              this.room.uiThreadTs,
-              "Playback is paused, so I’ll leave in 2 minutes.",
-            ).catch((error) =>
-              this.log.warn(
-                { event: "paused_notice_failed", err: error },
-                "Could not post paused timeout notice",
-              ),
-            );
-        },
-        Math.max(0, this.config.pausedMs - this.config.warningMs),
-      );
-      this.pausedTimer = setTimeout(
-        () =>
-          void this.enqueue(async () => {
-            this.pausedTimer = undefined;
-            if (this.state === "paused")
-              await this.end(undefined, "paused timeout");
-          }),
-        this.config.pausedMs,
-      );
-      this.log.debug(
-        { event: "paused_timeout_scheduled", timeoutMs: this.config.pausedMs },
-        "Paused timeout scheduled",
-      );
-    } else if (this.state !== "paused") {
-      clearTimeout(this.pausedTimer);
-      this.pausedTimer = undefined;
-      clearTimeout(this.pausedWarningTimer);
-      this.pausedWarningTimer = undefined;
-    }
+  private warnLeaving(kind: "alone" | "idle" | "paused", text: string) {
+    void this.post(this.room.uiChannelId, this.room.uiThreadTs, text).catch(
+      (error) =>
+        this.log.warn(
+          { event: `${kind}_notice_failed`, err: error },
+          `Could not post ${kind} timeout notice`,
+        ),
+    );
+  }
+
+  // Stops everything in flight: autoplay, downloads and timers.
+  private stopWork() {
+    this.cancelAutoplay();
+    for (const controller of this.preparations.values()) controller.abort();
+    this.preparations.clear();
+    for (const timer of [
+      this.idleTimer,
+      this.idleWarningTimer,
+      this.aloneTimer,
+      this.pausedTimer,
+      this.pausedWarningTimer,
+      this.anchorTimer,
+      this.renderTimer,
+    ])
+      clearTimeout(timer);
   }
 
   private async end(userId: string | undefined, reason: string) {
@@ -5781,17 +5016,7 @@ export class Coordinator {
     );
     this.state = "ended";
     this.playbackScrobbling?.finish();
-    this.autoplayGeneration++;
-    this.autoplayPending = false;
-    for (const controller of this.preparations.values()) controller.abort();
-    this.preparations.clear();
-    clearTimeout(this.idleTimer);
-    clearTimeout(this.idleWarningTimer);
-    clearTimeout(this.aloneTimer);
-    clearTimeout(this.pausedTimer);
-    clearTimeout(this.pausedWarningTimer);
-    clearTimeout(this.anchorTimer);
-    clearTimeout(this.renderTimer);
+    this.stopWork();
     clearTimeout(this.queueModalTimer);
     this.queueViews.clear();
     this.store.endSession(
@@ -5870,9 +5095,7 @@ export class Coordinator {
 
   private recapBlocks(text: string) {
     const songs = [...this.history, ...(this.current ? [this.current] : [])];
-    const blocks: unknown[] = [
-      { type: "section", text: { type: "mrkdwn", text } },
-    ];
+    const blocks: unknown[] = [section(text)];
     if (!songs.length) return [...blocks, this.restoreBlock()];
     const autoplay = songs.filter((song) => song.automatic).length;
     const artists = Map.groupBy(songs, (song) => firstArtist(song.artist));
@@ -5897,24 +5120,20 @@ export class Coordinator {
       is_collapsible: true,
       default_collapsed: true,
       child_blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: [
-              `*Listening time:* ${elapsed(this.listenedSeconds)}`,
-              `*Songs played:* ${songs.length}`,
-              `*Mix:* ${songs.length - autoplay} requested · ${autoplay} autoplay`,
-              `*Autoplay percentage:* ${Math.round((autoplay / songs.length) * 100)}%`,
-              `*Unique artists:* ${artists.size}`,
-              `*Most frequent requester:* ${topRequester ? `<@${topRequester[0]}> (${songCount(topRequester[1].length)})` : "None"}`,
-              `*Most repeated artist:* ${escape(topArtist)} (${songCount(topSongs.length)})`,
-              `*Longest song:* ${longest ? `${escape(longest.title)} · ${elapsed(longest.duration!)}` : "Unknown"}`,
-              `*Average song length:* ${timed.length ? elapsed(average) : "Unknown"}`,
-              `*Session host:* ${this.hostId ? `<@${this.hostId}>` : "None"}`,
-            ].join("\n"),
-          },
-        },
+        section(
+          [
+            `*Listening time:* ${elapsed(this.listenedSeconds)}`,
+            `*Songs played:* ${songs.length}`,
+            `*Mix:* ${songs.length - autoplay} requested · ${autoplay} autoplay`,
+            `*Autoplay percentage:* ${Math.round((autoplay / songs.length) * 100)}%`,
+            `*Unique artists:* ${artists.size}`,
+            `*Most frequent requester:* ${topRequester ? `<@${topRequester[0]}> (${songCount(topRequester[1].length)})` : "None"}`,
+            `*Most repeated artist:* ${escape(topArtist)} (${songCount(topSongs.length)})`,
+            `*Longest song:* ${longest ? `${escape(longest.title)} · ${elapsed(longest.duration!)}` : "Unknown"}`,
+            `*Average song length:* ${timed.length ? elapsed(average) : "Unknown"}`,
+            `*Session host:* ${this.hostId ? `<@${this.hostId}>` : "None"}`,
+          ].join("\n"),
+        ),
         ...sectionBlocks(
           "*Songs*",
           songs.map(
@@ -5929,18 +5148,11 @@ export class Coordinator {
   }
 
   private restoreBlock() {
-    return {
-      type: "actions",
-      block_id: `restore_${this.id}`,
-      elements: [
-        {
-          type: "button",
-          action_id: "restore_session",
-          text: plain("Restore session"),
-          style: "primary",
-          value: this.id,
-        },
-      ],
-    };
+    return actions(`restore_${this.id}`, [
+      button("restore_session", plain("Restore session"), {
+        style: "primary",
+        value: this.id,
+      }),
+    ]);
   }
 }

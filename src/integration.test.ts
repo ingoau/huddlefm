@@ -13,6 +13,7 @@ import {
   sessionMatchesChannel,
   slackModalBlockLimit,
   wrapIntegrationResult,
+  type IntegrationCommand,
 } from "./integration.ts";
 
 test("ignores non-JSON and missing protocol version", () => {
@@ -119,59 +120,22 @@ test("parses a valid request_control and command with optional channel", () => {
     ok: true,
     command: { type: "skip", channel: "C123" },
   });
+});
+
+test.each<[Record<string, unknown>, Partial<IntegrationCommand>]>([
+  [{ autoplay: "huddle" }, { autoplayMode: "huddle" }],
+  [{ autoplay: true }, { autoplay: true }],
+  [{ loopMode: "queue" }, { loopMode: "queue" }],
+  [{ loop: "track" }, { loopMode: "track" }],
+  [{ duckingMode: "strong" }, { duckingMode: "strong" }],
+  [{ ducking: "off" }, { duckingMode: "off" }],
+  [{ ducking: "loud" }, {}],
+])("parses settings field %j as %j", (fields, expected) => {
   expect(
     parseIntegrationMessage(
-      JSON.stringify({ v: 1, type: "settings", autoplay: "huddle" }),
+      JSON.stringify({ v: 1, type: "settings", ...fields }),
     ),
-  ).toEqual({
-    ok: true,
-    command: { type: "settings", autoplayMode: "huddle" },
-  });
-  expect(
-    parseIntegrationMessage(
-      JSON.stringify({ v: 1, type: "settings", autoplay: true }),
-    ),
-  ).toEqual({
-    ok: true,
-    command: { type: "settings", autoplay: true },
-  });
-  expect(
-    parseIntegrationMessage(
-      JSON.stringify({ v: 1, type: "settings", loopMode: "queue" }),
-    ),
-  ).toEqual({
-    ok: true,
-    command: { type: "settings", loopMode: "queue" },
-  });
-  expect(
-    parseIntegrationMessage(
-      JSON.stringify({ v: 1, type: "settings", loop: "track" }),
-    ),
-  ).toEqual({
-    ok: true,
-    command: { type: "settings", loopMode: "track" },
-  });
-  expect(
-    parseIntegrationMessage(
-      JSON.stringify({ v: 1, type: "settings", duckingMode: "strong" }),
-    ),
-  ).toEqual({
-    ok: true,
-    command: { type: "settings", duckingMode: "strong" },
-  });
-  expect(
-    parseIntegrationMessage(
-      JSON.stringify({ v: 1, type: "settings", ducking: "off" }),
-    ),
-  ).toEqual({
-    ok: true,
-    command: { type: "settings", duckingMode: "off" },
-  });
-  expect(
-    parseIntegrationMessage(
-      JSON.stringify({ v: 1, type: "settings", ducking: "loud" }),
-    ),
-  ).toEqual({ ok: true, command: { type: "settings" } });
+  ).toEqual({ ok: true, command: { type: "settings", ...expected } });
 });
 
 test("matches sessions by source, UI, or companion channel", () => {

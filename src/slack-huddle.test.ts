@@ -46,6 +46,46 @@ test("reads participants from the room info response envelope", async () => {
   }
 });
 
+test("returns a created companion channel when setting its topic fails", async () => {
+  const originalFetch = globalThis.fetch;
+  const adapter = new SlackHuddleAdapter({
+    workspaceUrl: "https://slack.test",
+    xoxc: "token",
+    xoxd: "cookie",
+    mediaRegion: "us-east-1",
+  });
+  const topicOutcomes = [
+    () => Response.json({ ok: false, error: "not_allowed" }),
+    () => Response.json({ ok: false }, { status: 503 }),
+    () => {
+      throw new Error("network failure");
+    },
+  ];
+
+  try {
+    for (const topicOutcome of topicOutcomes) {
+      const requests: string[] = [];
+      globalThis.fetch = (async (input) => {
+        const path = new URL(String(input)).pathname;
+        requests.push(path);
+        if (path === "/api/conversations.create")
+          return Response.json({ ok: true, channel: { id: "CCOMP" } });
+        return topicOutcome();
+      }) as typeof fetch;
+
+      await expect(adapter.createCompanionChannel("CSOURCE")).resolves.toBe(
+        "CCOMP",
+      );
+      expect(requests).toEqual([
+        "/api/conversations.create",
+        "/api/conversations.setTopic",
+      ]);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("roomOwnsThread matches the UI thread and the original huddle thread", () => {
   const companionRoom = {
     uiChannelId: "CCOMP",

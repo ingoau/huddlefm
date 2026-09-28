@@ -1,5 +1,6 @@
 import YTMusic from "ytmusic-api";
 import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 import { logger } from "./logger.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
@@ -54,13 +55,7 @@ async function readLimited(response: Response, limit: number) {
     }
     chunks.push(value);
   }
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(merged);
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 // Removed, private, blocked, and unreleased media are everyday conditions, so
@@ -207,10 +202,6 @@ export function normalizeToken(value: string) {
   );
 }
 
-function normalizeArtist(value: string) {
-  return normalizeToken(value);
-}
-
 export type TrackMetadata = {
   sourceInput: string;
   canonicalUrl: string;
@@ -259,7 +250,6 @@ export class TrackCatalog {
     string,
     TrackMetadata | CollectionReference | string
   >();
-  private command: string[];
   private proxy?: PublicNetworkProxy;
   private activePreparations = 0;
   private transitions = new Map<string, TransitionData>();
@@ -276,9 +266,7 @@ export class TrackCatalog {
       downloadBytes: number;
       loudnessNormalization?: boolean;
     },
-  ) {
-    this.command = ["yt-dlp", "--force-ipv4"];
-  }
+  ) {}
 
   async initialize() {
     const startedAt = Date.now();
@@ -304,170 +292,141 @@ export class TrackCatalog {
 
   async suggestions(query: string, allowed = { songs: true, bulk: false }) {
     const startedAt = Date.now();
-    const url = parseHttpUrl(query);
-    if (url) {
-      await assertPublicUrl(url);
-      const share = navidromeShare(url);
-      if (share) {
-        const options = [
-          ...(allowed.songs
-            ? [
-                option(
-                  `Link: ${share.pageUrl.href}`,
-                  this.remember(share.pageUrl.href),
-                ),
-              ]
-            : []),
-          ...(allowed.bulk
-            ? [
-                option(
-                  `Add share: ${share.pageUrl.href}`,
-                  this.remember({
-                    type: "navidrome-share",
-                    url: share.pageUrl.href,
-                  }),
-                ),
-              ]
-            : []),
-        ];
-        log.debug(
-          {
-            event: "suggestions_completed",
-            inputType: "navidrome_share_url",
-            count: options.length,
-            durationMs: Date.now() - startedAt,
-          },
-          "Track suggestions completed",
-        );
-        return options;
-      }
-      const id = youtubePlaylistId(url);
-      const playlist =
-        id && allowed.bulk
-          ? [
-              option(
-                `Add playlist: ${url.href}`,
-                this.remember({ type: "playlist", id, url: url.href }),
-              ),
-            ]
-          : [];
-      if (!allowed.songs || url.pathname.replace(/\/$/, "") === "/playlist") {
-        log.debug(
-          {
-            event: "suggestions_completed",
-            inputType: "playlist_url",
-            count: playlist.length,
-            durationMs: Date.now() - startedAt,
-          },
-          "Track suggestions completed",
-        );
-        return playlist;
-      }
-      const reference = this.remember(url.href);
-      const options = [option(`Link: ${url.href}`, reference), ...playlist];
+    const completed = (
+      inputType: string,
+      options: ReturnType<typeof option>[],
+      extra = {},
+    ) => {
       log.debug(
         {
           event: "suggestions_completed",
-          inputType: "url",
+          inputType,
           count: options.length,
+          ...extra,
           durationMs: Date.now() - startedAt,
         },
         "Track suggestions completed",
       );
       return options;
+    };
+    const url = parseHttpUrl(query);
+    if (!url) {
+      const [songs, albums] = await Promise.all([
+        allowed.songs ? this.music.searchSongs(query) : [],
+        allowed.bulk ? this.music.searchAlbums(query) : [],
+      ]);
+      return completed(
+        "search",
+        [
+          ...songs
+            .slice(0, 5)
+            .map((song) =>
+              option(
+                `${song.name} — ${song.artist.name}${song.album ? ` · ${song.album.name}` : ""}`,
+                this.remember(songMetadata(song)),
+              ),
+            ),
+          ...albums
+            .slice(0, 5)
+            .map((album) =>
+              option(
+                `Add album: ${album.name} — ${album.artist.name}`,
+                this.remember({ type: "album", id: album.albumId }),
+              ),
+            ),
+        ],
+        { songsAllowed: allowed.songs, bulkAllowed: allowed.bulk },
+      );
     }
-    const [songs, albums] = await Promise.all([
-      allowed.songs ? this.music.searchSongs(query) : [],
-      allowed.bulk ? this.music.searchAlbums(query) : [],
+    await assertPublicUrl(url);
+    const share = navidromeShare(url);
+    if (share) {
+      const href = share.pageUrl.href;
+      return completed("navidrome_share_url", [
+        ...(allowed.songs
+          ? [option(`Link: ${href}`, this.remember(href))]
+          : []),
+        ...(allowed.bulk
+          ? [
+              option(
+                `Add share: ${href}`,
+                this.remember({ type: "navidrome-share", url: href }),
+              ),
+            ]
+          : []),
+      ]);
+    }
+    const id = youtubePlaylistId(url);
+    const playlist =
+      id && allowed.bulk
+        ? [
+            option(
+              `Add playlist: ${url.href}`,
+              this.remember({ type: "playlist", id, url: url.href }),
+            ),
+          ]
+        : [];
+    if (!allowed.songs || url.pathname.replace(/\/$/, "") === "/playlist")
+      return completed("playlist_url", playlist);
+    return completed("url", [
+      option(`Link: ${url.href}`, this.remember(url.href)),
+      ...playlist,
     ]);
-    const options = [
-      ...songs
-        .slice(0, 5)
-        .map((song) =>
-          option(
-            `${song.name} — ${song.artist.name}${song.album ? ` · ${song.album.name}` : ""}`,
-            this.remember(songMetadata(song)),
-          ),
-        ),
-      ...albums
-        .slice(0, 5)
-        .map((album) =>
-          option(
-            `Add album: ${album.name} — ${album.artist.name}`,
-            this.remember({ type: "album", id: album.albumId }),
-          ),
-        ),
-    ];
-    log.debug(
-      {
-        event: "suggestions_completed",
-        inputType: "search",
-        count: options.length,
-        songsAllowed: allowed.songs,
-        bulkAllowed: allowed.bulk,
-        durationMs: Date.now() - startedAt,
-      },
-      "Track suggestions completed",
-    );
-    return options;
   }
 
   async resolve(reference: string): Promise<TrackMetadata | TrackMetadata[]> {
-    const startedAt = Date.now();
     const stored = this.references.get(reference);
     if (!stored) throw new TrackError("Track selection expired; search again");
-    if (typeof stored === "object" && "type" in stored) {
-      const tracks =
+    const resolved = await this.resolveStored(stored);
+    this.references.delete(reference);
+    return resolved;
+  }
+
+  private async resolveStored(
+    stored: TrackMetadata | CollectionReference | string,
+  ) {
+    if (typeof stored === "object" && "type" in stored)
+      return this.resolveCollection(stored.type, async () =>
         stored.type === "album"
           ? (await this.music.getAlbum(stored.id)).songs.map((song) =>
               songMetadata(song),
             )
           : stored.type === "navidrome-share"
-            ? await this.resolveNavidromeShare(stored.url)
+            ? this.resolveNavidromeShare(stored.url)
             : (await this.music.getPlaylistVideos(stored.id)).map((song) =>
                 songMetadata(song, stored.url),
-              );
-      if (!tracks.length)
-        throw new TrackError("That album or playlist has no playable songs");
-      for (const track of tracks) this.validate(track);
-      this.references.delete(reference);
-      log.info(
-        {
-          event: "collection_resolved",
-          collectionType: stored.type,
-          count: tracks.length,
-          durationMs: Date.now() - startedAt,
-        },
-        "Track collection resolved",
+              ),
       );
-      return tracks;
-    }
     if (typeof stored !== "string") {
       this.validate(stored);
-      this.references.delete(reference);
       return stored;
     }
-    const share = navidromeShare(parseHttpUrl(stored));
-    if (share) {
-      const tracks = await this.resolveNavidromeShare(stored);
-      if (!tracks.length)
-        throw new TrackError("That album or playlist has no playable songs");
-      for (const track of tracks) this.validate(track);
-      this.references.delete(reference);
-      log.info(
-        {
-          event: "collection_resolved",
-          collectionType: "navidrome-share",
-          count: tracks.length,
-          durationMs: Date.now() - startedAt,
-        },
-        "Track collection resolved",
-      );
-      return tracks.length === 1 ? tracks[0]! : tracks;
-    }
-    const track = await this.resolveUrl(stored);
-    this.references.delete(reference);
-    return track;
+    if (!navidromeShare(parseHttpUrl(stored))) return this.resolveUrl(stored);
+    const tracks = await this.resolveCollection("navidrome-share", () =>
+      this.resolveNavidromeShare(stored),
+    );
+    return tracks.length === 1 ? tracks[0]! : tracks;
+  }
+
+  private async resolveCollection(
+    collectionType: CollectionReference["type"],
+    load: () => Promise<TrackMetadata[]>,
+  ) {
+    const startedAt = Date.now();
+    const tracks = await load();
+    if (!tracks.length)
+      throw new TrackError("That album or playlist has no playable songs");
+    for (const track of tracks) this.validate(track);
+    log.info(
+      {
+        event: "collection_resolved",
+        collectionType,
+        count: tracks.length,
+        durationMs: Date.now() - startedAt,
+      },
+      "Track collection resolved",
+    );
+    return tracks;
   }
 
   async resolveUrl(input: string): Promise<TrackMetadata> {
@@ -476,26 +435,14 @@ export class TrackCatalog {
     if (!url)
       throw new TrackError("Only absolute HTTP or HTTPS URLs are supported");
     await assertPublicUrl(url);
-    const share = navidromeShare(url);
-    if (share) {
+    if (navidromeShare(url)) {
       const tracks = await this.resolveNavidromeShare(url.href);
       if (!tracks.length)
         throw new TrackError("That album or playlist has no playable songs");
       if (tracks.length > 1)
         throw new TrackError("Playlists are not supported");
       this.validate(tracks[0]!);
-      log.info(
-        {
-          event: "url_resolved",
-          sourceId: tracks[0]!.sourceId,
-          title: tracks[0]!.title,
-          artist: tracks[0]!.artist,
-          durationSeconds: tracks[0]!.duration,
-          durationMs: Date.now() - startedAt,
-        },
-        "Media URL resolved",
-      );
-      return tracks[0]!;
+      return urlResolved(tracks[0]!, startedAt);
     }
     const metadata = await runJson([
       ...this.extractor(),
@@ -534,27 +481,13 @@ export class TrackCatalog {
     };
     // Direct files and other generic sources often only expose the filename
     // through yt-dlp; prefer embedded tags when the extractor metadata is thin.
-    if (shouldProbeEmbeddedMetadata(track, metadata.extractor)) {
-      if (!this.proxy) throw new Error("Track catalog is not initialized");
+    if (shouldProbeEmbeddedMetadata(track, metadata.extractor))
       track = applyEmbeddedMetadata(
         track,
-        await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxy.url),
+        await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxyUrl),
       );
-    }
-    if (track.duration && track.duration > this.limits.durationSeconds)
-      throw new TrackError("Track exceeds the duration limit");
-    log.info(
-      {
-        event: "url_resolved",
-        sourceId: track.sourceId,
-        title: track.title,
-        artist: track.artist,
-        durationSeconds: track.duration,
-        durationMs: Date.now() - startedAt,
-      },
-      "Media URL resolved",
-    );
-    return track;
+    this.validate(track);
+    return urlResolved(track, startedAt);
   }
 
   async upNextIds(videoId: string) {
@@ -566,37 +499,24 @@ export class TrackCatalog {
   // `thumbnail`. Accept every shape seen so far.
   async upNextTracks(videoId: string): Promise<TrackMetadata[]> {
     const results: unknown = await this.music.getUpNexts(videoId);
-    if (!Array.isArray(results)) return [];
-    return results.flatMap((result) => {
-      if (!result || typeof result !== "object") return [];
-      const row = result as {
-        videoId?: unknown;
-        title?: unknown;
-        artists?: unknown;
-        artist?: unknown;
-        duration?: unknown;
-        thumbnail?: unknown;
-        thumbnails?: { url?: string }[];
-      };
-      const id = row.videoId;
+    return asArray(results).flatMap((row) => {
+      const {
+        videoId: id,
+        title,
+        artists,
+        artist,
+        duration,
+        thumbnail,
+        thumbnails,
+      } = record(row);
       if (typeof id !== "string" || !isYoutubeVideoId(id)) return [];
-      const title = typeof row.title === "string" ? row.title : "Untitled";
-      const artist =
-        artistName(row.artists) ?? artistName(row.artist) ?? "Unknown artist";
-      const artwork = artworkUrl(
-        row.thumbnails?.at(-1)?.url ??
-          (typeof row.thumbnail === "string" ? row.thumbnail : undefined),
-      );
       return [
-        {
-          sourceInput: `https://music.youtube.com/watch?v=${id}`,
-          canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
-          sourceId: id,
-          title,
-          artist,
-          duration: parseDuration(row.duration),
-          artwork,
-        } satisfies TrackMetadata,
+        youtubeMusicTrack(id, {
+          title: asString(title) ?? "Untitled",
+          artist: artistName(artists) ?? artistName(artist) ?? "Unknown artist",
+          duration: parseDuration(duration),
+          artwork: artworkUrl(thumbnailUrl(thumbnails) ?? asString(thumbnail)),
+        }),
       ];
     });
   }
@@ -606,10 +526,10 @@ export class TrackCatalog {
     if (!query) return;
     const songs = await this.music.searchSongs(query);
     if (!Array.isArray(songs) || !songs.length) return;
-    const needle = normalizeArtist(artist);
+    const needle = normalizeToken(artist);
     const match =
       songs.find((song) => {
-        const name = normalizeArtist(song.artist?.name ?? "");
+        const name = normalizeToken(song.artist?.name ?? "");
         return name && (name.includes(needle) || needle.includes(name));
       }) ?? songs[0];
     if (!match?.videoId || !isYoutubeVideoId(match.videoId)) return;
@@ -622,25 +542,18 @@ export class TrackCatalog {
   async popularTracks(): Promise<TrackMetadata[]> {
     const startedAt = Date.now();
     const sections: unknown = await this.music.getHomeSections();
-    const rows = (Array.isArray(sections) ? sections : []).flatMap(
-      (section) => {
-        const contents = (section as { contents?: unknown })?.contents;
-        return Array.isArray(contents) ? (contents as unknown[]) : [];
-      },
+    const rows = asArray(sections).flatMap((section) =>
+      asArray(record(section).contents),
     );
-    const songs = rows.flatMap((row) => homeSongMetadata(row));
+    const songs = rows.flatMap(homeSongMetadata);
     const playlists = rows.flatMap((row) => {
-      const { type, name, playlistId } = (row ?? {}) as {
-        type?: unknown;
-        name?: unknown;
-        playlistId?: unknown;
-      };
+      const { type, name, playlistId } = record(row);
       // Only YouTube Music's own editorial playlists browse without an
       // account; user and chart playlists (PL…, OLAK…) return 400.
       return type === "PLAYLIST" &&
         typeof playlistId === "string" &&
         playlistId.startsWith("RDCLAK")
-        ? [{ name: typeof name === "string" ? name : "", playlistId }]
+        ? [{ name: asString(name) ?? "", playlistId }]
         : [];
     });
     const hits = playlists.filter((playlist) =>
@@ -695,9 +608,8 @@ export class TrackCatalog {
     if (!url || !share)
       throw new TrackError("Only absolute HTTP or HTTPS URLs are supported");
     await assertPublicUrl(share.pageUrl);
-    if (!this.proxy) throw new Error("Track catalog is not initialized");
     const response = await fetch(share.pageUrl.href, {
-      proxy: this.proxy.url,
+      proxy: this.proxyUrl,
       headers: {
         accept: "text/html,application/xhtml+xml",
         "user-agent": "HuddleFM",
@@ -721,9 +633,7 @@ export class TrackCatalog {
       throw new TrackError("That album or playlist has no playable songs");
     const tracks: TrackMetadata[] = [];
     for (const track of info.tracks) {
-      if (!track.id) continue;
       const stream = share.streamUrl(track.id);
-      const artwork = share.coverUrl(track.id);
       await assertPublicUrl(stream);
       const tokenHash = new Bun.CryptoHasher("sha256")
         .update(track.id)
@@ -738,9 +648,9 @@ export class TrackCatalog {
         album: track.album?.trim() || undefined,
         duration:
           track.duration && Number.isFinite(track.duration)
-            ? Number(track.duration)
+            ? track.duration
             : undefined,
-        artwork: await publicArtworkUrl(artwork.href),
+        artwork: await publicArtworkUrl(share.coverUrl(track.id).href),
       });
     }
     if (!tracks.length)
@@ -996,9 +906,13 @@ export class TrackCatalog {
     }
   }
 
-  private extractor() {
+  private get proxyUrl() {
     if (!this.proxy) throw new Error("Track catalog is not initialized");
-    return [...this.command, "--proxy", this.proxy.url];
+    return this.proxy.url;
+  }
+
+  private extractor() {
+    return ["yt-dlp", "--force-ipv4", "--proxy", this.proxyUrl];
   }
 
   private remember(value: TrackMetadata | CollectionReference | string) {
@@ -1063,6 +977,43 @@ export function transitionData(output: string, duration: number) {
   return { introSeconds, outroSeconds, fadeInSeconds, fadeOutSeconds };
 }
 
+function urlResolved(track: TrackMetadata, startedAt: number) {
+  log.info(
+    {
+      event: "url_resolved",
+      sourceId: track.sourceId,
+      title: track.title,
+      artist: track.artist,
+      durationSeconds: track.duration,
+      durationMs: Date.now() - startedAt,
+    },
+    "Media URL resolved",
+  );
+  return track;
+}
+
+const record = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+const asArray = (value: unknown): unknown[] =>
+  Array.isArray(value) ? value : [];
+const asString = (value: unknown) =>
+  typeof value === "string" ? value : undefined;
+const thumbnailUrl = (thumbnails: unknown) =>
+  record(asArray(thumbnails).at(-1)).url;
+
+function youtubeMusicTrack(
+  videoId: string,
+  fields: Omit<TrackMetadata, "sourceInput" | "canonicalUrl" | "sourceId">,
+  sourceInput = `https://music.youtube.com/watch?v=${videoId}`,
+): TrackMetadata {
+  return {
+    sourceInput,
+    canonicalUrl: `https://music.youtube.com/watch?v=${videoId}`,
+    sourceId: videoId,
+    ...fields,
+  };
+}
+
 function songMetadata(
   song: {
     videoId: string;
@@ -1072,61 +1023,44 @@ function songMetadata(
     duration?: number | null;
     thumbnails: { url: string }[];
   },
-  sourceInput = `https://music.youtube.com/watch?v=${song.videoId}`,
-): TrackMetadata {
-  return {
+  sourceInput?: string,
+) {
+  return youtubeMusicTrack(
+    song.videoId,
+    {
+      title: song.name,
+      artist: song.artist.name,
+      album: song.album?.name,
+      duration: song.duration ?? undefined,
+      artwork: artworkUrl(song.thumbnails.at(-1)?.url),
+    },
     sourceInput,
-    canonicalUrl: `https://music.youtube.com/watch?v=${song.videoId}`,
-    sourceId: song.videoId,
-    title: song.name,
-    artist: song.artist.name,
-    album: song.album?.name,
-    duration: song.duration ?? undefined,
-    artwork: artworkUrl(song.thumbnails.at(-1)?.url),
-  };
+  );
 }
 
 // A song or video row from the home page or a playlist, accepting the
 // runtime shapes ytmusic-api returns for either.
 function homeSongMetadata(row: unknown): TrackMetadata[] {
-  if (!row || typeof row !== "object") return [];
-  const { type, videoId, name, artist, album, duration, thumbnails } = row as {
-    type?: unknown;
-    videoId?: unknown;
-    name?: unknown;
-    artist?: unknown;
-    album?: { name?: unknown } | null;
-    duration?: unknown;
-    thumbnails?: { url?: string }[];
-  };
+  const { type, videoId, name, artist, album, duration, thumbnails } =
+    record(row);
   if (type !== "SONG" && type !== "VIDEO") return [];
   if (typeof videoId !== "string" || !isYoutubeVideoId(videoId)) return [];
   if (typeof name !== "string" || !name.trim()) return [];
   return [
-    {
-      sourceInput: `https://music.youtube.com/watch?v=${videoId}`,
-      canonicalUrl: `https://music.youtube.com/watch?v=${videoId}`,
-      sourceId: videoId,
+    youtubeMusicTrack(videoId, {
       title: name,
       artist: artistName(artist) ?? "Unknown artist",
-      album: typeof album?.name === "string" ? album.name : undefined,
+      album: asString(record(album).name),
       duration: parseDuration(duration),
-      artwork: artworkUrl(
-        Array.isArray(thumbnails) ? thumbnails.at(-1)?.url : undefined,
-      ),
-    },
+      artwork: artworkUrl(thumbnailUrl(thumbnails)),
+    }),
   ];
 }
 
 function artistName(value: unknown): string | undefined {
-  if (typeof value === "string") return value.trim() || undefined;
   if (Array.isArray(value))
     return value.map(artistName).filter(Boolean).join(", ") || undefined;
-  if (value && typeof value === "object") {
-    const name = (value as { name?: unknown }).name;
-    return typeof name === "string" ? name.trim() || undefined : undefined;
-  }
-  return undefined;
+  return (asString(value) ?? asString(record(value).name))?.trim() || undefined;
 }
 
 // Seconds from a number, or a "h:mm:ss" / "m:ss" clock string.
@@ -1258,17 +1192,26 @@ export function applyEmbeddedMetadata<T extends TrackMetadata>(
   return track;
 }
 
+// FFmpeg tools reach remote inputs only through the public-network proxy, so
+// the input must pass the same check as the media URL itself.
+async function proxyArguments(
+  input: string,
+  proxyUrl: string | undefined,
+  purpose: string,
+) {
+  const remoteUrl = parseHttpUrl(input);
+  if (!remoteUrl) return [];
+  await assertPublicUrl(remoteUrl);
+  if (!proxyUrl) throw new Error(`Remote ${purpose} require a proxy`);
+  return ["-http_proxy", proxyUrl];
+}
+
 export async function probeEmbeddedMetadata(
   input: string,
   signal?: AbortSignal,
   proxyUrl?: string,
 ): Promise<EmbeddedMetadata> {
   try {
-    const remoteUrl = parseHttpUrl(input);
-    if (remoteUrl) {
-      await assertPublicUrl(remoteUrl);
-      if (!proxyUrl) throw new Error("Remote metadata probes require a proxy");
-    }
     const result = await run(
       [
         "ffprobe",
@@ -1282,7 +1225,7 @@ export async function probeEmbeddedMetadata(
         "10000000",
         "-probesize",
         "10000000",
-        ...(remoteUrl ? ["-http_proxy", proxyUrl!] : []),
+        ...(await proxyArguments(input, proxyUrl, "metadata probes")),
         input,
       ],
       30_000,
@@ -1323,17 +1266,12 @@ export async function extractEmbeddedArtwork(
   proxyUrl?: string,
 ) {
   try {
-    const remoteUrl = parseHttpUrl(input);
-    if (remoteUrl) {
-      await assertPublicUrl(remoteUrl);
-      if (!proxyUrl) throw new Error("Remote artwork extracts require a proxy");
-    }
     await run(
       [
         "ffmpeg",
         "-hide_banner",
         "-y",
-        ...(remoteUrl ? ["-http_proxy", proxyUrl!] : []),
+        ...(await proxyArguments(input, proxyUrl, "artwork extracts")),
         "-i",
         input,
         "-an",
@@ -1369,14 +1307,12 @@ export async function extractEmbeddedArtwork(
 }
 
 async function retainedSourcePath(opusPath: string) {
-  const slash = opusPath.lastIndexOf("/");
-  const directory = slash >= 0 ? opusPath.slice(0, slash) : ".";
-  const fileName = slash >= 0 ? opusPath.slice(slash + 1) : opusPath;
-  const prefix = fileName.replace(/\.[^.]+$/, "");
-  const match = (await readdir(directory)).find((name) => {
-    if (name === fileName) return false;
-    return name.startsWith(`${prefix}.`);
-  });
+  const directory = dirname(opusPath);
+  const fileName = basename(opusPath);
+  const prefix = `${fileName.replace(/\.[^.]+$/, "")}.`;
+  const match = (await readdir(directory)).find(
+    (name) => name !== fileName && name.startsWith(prefix),
+  );
   return match ? `${directory}/${match}` : undefined;
 }
 
@@ -1473,38 +1409,25 @@ export function parseNavidromeShareInfo(html: string) {
     let parsed: unknown = JSON.parse(raw);
     if (typeof parsed === "string") parsed = JSON.parse(parsed);
     if (!parsed || typeof parsed !== "object") return;
-    const tracks = (parsed as { tracks?: unknown }).tracks;
+    const { id, description, tracks } = record(parsed);
     if (!Array.isArray(tracks)) return;
     return {
-      id:
-        typeof (parsed as { id?: unknown }).id === "string"
-          ? (parsed as { id: string }).id
-          : undefined,
-      description:
-        typeof (parsed as { description?: unknown }).description === "string"
-          ? (parsed as { description: string }).description
-          : undefined,
+      id: asString(id),
+      description: asString(description),
       tracks: tracks.flatMap((track) => {
-        if (!track || typeof track !== "object") return [];
-        const value = track as {
-          id?: unknown;
-          title?: unknown;
-          artist?: unknown;
-          album?: unknown;
-          duration?: unknown;
-        };
-        if (typeof value.id !== "string" || !value.id) return [];
+        const { id, title, artist, album, duration } = record(track);
+        if (typeof id !== "string" || !id) return [];
         return [
           {
-            id: value.id,
-            title: typeof value.title === "string" ? value.title : undefined,
-            artist: typeof value.artist === "string" ? value.artist : undefined,
-            album: typeof value.album === "string" ? value.album : undefined,
+            id,
+            title: asString(title),
+            artist: asString(artist),
+            album: asString(album),
             duration:
-              typeof value.duration === "number"
-                ? value.duration
-                : typeof value.duration === "string" && value.duration.trim()
-                  ? Number(value.duration)
+              typeof duration === "number"
+                ? duration
+                : typeof duration === "string" && duration.trim()
+                  ? Number(duration)
                   : undefined,
           },
         ];

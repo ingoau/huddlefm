@@ -55,12 +55,8 @@ function isRomanizableLine(line: Lyric) {
   return containsNonLatin(text);
 }
 
-function googleLang(lang: string) {
-  return lang === "zh" ? "zh-CN" : lang;
-}
-
 function googleRomajiUrl(lang: string, text: string) {
-  const source = googleLang(lang);
+  const source = lang === "zh" ? "zh-CN" : lang;
   return `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(source)}&tl=${encodeURIComponent(`${source}-Latn`)}&dt=t&dt=rm&q=${encodeURIComponent(text)}`;
 }
 
@@ -74,26 +70,11 @@ function localRomanize(text: string, lang: string | null) {
   return result && !isSameText(result, text) ? result : undefined;
 }
 
-function lineLanguage(text: string) {
-  return detectNonLatinLanguage(text) ?? "auto";
-}
-
-function groupByLanguage(pending: PendingLine[]) {
-  const groups = new Map<string, PendingLine[]>();
-  for (const item of pending) {
-    const group = groups.get(item.lang) ?? [];
-    group.push(item);
-    groups.set(item.lang, group);
-  }
-  return groups;
-}
-
 async function romanizeViaUnison(
   items: PendingLine[],
   sourceLanguage: string,
   options: RomanizeRequestOptions,
 ) {
-  if (items.length === 0) return new Map<number, string>();
   const fetchImpl = options.fetch ?? fetch;
   const response = await fetchImpl(UNISON_TRANSLATE_URL, {
     method: "POST",
@@ -126,32 +107,25 @@ async function romanizeViaGoogle(
   sourceLanguage: string,
   options: RomanizeRequestOptions,
 ) {
-  if (items.length === 0) return new Map<number, string>();
   const fetchImpl = options.fetch ?? fetch;
   const results = new Map<number, string>();
-  const chunks: PendingLine[][] = [];
-  let current: PendingLine[] = [];
-  let encodedLength = 0;
-  const baseUrl = googleRomajiUrl(sourceLanguage, "");
-  const separatorEncoded = encodeURIComponent(BATCH_SEPARATOR);
+  const baseLength = googleRomajiUrl(sourceLanguage, "").length;
+  const separatorLength = encodeURIComponent(BATCH_SEPARATOR).length;
+  const chunks: PendingLine[][] = [[]];
+  let urlLength = baseLength;
 
   for (const item of items) {
-    const itemEncoded = encodeURIComponent(item.text);
-    const added =
-      (current.length > 0 ? separatorEncoded.length : 0) + itemEncoded.length;
-    if (
-      current.length > 0 &&
-      baseUrl.length + encodedLength + added > MAX_URL_LENGTH
-    ) {
-      chunks.push(current);
-      current = [];
-      encodedLength = 0;
+    const current = chunks.at(-1)!;
+    const itemLength = encodeURIComponent(item.text).length;
+    const added = (current.length ? separatorLength : 0) + itemLength;
+    if (current.length && urlLength + added > MAX_URL_LENGTH) {
+      chunks.push([item]);
+      urlLength = baseLength + itemLength;
+    } else {
+      current.push(item);
+      urlLength += added;
     }
-    current.push(item);
-    encodedLength +=
-      (current.length > 1 ? separatorEncoded.length : 0) + itemEncoded.length;
   }
-  if (current.length) chunks.push(current);
 
   for (const chunk of chunks) {
     const combined = chunk.map((item) => item.text).join(BATCH_SEPARATOR);
@@ -168,23 +142,21 @@ async function romanizeViaGoogle(
     if (!response.ok) continue;
     const data = (await response.json()) as unknown[][];
     if (!Array.isArray(data?.[0])) continue;
-    let full = "";
-    for (const part of data[0] as unknown[]) {
-      if (!Array.isArray(part)) continue;
-      const romanized = (part[3] ?? part[2]) as string | undefined;
-      if (romanized) full += romanized;
-    }
+    const full = data[0]
+      .map((part) =>
+        Array.isArray(part) ? ((part[3] ?? part[2]) as string | undefined) : "",
+      )
+      .filter(Boolean)
+      .join("");
     let romanizedLines = full.split(BATCH_SEPARATOR);
-    if (romanizedLines.length < chunk.length) {
-      const semicolonSplit = full.split(";").filter((line) => line.trim());
-      if (semicolonSplit.length === chunk.length)
-        romanizedLines = semicolonSplit;
-      else {
-        const newlineSplit = full.split(/\r?\n/).filter((line) => line.trim());
-        if (newlineSplit.length === chunk.length) romanizedLines = newlineSplit;
-        else if (romanizedLines.length === 1 && chunk.length > 1)
-          romanizedLines = [];
-      }
+    if (romanizedLines.length !== chunk.length) {
+      // Google sometimes collapses the separator; fall back to whichever
+      // split yields one line per input, or give up on the whole chunk so
+      // no line is handed another line's romanization.
+      romanizedLines =
+        [full.split(";"), full.split(/\r?\n/)]
+          .map((lines) => lines.filter((line) => line.trim()))
+          .find((lines) => lines.length === chunk.length) ?? [];
     }
     chunk.forEach((item, index) => {
       const romanized = romanizedLines[index]?.trim();
@@ -206,39 +178,34 @@ async function romanizeLanguageGroup(
     ? AbortSignal.any([options.signal, timeoutSignal])
     : timeoutSignal;
   const requestOptions = { ...options, signal };
-  const stillNeeded = () =>
-    items.filter((item) => !results.has(item.lineIndex));
+  const attempt = async (
+    provider: "Unison" | "Google",
+    romanize: typeof romanizeViaUnison,
+    pending: PendingLine[],
+  ) => {
+    try {
+      for (const [lineIndex, romanization] of await romanize(
+        pending,
+        lang,
+        requestOptions,
+      ))
+        results.set(lineIndex, romanization);
+    } catch (error) {
+      log.warn(
+        {
+          event: `${provider.toLowerCase()}_romanization_failed`,
+          lang,
+          err: error,
+        },
+        `${provider} romanization failed`,
+      );
+    }
+  };
 
-  try {
-    for (const [lineIndex, romanization] of await romanizeViaUnison(
-      stillNeeded(),
-      lang,
-      requestOptions,
-    ))
-      results.set(lineIndex, romanization);
-  } catch (error) {
-    log.warn(
-      { event: "unison_romanization_failed", lang, err: error },
-      "Unison romanization failed",
-    );
-  }
-
-  const missing = stillNeeded();
-  if (missing.length === 0 || signal.aborted) return;
-
-  try {
-    for (const [lineIndex, romanization] of await romanizeViaGoogle(
-      missing,
-      lang === "auto" ? "auto" : lang,
-      requestOptions,
-    ))
-      results.set(lineIndex, romanization);
-  } catch (error) {
-    log.warn(
-      { event: "google_romanization_failed", lang, err: error },
-      "Google romanization failed",
-    );
-  }
+  await attempt("Unison", romanizeViaUnison, items);
+  const missing = items.filter((item) => !results.has(item.lineIndex));
+  if (missing.length && !signal.aborted)
+    await attempt("Google", romanizeViaGoogle, missing);
 }
 
 /**
@@ -253,25 +220,18 @@ export async function enrichLyricsWithRomanization(
   const pending = lines.flatMap((line, lineIndex) => {
     if (!isRomanizableLine(line)) return [];
     const text = line.words.trim();
-    return [{ lineIndex, text, lang: lineLanguage(text) }];
+    return [{ lineIndex, text, lang: detectNonLatinLanguage(text) ?? "auto" }];
   });
-  if (pending.length === 0) {
-    attachTimedRomanizations(lines);
-    return lines;
-  }
 
   const results = new Map<number, string>();
-  for (const [lang, group] of groupByLanguage(pending))
+  for (const [lang, group] of Map.groupBy(pending, (item) => item.lang))
     await romanizeLanguageGroup(group, lang, options, results);
 
   let attached = 0;
   for (const item of pending) {
-    let romanization = results.get(item.lineIndex);
-    if (!romanization)
-      romanization = localRomanize(
-        item.text,
-        item.lang === "auto" ? null : item.lang,
-      );
+    const romanization =
+      results.get(item.lineIndex) ??
+      localRomanize(item.text, item.lang === "auto" ? null : item.lang);
     if (!romanization || isSameText(romanization, item.text)) continue;
     lines[item.lineIndex]!.romanization = tidyRomanization(romanization);
     attached += 1;

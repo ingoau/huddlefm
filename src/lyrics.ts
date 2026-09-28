@@ -15,65 +15,96 @@ export type LyricsPayload = {
 
 function variants(track: TrackMetadata) {
   const featured = track.title.match(/\s*[([]feat\.\s+([^\])]+)[\])]/i);
-  return [
-    [track.title, track.artist],
-    ...(featured
-      ? [
-          [
-            track.title.replace(featured[0], "").trim(),
-            `${track.artist}, ${featured[1]!.trim()}`,
-          ],
-        ]
-      : []),
-  ];
+  const list: [string, string][] = [[track.title, track.artist]];
+  if (featured)
+    list.push([
+      track.title.replace(featured[0], "").trim(),
+      `${track.artist}, ${featured[1]!.trim()}`,
+    ]);
+  return list;
+}
+
+const songDurationMs = (track: TrackMetadata) => (track.duration ?? 0) * 1000;
+
+// Every provider accepts the duration and album as optional hints, each under
+// its own parameter names.
+function withHints(url: URL, track: TrackMetadata, names: [string, string]) {
+  if (track.duration)
+    url.searchParams.set(names[0], String(Math.round(track.duration)));
+  if (track.album) url.searchParams.set(names[1], track.album);
+  return url;
+}
+
+async function fetchJson<T>(
+  url: string | URL,
+  init: RequestInit = {},
+  timeoutMs = 10_000,
+) {
+  const response = await fetch(url, {
+    ...init,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return response.ok ? ((await response.json()) as T) : undefined;
+}
+
+async function fetchText(url: string) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  return response.ok ? response.text() : undefined;
+}
+
+const payload = (lines: Lyric[], source: string, priority: number) =>
+  lines.length ? { lines, source, priority } : undefined;
+
+function wordSyncedLines(ttml: string, track: TrackMetadata) {
+  const parsed = parseTTMLContent(ttml, {
+    songDurationMs: songDurationMs(track),
+  });
+  return parsed.isWordSynced ? parsed.lyrics : [];
 }
 
 export class LyricsCatalog {
   private cache = new Map<string, Promise<LyricsPayload | undefined>>();
 
   get(track: TrackMetadata) {
-    let request = this.cache.get(track.sourceId);
-    if (!request) {
-      log.debug(
-        { event: "cache_miss", sourceId: track.sourceId },
-        "Fetching lyrics",
-      );
-      request = this.fetch(track);
-      this.cache.set(track.sourceId, request);
-    } else
-      log.debug(
-        { event: "cache_hit", sourceId: track.sourceId },
-        "Using cached lyrics request",
-      );
+    const cached = this.cache.get(track.sourceId);
+    log.debug(
+      { event: cached ? "cache_hit" : "cache_miss", sourceId: track.sourceId },
+      cached ? "Using cached lyrics request" : "Fetching lyrics",
+    );
+    if (cached) return cached;
+    const request = this.fetch(track);
+    this.cache.set(track.sourceId, request);
     return request;
   }
 
   private async fetch(track: TrackMetadata) {
     const startedAt = Date.now();
-    const providers = [
+    const providers: [string, Promise<LyricsPayload | undefined>][] = [
       ["better-lyrics", this.betterLyrics(track)],
       ["binimum", this.binimum(track)],
       ["unison", this.unison(track)],
       ["amll", this.amll(track)],
       ["lrclib", this.lrclib(track)],
-    ] as const;
-    const results = await Promise.allSettled(providers.map(([, work]) => work));
-    results.forEach((result, index) => {
-      if (result.status === "rejected")
-        log.warn(
-          {
-            event: "provider_failed",
-            provider: providers[index]?.[0],
-            sourceId: track.sourceId,
-            err: result.reason,
-          },
-          "Lyrics provider failed",
-        );
-    });
+    ];
+    const results = await Promise.all(
+      providers.map(async ([provider, work]) => {
+        try {
+          return await work;
+        } catch (error) {
+          log.warn(
+            {
+              event: "provider_failed",
+              provider,
+              sourceId: track.sourceId,
+              err: error,
+            },
+            "Lyrics provider failed",
+          );
+        }
+      }),
+    );
     const selected = results
-      .flatMap((result) =>
-        result.status === "fulfilled" && result.value ? [result.value] : [],
-      )
+      .flatMap((result) => (result ? [result] : []))
       .sort((a, b) => a.priority - b.priority)[0];
     if (selected) {
       sanitizeInlineLyricRoles(selected.lines);
@@ -98,54 +129,42 @@ export class LyricsCatalog {
   private async betterLyrics(track: TrackMetadata) {
     for (const [title, artist] of variants(track)) {
       const url = new URL("https://lyrics-api.boidu.dev/getLyrics");
-      url.searchParams.set("s", title!);
-      url.searchParams.set("a", artist!);
-      if (track.duration)
-        url.searchParams.set("d", String(Math.round(track.duration)));
-      if (track.album) url.searchParams.set("al", track.album);
-      const response = await fetch(url, {
-        headers: { accept: "application/json", "user-agent": "Mozilla/5.0" },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!response.ok) continue;
-      const { ttml } = (await response.json()) as { ttml?: string };
-      if (!ttml) continue;
-      const parsed = parseTTMLContent(ttml, {
-        songDurationMs: (track.duration ?? 0) * 1000,
-      });
-      if (parsed.isWordSynced && parsed.lyrics.length)
-        return { lines: parsed.lyrics, source: "Better Lyrics", priority: 0 };
+      url.searchParams.set("s", title);
+      url.searchParams.set("a", artist);
+      const data = await fetchJson<{ ttml?: string }>(
+        withHints(url, track, ["d", "al"]),
+        {
+          headers: { accept: "application/json", "user-agent": "Mozilla/5.0" },
+        },
+        15_000,
+      );
+      if (!data?.ttml) continue;
+      const found = payload(
+        wordSyncedLines(data.ttml, track),
+        "Better Lyrics",
+        0,
+      );
+      if (found) return found;
     }
   }
 
   private async binimum(track: TrackMetadata) {
     for (const [title, artist] of variants(track)) {
       const url = new URL("https://lyrics-api.binimum.org/");
-      url.searchParams.set("track", title!);
-      url.searchParams.set("artist", artist!);
-      if (track.duration)
-        url.searchParams.set("duration", String(Math.round(track.duration)));
-      if (track.album) url.searchParams.set("album", track.album);
-      const response = await fetch(url, {
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) continue;
-      const result = (
-        (await response.json()) as {
-          results?: { timing_type?: string; lyricsUrl?: string }[];
-        }
-      ).results?.find((value) => value.timing_type === "word");
-      if (!result?.lyricsUrl?.startsWith("https://lyrics-storage.binimum.org/"))
+      url.searchParams.set("track", title);
+      url.searchParams.set("artist", artist);
+      const data = await fetchJson<{
+        results?: { timing_type?: string; lyricsUrl?: string }[];
+      }>(withHints(url, track, ["duration", "album"]));
+      const lyricsUrl = data?.results?.find(
+        (value) => value.timing_type === "word",
+      )?.lyricsUrl;
+      if (!lyricsUrl?.startsWith("https://lyrics-storage.binimum.org/"))
         continue;
-      const lyricResponse = await fetch(result.lyricsUrl, {
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!lyricResponse.ok) continue;
-      const parsed = parseTTMLContent(await lyricResponse.text(), {
-        songDurationMs: (track.duration ?? 0) * 1000,
-      });
-      if (parsed.isWordSynced && parsed.lyrics.length)
-        return { lines: parsed.lyrics, source: "BiniLyrics", priority: 2 };
+      const ttml = await fetchText(lyricsUrl);
+      if (!ttml) continue;
+      const found = payload(wordSyncedLines(ttml, track), "BiniLyrics", 2);
+      if (found) return found;
     }
   }
 
@@ -154,107 +173,77 @@ export class LyricsCatalog {
     url.searchParams.set("v", track.sourceId);
     url.searchParams.set("song", track.title);
     url.searchParams.set("artist", track.artist);
-    if (track.duration)
-      url.searchParams.set("duration", String(Math.round(track.duration)));
-    if (track.album) url.searchParams.set("album", track.album);
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!response.ok) return;
     const data = (
-      (await response.json()) as { data?: { format?: string; lyrics?: string } }
-    ).data;
+      await fetchJson<{ data?: { format?: string; lyrics?: string } }>(
+        withHints(url, track, ["duration", "album"]),
+      )
+    )?.data;
     if (!data?.lyrics) return;
-    const duration = (track.duration ?? 0) * 1000;
-    const parsed =
-      data.format === "ttml"
-        ? parseTTMLContent(data.lyrics, { songDurationMs: duration })
-        : undefined;
+    const source = "Better Lyrics · Unison";
+    const durationMs = songDurationMs(track);
+    if (data.format === "ttml") {
+      const parsed = parseTTMLContent(data.lyrics, {
+        songDurationMs: durationMs,
+      });
+      return payload(parsed.lyrics, source, parsed.isWordSynced ? 1 : 7);
+    }
     const lines =
-      parsed?.lyrics ??
-      (data.format === "lrc"
-        ? parseLRC(data.lyrics, duration)
+      data.format === "lrc"
+        ? parseLRC(data.lyrics, durationMs)
         : data.format === "plain"
-          ? PlainParser.parse(data.lyrics, duration)
-          : []);
-    return lines.length
-      ? {
-          lines,
-          source: "Better Lyrics · Unison",
-          priority: parsed?.isWordSynced ? 1 : data.format === "plain" ? 13 : 7,
-        }
-      : undefined;
+          ? PlainParser.parse(data.lyrics, durationMs)
+          : [];
+    return payload(lines, source, data.format === "plain" ? 13 : 7);
   }
 
   private async amll(track: TrackMetadata) {
-    const response = await fetch(
-      "https://amlldb.bikonoo.com/api/search-lyrics",
+    const results = await fetchJson<
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ query: track.title, type: "title" }),
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
-    if (!response.ok) return;
+        file?: string;
+        title?: string;
+        titles?: string[];
+        artist?: string;
+        artists?: string[];
+      }[]
+    >("https://amlldb.bikonoo.com/api/search-lyrics", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: track.title, type: "title" }),
+    });
+    if (!results) return;
     const normalize = (value: string) =>
       value.toLowerCase().replace(/\s+/g, " ").trim();
-    const results = (await response.json()) as {
-      file?: string;
-      title?: string;
-      titles?: string[];
-      artist?: string;
-      artists?: string[];
-    }[];
+    const matches = (values: (string | undefined)[], expected: string) =>
+      values.some((value) => normalize(value ?? "") === normalize(expected));
     const match = results.find(
       (result) =>
-        [...(result.titles ?? []), result.title ?? ""].some(
-          (value) => normalize(value) === normalize(track.title),
-        ) &&
-        [...(result.artists ?? []), result.artist ?? ""].some(
-          (value) => normalize(value) === normalize(track.artist),
-        ) &&
+        matches([...(result.titles ?? []), result.title], track.title) &&
+        matches([...(result.artists ?? []), result.artist], track.artist) &&
         result.file?.endsWith(".ttml"),
     );
     if (!match?.file) return;
-    const lyricResponse = await fetch(
+    const ttml = await fetchText(
       `https://amlldb.bikonoo.com/raw-lyrics/${encodeURIComponent(match.file)}`,
-      {
-        signal: AbortSignal.timeout(10_000),
-      },
     );
-    if (!lyricResponse.ok) return;
-    const parsed = parseTTMLContent(await lyricResponse.text(), {
-      songDurationMs: (track.duration ?? 0) * 1000,
-    });
-    return parsed.isWordSynced && parsed.lyrics.length
-      ? { lines: parsed.lyrics, source: "AMLL TTML DB", priority: 5 }
-      : undefined;
+    if (!ttml) return;
+    return payload(wordSyncedLines(ttml, track), "AMLL TTML DB", 5);
   }
 
   private async lrclib(track: TrackMetadata) {
     const url = new URL("https://lrclib.net/api/get");
     url.searchParams.set("track_name", track.title);
     url.searchParams.set("artist_name", track.artist);
-    if (track.duration)
-      url.searchParams.set("duration", String(Math.round(track.duration)));
-    if (track.album) url.searchParams.set("album_name", track.album);
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!response.ok) return;
-    const data = (await response.json()) as {
+    const data = await fetchJson<{
       syncedLyrics?: string;
       plainLyrics?: string;
-    };
-    const duration = (track.duration ?? 0) * 1000;
+    }>(withHints(url, track, ["duration", "album_name"]));
+    if (!data) return;
+    const durationMs = songDurationMs(track);
     const lines = data.syncedLyrics
-      ? parseLRC(data.syncedLyrics, duration)
+      ? parseLRC(data.syncedLyrics, durationMs)
       : data.plainLyrics
-        ? PlainParser.parse(data.plainLyrics, duration)
+        ? PlainParser.parse(data.plainLyrics, durationMs)
         : [];
-    return lines.length
-      ? {
-          lines,
-          source: "Better Lyrics · LRCLIB",
-          priority: data.syncedLyrics ? 9 : 14,
-        }
-      : undefined;
+    return payload(lines, "Better Lyrics · LRCLIB", data.syncedLyrics ? 9 : 14);
   }
 }

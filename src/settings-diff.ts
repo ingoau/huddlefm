@@ -10,16 +10,13 @@ export type SettingChange = {
 };
 
 function same(from: SettingValue, to: SettingValue) {
-  if (Array.isArray(from) || Array.isArray(to)) {
-    if (!Array.isArray(from) || !Array.isArray(to)) return false;
-    const left = [...from].sort();
-    const right = [...to].sort();
-    return (
-      left.length === right.length &&
-      left.every((value, index) => value === right[index])
-    );
-  }
-  return from === to;
+  if (!Array.isArray(from) || !Array.isArray(to)) return from === to;
+  const left = [...from].sort();
+  const right = [...to].sort();
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
 }
 
 /**
