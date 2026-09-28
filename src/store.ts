@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -235,6 +235,58 @@ type PendingScrobble = {
 };
 
 type Row = Record<string, unknown>;
+
+type SessionSnapshot = {
+  state: string;
+  playbackSeconds: number;
+  displayMode: DisplayMode;
+  anchorEnabled: boolean;
+  queue: string[];
+};
+
+const sessionColumns = {
+  status: "status",
+  hostId: "host_id",
+  volume: "volume",
+  autoplay: "autoplay",
+  loopMode: "loop_mode",
+  transitionMode: "transition_mode",
+  duckingMode: "ducking_mode",
+  playbackSeconds: "playback_seconds",
+  listenedSeconds: "listened_seconds",
+  displayMode: "display_mode",
+  anchorEnabled: "anchor_enabled",
+};
+
+const trackColumns = {
+  status: "status",
+  filePath: "file_path",
+  title: "title",
+  artist: "artist",
+  album: "album",
+  duration: "duration",
+  artwork: "artwork",
+  introSeconds: "intro_seconds",
+  outroSeconds: "outro_seconds",
+  fadeInSeconds: "fade_in_seconds",
+  fadeOutSeconds: "fade_out_seconds",
+};
+
+// The SET clause and bindings for whichever of `fields` are present.
+function assignments(
+  columns: Record<string, string>,
+  fields: Record<string, unknown>,
+) {
+  const set = Object.entries(fields).filter(
+    ([field, value]) => field in columns && value !== undefined,
+  );
+  return {
+    sql: set.map(([field]) => `${columns[field]} = ?`).join(", "),
+    values: set.map(([, value]) =>
+      typeof value === "boolean" ? Number(value) : value,
+    ) as SQLQueryBindings[],
+  };
+}
 
 // Optional columns become absent keys rather than undefined ones, so a saved
 // record round-trips through JSON and `toHaveProperty` the same way.
@@ -679,86 +731,49 @@ export class Store {
       anchorEnabled?: boolean;
     },
   ) {
-    if (fields.status !== undefined)
-      this.db
-        .query("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?")
-        .run(fields.status, Date.now(), sessionId);
-    if (fields.hostId !== undefined)
-      this.db
-        .query("UPDATE sessions SET host_id = ?, updated_at = ? WHERE id = ?")
-        .run(fields.hostId, Date.now(), sessionId);
-    if (fields.volume !== undefined)
-      this.db
-        .query("UPDATE sessions SET volume = ?, updated_at = ? WHERE id = ?")
-        .run(fields.volume, Date.now(), sessionId);
-    if (fields.autoplay !== undefined)
-      this.db
-        .query("UPDATE sessions SET autoplay = ?, updated_at = ? WHERE id = ?")
-        .run(fields.autoplay, Date.now(), sessionId);
-    if (fields.loopMode !== undefined)
-      this.db
-        .query("UPDATE sessions SET loop_mode = ?, updated_at = ? WHERE id = ?")
-        .run(fields.loopMode, Date.now(), sessionId);
-    if (fields.transitionMode !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET transition_mode = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.transitionMode, Date.now(), sessionId);
-    if (fields.duckingMode !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET ducking_mode = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.duckingMode, Date.now(), sessionId);
-    if (fields.playbackSeconds !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET playback_seconds = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.playbackSeconds, Date.now(), sessionId);
-    if (fields.listenedSeconds !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET listened_seconds = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.listenedSeconds, Date.now(), sessionId);
-    if (fields.displayMode !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET display_mode = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.displayMode, Date.now(), sessionId);
-    if (fields.anchorEnabled !== undefined)
-      this.db
-        .query(
-          "UPDATE sessions SET anchor_enabled = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(fields.anchorEnabled ? 1 : 0, Date.now(), sessionId);
+    const { sql, values } = assignments(sessionColumns, fields);
+    if (!sql) return;
+    this.db
+      .query(`UPDATE sessions SET ${sql}, updated_at = ? WHERE id = ?`)
+      .run(...values, Date.now(), sessionId);
   }
 
   suspendSession(
     sessionId: string,
-    state: {
-      state: string;
-      playbackSeconds: number;
-      displayMode: DisplayMode;
-      anchorEnabled: boolean;
-      queue: string[];
-    },
+    state: SessionSnapshot,
+    resumeUntil: number,
+  ) {
+    this.saveSnapshot(sessionId, "suspended", state, resumeUntil);
+  }
+
+  endSession(
+    sessionId: string,
+    state: SessionSnapshot & { listenedSeconds: number },
+    resumeUntil: number,
+  ) {
+    this.saveSnapshot(sessionId, "ended", state, resumeUntil);
+  }
+
+  private saveSnapshot(
+    sessionId: string,
+    status: string,
+    state: SessionSnapshot & { listenedSeconds?: number },
     resumeUntil: number,
   ) {
     this.db.transaction(() => {
       this.db
         .query(
           `UPDATE sessions SET
-        status = 'suspended', resume_state = ?, resume_until = ?, playback_seconds = ?,
-        display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`,
+        status = ?, resume_state = ?, resume_until = ?, playback_seconds = ?,
+        listened_seconds = COALESCE(?, listened_seconds), display_mode = ?,
+        anchor_enabled = ?, updated_at = ? WHERE id = ?`,
         )
         .run(
+          status,
           state.state,
           resumeUntil,
           state.playbackSeconds,
+          state.listenedSeconds ?? null,
           state.displayMode,
           state.anchorEnabled ? 1 : 0,
           Date.now(),
@@ -784,39 +799,6 @@ export class Store {
       "UPDATE tracks SET queue_position = ? WHERE id = ? AND session_id = ?",
     );
     queue.forEach((id, index) => position.run(index, id, sessionId));
-  }
-
-  endSession(
-    sessionId: string,
-    state: {
-      state: string;
-      playbackSeconds: number;
-      listenedSeconds: number;
-      displayMode: DisplayMode;
-      anchorEnabled: boolean;
-      queue: string[];
-    },
-    resumeUntil: number,
-  ) {
-    this.db.transaction(() => {
-      this.db
-        .query(
-          `UPDATE sessions SET
-        status = 'ended', resume_state = ?, resume_until = ?, playback_seconds = ?,
-        listened_seconds = ?, display_mode = ?, anchor_enabled = ?, updated_at = ? WHERE id = ?`,
-        )
-        .run(
-          state.state,
-          resumeUntil,
-          state.playbackSeconds,
-          state.listenedSeconds,
-          state.displayMode,
-          state.anchorEnabled ? 1 : 0,
-          Date.now(),
-          sessionId,
-        );
-      this.writeQueueOrder(sessionId, state.queue);
-    })();
   }
 
   setEndMessage(
@@ -1535,50 +1517,9 @@ export class Store {
       fadeOutSeconds?: number;
     },
   ) {
-    if (fields.status !== undefined)
-      this.db
-        .query("UPDATE tracks SET status = ? WHERE id = ?")
-        .run(fields.status, id);
-    if (fields.filePath !== undefined)
-      this.db
-        .query("UPDATE tracks SET file_path = ? WHERE id = ?")
-        .run(fields.filePath, id);
-    if (fields.title !== undefined)
-      this.db
-        .query("UPDATE tracks SET title = ? WHERE id = ?")
-        .run(fields.title, id);
-    if (fields.artist !== undefined)
-      this.db
-        .query("UPDATE tracks SET artist = ? WHERE id = ?")
-        .run(fields.artist, id);
-    if (fields.album !== undefined)
-      this.db
-        .query("UPDATE tracks SET album = ? WHERE id = ?")
-        .run(fields.album, id);
-    if (fields.duration !== undefined)
-      this.db
-        .query("UPDATE tracks SET duration = ? WHERE id = ?")
-        .run(fields.duration, id);
-    if (fields.artwork !== undefined)
-      this.db
-        .query("UPDATE tracks SET artwork = ? WHERE id = ?")
-        .run(fields.artwork, id);
-    if (fields.introSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET intro_seconds = ? WHERE id = ?")
-        .run(fields.introSeconds, id);
-    if (fields.outroSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET outro_seconds = ? WHERE id = ?")
-        .run(fields.outroSeconds, id);
-    if (fields.fadeInSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET fade_in_seconds = ? WHERE id = ?")
-        .run(fields.fadeInSeconds, id);
-    if (fields.fadeOutSeconds !== undefined)
-      this.db
-        .query("UPDATE tracks SET fade_out_seconds = ? WHERE id = ?")
-        .run(fields.fadeOutSeconds, id);
+    const { sql, values } = assignments(trackColumns, fields);
+    if (!sql) return;
+    this.db.query(`UPDATE tracks SET ${sql} WHERE id = ?`).run(...values, id);
   }
 
   removeTrack(id: string) {
