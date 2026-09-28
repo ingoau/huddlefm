@@ -32,14 +32,8 @@ function isLatinRomanization(text: string) {
 export function sanitizeInlineLyricRoles(lines: Lyric[]) {
   for (const line of lines) {
     if (!line.parts?.length) continue;
-
-    const sung: LyricPart[] = [];
-    const orphaned: LyricPart[] = [];
-    for (const part of line.parts) {
-      if (isOrphanedRolePart(part)) orphaned.push(part);
-      else sung.push(part);
-    }
-
+    const orphaned = line.parts.filter(isOrphanedRolePart);
+    const sung = line.parts.filter((part) => !isOrphanedRolePart(part));
     if (orphaned.length === 0 || sung.length === 0) continue;
 
     line.parts = sung;
