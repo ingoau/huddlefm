@@ -141,6 +141,15 @@ function defined<Value extends object>(value: Value) {
   ) as Partial<Value>;
 }
 
+// A modal's private metadata, or nothing when it is missing or malformed.
+function parseMetadata(metadata: string | undefined): Record<string, unknown> {
+  try {
+    return JSON.parse(metadata || "{}");
+  } catch {
+    return {};
+  }
+}
+
 function throwIfAborted(signal?: AbortSignal) {
   if (!signal?.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
@@ -549,11 +558,7 @@ export class Coordinator {
     if (interaction.value === this.id) return true;
     const action = parseIntegrationActionValue(interaction.value);
     if (action?.sessionId === this.id) return true;
-    try {
-      return JSON.parse(interaction.metadata || "{}").sessionId === this.id;
-    } catch {
-      return false;
-    }
+    return parseMetadata(interaction.metadata).sessionId === this.id;
   }
 
   async action(interaction: Interaction) {
@@ -1627,10 +1632,7 @@ export class Coordinator {
         message: "This session has no host to approve the request.",
       });
     const existing = this.pendingIntegrations.get(options.userId);
-    if (existing) {
-      clearTimeout(existing.timer);
-      this.pendingIntegrations.delete(options.userId);
-    }
+    if (existing) this.dropPending(existing);
     const requestId = crypto.randomUUID();
     const pending = {
       id: requestId,
@@ -1677,8 +1679,7 @@ export class Coordinator {
       try {
         await this.slack.dm(this.hostId, text, { blocks });
       } catch (fallbackError) {
-        clearTimeout(pending.timer);
-        this.pendingIntegrations.delete(options.userId);
+        this.dropPending(pending);
         this.log.warn(
           {
             event: "integration_prompt_failed",
@@ -1856,8 +1857,7 @@ export class Coordinator {
         interaction.userId,
         "That control request is no longer pending.",
       );
-    clearTimeout(pending.timer);
-    this.pendingIntegrations.delete(pending.userId);
+    this.dropPending(pending);
     if (interaction.actionId === "integration_decline") {
       await this.replyIntegration(pending, {
         ok: true,
@@ -1935,6 +1935,14 @@ export class Coordinator {
     );
     if (interaction.viewId && interaction.viewHash)
       await this.updateSettings(interaction);
+  }
+
+  private dropPending(pending: {
+    userId: string;
+    timer: ReturnType<typeof setTimeout>;
+  }) {
+    clearTimeout(pending.timer);
+    this.pendingIntegrations.delete(pending.userId);
   }
 
   private replyIntegration(
@@ -3840,14 +3848,10 @@ export class Coordinator {
   }
 
   private validQueueView(interaction: Interaction) {
-    try {
-      return (
-        interaction.viewId &&
-        JSON.parse(interaction.metadata).sessionId === this.id
-      );
-    } catch {
-      return false;
-    }
+    return (
+      interaction.viewId &&
+      parseMetadata(interaction.metadata).sessionId === this.id
+    );
   }
 
   private rememberQueueView(interaction: Interaction) {
@@ -3942,12 +3946,10 @@ export class Coordinator {
   }
 
   private integrationSettingsPage(interaction: Interaction) {
-    try {
-      const page = JSON.parse(interaction.metadata || "{}").integrationPage;
-      return Number.isInteger(page) && page > 0 ? page : 0;
-    } catch {
-      return 0;
-    }
+    const page = parseMetadata(interaction.metadata).integrationPage;
+    return typeof page === "number" && Number.isInteger(page) && page > 0
+      ? page
+      : 0;
   }
 
   private async integrationGrantsPage(interaction: Interaction) {
