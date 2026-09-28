@@ -23,16 +23,13 @@ const searchConcurrency = 3;
 // Personal recommendations: each lane keeps a rolling pool that decays between
 // builds, and a sample is drawn once per build so the modal is stable until the
 // pool actually changes.
-const discoverPoolSize = 45;
-const favouritesPoolSize = 45;
-const discoverSampleSize = 30;
-const favouritesSampleSize = 30;
+const poolSize = 45;
+const sampleSize = 30;
 // A lane whose visible sample has dropped to half is topped up, but not
 // more often than this, so a thin lane does not rebuild on every play.
 const laneDepletionThreshold = 15;
 const depletionRebuildIntervalMs = 60_000;
-const discoverResolveAttempts = 25;
-const favouritesResolveAttempts = 25;
+const poolResolveAttempts = 25;
 const poolDecay = 0.7;
 const newcomerShare = 1 / 3;
 const trackSeedCount = 5;
@@ -72,9 +69,7 @@ const mixArtistRunDamping = 0.5;
 const mixFairnessWeight = 1;
 const skipTrackPenalty = 0.2;
 const skipArtistPenalty = 0.6;
-// Contributions from similarity lookups carry these ids instead of a real
-// listener, so they must not count as a seed.
-const syntheticUsers = new Set(["similar", "related"]);
+const lanes = ["discover", "favourites"] as const;
 
 export type TasteTrack = {
   title: string;
@@ -170,6 +165,8 @@ type UserPool = {
   sample: UserRecommendations;
   builtAt: number;
 };
+
+type Resolved = { track: ScoredTrack; metadata: TrackMetadata };
 
 type CacheEntry<T> = {
   value: T;
@@ -477,7 +474,7 @@ export class RecommendationCatalog {
       result[lane].length < laneDepletionThreshold &&
       sample[lane].length > result[lane].length;
     if (
-      (depleted("discover") || depleted("favourites")) &&
+      lanes.some(depleted) &&
       Date.now() - entry.value.builtAt > depletionRebuildIntervalMs
     )
       entry.expires = 0;
@@ -520,17 +517,11 @@ export class RecommendationCatalog {
     const { nowPlaying } = options;
     const [profiles, similar, similarArtists, related] = await Promise.all([
       Promise.all(listeners.map((userId) => this.userTaste(userId))),
-      nowPlaying
-        ? this.similarTracks(nowPlaying.title, nowPlaying.artist)
-        : Promise.resolve([] as TasteContribution[]),
-      nowPlaying
-        ? this.similarArtistTracks(nowPlaying.artist, 1)
-        : Promise.resolve([] as TasteContribution[]),
+      nowPlaying ? this.similarTracks(nowPlaying.title, nowPlaying.artist) : [],
+      nowPlaying ? this.similarArtistTracks(nowPlaying.artist, 1) : [],
       nowPlaying?.sourceId && isYoutubeVideoId(nowPlaying.sourceId)
-        ? this.tracks
-            .upNextTracks(nowPlaying.sourceId)
-            .catch(() => [] as TrackMetadata[])
-        : Promise.resolve([] as TrackMetadata[]),
+        ? this.tracks.upNextTracks(nowPlaying.sourceId).catch(() => [])
+        : [],
     ]);
     const knownBy = new Map<string, TasteProfile>();
     listeners.forEach((userId, index) => knownBy.set(userId, profiles[index]!));
@@ -618,58 +609,46 @@ export class RecommendationCatalog {
     // A track counts as a seed for each listener who has actually played it,
     // which is a stronger signal than merely turning up in their similar
     // tracks or Discover pool.
-    const playedBy = (track: ScoredTrack) => {
+    const finish = ({ track, metadata }: Resolved): AutoplayCandidate => {
       const key = keyOf(track);
-      return listeners.filter((userId) => knownBy.get(userId)!.known.has(key));
-    };
-    const finish = (
-      candidate: AutoplayCandidate & { track: ScoredTrack },
-      discovery: boolean,
-    ): AutoplayCandidate => {
-      const { track, ...rest } = candidate;
-      const played = playedBy(track);
+      const played = listeners.filter((userId) =>
+        knownBy.get(userId)!.known.has(key),
+      );
       return {
-        ...rest,
-        discovery,
+        sourceId: metadata.sourceId,
+        score: track.score,
         seedCount: Math.max(1, played.length),
+        discovery: isDiscovery(track),
         listenerIds: track.userIds.filter((userId) => knownBy.has(userId)),
+        metadata,
       };
     };
     // Candidates come back in the sampled order, which the caller keeps:
     // re-sorting by score here would put the same track first every pick.
-    if (!options.discover) {
+    const results: AutoplayCandidate[] = [];
+    const resolveLane = async (tracks: ScoredTrack[], limit: number) => {
       const resolved = await this.resolvePlayable(
-        this.sampleByScore(eligible),
+        this.sampleByScore(tracks),
         excluded,
-        mixCandidateLimit,
+        limit,
         mixResolveAttempts,
       );
-      return resolved.map((candidate) =>
-        finish(candidate, isDiscovery(candidate.track)),
+      for (const candidate of resolved) {
+        excluded.add(candidate.metadata.sourceId);
+        results.push(finish(candidate));
+      }
+    };
+    if (!options.discover) await resolveLane(eligible, mixCandidateLimit);
+    else {
+      // A discovery turn: lead with tracks nobody in the huddle has listened
+      // to, then fall back to the usual ranking.
+      await resolveLane(eligible.filter(isDiscovery), mixDiscoveryLimit);
+      await resolveLane(
+        eligible.filter((track) => !isDiscovery(track)),
+        mixCandidateLimit - results.length,
       );
     }
-    // A discovery turn: lead with tracks nobody in the huddle has listened
-    // to, then fall back to the usual ranking.
-    const discoveries = await this.resolvePlayable(
-      this.sampleByScore(eligible.filter(isDiscovery)),
-      excluded,
-      mixDiscoveryLimit,
-      mixResolveAttempts,
-    );
-    const seen = new Set([
-      ...excluded,
-      ...discoveries.map((candidate) => candidate.sourceId),
-    ]);
-    const rest = await this.resolvePlayable(
-      this.sampleByScore(eligible.filter((track) => !isDiscovery(track))),
-      seen,
-      mixCandidateLimit - discoveries.length,
-      mixResolveAttempts,
-    );
-    return [
-      ...discoveries.map((candidate) => finish(candidate, true)),
-      ...rest.map((candidate) => finish(candidate, false)),
-    ];
+    return results;
   }
 
   // Reorders the strongest candidates with a score-weighted draw, so the
@@ -695,11 +674,11 @@ export class RecommendationCatalog {
       else if (normalizeToken(primaryArtist(entry.metadata.artist)) === artist)
         entry.score *= skipArtistPenalty;
     };
-    pool.discover.forEach(punish);
-    pool.favourites.forEach(punish);
     const keep = (entry: PlayableRecommendation) => keyOf(entry) !== key;
-    pool.sample.discover = pool.sample.discover.filter(keep);
-    pool.sample.favourites = pool.sample.favourites.filter(keep);
+    for (const lane of lanes) {
+      pool[lane].forEach(punish);
+      pool.sample[lane] = pool.sample[lane].filter(keep);
+    }
   }
 
   private userTaste(userId: string) {
@@ -782,12 +761,14 @@ export class RecommendationCatalog {
       ...listenBrainz.known,
     ]);
     const artists = new Map<string, TasteArtist>();
-    for (const artist of [...lastFm.artists, ...listenBrainz.artists]) {
-      const key = normalizeToken(artist.name);
+    const addArtist = (name: string, score: number) => {
+      const key = normalizeToken(name);
       const existing = artists.get(key);
-      if (existing) existing.score += artist.score;
-      else artists.set(key, { ...artist });
-    }
+      if (existing) existing.score += score;
+      else artists.set(key, { name, score });
+    };
+    for (const artist of [...lastFm.artists, ...listenBrainz.artists])
+      addArtist(artist.name, artist.score);
     // Without a scrobbler, the artists someone adds or likes are the best
     // signal. Counted on the same scale as the track weights, so an added song
     // is worth one artist point and a like is worth what it is still worth:
@@ -796,12 +777,7 @@ export class RecommendationCatalog {
     if (!artists.size)
       for (const track of [...added, ...liked]) {
         const name = firstArtist(track.artist);
-        const key = normalizeToken(name);
-        if (!key) continue;
-        const score = track.weight / addedWeight;
-        const existing = artists.get(key);
-        if (existing) existing.score += score;
-        else artists.set(key, { name, score });
+        if (normalizeToken(name)) addArtist(name, track.weight / addedWeight);
       }
     return {
       contributions,
@@ -888,16 +864,12 @@ export class RecommendationCatalog {
     const discover = await this.mergePool(
       previous.discover.filter((track) => !profile.known.has(track.key)),
       discoverRanked,
-      discoverPoolSize,
-      discoverResolveAttempts,
       excludedIds,
     );
     for (const track of discover) excludedIds.add(track.metadata.sourceId);
     const favourites = await this.mergePool(
       previous.favourites.filter((track) => !recentKeys.has(track.key)),
       favouritesRanked,
-      favouritesPoolSize,
-      favouritesResolveAttempts,
       excludedIds,
     );
     const now = Date.now();
@@ -914,10 +886,8 @@ export class RecommendationCatalog {
       this.playable.set(track.id, track.metadata);
     }
     const sample = {
-      discover: this.draw(discover, discoverSampleSize).map(playableFromPool),
-      favourites: this.draw(favourites, favouritesSampleSize).map(
-        playableFromPool,
-      ),
+      discover: this.draw(discover, sampleSize).map(playableFromPool),
+      favourites: this.draw(favourites, sampleSize).map(playableFromPool),
     };
     log.info(
       {
@@ -933,13 +903,11 @@ export class RecommendationCatalog {
 
   // Folds this build's ranking into the previous pool: old entries decay,
   // re-recommended ones are bumped, and a bounded number of newcomers are
-  // resolved. The result is the top `size` by score, with a share reserved
-  // for this build's newcomers so incumbents cannot lock the pool.
+  // resolved. The result is the top `poolSize` by score, with a share
+  // reserved for this build's newcomers so incumbents cannot lock the pool.
   private async mergePool(
     previous: PoolTrack[],
     ranked: ScoredTrack[],
-    size: number,
-    attempts: number,
     excluded: Set<string>,
   ) {
     const pool = new Map<string, PoolTrack>();
@@ -965,31 +933,30 @@ export class RecommendationCatalog {
     const resolved = await this.resolvePlayable(
       newcomers,
       seen,
-      size,
-      attempts,
+      poolSize,
+      poolResolveAttempts,
     );
     const fresh: PoolTrack[] = [];
-    for (const candidate of resolved) {
-      const key = trackKey(candidate.track.title, candidate.track.artist);
-      const track = {
+    for (const { track, metadata } of resolved) {
+      const entry = {
         id: `rec_${crypto.randomUUID()}`,
-        key,
-        score: candidate.score,
-        sources: candidate.track.sources,
-        metadata: candidate.metadata,
+        key: keyOf(track),
+        score: track.score,
+        sources: track.sources,
+        metadata,
       };
-      pool.set(key, track);
-      fresh.push(track);
+      pool.set(entry.key, entry);
+      fresh.push(entry);
     }
     const byScore = (a: PoolTrack, b: PoolTrack) => b.score - a.score;
     const reserved = fresh
       .sort(byScore)
-      .slice(0, Math.ceil(size * newcomerShare));
+      .slice(0, Math.ceil(poolSize * newcomerShare));
     const keptIds = new Set(reserved.map((track) => track.id));
     const rest = [...pool.values()]
       .filter((track) => !keptIds.has(track.id))
       .sort(byScore)
-      .slice(0, Math.max(0, size - reserved.length));
+      .slice(0, Math.max(0, poolSize - reserved.length));
     return [...reserved, ...rest].sort(byScore);
   }
 
@@ -1001,10 +968,7 @@ export class RecommendationCatalog {
   ) {
     const seen = new Set(excluded);
     const seenKeys = new Set<string>();
-    const results: (AutoplayCandidate & {
-      track: ScoredTrack;
-      rank: number;
-    })[] = [];
+    const results: (Resolved & { rank: number })[] = [];
     await mapPool(
       ranked.slice(0, attempts).map((track, rank) => ({ track, rank })),
       searchConcurrency,
@@ -1019,25 +983,11 @@ export class RecommendationCatalog {
         seen.add(metadata.sourceId);
         seenKeys.add(key);
         seenKeys.add(keyOf(metadata));
-        results.push({
-          sourceId: metadata.sourceId,
-          score: track.score,
-          seedCount: Math.max(
-            1,
-            track.userIds.filter((id) => !syntheticUsers.has(id)).length,
-          ),
-          discovery: false,
-          listenerIds: track.userIds.filter((id) => !syntheticUsers.has(id)),
-          metadata,
-          track,
-          rank,
-        });
+        results.push({ track, metadata, rank });
       },
     );
     // Lookups finish out of order; hand back the caller's order.
-    return results
-      .sort((a, b) => a.rank - b.rank)
-      .map(({ rank: _, ...candidate }) => candidate);
+    return results.sort((a, b) => a.rank - b.rank);
   }
 
   // Turns a title/artist pair into playable metadata: a track that already
