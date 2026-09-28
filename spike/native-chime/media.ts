@@ -1,7 +1,7 @@
 // Throwaway spike: native Chime attendee that sends audio (+ optional video),
 // logs speech signals and reconnects after a drop.
 // Usage: bun media.ts [--video] [--no-audio] [--seconds N] [--channel C]
-//                     [--ducking off|gentle|strong]
+//                     [--ducking off|gentle|strong] [--video-image card.png]
 import nodeDataChannel from "node-datachannel";
 import { createEncoder, Application, Signal } from "libopus-wasm";
 import { loadEnv, redact, roomsJoin, Signaling } from "./chime";
@@ -25,6 +25,16 @@ const withAudio = !process.argv.includes("--no-audio");
 const seconds = Number(arg("seconds") ?? 60);
 const channel = arg("channel") ?? "C0BPVPVLQ4D";
 const duckingMode = parseDuckingMode(arg("ducking"));
+const videoImage = arg("video-image");
+// Timing marks for bench.ts; each is printed once.
+const marked = new Set<string>();
+const mark = (name: string) => {
+  if (marked.has(name)) return;
+  marked.add(name);
+  console.log(
+    `[${((performance.now() - t0) / 1000).toFixed(1).padStart(6)}s] MARK ${name}`,
+  );
+};
 const t0 = performance.now();
 const stamp = () =>
   `[${((performance.now() - t0) / 1000).toFixed(1).padStart(6)}s]`;
@@ -57,6 +67,7 @@ const speech = {
 // ---- join ----------------------------------------------------------------------
 let { meeting, attendee } = await roomsJoin(channel);
 let selfId: string = attendee.AttendeeId;
+mark("rooms_join");
 const audioSessionId = Math.floor(Math.random() * 2 ** 32);
 say(
   "rooms.join ok, attendee",
@@ -201,11 +212,41 @@ function senderReport(
   p.writeUInt32BE(octets >>> 0, 24);
   return p;
 }
+// What the server reports about our streams (RTCP receiver report blocks), to
+// compare with Chromium's remote-inbound-rtp stats.
+const remote: Record<string, unknown> = {};
+function reportBlocks(buf: Buffer, off: number, count: number, end: number) {
+  for (let i = 0; i < count && off + 24 <= end; i++, off += 24) {
+    const ssrc = buf.readUInt32BE(off);
+    const kind =
+      ssrc === audioSsrc ? "audio" : ssrc === videoSsrc ? "video" : undefined;
+    if (!kind) continue;
+    const lsr = buf.readUInt32BE(off + 16),
+      dlsr = buf.readUInt32BE(off + 20);
+    const ntp = Date.now() / 1000 + 2208988800;
+    const nowMid =
+      ((Math.floor(ntp) & 0xffff) * 65536 + Math.floor((ntp % 1) * 65536)) >>>
+      0;
+    remote[kind] = {
+      fractionLost: Number((buf[off + 4] / 256).toFixed(3)),
+      packetsLost: buf.readIntBE(off + 5, 3),
+      jitterMs: Math.round(
+        buf.readUInt32BE(off + 12) / (kind === "audio" ? 48 : 90),
+      ),
+      rttMs: lsr
+        ? Math.round((((nowMid - lsr - dlsr) >>> 0) / 65536) * 1000)
+        : null,
+    };
+  }
+}
 const rtcpKinds = (buf: Buffer) => {
   let off = 0;
   while (off + 4 <= buf.length) {
     const pt = buf[off + 1],
       fmt = buf[off] & 0x1f;
+    const end = off + (buf.readUInt16BE(off + 2) + 1) * 4;
+    if (pt === 200) reportBlocks(buf, off + 28, fmt, end);
+    if (pt === 201) reportBlocks(buf, off + 8, fmt, end);
     if (pt === 206 && fmt === 1) stats.pli++;
     if (pt === 206 && fmt === 15) stats.remb++;
     if (pt === 205 && fmt === 1) stats.nack++;
@@ -276,6 +317,7 @@ async function connectWith(
   await sig.connect();
   sig.join();
   const ack = await sig.wait("JOIN_ACK");
+  mark("join_ack");
   const index = await sig.wait("INDEX").catch(() => undefined);
   say(
     "INDEX",
@@ -329,6 +371,7 @@ async function connectWith(
   pc.onStateChange((st: string) => say("pc state", st));
   pc.onIceStateChange((st: string) => {
     say("ice state", st);
+    if (st === "connected") mark("ice_connected");
     if (st === "failed" || st === "closed") lost(s, `ice ${st}`);
   });
   audioTrack.onMessage((m: Buffer) => {
@@ -402,6 +445,7 @@ async function connectWith(
     },
   });
   const subAck = await sig.wait("SUBSCRIBE_ACK");
+  mark("subscribe_ack");
   say(
     "SUBSCRIBE_ACK",
     JSON.stringify({
@@ -564,6 +608,7 @@ function startAudio() {
           )
         ) {
           stats.audioSent++;
+          mark("audio_flowing");
           stats.audioBytes += payload.length;
         }
       } else sample += 960;
@@ -587,18 +632,30 @@ async function startVideo() {
       "-loglevel",
       "error",
       "-re",
-      "-f",
-      "lavfi",
-      "-i",
-      hasDrawtext
-        ? "testsrc2=size=720x720:rate=15"
-        : "testsrc=size=720x720:rate=15",
-      ...(hasDrawtext
+      // --video-image sends a static card, like the v1 plan; otherwise a test
+      // pattern.
+      // The card is decoded and scaled once, then its frame repeats.
+      ...(videoImage
         ? [
-            "-vf",
-            "drawtext=text='HuddleFM native spike %{localtime\\:%T}':fontcolor=white:fontsize=36:box=1:boxcolor=black@0.6:x=(w-tw)/2:y=h-80",
+            "-f",
+            "lavfi",
+            "-i",
+            `movie='${videoImage.replaceAll("'", "\\'")}',scale=720:720,loop=loop=-1:size=1:start=0,setpts=N/15/TB,fps=15`,
           ]
-        : []),
+        : [
+            "-f",
+            "lavfi",
+            "-i",
+            hasDrawtext
+              ? "testsrc2=size=720x720:rate=15"
+              : "testsrc=size=720x720:rate=15",
+            ...(hasDrawtext
+              ? [
+                  "-vf",
+                  "drawtext=text='HuddleFM native spike %{localtime\\:%T}':fontcolor=white:fontsize=36:box=1:boxcolor=black@0.6:x=(w-tw)/2:y=h-80",
+                ]
+              : []),
+          ]),
       "-c:v",
       "libx264",
       "-preset",
@@ -609,14 +666,20 @@ async function startVideo() {
       "baseline",
       "-pix_fmt",
       "yuv420p",
-      "-b:v",
-      "800k",
-      "-maxrate",
-      "1000k",
-      "-bufsize",
-      "500k",
-      "-g",
-      "15",
+      // A still card needs a quality target, not a bitrate to fill, and few
+      // keyframes (each one resends the whole image).
+      ...(videoImage
+        ? ["-crf", "30", "-maxrate", "1000k", "-bufsize", "1000k", "-g", "45"]
+        : [
+            "-b:v",
+            "800k",
+            "-maxrate",
+            "1000k",
+            "-bufsize",
+            "500k",
+            "-g",
+            "15",
+          ]),
       "-bf",
       "0",
       "-x264-params",
@@ -668,6 +731,7 @@ async function startVideo() {
       }
     }
     stats.videoFrames++;
+    mark("video_flowing");
     lastVideoTs = ts;
   };
   for await (const chunk of ffmpeg.stdout as ReadableStream<Uint8Array>) {
@@ -742,6 +806,7 @@ const statTimer = setInterval(() => {
       duckGain: Number(duckGainAt(performance.now()).toFixed(2)),
       undecodableFrames: undecodable + (session?.sig.undecodable ?? 0),
       connected: !!session?.open,
+      remote,
     }),
   );
 }, 10000);
@@ -756,7 +821,7 @@ async function shutdown(reason: string) {
   clearInterval(watchdog);
   clearTimeout(duckTimer);
   ffmpeg?.kill();
-  say("final", JSON.stringify({ ...stats, ...speech }));
+  say("final", JSON.stringify({ ...stats, ...speech, remote }));
   const s = session;
   if (s) {
     try {

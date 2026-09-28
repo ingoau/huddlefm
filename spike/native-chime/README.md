@@ -14,6 +14,8 @@ It has its own `package.json` and is excluded from the root `tsconfig.json`. Not
 
 - `chime.ts` holds `rooms.join` and a minimal Chime signaling client: protobuf over WebSocket, JOIN, SUBSCRIBE, ping/pong, LEAVE.
 - `recon.ts` joins, prints the JOIN_ACK and INDEX, and leaves. It sends no media.
+- `chromium.ts` runs the current Chromium backend for comparison: it builds `src/media-page.ts`, serves it like the bot, launches Chrome with `MediaBrowserPool`'s flags and plays the same arpeggio.
+- `bench.ts` runs either backend, samples its whole process tree (RSS and CPU) and times its `MARK` lines. Results go to `bench-results/` (gitignored).
 - `media.ts` runs the full attendee. It connects through a `node-datachannel` peer (relay only), sends Opus audio at 128k stereo, optionally sends H.264 video through ffmpeg, logs speech signals and ducks the audio while someone talks. It reconnects when the signaling socket closes, ICE fails, or no signaling frame arrives for 15 s.
 - `SignalingProtocol.proto` is copied from `amazon-chime-sdk-js` v3.31.0 (Apache-2.0, see `SignalingProtocol.LICENSE` and `.NOTICE`).
 
@@ -44,6 +46,9 @@ bun media.ts --seconds 120                       # audio + speech signals
 bun media.ts --video --seconds 120               # adds a video tile
 bun media.ts --video --no-audio --seconds 60     # video only
 bun media.ts --ducking strong                    # off | gentle (default) | strong
+bun media.ts --video --video-image card.png      # static card instead of a test pattern
+bun bench.ts chromium --label chromium -- --seconds 75 --rejoin
+bun bench.ts native --label native -- --video --video-image bench-results/card.png --seconds 45
 ```
 
 - The default channel is `C0BPVPVLQ4D`; override it with `--channel`.
@@ -134,6 +139,27 @@ Drops were simulated by freezing the bun process with `SIGSTOP`/`SIGCONT`, so th
 | Audio + video + ducking, 210 s       | 28–67 MB | 12.1 s (about 6%) | 24–29 MB   | 18.4 s (about 9%) |
 
 CPU is a share of one Apple Silicon core. The peak RSS is at startup; no run showed RSS growing over time.
+
+### Chromium versus native (one huddle, same machine)
+
+Both played the same arpeggio into the same huddle, one after the other. Chromium ran the real `src/media-page.ts` (Chrome 154, headless, launched like `MediaBrowserPool`) with artwork, title and progress. Native sent a screenshot of that page as a static card (`--video-image`). CPU and memory are the whole process tree in a steady window from 10 s after audio started until leaving.
+
+|                                      | Chromium                                                      | Native                                      |
+| ------------------------------------ | ------------------------------------------------------------- | ------------------------------------------- |
+| Join, cold (start to audio flowing)  | 9.5 s: launch 5.3, `rooms.join` 0.6, page 2.3, Chime join 1.3 | 1.5–2.2 s over three runs                   |
+| Join, warm (browser already running) | 2.8 s                                                         | same as cold                                |
+| CPU (share of one M4 core)           | about 40%: renderer 23, GPU 12, other helpers 5               | about 13%: bun 6, ffmpeg 7                  |
+| Memory, steady                       | about 460 MB across 11 processes                              | about 88 MB (bun about 55, ffmpeg about 25) |
+| Memory, peak                         | about 1 GB (at launch)                                        | 149 MB                                      |
+| Audio                                | Opus, 128 kbps                                                | Opus, 128 kbps                              |
+| Video                                | VP9 (libvpx), 30 fps, about 50 kbps                           | H.264 baseline, 15 fps, about 190 kbps      |
+| Server-reported loss / RTT           | 0 / 25–38 ms                                                  | 0 / 26–34 ms                                |
+
+- The harness's own bun process (56 MB, 1% CPU) is not counted for Chromium, since the bot's process exists either way.
+- The first native card run used 23% CPU. ffmpeg re-decoded the PNG every frame and filled an 800 kbps target on a still image. Decoding once, looping the frame, CRF 30 and a 3 s keyframe interval brought ffmpeg from 17.5% to 7%. The testsrc pipeline still uses the fixed bitrate.
+- Chromium's browser and GPU processes are shared between huddles, so each extra huddle costs it less than the single-huddle figure. That was not measured.
+- These are macOS numbers with a GPU. In the Docker image Chromium renders in software, so its CPU cost there is likely higher.
+- Native's card is a fixed screenshot. A v1 card redrawn with `@napi-rs/canvas` for progress would add some CPU.
 
 ### Not tested
 
