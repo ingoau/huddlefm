@@ -153,71 +153,63 @@ export function parseIntegrationMessage(text: string): IntegrationParseResult {
       },
     };
   }
-  const command: IntegrationCommand = { type };
-  if (typeof body.channel === "string" && body.channel)
-    command.channel = body.channel;
-  if (typeof body.query === "string") command.query = body.query;
-  if (typeof body.reference === "string") command.reference = body.reference;
-  if (typeof body.trackId === "string") command.trackId = body.trackId;
-  if (body.direction === "up" || body.direction === "down")
-    command.direction = body.direction;
-  if (typeof body.playNext === "boolean") command.playNext = body.playNext;
-  if (typeof body.position === "number") command.position = body.position;
-  if (typeof body.seconds === "number") command.seconds = body.seconds;
-  if (typeof body.percent === "number") command.percent = body.percent;
-  if (
-    typeof body.displayMode === "string" &&
-    displayModes.includes(body.displayMode as (typeof displayModes)[number])
-  )
-    command.displayMode = body.displayMode as (typeof displayModes)[number];
-  if (typeof body.autoplay === "boolean") command.autoplay = body.autoplay;
-  if (
-    typeof body.autoplay === "string" &&
-    autoplayModes.includes(body.autoplay as (typeof autoplayModes)[number])
-  )
-    command.autoplayMode = body.autoplay as (typeof autoplayModes)[number];
-  if (
-    typeof body.autoplayMode === "string" &&
-    autoplayModes.includes(body.autoplayMode as (typeof autoplayModes)[number])
-  )
-    command.autoplayMode = body.autoplayMode as (typeof autoplayModes)[number];
-  if (
-    typeof body.loopMode === "string" &&
-    loopModes.includes(body.loopMode as (typeof loopModes)[number])
-  )
-    command.loopMode = body.loopMode as (typeof loopModes)[number];
-  if (
-    typeof body.loop === "string" &&
-    loopModes.includes(body.loop as (typeof loopModes)[number])
-  )
-    command.loopMode = body.loop as (typeof loopModes)[number];
-  if (
-    typeof body.transitionMode === "string" &&
-    transitionModes.includes(
-      body.transitionMode as (typeof transitionModes)[number],
-    )
-  )
-    command.transitionMode =
-      body.transitionMode as (typeof transitionModes)[number];
-  if (
-    typeof body.duckingMode === "string" &&
-    duckingModes.includes(body.duckingMode as (typeof duckingModes)[number])
-  )
-    command.duckingMode = body.duckingMode as (typeof duckingModes)[number];
-  if (
-    typeof body.ducking === "string" &&
-    duckingModes.includes(body.ducking as (typeof duckingModes)[number])
-  )
-    command.duckingMode = body.ducking as (typeof duckingModes)[number];
-  if (typeof body.anchorEnabled === "boolean")
-    command.anchorEnabled = body.anchorEnabled;
-  return { ok: true, command };
+  // Short aliases (autoplay, loop, ducking) are accepted alongside the full
+  // field names; a valid full name wins for autoplay, an alias for the rest.
+  const fields: Omit<IntegrationCommand, "type"> = {
+    channel: string(body.channel) || undefined,
+    query: string(body.query),
+    reference: string(body.reference),
+    trackId: string(body.trackId),
+    direction: mode(["up", "down"] as const, body.direction),
+    playNext: boolean(body.playNext),
+    position: number(body.position),
+    seconds: number(body.seconds),
+    percent: number(body.percent),
+    displayMode: mode(displayModes, body.displayMode),
+    autoplay: boolean(body.autoplay),
+    autoplayMode:
+      mode(autoplayModes, body.autoplayMode) ??
+      mode(autoplayModes, body.autoplay),
+    loopMode: mode(loopModes, body.loop) ?? mode(loopModes, body.loopMode),
+    transitionMode: mode(transitionModes, body.transitionMode),
+    duckingMode:
+      mode(duckingModes, body.ducking) ?? mode(duckingModes, body.duckingMode),
+    anchorEnabled: boolean(body.anchorEnabled),
+  };
+  return { ok: true, command: { type, ...defined(fields) } };
+}
+
+const string = (value: unknown) =>
+  typeof value === "string" ? value : undefined;
+const number = (value: unknown) =>
+  typeof value === "number" ? value : undefined;
+const boolean = (value: unknown) =>
+  typeof value === "boolean" ? value : undefined;
+
+function mode<T extends string>(modes: readonly T[], value: unknown) {
+  return modes.includes(value as T) ? (value as T) : undefined;
+}
+
+function defined<T extends object>(value: T) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, field]) => field !== undefined),
+  ) as T;
 }
 
 function stringList(value: unknown) {
   if (!Array.isArray(value)) return;
   if (!value.every((item) => typeof item === "string")) return;
   return value as string[];
+}
+
+function parseJson(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed && typeof parsed === "object")
+      return parsed as Record<string, unknown>;
+  } catch {
+    return;
+  }
 }
 
 export function integrationReply(
@@ -276,19 +268,35 @@ export function integrationActionValue(sessionId: string, requestId: string) {
 }
 
 export function parseIntegrationActionValue(value: string) {
-  try {
-    const parsed = JSON.parse(value) as {
-      sessionId?: unknown;
-      requestId?: unknown;
-    };
-    if (
-      typeof parsed.sessionId === "string" &&
-      typeof parsed.requestId === "string"
-    )
-      return { sessionId: parsed.sessionId, requestId: parsed.requestId };
-  } catch {
-    return;
-  }
+  const parsed = parseJson(value);
+  if (
+    typeof parsed?.sessionId === "string" &&
+    typeof parsed.requestId === "string"
+  )
+    return { sessionId: parsed.sessionId, requestId: parsed.requestId };
+}
+
+function bullets(labels: string[]) {
+  return labels.map((label) => `• ${label}`).join("\n");
+}
+
+function section(text: string) {
+  return { type: "section", text: { type: "mrkdwn", text } };
+}
+
+function button(
+  actionId: string,
+  label: string,
+  value: string,
+  style?: "primary" | "danger",
+) {
+  return {
+    type: "button",
+    action_id: actionId,
+    text: plain(label),
+    ...(style ? { style } : {}),
+    value,
+  };
 }
 
 export function integrationRequestBlocks(options: {
@@ -300,51 +308,19 @@ export function integrationRequestBlocks(options: {
   events: string[];
 }) {
   const value = integrationActionValue(options.sessionId, options.requestId);
-  const permissions = permissionLabelList(options.permissions)
-    .map((label) => `• ${label}`)
-    .join("\n");
-  const events = eventLabelList(options.events)
-    .map((label) => `• ${label}`)
-    .join("\n");
+  const permissions = bullets(permissionLabelList(options.permissions));
+  const events = bullets(eventLabelList(options.events));
   return [
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `<@${options.userId}> wants to control this session in <#${options.channel}>.`,
-      },
-    },
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Permissions*\n${permissions || "• None"}`,
-      },
-    },
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Events*\n${events || "• None"}`,
-      },
-    },
+    section(
+      `<@${options.userId}> wants to control this session in <#${options.channel}>.`,
+    ),
+    section(`*Permissions*\n${permissions || "• None"}`),
+    section(`*Events*\n${events || "• None"}`),
     {
       type: "actions",
       elements: [
-        {
-          type: "button",
-          action_id: "integration_accept",
-          text: plain("Accept"),
-          style: "primary",
-          value,
-        },
-        {
-          type: "button",
-          action_id: "integration_decline",
-          text: plain("Decline"),
-          style: "danger",
-          value,
-        },
+        button("integration_accept", "Accept", value, "primary"),
+        button("integration_decline", "Decline", value, "danger"),
       ],
     },
   ];
@@ -357,28 +333,14 @@ export function integrationGrantedBlocks(options: {
   permissions: string[];
 }) {
   const value = integrationActionValue(options.sessionId, options.requestId);
-  const permissions = permissionLabelList(options.permissions)
-    .map((label) => `• ${label}`)
-    .join("\n");
+  const permissions = bullets(permissionLabelList(options.permissions));
   return [
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `Granted <@${options.userId}> control of this session.\n${permissions}`,
-      },
-    },
+    section(
+      `Granted <@${options.userId}> control of this session.\n${permissions}`,
+    ),
     {
       type: "actions",
-      elements: [
-        {
-          type: "button",
-          action_id: "integration_revoke",
-          text: plain("Revoke"),
-          style: "danger",
-          value,
-        },
-      ],
+      elements: [button("integration_revoke", "Revoke", value, "danger")],
     },
   ];
 }
@@ -391,21 +353,14 @@ export function integrationSettingsPageValue(sessionId: string, page: number) {
 }
 
 export function parseIntegrationSettingsPage(value: string) {
-  try {
-    const parsed = JSON.parse(value) as {
-      sessionId?: unknown;
-      page?: unknown;
-    };
-    if (
-      typeof parsed.sessionId === "string" &&
-      typeof parsed.page === "number" &&
-      Number.isInteger(parsed.page) &&
-      parsed.page >= 0
-    )
-      return { sessionId: parsed.sessionId, page: parsed.page };
-  } catch {
-    return;
-  }
+  const parsed = parseJson(value);
+  if (
+    typeof parsed?.sessionId === "string" &&
+    typeof parsed.page === "number" &&
+    Number.isInteger(parsed.page) &&
+    parsed.page >= 0
+  )
+    return { sessionId: parsed.sessionId, page: parsed.page };
 }
 
 export function integrationSettingsBlocks(options: {
@@ -437,26 +392,18 @@ export function integrationSettingsBlocks(options: {
   const page = Math.min(Math.max(0, options.page ?? 0), pageCount - 1);
   const start = page * pageSize;
   const slice = options.grants.slice(start, start + pageSize);
+  const pageButton = (actionId: string, label: string, target: number) =>
+    button(
+      actionId,
+      label,
+      integrationSettingsPageValue(options.sessionId, target),
+    );
   const elements = [
     ...(page > 0
-      ? [
-          {
-            type: "button" as const,
-            action_id: "integration_grants_prev",
-            text: plain("Previous"),
-            value: integrationSettingsPageValue(options.sessionId, page - 1),
-          },
-        ]
+      ? [pageButton("integration_grants_prev", "Previous", page - 1)]
       : []),
     ...(page < pageCount - 1
-      ? [
-          {
-            type: "button" as const,
-            action_id: "integration_grants_next",
-            text: plain("Next"),
-            value: integrationSettingsPageValue(options.sessionId, page + 1),
-          },
-        ]
+      ? [pageButton("integration_grants_next", "Next", page + 1)]
       : []),
   ];
   return [
@@ -475,9 +422,7 @@ function integrationGrantBlocks(
   grants: { userId: string; requestId: string; permissions: string[] }[],
 ) {
   return grants.flatMap((grant) => {
-    const permissions = permissionLabelList(grant.permissions)
-      .map((label) => `• ${label}`)
-      .join("\n");
+    const permissions = bullets(permissionLabelList(grant.permissions));
     return [
       {
         type: "section",
@@ -492,11 +437,12 @@ function integrationGrantBlocks(
         block_id: `integration_actions_${grant.userId}`,
         elements: [
           {
-            type: "button",
-            action_id: "integration_revoke",
-            text: plain("Revoke"),
-            style: "danger",
-            value: integrationActionValue(sessionId, grant.requestId),
+            ...button(
+              "integration_revoke",
+              "Revoke",
+              integrationActionValue(sessionId, grant.requestId),
+              "danger",
+            ),
             confirm: confirm(
               "Revoke control?",
               `This stops <@${grant.userId}> from controlling this session.`,
