@@ -46,19 +46,29 @@ import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
 import type { WorkspaceAdmins } from "./workspace-admins.ts";
 import {
+  actions,
+  addedBy,
+  artworkIcon,
   auditTrack,
+  button,
+  capitalize,
   confirm,
+  context,
   elapsed,
   escape,
   footerContext,
   icon,
+  input,
   likeValue,
+  modeSelect,
   permissionLabels,
   plain,
   safeAuditError,
+  section,
   sectionBlocks,
   songCount,
-  staticSelect,
+  toggle,
+  when,
 } from "./coordinator-ui.ts";
 import {
   eventGroup,
@@ -132,6 +142,22 @@ function throwIfAborted(signal?: AbortSignal) {
 // What the person who pressed the like button hears back. Nobody else sees it,
 // so it says what the like is for rather than announcing it to the room.
 const likedNotice = "This will be recommended to you more";
+
+const autoplayDescriptions: Record<AutoplayMode, string> = {
+  off: "Do not queue recommendations",
+  related: "Continue from songs requested in this huddle",
+  huddle: "Mix what people in this huddle listen to",
+};
+const loopDescriptions: Record<LoopMode, string> = {
+  off: "Do not repeat",
+  track: "Restart the current song when it ends",
+  queue: "Move finished songs back to the end of the queue",
+};
+const duckingDescriptions: Record<DuckingMode, string> = {
+  off: "Keep playing at full volume",
+  gentle: "Dip the music under the conversation",
+  strong: "Drop the music well back while people talk",
+};
 
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
@@ -2132,26 +2158,19 @@ export class Coordinator {
         likedNotice,
         this.room.uiThreadTs,
         [
-          { type: "section", text: { type: "mrkdwn", text: likedNotice } },
-          {
-            type: "actions",
-            block_id: "track_like",
-            elements: [
-              {
-                type: "button",
-                action_id: "unlike_track",
-                text: plain("Undo"),
-                value: likeValue({
-                  sessionId: this.id,
-                  title: entry.title,
-                  artist: entry.artist,
-                  ...(entry.discovery === undefined
-                    ? {}
-                    : { discovery: entry.discovery }),
-                }),
-              },
-            ],
-          },
+          section(likedNotice),
+          actions("track_like", [
+            button("unlike_track", plain("Undo"), {
+              value: likeValue({
+                sessionId: this.id,
+                title: entry.title,
+                artist: entry.artist,
+                ...(entry.discovery === undefined
+                  ? {}
+                  : { discovery: entry.discovery }),
+              }),
+            }),
+          ]),
         ],
       )
       .catch((error) =>
@@ -3586,7 +3605,6 @@ export class Coordinator {
           value: track.id,
         })),
       }));
-    const canBulk = this.can(interaction.userId, "add-bulk");
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
       callback_id: "add_track_to_queue",
@@ -3595,71 +3613,53 @@ export class Coordinator {
       submit: plain("Add"),
       close: plain("Cancel"),
       blocks: [
-        {
-          type: "input",
-          block_id: "track",
-          optional: Boolean(recent.length || recommendedGroups.length),
-          label: plain("Song, album, playlist, or link"),
-          element: {
+        input(
+          "track",
+          "Song, album, playlist, or link",
+          {
             type: "external_select",
             action_id: "selection",
             placeholder: plain("Search or paste a link"),
             min_query_length: 3,
             focus_on_load: true,
           },
-        },
-        ...(recommendedGroups.length
-          ? [
-              {
-                type: "input",
-                block_id: "recommend",
-                optional: true,
-                label: plain("Recommended for you"),
-                element: {
-                  type: "static_select",
-                  action_id: "selection",
-                  placeholder: plain("Choose a recommendation"),
-                  option_groups: recommendedGroups,
-                },
-              },
-            ]
-          : []),
-        ...(recent.length
-          ? [
-              {
-                type: "input",
-                block_id: "recent",
-                optional: true,
-                label: plain("Recent songs"),
-                element: {
-                  type: "static_select",
-                  action_id: "selection",
-                  placeholder: plain("Choose a recent song"),
-                  options: recent.map((track) => ({
-                    text: plain(
-                      `${track.title} — ${track.artist}`.slice(0, 75),
-                    ),
-                    value: track.id,
-                  })),
-                },
-              },
-            ]
-          : []),
-        ...(canBulk
-          ? [
-              {
-                type: "actions",
-                block_id: "bulk_add",
-                elements: [
-                  {
-                    type: "button",
-                    action_id: "open_bulk_add",
-                    text: plain("Add in bulk"),
-                  },
-                ],
-              },
-            ]
-          : []),
+          { optional: Boolean(recent.length || recommendedGroups.length) },
+        ),
+        ...when(
+          recommendedGroups.length,
+          input(
+            "recommend",
+            "Recommended for you",
+            {
+              type: "static_select",
+              action_id: "selection",
+              placeholder: plain("Choose a recommendation"),
+              option_groups: recommendedGroups,
+            },
+            { optional: true },
+          ),
+        ),
+        ...when(
+          recent.length,
+          input(
+            "recent",
+            "Recent songs",
+            {
+              type: "static_select",
+              action_id: "selection",
+              placeholder: plain("Choose a recent song"),
+              options: recent.map((track) => ({
+                text: plain(`${track.title} — ${track.artist}`.slice(0, 75)),
+                value: track.id,
+              })),
+            },
+            { optional: true },
+          ),
+        ),
+        ...when(
+          this.can(interaction.userId, "add-bulk"),
+          actions("bulk_add", [button("open_bulk_add", plain("Add in bulk"))]),
+        ),
       ],
     });
   }
@@ -3683,14 +3683,10 @@ export class Coordinator {
       submit: plain("Add"),
       close: plain("Cancel"),
       blocks: [
-        {
-          type: "input",
-          block_id: "links",
-          label: plain("Track links"),
-          hint: plain(
-            "One HTTP(S) link per line. Blank lines and # comments are ignored.",
-          ),
-          element: {
+        input(
+          "links",
+          "Track links",
+          {
             type: "plain_text_input",
             action_id: "text",
             multiline: true,
@@ -3699,7 +3695,10 @@ export class Coordinator {
               "https://example.com/a.mp3\nhttps://example.com/b.mp3",
             ),
           },
-        },
+          {
+            hint: "One HTTP(S) link per line. Blank lines and # comments are ignored.",
+          },
+        ),
       ],
     };
   }
@@ -3802,17 +3801,12 @@ export class Coordinator {
       submit: plain("Move"),
       close: plain("Cancel"),
       blocks: [
-        {
-          type: "input",
-          block_id: "position",
-          label: plain(`Position (1–${this.queue.length})`),
-          element: {
-            type: "plain_text_input",
-            action_id: "value",
-            initial_value: String(position),
-            placeholder: plain("For example, 3"),
-          },
-        },
+        input("position", `Position (1–${this.queue.length})`, {
+          type: "plain_text_input",
+          action_id: "value",
+          initial_value: String(position),
+          placeholder: plain("For example, 3"),
+        }),
       ],
     });
   }
@@ -3850,6 +3844,7 @@ export class Coordinator {
 
   private queueView(userId: string) {
     const manages = this.can(userId, "manage-queue");
+    const last = this.queue.length - 1;
     return {
       type: "modal",
       callback_id: "manage_queue",
@@ -3859,104 +3854,54 @@ export class Coordinator {
       close: plain("Close"),
       blocks: this.queue.length
         ? [
-            ...(manages && this.shufflableCount() > 1
-              ? [
-                  {
-                    type: "actions",
-                    block_id: "queue_shuffle",
-                    elements: [
-                      {
-                        type: "button",
-                        action_id: "shuffle_queue",
-                        text: plain("Shuffle"),
-                        value: this.id,
-                      },
-                    ],
-                  },
-                ]
-              : []),
+            ...when(
+              manages && this.shufflableCount() > 1,
+              actions("queue_shuffle", [
+                button("shuffle_queue", plain("Shuffle"), { value: this.id }),
+              ]),
+            ),
             ...this.queue.flatMap((track, index) => {
+              const value = track.id;
               const controls = [
-                ...(manages && index
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_play_next",
-                        text: plain("Play next"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages && index
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_move_up",
-                        text: plain("Up"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages && index < this.queue.length - 1
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_move_down",
-                        text: plain("Down"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "queue_move_to_position",
-                        text: plain("Move to…"),
-                        value: track.id,
-                      },
-                    ]
-                  : []),
-                ...(manages ||
-                (track.requesterId === userId && this.can(userId, "remove-own"))
-                  ? [
-                      {
-                        type: "button",
-                        action_id: "remove_queue_track",
-                        text: plain("Remove"),
-                        style: "danger",
-                        value: track.id,
-                      },
-                    ]
-                  : []),
+                ...when(
+                  manages && index,
+                  button("queue_play_next", plain("Play next"), { value }),
+                ),
+                ...when(
+                  manages && index,
+                  button("queue_move_up", plain("Up"), { value }),
+                ),
+                ...when(
+                  manages && index < last,
+                  button("queue_move_down", plain("Down"), { value }),
+                ),
+                ...when(
+                  manages,
+                  button("queue_move_to_position", plain("Move to…"), {
+                    value,
+                  }),
+                ),
+                ...when(
+                  this.canRemove(userId, track),
+                  button("remove_queue_track", plain("Remove"), {
+                    style: "danger",
+                    value,
+                  }),
+                ),
               ];
               return [
-                {
-                  type: "section",
-                  block_id: `queue_item_${track.id}`,
-                  text: {
-                    type: "mrkdwn",
-                    text: `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.automatic ? "Autoplay recommendation" : `Added by <@${track.requesterId}>`}`,
-                  },
-                },
-                ...(controls.length
-                  ? [
-                      {
-                        type: "actions",
-                        block_id: `queue_actions_${track.id}`,
-                        elements: controls,
-                      },
-                    ]
-                  : []),
+                section(
+                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${addedBy(track)}`,
+                  `queue_item_${track.id}`,
+                ),
+                ...when(
+                  controls.length,
+                  actions(`queue_actions_${track.id}`, controls),
+                ),
               ];
             }),
           ]
-        : [
-            {
-              type: "section",
-              text: { type: "mrkdwn", text: "The queue is empty." },
-            },
-          ],
+        : [section("The queue is empty.")],
     };
   }
 
@@ -4092,413 +4037,262 @@ export class Coordinator {
       sessionEnabled: false,
     };
     const admin = this.settingsAdmin(userId);
-    const canChangeVolume = this.can(userId, "volume");
-    const canConfigure = this.can(userId, "configure-settings");
-    const canEnd = this.can(userId, "end-session");
+    const value = this.id;
     const sessionBlocks = [
       { type: "header", text: plain("Session") },
-      ...(canChangeVolume
-        ? [
-            {
-              type: "input",
-              block_id: "volume",
-              label: plain("Volume (%)"),
-              element: {
-                type: "plain_text_input",
-                action_id: "percent",
-                initial_value: String(Math.round(this.volume * 10_000) / 100),
-              },
-            },
-          ]
-        : []),
-      ...(canConfigure
-        ? [
-            {
-              type: "input",
-              block_id: "display",
-              label: plain("Display mode"),
-              element: staticSelect(
-                "mode",
-                displayModes.map((mode) => ({
-                  text: plain(mode[0]!.toUpperCase() + mode.slice(1)),
-                  value: mode,
-                })),
-                this.displayMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "autoplay",
-              optional: true,
-              label: plain("Autoplay"),
-              hint: plain("Play recommendations when the queue is empty"),
-              element: staticSelect(
-                "mode",
-                autoplayModes.map((mode) => ({
-                  text: plain(autoplayModeLabels[mode]),
-                  value: mode,
-                  description: plain(
-                    mode === "related"
-                      ? "Continue from songs requested in this huddle"
-                      : mode === "huddle"
-                        ? "Mix what people in this huddle listen to"
-                        : "Do not queue recommendations",
-                  ),
-                })),
-                this.autoplayMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "loop",
-              optional: true,
-              label: plain("Loop"),
-              hint: plain("Repeat the current track or cycle the queue"),
-              element: staticSelect(
-                "mode",
-                loopModes.map((mode) => ({
-                  text: plain(loopModeLabels[mode]),
-                  value: mode,
-                  description: plain(
-                    mode === "track"
-                      ? "Restart the current song when it ends"
-                      : mode === "queue"
-                        ? "Move finished songs back to the end of the queue"
-                        : "Do not repeat",
-                  ),
-                })),
-                this.loopMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "transition",
-              label: plain("Transitions"),
-              element: staticSelect(
-                "mode",
-                transitionModes.map((mode) => ({
-                  text: plain(
-                    mode === "none"
-                      ? "Disabled"
-                      : mode === "adaptive"
-                        ? "Adaptive crossfade"
-                        : mode[0]!.toUpperCase() + mode.slice(1),
-                  ),
-                  value: mode,
-                })),
-                this.transitionMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "ducking",
-              label: plain("Auto-duck"),
-              hint: plain("Lower the music while someone is speaking"),
-              element: staticSelect(
-                "mode",
-                duckingModes.map((mode) => ({
-                  text: plain(duckingModeLabels[mode]),
-                  value: mode,
-                  description: plain(
-                    mode === "gentle"
-                      ? "Dip the music under the conversation"
-                      : mode === "strong"
-                        ? "Drop the music well back while people talk"
-                        : "Keep playing at full volume",
-                  ),
-                })),
-                this.duckingMode,
-              ),
-            },
-            {
-              type: "input",
-              block_id: "anchor",
-              optional: true,
-              label: plain("Thread position"),
-              element: {
-                type: "checkboxes",
-                action_id: "enabled",
-                options: [
-                  {
-                    text: plain("Keep player at bottom of thread"),
-                    value: "enabled",
-                  },
-                ],
-                initial_options: this.anchorEnabled
-                  ? [
-                      {
-                        text: plain("Keep player at bottom of thread"),
-                        value: "enabled",
-                      },
-                    ]
-                  : [],
-              },
-            },
-          ]
-        : []),
-      ...(canEnd
-        ? [
-            {
-              type: "actions",
-              block_id: "session_actions",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "end_session",
-                  text: plain("End session"),
-                  style: "danger",
-                  value: this.id,
-                  confirm: confirm(
-                    "End playback?",
-                    "This stops playback and ends the session.",
-                    "End",
-                  ),
-                },
-              ],
-            },
-          ]
-        : []),
-      ...(admin
-        ? [
-            { type: "header", text: plain("Permissions") },
-            {
-              type: "input",
-              block_id: "host",
-              optional: true,
-              label: plain("Transfer host"),
-              element: {
-                type: "users_select",
-                action_id: "user",
-                ...(this.hostId ? { initial_user: this.hostId } : {}),
-              },
-            },
-            {
-              type: "input",
-              block_id: "permission_preset",
-              optional: true,
-              label: plain("Apply permission preset"),
-              hint: plain("Saving overwrites the custom permissions below."),
-              element: {
-                type: "static_select",
-                action_id: "selected",
-                placeholder: plain("Choose a preset"),
-                options: (
-                  [
-                    ["default", "Default"],
-                    ["host-only", "Host only"],
-                    ["collaborative", "Collaborative"],
-                    ["communism", "Communism"],
-                  ] satisfies [string, string][]
-                ).map(([value, label]) => ({ text: plain(label), value })),
-              },
-            },
-            {
-              type: "input",
-              block_id: "permissions",
-              optional: true,
-              label: plain("Everyone else may"),
-              element: {
-                type: "checkboxes",
-                action_id: "selected",
-                options: capabilities.map((value) => ({
-                  text: plain(permissionLabels[value]),
-                  value,
-                })),
-                initial_options: capabilities
-                  .filter((value) => this.allowed.has(value))
-                  .map((value) => ({
-                    text: plain(permissionLabels[value]),
-                    value,
-                  })),
-              },
-            },
-          ]
-        : []),
+      ...when(
+        this.can(userId, "volume"),
+        input("volume", "Volume (%)", {
+          type: "plain_text_input",
+          action_id: "percent",
+          initial_value: String(Math.round(this.volume * 10_000) / 100),
+        }),
+      ),
+      ...when(
+        this.can(userId, "configure-settings"),
+        input(
+          "display",
+          "Display mode",
+          modeSelect(displayModes, this.displayMode, capitalize),
+        ),
+        input(
+          "autoplay",
+          "Autoplay",
+          modeSelect(
+            autoplayModes,
+            this.autoplayMode,
+            (mode) => autoplayModeLabels[mode],
+            autoplayDescriptions,
+          ),
+          {
+            optional: true,
+            hint: "Play recommendations when the queue is empty",
+          },
+        ),
+        input(
+          "loop",
+          "Loop",
+          modeSelect(
+            loopModes,
+            this.loopMode,
+            (mode) => loopModeLabels[mode],
+            loopDescriptions,
+          ),
+          {
+            optional: true,
+            hint: "Repeat the current track or cycle the queue",
+          },
+        ),
+        input(
+          "transition",
+          "Transitions",
+          modeSelect(transitionModes, this.transitionMode, (mode) =>
+            mode === "none"
+              ? "Disabled"
+              : mode === "adaptive"
+                ? "Adaptive crossfade"
+                : capitalize(mode),
+          ),
+        ),
+        input(
+          "ducking",
+          "Auto-duck",
+          modeSelect(
+            duckingModes,
+            this.duckingMode,
+            (mode) => duckingModeLabels[mode],
+            duckingDescriptions,
+          ),
+          { hint: "Lower the music while someone is speaking" },
+        ),
+        input(
+          "anchor",
+          "Thread position",
+          toggle(
+            "enabled",
+            "Keep player at bottom of thread",
+            this.anchorEnabled,
+          ),
+          { optional: true },
+        ),
+      ),
+      ...when(
+        this.can(userId, "end-session"),
+        actions("session_actions", [
+          button("end_session", plain("End session"), {
+            style: "danger",
+            value,
+            confirm: confirm(
+              "End playback?",
+              "This stops playback and ends the session.",
+              "End",
+            ),
+          }),
+        ]),
+      ),
+      ...when(
+        admin,
+        { type: "header", text: plain("Permissions") },
+        input(
+          "host",
+          "Transfer host",
+          {
+            type: "users_select",
+            action_id: "user",
+            ...(this.hostId ? { initial_user: this.hostId } : {}),
+          },
+          { optional: true },
+        ),
+        input(
+          "permission_preset",
+          "Apply permission preset",
+          {
+            type: "static_select",
+            action_id: "selected",
+            placeholder: plain("Choose a preset"),
+            options: (
+              [
+                ["default", "Default"],
+                ["host-only", "Host only"],
+                ["collaborative", "Collaborative"],
+                ["communism", "Communism"],
+              ] satisfies [string, string][]
+            ).map(([value, label]) => ({ text: plain(label), value })),
+          },
+          {
+            optional: true,
+            hint: "Saving overwrites the custom permissions below.",
+          },
+        ),
+        input(
+          "permissions",
+          "Everyone else may",
+          {
+            type: "checkboxes",
+            action_id: "selected",
+            options: capabilities.map((value) => ({
+              text: plain(permissionLabels[value]),
+              value,
+            })),
+            initial_options: capabilities
+              .filter((value) => this.allowed.has(value))
+              .map((value) => ({
+                text: plain(permissionLabels[value]),
+                value,
+              })),
+          },
+          { optional: true },
+        ),
+      ),
     ];
     const userBlocks = [
       { type: "header", text: plain("User settings") },
-      {
-        type: "input",
-        block_id: "huddle_mix",
-        optional: true,
-        label: plain("Huddle mix"),
-        hint: plain(
-          "Last.fm, ListenBrainz, and songs you've added. Only used while you're in the huddle, and never shown as yours.",
+      input(
+        "huddle_mix",
+        "Huddle mix",
+        toggle(
+          "enabled",
+          "Include my listening in Huddle mix",
+          settings.huddleMixOptIn,
         ),
-        element: {
-          type: "checkboxes",
-          action_id: "enabled",
-          options: [
-            {
-              text: plain("Include my listening in Huddle mix"),
-              value: "enabled",
-            },
-          ],
-          initial_options: settings.huddleMixOptIn
-            ? [
-                {
-                  text: plain("Include my listening in Huddle mix"),
-                  value: "enabled",
-                },
-              ]
-            : [],
+        {
+          optional: true,
+          hint: "Last.fm, ListenBrainz, and songs you've added. Only used while you're in the huddle, and never shown as yours.",
         },
-      },
-      ...(settings.configured
-        ? [
-            {
-              type: "input",
-              block_id: "scrobbling_mode",
-              label: plain("Scrobbling mode"),
-              hint: plain("Sets the default for each Huddle"),
-              element: staticSelect(
-                "mode",
-                scrobblingModes.map((mode) => ({
-                  text: plain(
-                    mode === "ask"
-                      ? "Ask every time"
-                      : mode[0]!.toUpperCase() + mode.slice(1),
-                  ),
-                  value: mode,
-                })),
-                settings.mode,
-              ),
-            },
-            {
-              type: "actions",
-              block_id: "session_scrobbling",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "toggle_session_scrobbling",
-                  text: plain(
-                    `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
-                  ),
-                  value: this.id,
-                },
-              ],
-            },
-          ]
-        : []),
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: settings.lastFmConnected
-            ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
-            : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
-        },
-      },
+      ),
+      ...when(
+        settings.configured,
+        input(
+          "scrobbling_mode",
+          "Scrobbling mode",
+          modeSelect(scrobblingModes, settings.mode, (mode) =>
+            mode === "ask" ? "Ask every time" : capitalize(mode),
+          ),
+          { hint: "Sets the default for each Huddle" },
+        ),
+        actions("session_scrobbling", [
+          button(
+            "toggle_session_scrobbling",
+            plain(
+              `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
+            ),
+            { value },
+          ),
+        ]),
+      ),
+      section(
+        settings.lastFmConnected
+          ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
+          : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
+      ),
       ...(settings.lastFmConnected
         ? [
-            {
-              type: "input",
-              block_id: "lastfm_scrobbling",
-              optional: true,
-              label: plain("Last.fm scrobbling"),
-              element: {
-                type: "checkboxes",
-                action_id: "enabled",
-                options: [{ text: plain("Enabled"), value: "enabled" }],
-                initial_options: settings.lastFmEnabled
-                  ? [{ text: plain("Enabled"), value: "enabled" }]
-                  : [],
-              },
-            },
-            {
-              type: "actions",
-              block_id: "lastfm_actions",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "disconnect_lastfm",
-                  text: plain("Disconnect"),
-                  style: "danger",
-                  value: this.id,
-                  confirm: confirm(
-                    "Disconnect Last.fm?",
-                    "This removes your saved Last.fm login.",
-                    "Disconnect",
-                  ),
-                },
-              ],
-            },
+            input(
+              "lastfm_scrobbling",
+              "Last.fm scrobbling",
+              toggle("enabled", "Enabled", settings.lastFmEnabled),
+              { optional: true },
+            ),
+            actions("lastfm_actions", [
+              button("disconnect_lastfm", plain("Disconnect"), {
+                style: "danger",
+                value,
+                confirm: confirm(
+                  "Disconnect Last.fm?",
+                  "This removes your saved Last.fm login.",
+                  "Disconnect",
+                ),
+              }),
+            ]),
           ]
-        : settings.lastFmAvailable
-          ? [
-              {
-                type: "actions",
-                block_id: "lastfm_actions",
-                elements: [
-                  {
-                    type: "button",
-                    action_id: "connect_lastfm",
-                    text: plain("Log in to Last.fm"),
-                    value: this.id,
-                  },
-                ],
-              },
-            ]
-          : []),
-      {
-        type: "input",
-        block_id: "listenbrainz_scrobbling",
-        optional: true,
-        label: plain("ListenBrainz scrobbling"),
-        hint: plain(
-          settings.listenBrainzConnected
+        : when(
+            settings.lastFmAvailable,
+            actions("lastfm_actions", [
+              button("connect_lastfm", plain("Log in to Last.fm"), { value }),
+            ]),
+          )),
+      input(
+        "listenbrainz_scrobbling",
+        "ListenBrainz scrobbling",
+        toggle("enabled", "Enabled", settings.listenBrainzEnabled),
+        {
+          optional: true,
+          hint: settings.listenBrainzConnected
             ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
             : "Uses your ListenBrainz user token",
-        ),
-        element: {
-          type: "checkboxes",
-          action_id: "enabled",
-          options: [{ text: plain("Enabled"), value: "enabled" }],
-          initial_options: settings.listenBrainzEnabled
-            ? [{ text: plain("Enabled"), value: "enabled" }]
-            : [],
         },
-      },
-      {
-        type: "input",
-        block_id: "listenbrainz_token",
-        optional: true,
-        label: plain("ListenBrainz API key / user token"),
-        hint: plain(
-          settings.listenBrainzConnected
-            ? "Leave blank to keep the saved token"
-            : "Find it in ListenBrainz settings",
-        ),
-        element: {
+      ),
+      input(
+        "listenbrainz_token",
+        "ListenBrainz API key / user token",
+        {
           type: "plain_text_input",
           action_id: "value",
           placeholder: plain(
             settings.listenBrainzConnected ? "Saved" : "Paste token",
           ),
         },
-      },
-      ...(settings.listenBrainzConnected
-        ? [
-            {
-              type: "actions",
-              block_id: "listenbrainz_actions",
-              elements: [
-                {
-                  type: "button",
-                  action_id: "disconnect_listenbrainz",
-                  text: plain("Remove token"),
-                  style: "danger",
-                  value: this.id,
-                  confirm: confirm(
-                    "Remove ListenBrainz token?",
-                    "This disables ListenBrainz scrobbling and removes your saved token.",
-                    "Remove",
-                  ),
-                },
-              ],
-            },
-          ]
-        : []),
+        {
+          optional: true,
+          hint: settings.listenBrainzConnected
+            ? "Leave blank to keep the saved token"
+            : "Find it in ListenBrainz settings",
+        },
+      ),
+      ...when(
+        settings.listenBrainzConnected,
+        actions("listenbrainz_actions", [
+          button("disconnect_listenbrainz", plain("Remove token"), {
+            style: "danger",
+            value,
+            confirm: confirm(
+              "Remove ListenBrainz token?",
+              "This disables ListenBrainz scrobbling and removes your saved token.",
+              "Remove",
+            ),
+          }),
+        ]),
+      ),
     ];
     const integrationBlocks = admin
       ? integrationSettingsBlocks({
@@ -4539,32 +4333,18 @@ export class Coordinator {
         title: plain("Connect Last.fm"),
         close: plain("Cancel"),
         blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: "Authorize HuddleFM in Last.fm, return here, then press Continue.",
-            },
-          },
-          {
-            type: "actions",
-            block_id: "lastfm_login_actions",
-            elements: [
-              {
-                type: "button",
-                action_id: "open_lastfm_authorization",
-                text: plain("Authorize Last.fm"),
-                url,
-              },
-              {
-                type: "button",
-                action_id: "continue_lastfm",
-                text: plain("Continue"),
-                style: "primary",
-                value: this.id,
-              },
-            ],
-          },
+          section(
+            "Authorize HuddleFM in Last.fm, return here, then press Continue.",
+          ),
+          actions("lastfm_login_actions", [
+            button("open_lastfm_authorization", plain("Authorize Last.fm"), {
+              url,
+            }),
+            button("continue_lastfm", plain("Continue"), {
+              style: "primary",
+              value: this.id,
+            }),
+          ]),
         ],
       });
     } catch (error) {
@@ -4592,15 +4372,7 @@ export class Coordinator {
           type: "modal",
           title: plain("Connect Last.fm"),
           close: plain("Done"),
-          blocks: [
-            {
-              type: "section",
-              text: {
-                type: "mrkdwn",
-                text: `Connected as *${escape(username)}*.`,
-              },
-            },
-          ],
+          blocks: [section(`Connected as *${escape(username)}*.`)],
         });
       if (interaction.previousViewId)
         await this.slack.updateModal(
@@ -5038,6 +4810,7 @@ export class Coordinator {
     // Nothing playing, queued, or being chosen: offer to start something
     // instead of controls that have nothing to act on.
     const idle = !current && !next && !this.autoplayPending;
+    const value = this.id;
     return [
       {
         type: "container",
@@ -5048,139 +4821,55 @@ export class Coordinator {
             ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}`
             : "Ready for music",
         ),
-        ...(current?.artwork
-          ? {
-              icon: {
-                type: "image",
-                image_url: current.artwork,
-                alt_text: `${current.title} artwork`,
-              },
-            }
-          : {}),
+        ...artworkIcon(current),
         child_blocks: [
           ...(current
             ? [
-                {
-                  type: "context",
-                  block_id: `current_status_${id}`,
-                  elements: [
-                    {
-                      type: "mrkdwn",
-                      text: current.automatic
-                        ? "Autoplay recommendation"
-                        : `Added by <@${current.requesterId}>`,
-                    },
-                  ],
-                },
+                context(`current_status_${id}`, addedBy(current)),
+                actions(`playback_${id}`, [
+                  button("previous_track", icon(":ms-skip-back:"), { value }),
+                  button(
+                    "toggle_playback",
+                    icon(this.state === "paused" ? ":ms-play:" : ":ms-pause:"),
+                    { style: "primary", value },
+                  ),
+                  button("next_track", icon(":ms-skip-forward:"), { value }),
+                ]),
+                actions(`volume_${id}`, [
+                  button("volume_down", icon(":ms-speaker-low-volume:"), {
+                    value,
+                  }),
+                  button("volume_up", icon(":ms-speaker-loud-volume:"), {
+                    value,
+                  }),
+                  // Carries the entry rather than the session: a click can
+                  // land after the song has rolled over, and it should like
+                  // the song they were listening to rather than whatever is
+                  // playing by the time it arrives.
+                  button("like_track", icon("💖"), { value: current.id }),
+                ]),
+                actions(`seek_${id}`, [
+                  button("seek_back", icon(":ms-rewind:"), { value }),
+                  button("seek_forward", icon(":ms-fast-forward:"), { value }),
+                ]),
               ]
-            : []),
-          ...(current
-            ? [
-                {
-                  type: "actions",
-                  block_id: `playback_${id}`,
-                  elements: [
-                    {
-                      type: "button",
-                      action_id: "previous_track",
-                      text: icon(":ms-skip-back:"),
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "toggle_playback",
-                      text: icon(
-                        this.state === "paused" ? ":ms-play:" : ":ms-pause:",
-                      ),
-                      style: "primary",
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "next_track",
-                      text: icon(":ms-skip-forward:"),
-                      value: this.id,
-                    },
-                  ],
-                },
-                {
-                  type: "actions",
-                  block_id: `volume_${id}`,
-                  elements: [
-                    {
-                      type: "button",
-                      action_id: "volume_down",
-                      text: icon(":ms-speaker-low-volume:"),
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "volume_up",
-                      text: icon(":ms-speaker-loud-volume:"),
-                      value: this.id,
-                    },
-                    // Carries the entry rather than the session: a click can
-                    // land after the song has rolled over, and it should like
-                    // the song they were listening to rather than whatever is
-                    // playing by the time it arrives.
-                    {
-                      type: "button",
-                      action_id: "like_track",
-                      text: icon("💖"),
-                      value: current.id,
-                    },
-                  ],
-                },
-                {
-                  type: "actions",
-                  block_id: `seek_${id}`,
-                  elements: [
-                    {
-                      type: "button",
-                      action_id: "seek_back",
-                      text: icon(":ms-rewind:"),
-                      value: this.id,
-                    },
-                    {
-                      type: "button",
-                      action_id: "seek_forward",
-                      text: icon(":ms-fast-forward:"),
-                      value: this.id,
-                    },
-                  ],
-                },
-              ]
-            : idle
-              ? [
-                  {
-                    type: "actions",
-                    block_id: `play_something_${id}`,
-                    elements: [
-                      {
-                        type: "button",
-                        action_id: "play_something",
-                        text: plain("Play something"),
-                        style: "primary",
-                        value: this.id,
-                      },
-                    ],
-                  },
-                ]
-              : []),
-          {
-            type: "context",
-            block_id: `volume_status_${id}`,
-            elements: [
-              {
-                type: "mrkdwn",
-                text: `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
-                  this.integrations.size
-                    ? ` · Controlling: ${[...this.integrations.keys()].map((id) => `<@${id}>`).join(", ")}`
-                    : ""
-                }`,
-              },
-            ],
-          },
+            : when(
+                idle,
+                actions(`play_something_${id}`, [
+                  button("play_something", plain("Play something"), {
+                    style: "primary",
+                    value,
+                  }),
+                ]),
+              )),
+          context(
+            `volume_status_${id}`,
+            `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
+              this.integrations.size
+                ? ` · Controlling: ${[...this.integrations.keys()].map((id) => `<@${id}>`).join(", ")}`
+                : ""
+            }`,
+          ),
         ],
       },
       {
@@ -5200,87 +4889,35 @@ export class Coordinator {
               ? "Autoplay is picking a recommendation"
               : "Add a song to keep the music going",
         ),
-        ...(next?.artwork
-          ? {
-              icon: {
-                type: "image",
-                image_url: next.artwork,
-                alt_text: `${next.title} artwork`,
-              },
-            }
-          : {}),
+        ...artworkIcon(next),
         child_blocks: [
-          {
-            type: "context",
-            block_id: `queue_status_${id}`,
-            elements: [
-              {
-                type: "mrkdwn",
-                text: `${next ? `${next.automatic ? "Autoplay recommendation" : `Added by <@${next.requesterId}>`} · ` : ""}${this.queue.length} ${this.queue.length === 1 ? "song" : "songs"} in queue`,
-              },
-            ],
-          },
-          {
-            type: "actions",
-            block_id: `add_${id}`,
-            elements: [
-              {
-                type: "button",
-                action_id: "open_add_to_queue",
-                text: plain("Add to queue"),
-                value: this.id,
-              },
-            ],
-          },
-          {
-            type: "actions",
-            block_id: `actions_${id}`,
-            elements: [
-              {
-                type: "button",
-                action_id: "view_full_queue",
-                text: plain("Queue"),
-                value: this.id,
-              },
-              ...(this.shufflableCount() > 1
-                ? [
-                    {
-                      type: "button",
-                      action_id: "shuffle_queue",
-                      text: plain("Shuffle"),
-                      value: this.id,
-                    },
-                  ]
-                : []),
-              {
-                type: "button",
-                action_id: "clear_queue",
-                text: plain("Clear"),
-                value: this.id,
-                confirm: confirm(
-                  "Clear queue?",
-                  "This removes every upcoming track.",
-                  "Clear",
-                ),
-              },
-              ...(!this.hostId
-                ? [
-                    {
-                      type: "button",
-                      action_id: "claim_host",
-                      text: plain("Take over"),
-                      value: this.id,
-                    },
-                  ]
-                : []),
-              {
-                type: "button",
-                action_id: "open_settings",
-                text: plain("Settings"),
-                value: this.id,
-              },
-            ],
-          },
+          context(
+            `queue_status_${id}`,
+            `${next ? `${addedBy(next)} · ` : ""}${songCount(this.queue.length)} in queue`,
+          ),
+          actions(`add_${id}`, [
+            button("open_add_to_queue", plain("Add to queue"), { value }),
+          ]),
+          actions(`actions_${id}`, [
+            button("view_full_queue", plain("Queue"), { value }),
+            ...when(
+              this.shufflableCount() > 1,
+              button("shuffle_queue", plain("Shuffle"), { value }),
+            ),
+            button("clear_queue", plain("Clear"), {
+              value,
+              confirm: confirm(
+                "Clear queue?",
+                "This removes every upcoming track.",
+                "Clear",
+              ),
+            }),
+            ...when(
+              !this.hostId,
+              button("claim_host", plain("Take over"), { value }),
+            ),
+            button("open_settings", plain("Settings"), { value }),
+          ]),
           ...footerContext(this.config.footer, `footer_${id}`),
         ],
       },
@@ -5309,26 +4946,14 @@ export class Coordinator {
         "Do you want to scrobble your listening in this Huddle?",
         this.room.uiThreadTs,
         [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: "Do you want to scrobble your listening in this Huddle?",
-            },
-          },
-          {
-            type: "actions",
-            block_id: "session_scrobbling_prompt",
-            elements: [
-              {
-                type: "button",
-                action_id: "toggle_session_scrobbling",
-                text: plain("Enable scrobbling for this session"),
-                style: "primary",
-                value: this.id,
-              },
-            ],
-          },
+          section("Do you want to scrobble your listening in this Huddle?"),
+          actions("session_scrobbling_prompt", [
+            button(
+              "toggle_session_scrobbling",
+              plain("Enable scrobbling for this session"),
+              { style: "primary", value: this.id },
+            ),
+          ]),
         ],
       )
       .catch((error) =>
@@ -5556,9 +5181,7 @@ export class Coordinator {
 
   private recapBlocks(text: string) {
     const songs = [...this.history, ...(this.current ? [this.current] : [])];
-    const blocks: unknown[] = [
-      { type: "section", text: { type: "mrkdwn", text } },
-    ];
+    const blocks: unknown[] = [section(text)];
     if (!songs.length) return [...blocks, this.restoreBlock()];
     const autoplay = songs.filter((song) => song.automatic).length;
     const artists = Map.groupBy(songs, (song) => firstArtist(song.artist));
@@ -5583,24 +5206,20 @@ export class Coordinator {
       is_collapsible: true,
       default_collapsed: true,
       child_blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: [
-              `*Listening time:* ${elapsed(this.listenedSeconds)}`,
-              `*Songs played:* ${songs.length}`,
-              `*Mix:* ${songs.length - autoplay} requested · ${autoplay} autoplay`,
-              `*Autoplay percentage:* ${Math.round((autoplay / songs.length) * 100)}%`,
-              `*Unique artists:* ${artists.size}`,
-              `*Most frequent requester:* ${topRequester ? `<@${topRequester[0]}> (${songCount(topRequester[1].length)})` : "None"}`,
-              `*Most repeated artist:* ${escape(topArtist)} (${songCount(topSongs.length)})`,
-              `*Longest song:* ${longest ? `${escape(longest.title)} · ${elapsed(longest.duration!)}` : "Unknown"}`,
-              `*Average song length:* ${timed.length ? elapsed(average) : "Unknown"}`,
-              `*Session host:* ${this.hostId ? `<@${this.hostId}>` : "None"}`,
-            ].join("\n"),
-          },
-        },
+        section(
+          [
+            `*Listening time:* ${elapsed(this.listenedSeconds)}`,
+            `*Songs played:* ${songs.length}`,
+            `*Mix:* ${songs.length - autoplay} requested · ${autoplay} autoplay`,
+            `*Autoplay percentage:* ${Math.round((autoplay / songs.length) * 100)}%`,
+            `*Unique artists:* ${artists.size}`,
+            `*Most frequent requester:* ${topRequester ? `<@${topRequester[0]}> (${songCount(topRequester[1].length)})` : "None"}`,
+            `*Most repeated artist:* ${escape(topArtist)} (${songCount(topSongs.length)})`,
+            `*Longest song:* ${longest ? `${escape(longest.title)} · ${elapsed(longest.duration!)}` : "Unknown"}`,
+            `*Average song length:* ${timed.length ? elapsed(average) : "Unknown"}`,
+            `*Session host:* ${this.hostId ? `<@${this.hostId}>` : "None"}`,
+          ].join("\n"),
+        ),
         ...sectionBlocks(
           "*Songs*",
           songs.map(
@@ -5615,18 +5234,11 @@ export class Coordinator {
   }
 
   private restoreBlock() {
-    return {
-      type: "actions",
-      block_id: `restore_${this.id}`,
-      elements: [
-        {
-          type: "button",
-          action_id: "restore_session",
-          text: plain("Restore session"),
-          style: "primary",
-          value: this.id,
-        },
-      ],
-    };
+    return actions(`restore_${this.id}`, [
+      button("restore_session", plain("Restore session"), {
+        style: "primary",
+        value: this.id,
+      }),
+    ]);
   }
 }
