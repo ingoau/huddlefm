@@ -149,15 +149,14 @@ async function romanizeViaGoogle(
       .filter(Boolean)
       .join("");
     let romanizedLines = full.split(BATCH_SEPARATOR);
-    if (romanizedLines.length < chunk.length) {
+    if (romanizedLines.length !== chunk.length) {
       // Google sometimes collapses the separator; fall back to whichever
-      // split yields one line per input, or give up on the whole chunk.
-      const alternatives = [full.split(";"), full.split(/\r?\n/)].map((lines) =>
-        lines.filter((line) => line.trim()),
-      );
+      // split yields one line per input, or give up on the whole chunk so
+      // no line is handed another line's romanization.
       romanizedLines =
-        alternatives.find((lines) => lines.length === chunk.length) ??
-        (romanizedLines.length === 1 ? [] : romanizedLines);
+        [full.split(";"), full.split(/\r?\n/)]
+          .map((lines) => lines.filter((line) => line.trim()))
+          .find((lines) => lines.length === chunk.length) ?? [];
     }
     chunk.forEach((item, index) => {
       const romanized = romanizedLines[index]?.trim();

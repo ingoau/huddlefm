@@ -169,6 +169,19 @@ test("falls back to Google romaji when Unison omits romanization", async () => {
   expect(lines[0]!.romanization).toBe("Konnichiwa");
 });
 
+test("drops a Google chunk whose line count does not match", async () => {
+  const lines = [line("あ"), line("い"), line("う"), line("え")];
+  await enrichLyricsWithRomanization(lines, {
+    fetch: (async (input) => {
+      if (String(input).includes("unison.boidu.dev"))
+        return json({ lines: [] });
+      return json([[["", "", null, "Wrong one\n\n;\n\nWrong two"]]]);
+    }) as RomanizeFetch,
+  });
+  for (const item of lines)
+    expect(item.romanization ?? "").not.toContain("Wrong");
+});
+
 test("shares one timeout signal across sequential providers", async () => {
   const lines = [line("こんにちは")];
   const signals: (AbortSignal | null | undefined)[] = [];
