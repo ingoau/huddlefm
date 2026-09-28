@@ -112,6 +112,8 @@ export class ChimeSignaling {
   private pingTimer?: ReturnType<typeof setInterval>;
   private pingId = 0;
   private closed = false;
+  /** The close code, once the server has closed the socket. */
+  closeCode: number | undefined;
   lastInboundAt = Date.now();
 
   constructor(
@@ -151,6 +153,7 @@ export class ChimeSignaling {
       socket.onclose = (event) => {
         clearTimeout(timer);
         clearInterval(this.pingTimer);
+        this.closeCode = event.code;
         if (this.closed) return;
         this.closed = true;
         for (const handler of this.closeHandlers)

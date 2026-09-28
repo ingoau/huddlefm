@@ -11,6 +11,7 @@ import {
 import { decodeFrame, encodeFrame, rawFrameType } from "./signaling.ts";
 import { normalizedVolume, SpeechSignals } from "./speech.ts";
 import { iceServers } from "./chime-link.ts";
+import { withLocalAudio } from "./session.ts";
 
 describe("signaling frames", () => {
   test("round-trip through the Chime protobuf with a type byte", () => {
@@ -216,5 +217,42 @@ describe("audio helpers", () => {
     compressor.process(loud);
     // Full scale settles at -22 dB plus about 13 dB of makeup gain.
     expect(loud.at(-1)!).toBeCloseTo(10 ** (-8.8 / 20), 2);
+  });
+});
+
+describe("native session messages", () => {
+  const paths: Record<string, string> = { a: "/data/media/a.opus" };
+  const audioPath = (entryId: string) => paths[entryId];
+
+  test("play and preload decode local files when the entry has one", () => {
+    expect(
+      withLocalAudio(
+        { type: "play", entryId: "a", url: "http://x/a" },
+        audioPath,
+      ),
+    ).toEqual({ type: "play", entryId: "a", url: "/data/media/a.opus" });
+    expect(
+      withLocalAudio(
+        {
+          type: "preload",
+          entries: [
+            { entryId: "a", url: "http://x/a" },
+            { entryId: "b", url: "http://x/b" },
+          ],
+        },
+        audioPath,
+      ),
+    ).toEqual({
+      type: "preload",
+      entries: [
+        { entryId: "a", url: "/data/media/a.opus" },
+        { entryId: "b", url: "http://x/b" },
+      ],
+    });
+  });
+
+  test("other messages pass through untouched", () => {
+    const message = { type: "seek", seconds: 3 };
+    expect(withLocalAudio(message, audioPath)).toBe(message);
   });
 });

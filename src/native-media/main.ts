@@ -47,6 +47,7 @@ let link: ChimeLink | undefined;
 let card: VideoCard | undefined;
 let feed: VideoFeed | undefined;
 let pacer: ReturnType<typeof setInterval> | undefined;
+let statsTimer: ReturnType<typeof setInterval> | undefined;
 let leaving: Promise<void> | undefined;
 let trackSwap = 0;
 let wantVideo = true;
@@ -109,6 +110,16 @@ async function start(bootstrap: ChimeBootstrap) {
   });
   await startPacer(audio, chime);
   emit("joined");
+  statsTimer = setInterval(
+    () =>
+      log("debug", "native_media_stats", "Native media stats", {
+        ...chime.stats,
+        connected: chime.connected,
+        video: chime.sendingVideo,
+        duckGain: audio.duckGain,
+      }),
+    60_000,
+  );
 }
 
 function syncVideo() {
@@ -204,6 +215,7 @@ let finishing: Promise<void> | undefined;
 function finish(code: number) {
   finishing ??= (async () => {
     clearInterval(pacer);
+    clearInterval(statsTimer);
     engine?.dispose();
     feed?.stop();
     await link?.leave().catch(() => {});

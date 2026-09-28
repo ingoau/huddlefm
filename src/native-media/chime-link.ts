@@ -44,11 +44,23 @@ export type ChimeMeeting = {
 };
 export type ChimeAttendee = { AttendeeId: string; JoinToken: string };
 
+/** Chime said the session is over; reconnecting cannot help. */
+class TerminalError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 type Connection = {
   signaling: ChimeSignaling;
   peer: Peer;
   audio: Track;
   video?: Track;
+  /** Whether this connection's offer asked to send video. */
+  requestedVideo: boolean;
   opusPayloadType: number;
   h264PayloadType: number;
   open: boolean;
@@ -141,6 +153,14 @@ export class ChimeLink {
     this.connection = await this.connect();
     this.watchdog = setInterval(() => this.checkSilence(), 1_000);
     this.events.onConnected(false);
+    this.reconcileVideo(this.connection);
+  }
+
+  // A display change that lands while a connection is being built only takes
+  // effect on the next one, so rebuild once more if they disagree.
+  private reconcileVideo(connection: Connection) {
+    if (connection.requestedVideo !== this.wantVideo)
+      this.lost(connection, "video changed while connecting", true);
   }
 
   /** Sends one Opus frame covering `samples` samples at 48 kHz. */
@@ -237,6 +257,15 @@ export class ChimeLink {
       this.events.log,
     );
     let connection: Connection | undefined;
+    let terminal: TerminalError | undefined;
+    signaling.onFrame((frame) => {
+      const status = frame.audio_status?.audio_status;
+      if (status !== undefined && terminalAudioStatus[status])
+        terminal ??= new TerminalError(
+          terminalAudioStatus[status],
+          `Chime audio status ${status}`,
+        );
+    });
     try {
       await signaling.connect();
       signaling.join(this.audioSessionId);
@@ -253,7 +282,12 @@ export class ChimeLink {
     } catch (error) {
       if (connection) this.teardown(connection);
       else signaling.close();
-      throw error;
+      if (signaling.closeCode === 4410)
+        throw new TerminalError(
+          statusCodes.meetingEnded,
+          "Chime meeting ended",
+        );
+      throw terminal ?? error;
     }
   }
 
@@ -278,6 +312,7 @@ export class ChimeLink {
       peer,
       audio: audioTrack,
       video: this.wantVideo ? videoTrack : undefined,
+      requestedVideo: this.wantVideo,
       opusPayloadType: 111,
       h264PayloadType: 102,
       open: false,
@@ -406,6 +441,10 @@ export class ChimeLink {
       if (state === "failed" || state === "closed")
         this.lost(connection, `ICE ${state}`);
     });
+    peer.onStateChange((state: string) => {
+      if (state === "failed" || state === "closed")
+        this.lost(connection, `peer ${state}`);
+    });
     connection.video?.onMessage((packet: Buffer) => {
       if (isRtcp(packet) && countPictureLoss(packet))
         this.events.onPictureLoss();
@@ -491,8 +530,13 @@ export class ChimeLink {
           video: Boolean(connection.video),
         });
         this.events.onConnected(true);
+        this.reconcileVideo(connection);
         return;
       } catch (error) {
+        if (error instanceof TerminalError) {
+          this.terminal(error.code, error.message);
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         this.events.log(
           "warn",

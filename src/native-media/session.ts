@@ -24,6 +24,36 @@ const levels = new Set(["trace", "debug", "info", "warn", "error"]);
 const inheritedEnv = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"];
 
 /**
+ * Points `play` and `preload` at the downloaded files instead of the loopback
+ * /audio URLs, which ignore Range requests and so cannot be seeked by ffmpeg.
+ */
+export function withLocalAudio(
+  message: unknown,
+  audioPath: (entryId: string) => string | undefined,
+) {
+  if (!message || typeof message !== "object") return message;
+  const media = message as {
+    type?: string;
+    entryId?: string;
+    url?: string;
+    entries?: { entryId: string; url: string }[];
+  };
+  const local = (entryId: string | undefined, url: string | undefined) =>
+    (entryId && audioPath(entryId)) || url;
+  if (media.type === "play")
+    return { ...media, url: local(media.entryId, media.url) };
+  if (media.type === "preload" && Array.isArray(media.entries))
+    return {
+      ...media,
+      entries: media.entries.map((entry) => ({
+        ...entry,
+        url: local(entry.entryId, entry.url),
+      })),
+    };
+  return message;
+}
+
+/**
  * Runs one Huddle's native media in its own Bun process (src/native-media/
  * main.ts), so a crash in native WebRTC or media code ends that one session
  * instead of the whole bot. It speaks the media page's protocol: coordinator
@@ -38,9 +68,7 @@ export class NativeMediaSession {
 
   constructor(
     private onMessage: (message: MediaMessage) => void,
-    // Maps an entry to its downloaded file. The child decodes files directly:
-    // the loopback /audio route ignores Range requests, so ffmpeg could not
-    // seek through it.
+    // Maps an entry to its downloaded file; see withLocalAudio.
     private audioPath: (entryId: string) => string | undefined = () =>
       undefined,
   ) {}
@@ -96,30 +124,7 @@ export class NativeMediaSession {
 
   /** Sends a coordinator message; false when no media process is running. */
   send(message: unknown) {
-    return this.write(this.withLocalAudio(message));
-  }
-
-  private withLocalAudio(message: unknown) {
-    if (!message || typeof message !== "object") return message;
-    const media = message as {
-      type?: string;
-      entryId?: string;
-      url?: string;
-      entries?: { entryId: string; url: string }[];
-    };
-    const local = (entryId: string | undefined, url: string | undefined) =>
-      (entryId && this.audioPath(entryId)) || url;
-    if (media.type === "play")
-      return { ...media, url: local(media.entryId, media.url) };
-    if (media.type === "preload" && Array.isArray(media.entries))
-      return {
-        ...media,
-        entries: media.entries.map((entry) => ({
-          ...entry,
-          url: local(entry.entryId, entry.url),
-        })),
-      };
-    return message;
+    return this.write(withLocalAudio(message, this.audioPath));
   }
 
   async close() {
