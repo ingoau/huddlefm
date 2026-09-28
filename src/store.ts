@@ -272,6 +272,34 @@ const trackColumns = {
   fadeOutSeconds: "fade_out_seconds",
 };
 
+const addedColumns = [
+  ["sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'"],
+  ["sessions", "loop_mode", "TEXT NOT NULL DEFAULT 'off'"],
+  ["sessions", "transition_mode", "TEXT NOT NULL DEFAULT 'none'"],
+  ["sessions", "ducking_mode", "TEXT"],
+  ["sessions", "resume_state", "TEXT"],
+  ["sessions", "resume_until", "INTEGER"],
+  ["sessions", "playback_seconds", "REAL NOT NULL DEFAULT 0"],
+  ["sessions", "listened_seconds", "REAL NOT NULL DEFAULT 0"],
+  ["sessions", "lyrics_enabled", "INTEGER NOT NULL DEFAULT 1"],
+  ["sessions", "display_mode", "TEXT NOT NULL DEFAULT 'default'"],
+  ["sessions", "anchor_enabled", "INTEGER NOT NULL DEFAULT 0"],
+  ["sessions", "end_text", "TEXT"],
+  ["sessions", "end_blocks", "TEXT"],
+  ["sessions", "source_channel_id", "TEXT"],
+  ["sessions", "huddle_thread_ts", "TEXT"],
+  ["sessions", "companion_channel_id", "TEXT"],
+  ["sessions", "message_cleanup_at", "INTEGER"],
+  ["tracks", "automatic", "INTEGER NOT NULL DEFAULT 0"],
+  ["tracks", "queue_position", "INTEGER"],
+  ["tracks", "intro_seconds", "REAL"],
+  ["tracks", "outro_seconds", "REAL"],
+  ["tracks", "fade_in_seconds", "REAL"],
+  ["tracks", "fade_out_seconds", "REAL"],
+  ["user_scrobbling", "mode", "TEXT NOT NULL DEFAULT 'always'"],
+  ["user_scrobbling", "huddle_mix_opt_in", "INTEGER NOT NULL DEFAULT 1"],
+] as const;
+
 // The SET clause and bindings for whichever of `fields` are present.
 function assignments(
   columns: Record<string, string>,
@@ -294,6 +322,10 @@ function compact<T extends object>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, item]) => item !== undefined),
   ) as T;
+}
+
+function slots(values: readonly unknown[]) {
+  return values.map(() => "?").join(", ");
 }
 
 function text(value: unknown) {
@@ -516,74 +548,21 @@ export class Store {
       CREATE INDEX IF NOT EXISTS track_likes_user_recent
         ON track_likes(user_id, liked_at DESC);
     `);
-    this.ensureColumn("sessions", "autoplay", "TEXT NOT NULL DEFAULT 'off'");
-    this.migrateAutoplayModes();
-    this.ensureColumn("sessions", "loop_mode", "TEXT NOT NULL DEFAULT 'off'");
-    this.ensureColumn(
-      "sessions",
-      "transition_mode",
-      "TEXT NOT NULL DEFAULT 'none'",
-    );
-    this.ensureColumn("sessions", "ducking_mode", "TEXT");
-    this.ensureColumn("sessions", "resume_state", "TEXT");
-    this.ensureColumn("sessions", "resume_until", "INTEGER");
-    this.ensureColumn(
-      "sessions",
-      "playback_seconds",
-      "REAL NOT NULL DEFAULT 0",
-    );
-    this.ensureColumn(
-      "sessions",
-      "listened_seconds",
-      "REAL NOT NULL DEFAULT 0",
-    );
-    this.ensureColumn(
-      "sessions",
-      "lyrics_enabled",
-      "INTEGER NOT NULL DEFAULT 1",
-    );
+    // Columns added since the tables were first created, in the order they
+    // were added so older databases end up with the same layout.
     const hadDisplayMode = this.hasColumn("sessions", "display_mode");
-    this.ensureColumn(
-      "sessions",
-      "display_mode",
-      "TEXT NOT NULL DEFAULT 'default'",
-    );
+    for (const [table, column, definition] of addedColumns)
+      this.ensureColumn(table, column, definition);
+    this.migrateAutoplayModes();
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
       );
-    this.ensureColumn(
-      "sessions",
-      "anchor_enabled",
-      "INTEGER NOT NULL DEFAULT 0",
-    );
-    this.ensureColumn("sessions", "end_text", "TEXT");
-    this.ensureColumn("sessions", "end_blocks", "TEXT");
-    this.ensureColumn("sessions", "source_channel_id", "TEXT");
-    this.ensureColumn("sessions", "huddle_thread_ts", "TEXT");
-    this.ensureColumn("sessions", "companion_channel_id", "TEXT");
-    this.ensureColumn("sessions", "message_cleanup_at", "INTEGER");
-    this.ensureColumn("tracks", "automatic", "INTEGER NOT NULL DEFAULT 0");
     this.db.run(`CREATE INDEX IF NOT EXISTS tracks_requester_recent
       ON tracks(requester_id, automatic, created_at DESC)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS tracks_played_title_artist
       ON tracks(title COLLATE NOCASE, artist COLLATE NOCASE, created_at DESC)
       WHERE status = 'played'`);
-    this.ensureColumn("tracks", "queue_position", "INTEGER");
-    this.ensureColumn("tracks", "intro_seconds", "REAL");
-    this.ensureColumn("tracks", "outro_seconds", "REAL");
-    this.ensureColumn("tracks", "fade_in_seconds", "REAL");
-    this.ensureColumn("tracks", "fade_out_seconds", "REAL");
-    this.ensureColumn(
-      "user_scrobbling",
-      "mode",
-      "TEXT NOT NULL DEFAULT 'always'",
-    );
-    this.ensureColumn(
-      "user_scrobbling",
-      "huddle_mix_opt_in",
-      "INTEGER NOT NULL DEFAULT 1",
-    );
   }
 
   createSession(session: {
@@ -706,13 +685,10 @@ export class Store {
   }
 
   sessionCompanionChannel(sessionId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT companion_channel_id AS channelId FROM sessions WHERE id = ?",
-        )
-        .get(sessionId) as { channelId: string | null } | null
-    )?.channelId;
+    return this.scalar<string | null>(
+      "SELECT companion_channel_id FROM sessions WHERE id = ?",
+      sessionId,
+    );
   }
 
   setSession(
@@ -912,9 +888,7 @@ export class Store {
   }
 
   needsUsageBackfill() {
-    return !this.db
-      .query("SELECT 1 FROM data_migrations WHERE name = ?")
-      .get("audit-usage-v1");
+    return !this.migrated("audit-usage-v1");
   }
 
   importUsage(counts: UsageCounts) {
@@ -926,9 +900,7 @@ export class Store {
       );
       for (const [event, count] of Object.entries(counts))
         insert.run(event, count);
-      this.db
-        .query("INSERT INTO data_migrations (name, completed_at) VALUES (?, ?)")
-        .run("audit-usage-v1", Date.now());
+      this.completeMigration("audit-usage-v1");
     })();
   }
 
@@ -1048,23 +1020,17 @@ export class Store {
   }
 
   companionChannel(sourceChannelId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT channel_id AS channelId FROM companion_channels WHERE source_channel_id = ?",
-        )
-        .get(sourceChannelId) as { channelId: string } | null
-    )?.channelId;
+    return this.scalar<string>(
+      "SELECT channel_id FROM companion_channels WHERE source_channel_id = ?",
+      sourceChannelId,
+    );
   }
 
   sourceChannelForCompanion(channelId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT source_channel_id AS sourceChannelId FROM companion_channels WHERE channel_id = ?",
-        )
-        .get(channelId) as { sourceChannelId: string } | null
-    )?.sourceChannelId;
+    return this.scalar<string>(
+      "SELECT source_channel_id FROM companion_channels WHERE channel_id = ?",
+      channelId,
+    );
   }
 
   setCompanionChannel(sourceChannelId: string, channelId: string) {
@@ -1120,13 +1086,11 @@ export class Store {
   }
 
   companionRemovalDeadline(channelId: string, userId: string) {
-    return (
-      this.db
-        .query(
-          "SELECT due_at AS dueAt FROM companion_removals WHERE channel_id = ? AND user_id = ?",
-        )
-        .get(channelId, userId) as { dueAt: number } | null
-    )?.dueAt;
+    return this.scalar<number>(
+      "SELECT due_at FROM companion_removals WHERE channel_id = ? AND user_id = ?",
+      channelId,
+      userId,
+    );
   }
 
   completeCompanionRemoval(channelId: string, userId: string, dueAt: number) {
@@ -1428,12 +1392,11 @@ export class Store {
     limit = recentLikeLimit,
   ): LikeRecord[] {
     if (!userIds.length) return [];
-    const slots = userIds.map(() => "?").join(", ");
     return this.db
       .query(
         `SELECT user_id AS userId, title, artist, liked_at AS likedAt
         FROM track_likes
-        WHERE user_id IN (${slots}) AND liked_at >= ?
+        WHERE user_id IN (${slots(userIds)}) AND liked_at >= ?
         ORDER BY liked_at DESC LIMIT ?`,
       )
       .all(...userIds, since, limit) as LikeRecord[];
@@ -1444,12 +1407,11 @@ export class Store {
   // songs are matched never needs the stored rows rewritten.
   recentPlays(userIds: readonly string[], since: number): PlayRecord[] {
     if (!userIds.length) return [];
-    const slots = userIds.map(() => "?").join(", ");
     return this.db
       .query(
         `SELECT user_id AS userId, title, artist, played_at AS playedAt
         FROM track_plays
-        WHERE user_id IN (${slots}) AND played_at >= ?
+        WHERE user_id IN (${slots(userIds)}) AND played_at >= ?
         ORDER BY played_at DESC`,
       )
       .all(...userIds, since) as PlayRecord[];
@@ -1472,12 +1434,11 @@ export class Store {
 
   recentSkips(userIds: readonly string[], since: number): SkipRecord[] {
     if (!userIds.length) return [];
-    const slots = userIds.map(() => "?").join(", ");
     return this.db
       .query(
         `SELECT user_id AS userId, title, artist, weight, skipped_at AS skippedAt
         FROM autoplay_skips
-        WHERE user_id IN (${slots}) AND skipped_at >= ?
+        WHERE user_id IN (${slots(userIds)}) AND skipped_at >= ?
         ORDER BY skipped_at DESC`,
       )
       .all(...userIds, since) as SkipRecord[];
@@ -1566,12 +1527,7 @@ export class Store {
   }
 
   setScrobblingMode(userId: string, mode: ScrobblingMode) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET mode = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(mode, Date.now(), userId);
+    this.updateUserScrobbling(userId, "mode = ?", mode);
   }
 
   getSessionScrobbling(sessionId: string, userId: string) {
@@ -1593,78 +1549,63 @@ export class Store {
   }
 
   setHuddleMixOptIn(userId: string, enabled: boolean) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET huddle_mix_opt_in = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(enabled ? 1 : 0, Date.now(), userId);
+    this.updateUserScrobbling(userId, "huddle_mix_opt_in = ?", enabled ? 1 : 0);
   }
 
   setLastFmPending(userId: string, token: string, startedAt: number) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET lastfm_pending_token = ?, lastfm_pending_at = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(token, startedAt, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      "lastfm_pending_token = ?, lastfm_pending_at = ?",
+      token,
+      startedAt,
+    );
   }
 
   connectLastFm(userId: string, username: string, sessionKey: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        `UPDATE user_scrobbling SET lastfm_username = ?, lastfm_session_key = ?, lastfm_enabled = 1,
-      lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`,
-      )
-      .run(username, sessionKey, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      `lastfm_username = ?, lastfm_session_key = ?, lastfm_enabled = 1,
+      lastfm_pending_token = NULL, lastfm_pending_at = NULL`,
+      username,
+      sessionKey,
+    );
   }
 
   disconnectLastFm(userId: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        `UPDATE user_scrobbling SET lastfm_username = NULL, lastfm_session_key = NULL,
-      lastfm_enabled = 0, lastfm_pending_token = NULL, lastfm_pending_at = NULL, updated_at = ? WHERE user_id = ?`,
-      )
-      .run(Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      `lastfm_username = NULL, lastfm_session_key = NULL, lastfm_enabled = 0,
+      lastfm_pending_token = NULL, lastfm_pending_at = NULL`,
+    );
   }
 
   setLastFmEnabled(userId: string, enabled: boolean) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET lastfm_enabled = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(enabled ? 1 : 0, Date.now(), userId);
+    this.updateUserScrobbling(userId, "lastfm_enabled = ?", enabled ? 1 : 0);
   }
 
   setListenBrainzToken(userId: string, token: string, username: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET listenbrainz_token = ?, listenbrainz_username = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(token, username, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      "listenbrainz_token = ?, listenbrainz_username = ?",
+      token,
+      username,
+    );
   }
 
   disconnectListenBrainz(userId: string) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        `UPDATE user_scrobbling SET listenbrainz_username = NULL, listenbrainz_token = NULL,
-      listenbrainz_enabled = 0, updated_at = ? WHERE user_id = ?`,
-      )
-      .run(Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      `listenbrainz_username = NULL, listenbrainz_token = NULL,
+      listenbrainz_enabled = 0`,
+    );
   }
 
   setListenBrainzEnabled(userId: string, enabled: boolean) {
-    this.ensureUserScrobbling(userId);
-    this.db
-      .query(
-        "UPDATE user_scrobbling SET listenbrainz_enabled = ?, updated_at = ? WHERE user_id = ?",
-      )
-      .run(enabled ? 1 : 0, Date.now(), userId);
+    this.updateUserScrobbling(
+      userId,
+      "listenbrainz_enabled = ?",
+      enabled ? 1 : 0,
+    );
   }
 
   queueScrobble(
@@ -1758,10 +1699,7 @@ export class Store {
   }
 
   private migrateAutoplayModes() {
-    const done = this.db
-      .query("SELECT 1 FROM data_migrations WHERE name = ?")
-      .get("autoplay-modes-v1");
-    if (done) return;
+    if (this.migrated("autoplay-modes-v1")) return;
     this.db
       .query(
         `UPDATE sessions SET autoplay = CASE
@@ -1771,9 +1709,19 @@ export class Store {
         END`,
       )
       .run();
+    this.completeMigration("autoplay-modes-v1");
+  }
+
+  private migrated(name: string) {
+    return Boolean(
+      this.db.query("SELECT 1 FROM data_migrations WHERE name = ?").get(name),
+    );
+  }
+
+  private completeMigration(name: string) {
     this.db
       .query("INSERT INTO data_migrations (name, completed_at) VALUES (?, ?)")
-      .run("autoplay-modes-v1", Date.now());
+      .run(name, Date.now());
   }
 
   private ensureColumn(table: string, column: string, definition: string) {
@@ -1787,11 +1735,25 @@ export class Store {
     ).some((value) => value.name === column);
   }
 
-  private ensureUserScrobbling(userId: string) {
+  // The first column of the first matching row, or undefined without one.
+  private scalar<T>(sql: string, ...params: SQLQueryBindings[]) {
+    return this.db.query(sql).values(...params)[0]?.[0] as T | undefined;
+  }
+
+  private updateUserScrobbling(
+    userId: string,
+    assignments: string,
+    ...values: SQLQueryBindings[]
+  ) {
     this.db
       .query(
         "INSERT OR IGNORE INTO user_scrobbling (user_id, updated_at) VALUES (?, ?)",
       )
       .run(userId, Date.now());
+    this.db
+      .query(
+        `UPDATE user_scrobbling SET ${assignments}, updated_at = ? WHERE user_id = ?`,
+      )
+      .run(...values, Date.now(), userId);
   }
 }
