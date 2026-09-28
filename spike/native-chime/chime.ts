@@ -49,16 +49,33 @@ export async function roomsJoin(channelId: string) {
   return { meeting, attendee: json.call.free_willy.attendee, raw: json };
 }
 
+// Reads field 2 (the frame type) straight off the wire, for frames the proto
+// cannot decode.
+function rawType(bytes: Uint8Array) {
+  try {
+    const reader = protobuf.Reader.create(bytes);
+    while (reader.pos < reader.len) {
+      const tag = reader.uint32();
+      if (tag >>> 3 === 2 && (tag & 7) === 0) return reader.uint32();
+      reader.skipType(tag & 7);
+    }
+  } catch {}
+  return "?";
+}
+
 export type Handler = (type: string, frame: any) => void;
 
 export class Signaling {
   ws!: WebSocket;
   pingId = 0;
+  undecodable = 0;
   handlers: Handler[] = [];
   log: { dir: "in" | "out"; at: number; type: string; frame: any }[] = [];
   constructor(
     private meeting: any,
     private attendee: any,
+    // The JS SDK keeps one audio session id across reconnects.
+    private audioSessionId = Math.floor(Math.random() * 2 ** 32),
   ) {}
 
   on(handler: Handler) {
@@ -78,17 +95,37 @@ export class Signaling {
           new Error(`signaling ws error ${String((e as any).message ?? e)}`),
         );
       this.ws.onclose = (e) => {
-        console.log(`[sig] closed code=${e.code} reason=${e.reason}`);
+        console.log(
+          `[sig] closed code=${e.code} reason=${e.reason} at ${new Date().toISOString()}`,
+        );
         for (const h of this.handlers)
           h("CLOSED", { code: e.code, reason: e.reason });
       };
       this.ws.onmessage = (e) => {
         const bytes = new Uint8Array(e.data as ArrayBuffer);
-        const frame: any = Frame.toObject(Frame.decode(bytes.subarray(1)), {
-          enums: String,
-          longs: String,
-          bytes: String,
-        });
+        let frame: any;
+        try {
+          frame = Frame.toObject(Frame.decode(bytes.subarray(1)), {
+            enums: String,
+            longs: String,
+            bytes: String,
+          });
+        } catch (err) {
+          // Like the JS SDK, skip frames we cannot decode. The server sends
+          // frame types newer than our v3.31.0 proto; in proto2 an unknown
+          // enum value is dropped, so the required `type` looks missing.
+          this.undecodable++;
+          console.log(
+            `[sig] undecodable frame (${bytes.length} bytes, type ${rawType(bytes.subarray(1))}): ${String(err)}`,
+          );
+          this.log.push({
+            dir: "in",
+            at: Date.now(),
+            type: `UNDECODABLE_${rawType(bytes.subarray(1))}`,
+            frame: { length: bytes.length },
+          });
+          return;
+        }
         this.log.push({ dir: "in", at: Date.now(), type: frame.type, frame });
         if (frame.type === "PING_PONG" && frame.ping_pong?.type === "PING") {
           this.send("PING_PONG", {
@@ -101,6 +138,10 @@ export class Signaling {
   }
 
   send(type: keyof typeof T, body: Record<string, unknown> = {}) {
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      console.log(`[sig] drop ${type}: socket state ${this.ws.readyState}`);
+      return;
+    }
     const msg = Frame.fromObject({
       timestamp_ms: Date.now(),
       type: T[type],
@@ -137,7 +178,8 @@ export class Signaling {
     this.send("JOIN", {
       join: {
         protocol_version: 2,
-        max_num_of_videos: 0,
+        // Leave max_num_of_videos unset like the JS SDK: sending 0 made the
+        // server report at_capacity and answer SUBSCRIBE with 206 (view-only).
         flags: 2, // HAS_STREAM_UPDATE
         client_details: {
           app_name: "huddlefm-spike",
@@ -149,7 +191,7 @@ export class Signaling {
           client_source: "amazon-chime-sdk-js",
           chime_sdk_version: "3.31.0",
         },
-        audio_session_id: Math.floor(Math.random() * 2 ** 32),
+        audio_session_id: this.audioSessionId,
         wants_compressed_sdp: false,
       },
     });
