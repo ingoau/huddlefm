@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recentTrackLimit, Store } from "./store.ts";
 
-test("persists session and permission defaults", () => {
-  const store = new Store(":memory:");
+function createSession(
+  store: Store,
+  overrides: Partial<Parameters<Store["createSession"]>[0]> = {},
+) {
   store.createSession({
     id: "session",
     huddleId: "huddle",
@@ -16,7 +18,13 @@ test("persists session and permission defaults", () => {
     creatorId: "creator",
     hostId: "host",
     volume: 0.6,
+    ...overrides,
   });
+}
+
+test("persists session and permission defaults", () => {
+  const store = new Store(":memory:");
+  createSession(store);
   expect(
     store.db
       .query(
@@ -103,17 +111,13 @@ test("persists companion channels and cleanup jobs", () => {
   store.cancelCompanionRemoval("replacement", "user");
   expect(store.dueCompanionRemovals(100)).toEqual([]);
 
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
+  createSession(store, {
     channelId: "replacement",
     threadTs: "",
     sourceChannelId: "source",
     huddleThreadTs: "1.0",
     companionChannelId: "replacement",
-    creatorId: "creator",
-    volume: 0.6,
+    hostId: undefined,
   });
   store.recordSessionMessage("session", "replacement", "2.0");
   store.setSessionParticipants("session", ["host", "guest", "guest"]);
@@ -161,14 +165,10 @@ test("persists companion channels and cleanup jobs", () => {
 
 test("claimDueSessionMessage rejects jobs cleared by activateSession", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
+  createSession(store, {
     channelId: "companion",
     threadTs: "",
-    creatorId: "creator",
-    volume: 0.6,
+    hostId: undefined,
   });
   store.recordSessionMessage("session", "companion", "1.0");
   store.scheduleSessionMessageCleanup("session", 100);
@@ -191,14 +191,10 @@ test("claimDueSessionMessage rejects jobs cleared by activateSession", () => {
 
 test("retrySessionMessage does not restore jobs cleared by activateSession", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
+  createSession(store, {
     channelId: "companion",
     threadTs: "",
-    creatorId: "creator",
-    volume: 0.6,
+    hostId: undefined,
   });
   store.recordSessionMessage("session", "companion", "1.0");
   store.scheduleSessionMessageCleanup("session", 100);
@@ -233,16 +229,7 @@ test("creates indexes for recurring session, track, and scrobble queries", () =>
 
 test("updates track display metadata after embedded tags are read", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   store.addTrack({
     id: "track",
     sessionId: "session",
@@ -310,16 +297,7 @@ test("restores suspended sessions for three minutes", () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
   const path = join(directory, "store.sqlite");
   let store = new Store(path);
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   store.addTrack({
     id: "track",
     sessionId: "session",
@@ -420,16 +398,7 @@ test("restores suspended sessions for three minutes", () => {
 
 test("retains ended sessions until their restore window expires", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   store.endSession(
     "session",
     {
@@ -529,15 +498,7 @@ test("aggregates all-time canvas stats", () => {
 
 test("returns each user's latest distinct manual tracks", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1",
-    creatorId: "creator",
-    volume: 0.6,
-  });
+  createSession(store, { threadTs: "1", hostId: undefined });
   const add = (
     id: string,
     sourceId: string,
@@ -572,15 +533,7 @@ test("returns each user's latest distinct manual tracks", () => {
 
 test("returns up to one hundred distinct recent tracks by default", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1",
-    creatorId: "creator",
-    volume: 0.6,
-  });
+  createSession(store, { threadTs: "1", hostId: undefined });
   for (let index = 0; index < recentTrackLimit + 1; index++) {
     store.addTrack({
       id: `song-${index}`,
@@ -638,16 +591,7 @@ test("groups channel statistics by source after companion replacement", () => {
 
 test("persists a live queue order without disturbing history", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1",
-    creatorId: "host",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store, { threadTs: "1", creatorId: "host" });
   const add = (id: string, status: string) =>
     store.addTrack({
       id,
@@ -730,16 +674,7 @@ test("migrates the old lyrics toggle to display mode", () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
   const path = join(directory, "store.sqlite");
   let store = new Store(path);
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   store.close();
 
   const legacy = new Database(path);
@@ -759,16 +694,7 @@ test("restores sessions saved before ducking without a stored mode", () => {
   const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
   const path = join(directory, "store.sqlite");
   let store = new Store(path);
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   store.close();
 
   const legacy = new Database(path);
@@ -858,16 +784,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
 
 test("persists scrobbling mode and per-session overrides", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   store.setScrobblingMode("user", "ask");
   expect(store.getUserScrobbling("user").mode).toBe("ask");
   expect(store.getSessionScrobbling("session", "user")).toBeUndefined();
@@ -923,16 +840,7 @@ test("migrates integer autoplay flags to off and related", () => {
 
 test("lists recently autoplayed songs once each, newest first", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "host",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store, { creatorId: "host" });
   const add = (id: string, title: string, automatic: boolean) =>
     store.addTrack({
       id,
@@ -1034,16 +942,7 @@ test("remembers what each listener heard, across Huddles", () => {
 
 test("falls back to the Huddle's own channel when there is no source channel", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   store.recordTrackPlay({
     sessionId: "session",
     userId: "host",
@@ -1098,16 +997,7 @@ test("remembers skipped autoplay picks per listener", () => {
 
 test("prunes listening memory that has decayed away", () => {
   const store = new Store(":memory:");
-  store.createSession({
-    id: "session",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.6,
-  });
+  createSession(store);
   for (const playedAt of [1_000, 9_000])
     store.recordTrackPlay({
       sessionId: "session",
