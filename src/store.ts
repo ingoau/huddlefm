@@ -44,11 +44,19 @@ export type ScrobblingMode = (typeof scrobblingModes)[number];
 export const autoplayModes = ["off", "related", "huddle"] as const;
 export type AutoplayMode = (typeof autoplayModes)[number];
 
-export function parseAutoplayMode(value: unknown): AutoplayMode {
-  if (value === true || value === 1 || value === "1" || value === "related")
-    return "related";
-  if (value === "huddle") return "huddle";
-  return "off";
+function modeOf<M extends string>(modes: readonly M[], value: unknown) {
+  return modes.includes(value as M) ? (value as M) : undefined;
+}
+
+// Autoplay and loop were on/off toggles before they became modes, so a stored
+// boolean still reads as the first non-off mode.
+function parseMode<M extends string>(modes: readonly M[], value: unknown): M {
+  if (value === true || value === 1 || value === "1") return modes[1]!;
+  return modeOf(modes, value) ?? modes[0]!;
+}
+
+export function parseAutoplayMode(value: unknown) {
+  return parseMode(autoplayModes, value);
 }
 
 export const autoplayModeLabels: Record<AutoplayMode, string> = {
@@ -60,11 +68,8 @@ export const autoplayModeLabels: Record<AutoplayMode, string> = {
 export const loopModes = ["off", "track", "queue"] as const;
 export type LoopMode = (typeof loopModes)[number];
 
-export function parseLoopMode(value: unknown): LoopMode {
-  if (value === true || value === 1 || value === "1" || value === "track")
-    return "track";
-  if (value === "queue") return "queue";
-  return "off";
+export function parseLoopMode(value: unknown) {
+  return parseMode(loopModes, value);
 }
 
 export const loopModeLabels: Record<LoopMode, string> = {
@@ -228,6 +233,47 @@ type PendingScrobble = {
     automatic?: boolean;
   };
 };
+
+type Row = Record<string, unknown>;
+
+// Optional columns become absent keys rather than undefined ones, so a saved
+// record round-trips through JSON and `toHaveProperty` the same way.
+function compact<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as T;
+}
+
+function text(value: unknown) {
+  return value ? String(value) : undefined;
+}
+
+function numeric(value: unknown) {
+  return value === null ? undefined : Number(value);
+}
+
+function savedTrack(track: Row) {
+  return compact({
+    id: String(track.id),
+    requesterId: String(track.requester_id),
+    sourceInput: String(track.source_input),
+    canonicalUrl: String(track.canonical_url),
+    sourceId: String(track.source_id),
+    title: String(track.title),
+    artist: String(track.artist),
+    album: text(track.album),
+    duration: numeric(track.duration),
+    artwork: text(track.artwork),
+    automatic: track.automatic ? true : undefined,
+    status: String(track.status),
+    filePath: text(track.file_path),
+    introSeconds: numeric(track.intro_seconds),
+    outroSeconds: numeric(track.outro_seconds),
+    fadeInSeconds: numeric(track.fade_in_seconds),
+    fadeOutSeconds: numeric(track.fade_out_seconds),
+    queuePosition: numeric(track.queue_position),
+  } satisfies SavedTrack);
+}
 
 export class Store {
   db: Database;
@@ -907,7 +953,7 @@ export class Store {
   resumableSessions(now: number, ttlMs: number) {
     const rows = this.db
       .query(`SELECT * FROM sessions WHERE status != 'ended'`)
-      .all() as Record<string, unknown>[];
+      .all() as Row[];
     return this.savedSessions(rows, now, ttlMs, true);
   }
 
@@ -916,13 +962,13 @@ export class Store {
       .query(
         `SELECT * FROM sessions WHERE status = 'ended' AND resume_until IS NOT NULL`,
       )
-      .all() as Record<string, unknown>[];
+      .all() as Row[];
     return this.savedSessions(rows, Number.NEGATIVE_INFINITY, 0, false)
       .sessions;
   }
 
   private savedSessions(
-    rows: Record<string, unknown>[],
+    rows: Row[],
     now: number,
     ttlMs: number,
     expire: boolean,
@@ -944,41 +990,10 @@ export class Store {
         WHERE session_id = ? AND status IN ('playing', 'ready', 'preparing', 'played')
         ORDER BY CASE WHEN status = 'playing' THEN -1 ELSE COALESCE(queue_position, created_at) END`,
           )
-          .all(id) as Record<string, unknown>[]
-      ).map((track) => ({
-        id: String(track.id),
-        requesterId: String(track.requester_id),
-        sourceInput: String(track.source_input),
-        canonicalUrl: String(track.canonical_url),
-        sourceId: String(track.source_id),
-        title: String(track.title),
-        artist: String(track.artist),
-        ...(track.album ? { album: String(track.album) } : {}),
-        ...(track.duration === null
-          ? {}
-          : { duration: Number(track.duration) }),
-        ...(track.artwork ? { artwork: String(track.artwork) } : {}),
-        ...(track.automatic ? { automatic: true } : {}),
-        status: String(track.status),
-        ...(track.file_path ? { filePath: String(track.file_path) } : {}),
-        ...(track.intro_seconds === null
-          ? {}
-          : { introSeconds: Number(track.intro_seconds) }),
-        ...(track.outro_seconds === null
-          ? {}
-          : { outroSeconds: Number(track.outro_seconds) }),
-        ...(track.fade_in_seconds === null
-          ? {}
-          : { fadeInSeconds: Number(track.fade_in_seconds) }),
-        ...(track.fade_out_seconds === null
-          ? {}
-          : { fadeOutSeconds: Number(track.fade_out_seconds) }),
-        ...(track.queue_position === null
-          ? {}
-          : { queuePosition: Number(track.queue_position) }),
-      }));
+          .all(id) as Row[]
+      ).map(savedTrack);
       return [
-        {
+        compact({
           id,
           huddleId: String(row.huddle_id),
           callId: String(row.call_id),
@@ -986,36 +1001,27 @@ export class Store {
           threadTs: String(row.thread_ts),
           sourceChannelId: String(row.source_channel_id ?? row.channel_id),
           huddleThreadTs: String(row.huddle_thread_ts ?? row.thread_ts),
-          ...(row.companion_channel_id
-            ? { companionChannelId: String(row.companion_channel_id) }
-            : {}),
+          companionChannelId: text(row.companion_channel_id),
           uiTs: String(row.ui_ts ?? ""),
           revision: Number(row.revision),
           creatorId: String(row.creator_id),
-          ...(row.host_id ? { hostId: String(row.host_id) } : {}),
+          hostId: text(row.host_id),
           state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
           autoplay: parseAutoplayMode(row.autoplay),
           loopMode: parseLoopMode(row.loop_mode),
-          transitionMode: transitionModes.includes(
-            row.transition_mode as TransitionMode,
-          )
-            ? (row.transition_mode as TransitionMode)
-            : "none",
-          ...(duckingModes.includes(row.ducking_mode as DuckingMode)
-            ? { duckingMode: row.ducking_mode as DuckingMode }
-            : {}),
-          displayMode: displayModes.includes(row.display_mode as DisplayMode)
-            ? (row.display_mode as DisplayMode)
-            : "default",
+          transitionMode:
+            modeOf(transitionModes, row.transition_mode) ?? "none",
+          duckingMode: modeOf(duckingModes, row.ducking_mode),
+          displayMode: modeOf(displayModes, row.display_mode) ?? "default",
           anchorEnabled: Boolean(row.anchor_enabled),
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
           resumeUntil: deadline,
-          ...(row.end_text ? { endText: String(row.end_text) } : {}),
-          ...(row.end_blocks
-            ? { endBlocks: JSON.parse(String(row.end_blocks)) as unknown[] }
-            : {}),
+          endText: text(row.end_text),
+          endBlocks: row.end_blocks
+            ? (JSON.parse(String(row.end_blocks)) as unknown[])
+            : undefined,
           permissions: (
             this.db
               .query(
@@ -1024,7 +1030,7 @@ export class Store {
               .all(id) as { capability: string }[]
           ).map((value) => value.capability),
           tracks,
-        } satisfies SavedSession,
+        } satisfies SavedSession),
       ];
     });
     if (expiredIds.length)
@@ -1591,7 +1597,7 @@ export class Store {
   getUserScrobbling(userId: string): UserScrobbling {
     const row = this.db
       .query("SELECT * FROM user_scrobbling WHERE user_id = ?")
-      .get(userId) as Record<string, unknown> | null;
+      .get(userId) as Row | null;
     if (!row)
       return {
         lastFmEnabled: false,
@@ -1599,35 +1605,23 @@ export class Store {
         huddleMixOptIn: true,
         mode: "always",
       };
-    return {
-      ...(row.lastfm_username
-        ? { lastFmUsername: String(row.lastfm_username) }
-        : {}),
-      ...(row.lastfm_session_key
-        ? { lastFmSessionKey: String(row.lastfm_session_key) }
-        : {}),
+    return compact({
+      lastFmUsername: text(row.lastfm_username),
+      lastFmSessionKey: text(row.lastfm_session_key),
       lastFmEnabled: Boolean(row.lastfm_enabled),
-      ...(row.lastfm_pending_token
-        ? { lastFmPendingToken: String(row.lastfm_pending_token) }
-        : {}),
-      ...(row.lastfm_pending_at
-        ? { lastFmPendingAt: Number(row.lastfm_pending_at) }
-        : {}),
-      ...(row.listenbrainz_username
-        ? { listenBrainzUsername: String(row.listenbrainz_username) }
-        : {}),
-      ...(row.listenbrainz_token
-        ? { listenBrainzToken: String(row.listenbrainz_token) }
-        : {}),
+      lastFmPendingToken: text(row.lastfm_pending_token),
+      lastFmPendingAt: row.lastfm_pending_at
+        ? Number(row.lastfm_pending_at)
+        : undefined,
+      listenBrainzUsername: text(row.listenbrainz_username),
+      listenBrainzToken: text(row.listenbrainz_token),
       listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
       huddleMixOptIn:
         row.huddle_mix_opt_in === undefined
           ? true
           : Boolean(row.huddle_mix_opt_in),
-      mode: scrobblingModes.includes(row.mode as ScrobblingMode)
-        ? (row.mode as ScrobblingMode)
-        : "always",
-    };
+      mode: modeOf(scrobblingModes, row.mode) ?? "always",
+    });
   }
 
   setScrobblingMode(userId: string, mode: ScrobblingMode) {
@@ -1767,7 +1761,7 @@ export class Store {
           `SELECT id, session_id, user_id, service, listened_at, attempts, track FROM scrobbles
       WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY listened_at, created_at`,
         )
-        .all(now) as Record<string, unknown>[]
+        .all(now) as Row[]
     ).map(
       (row) =>
         ({
