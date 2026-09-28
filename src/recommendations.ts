@@ -1170,7 +1170,7 @@ export class RecommendationCatalog {
     autoplayed = new Set<string>(),
   ) {
     if (!username) return emptyProfile();
-    const headers = token ? { authorization: `Token ${token}` } : undefined;
+    const headers = tokenHeaders(token);
     const user = encodeURIComponent(username);
     const get = (path: string) =>
       this.json(`${listenBrainzEndpoint}${path}`, headers).catch(
@@ -1251,13 +1251,9 @@ export class RecommendationCatalog {
       .map((row) => row.mbid)
       .filter((mbid) => !this.recordings.get(mbid));
     if (missing.length) {
-      const settings = this.store.getUserScrobbling(userId);
-      const headers = settings.listenBrainzToken
-        ? { authorization: `Token ${settings.listenBrainzToken}` }
-        : undefined;
       const result = await this.json(
         `${listenBrainzEndpoint}/metadata/recording/?recording_mbids=${missing.map(encodeURIComponent).join(",")}&inc=artist%20release`,
-        headers,
+        tokenHeaders(this.store.getUserScrobbling(userId).listenBrainzToken),
       ).catch(() => undefined);
       const found =
         result && typeof result === "object"
@@ -1480,6 +1476,10 @@ function artistsFrom(
     const artist = String(name(row) ?? "").trim();
     return artist ? [{ name: artist, score: 1 + logCount(count(row)) }] : [];
   });
+}
+
+function tokenHeaders(token?: string) {
+  return token ? { authorization: `Token ${token}` } : undefined;
 }
 
 function logCount(value: unknown) {
