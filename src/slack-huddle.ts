@@ -437,15 +437,27 @@ export class SlackHuddleAdapter {
         );
         // The channel is usable without its topic, so a failed update is
         // logged rather than thrown, which would orphan the new channel.
-        const topic = await this.call("conversations.setTopic", {
-          channel: channelId,
-          topic: `HuddleFM controls for <#${sourceChannelId}>. Membership and messages are managed automatically.`,
-        });
-        if (topic.ok !== true)
+        try {
+          const topic = await this.call("conversations.setTopic", {
+            channel: channelId,
+            topic: `HuddleFM controls for <#${sourceChannelId}>. Membership and messages are managed automatically.`,
+          });
+          if (topic.ok !== true)
+            log.warn(
+              {
+                event: "topic_failed",
+                channelId,
+                sourceChannelId,
+                error: topic.error,
+              },
+              "Could not set companion channel topic",
+            );
+        } catch (err) {
           log.warn(
-            { event: "topic_failed", channelId, error: topic.error },
+            { event: "topic_failed", channelId, sourceChannelId, err },
             "Could not set companion channel topic",
           );
+        }
         return channelId;
       }
       suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 6);
