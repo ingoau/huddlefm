@@ -1096,47 +1096,32 @@ export class RecommendationCatalog {
         limit: String(knownHistoryLimit),
       }).catch(() => undefined),
     ]);
-    const known = asArray(
-      (allTime?.toptracks as { track?: unknown })?.track,
-    ).flatMap((row) => {
-      const track = lastFmTrack(row);
-      return track ? [keyOf(track)] : [];
-    });
-    const topTracks = asArray(
-      (top.toptracks as { track?: unknown })?.track,
-    ).flatMap((row) => {
-      const track = lastFmTrack(row);
-      if (!track) return [];
-      const playcount = Number((row as { playcount?: unknown }).playcount ?? 0);
-      return [
-        {
-          userId,
-          source: "lastfm",
-          weight: 1.5 + Math.log10(Math.max(1, playcount) + 1),
-          ...track,
-        },
-      ];
-    });
-    const recentTracks = asArray(
-      (recent.recenttracks as { track?: unknown })?.track,
-    ).flatMap((row) => {
-      const track = lastFmTrack(row);
-      if (!track || autoplayed.has(keyOf(track))) return [];
-      return [{ userId, source: "lastfm", weight: 1, ...track }];
-    });
-    const topArtists = asArray(
-      (artists?.topartists as { artist?: unknown })?.artist,
-    ).flatMap((row) => {
-      const name = lastFmArtist(row).trim();
-      if (!name) return [];
-      const playcount = Number((row as { playcount?: unknown }).playcount ?? 0);
-      return [{ name, score: 1 + Math.log10(Math.max(1, playcount) + 1) }];
-    });
+    const listener = { userId, source: "lastfm" };
     return {
       ...emptyProfile(),
-      contributions: [...topTracks, ...recentTracks],
-      known: new Set(known),
-      artists: topArtists,
+      contributions: [
+        ...contributionsFrom(
+          rows(top, "toptracks", "track"),
+          lastFmTrack,
+          listener,
+          (row) => 1.5 + logCount(row.playcount),
+        ),
+        ...contributionsFrom(
+          rows(recent, "recenttracks", "track"),
+          lastFmTrack,
+          listener,
+          () => 1,
+          autoplayed,
+        ),
+      ],
+      known: new Set(
+        parsed(rows(allTime, "toptracks", "track"), lastFmTrack).map(keyOf),
+      ),
+      artists: artistsFrom(
+        rows(artists, "topartists", "artist"),
+        lastFmArtist,
+        (row) => row.playcount,
+      ),
     };
   }
 
@@ -1148,18 +1133,16 @@ export class RecommendationCatalog {
       .load(
         `similar\0${trackKey(title, seed)}`,
         async () => {
-          const result = await this.lastFm("track.getSimilar", {
-            track: title,
-            artist: seed,
-            limit: "20",
-          }).catch(lastFmNotFound);
-          if (!result) return [];
-          return asArray(
-            (result.similartracks as { track?: unknown })?.track,
-          ).flatMap((row) => {
+          const similar = await this.lastFmRows(
+            "track.getSimilar",
+            { track: title, artist: seed, limit: "20" },
+            "similartracks",
+            "track",
+          );
+          return similar.flatMap((row) => {
             const track = lastFmTrack(row);
             if (!track) return [];
-            const match = Number((row as { match?: unknown }).match ?? 0);
+            const match = Number(row.match ?? 0);
             return [{ ...track, ...(match > 0 ? { match } : {}) }];
           });
         },
@@ -1185,17 +1168,16 @@ export class RecommendationCatalog {
     const neighbours = await this.artistLookups.load(
       `similar-artists\0${normalizeToken(seed)}`,
       async () => {
-        const result = await this.lastFm("artist.getSimilar", {
-          artist: seed,
-          limit: String(similarArtistsPerSeed),
-        }).catch(lastFmNotFound);
-        if (!result) return [];
-        return asArray(
-          (result.similarartists as { artist?: unknown })?.artist,
-        ).flatMap((row) => {
+        const similar = await this.lastFmRows(
+          "artist.getSimilar",
+          { artist: seed, limit: String(similarArtistsPerSeed) },
+          "similarartists",
+          "artist",
+        );
+        return similar.flatMap((row) => {
           const name = lastFmArtist(row).trim();
           if (!name) return [];
-          const match = Number((row as { match?: unknown }).match ?? 0);
+          const match = Number(row.match ?? 0);
           return [{ name, match: match > 0 ? match : 0.5 }];
         });
       },
@@ -1205,19 +1187,19 @@ export class RecommendationCatalog {
       neighbours.map(async (neighbour) => {
         const tracks = await this.lookups.load(
           `top-tracks\0${normalizeToken(neighbour.name)}`,
-          async () => {
-            const result = await this.lastFm("artist.getTopTracks", {
-              artist: neighbour.name,
-              limit: String(tracksPerSimilarArtist),
-            }).catch(lastFmNotFound);
-            if (!result) return [];
-            return asArray(
-              (result.toptracks as { track?: unknown })?.track,
-            ).flatMap((row) => {
-              const track = lastFmTrack(row);
-              return track ? [track] : [];
-            });
-          },
+          async () =>
+            parsed(
+              await this.lastFmRows(
+                "artist.getTopTracks",
+                {
+                  artist: neighbour.name,
+                  limit: String(tracksPerSimilarArtist),
+                },
+                "toptracks",
+                "track",
+              ),
+              lastFmTrack,
+            ),
           [],
         );
         return tracks.map(({ match: _, ...track }, index) => ({
@@ -1240,90 +1222,58 @@ export class RecommendationCatalog {
     if (!username) return emptyProfile();
     const headers = token ? { authorization: `Token ${token}` } : undefined;
     const user = encodeURIComponent(username);
+    const get = (path: string) =>
+      this.json(`${listenBrainzEndpoint}${path}`, headers).catch(
+        () => undefined,
+      );
     const [listens, stats, artists, recommendations, allTime] =
       await Promise.all([
-        this.json(
-          `${listenBrainzEndpoint}/user/${user}/listens?count=50`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/stats/user/${user}/recordings?range=quarter`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/stats/user/${user}/artists?range=quarter&count=${artistSeedWindow}`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/cf/recommendation/user/${user}/recording?count=${listenBrainzFetchCount}`,
-          headers,
-        ).catch(() => undefined),
-        this.json(
-          `${listenBrainzEndpoint}/stats/user/${user}/recordings?range=all_time&count=${knownHistoryLimit}`,
-          headers,
-        ).catch(() => undefined),
+        get(`/user/${user}/listens?count=50`),
+        get(`/stats/user/${user}/recordings?range=quarter`),
+        get(
+          `/stats/user/${user}/artists?range=quarter&count=${artistSeedWindow}`,
+        ),
+        get(
+          `/cf/recommendation/user/${user}/recording?count=${listenBrainzFetchCount}`,
+        ),
+        get(
+          `/stats/user/${user}/recordings?range=all_time&count=${knownHistoryLimit}`,
+        ),
       ]);
-    const known = asArray(
-      (allTime?.payload as { recordings?: unknown })?.recordings,
-    ).flatMap((row) => {
-      const track = listenBrainzTrack(row);
-      return track ? [keyOf(track)] : [];
-    });
-    const recent = asArray(
-      (listens?.payload as { listens?: unknown })?.listens,
-    ).flatMap((row) => {
-      const track = listenBrainzTrack(
-        (row as { track_metadata?: unknown }).track_metadata,
-      );
-      if (!track || autoplayed.has(keyOf(track))) return [];
-      return [{ userId, source: "listenbrainz", weight: 1, ...track }];
-    });
-    const top = asArray(
-      (stats?.payload as { recordings?: unknown })?.recordings,
-    ).flatMap((row) => {
-      const track = listenBrainzTrack(row);
-      if (!track) return [];
-      const count = Number(
-        (row as { listen_count?: unknown }).listen_count ?? 0,
-      );
-      return [
-        {
-          userId,
-          source: "listenbrainz",
-          weight: 1.5 + Math.log10(Math.max(1, count) + 1),
-          ...track,
-        },
-      ];
-    });
-    const topArtists = asArray(
-      (artists?.payload as { artists?: unknown })?.artists,
-    ).flatMap((row) => {
-      const name = String(
-        (row as { artist_name?: unknown }).artist_name ?? "",
-      ).trim();
-      if (!name) return [];
-      const count = Number(
-        (row as { listen_count?: unknown }).listen_count ?? 0,
-      );
-      return [{ name, score: 1 + Math.log10(Math.max(1, count) + 1) }];
-    });
-    const mbids = asArray(
-      (recommendations?.payload as { mbids?: unknown })?.mbids,
-    ).flatMap((row) => {
-      const mbid = String(
-        (row as { recording_mbid?: unknown }).recording_mbid ?? "",
-      );
+    const listener = { userId, source: "listenbrainz" };
+    const mbids = rows(recommendations, "payload", "mbids").flatMap((row) => {
+      const mbid = String(row.recording_mbid ?? "");
       if (!/^[0-9a-f-]{36}$/i.test(mbid)) return [];
-      const score = Number((row as { score?: unknown }).score ?? 0);
-      const listened = Boolean(
-        (row as { latest_listened_at?: unknown }).latest_listened_at,
-      );
+      const score = Number(row.score ?? 0);
+      const listened = Boolean(row.latest_listened_at);
       return [{ mbid, score: Number.isFinite(score) ? score : 0, listened }];
     });
     return {
-      contributions: [...recent, ...top],
-      known: new Set(known),
-      artists: topArtists,
+      contributions: [
+        ...contributionsFrom(
+          rows(listens, "payload", "listens"),
+          (row) => listenBrainzTrack(row.track_metadata),
+          listener,
+          () => 1,
+          autoplayed,
+        ),
+        ...contributionsFrom(
+          rows(stats, "payload", "recordings"),
+          listenBrainzTrack,
+          listener,
+          (row) => 1.5 + logCount(row.listen_count),
+        ),
+      ],
+      known: new Set(
+        parsed(rows(allTime, "payload", "recordings"), listenBrainzTrack).map(
+          keyOf,
+        ),
+      ),
+      artists: artistsFrom(
+        rows(artists, "payload", "artists"),
+        (row) => row.artist_name,
+        (row) => row.listen_count,
+      ),
       listenBrainz: mbids,
     };
   }
@@ -1359,14 +1309,14 @@ export class RecommendationCatalog {
         `${listenBrainzEndpoint}/metadata/recording/?recording_mbids=${missing.map(encodeURIComponent).join(",")}&inc=artist%20release`,
         headers,
       ).catch(() => undefined);
-      const rows =
+      const found =
         result && typeof result === "object"
           ? (result as Record<string, unknown>)
           : {};
       for (const mbid of missing)
         this.recordings.set(
           mbid,
-          listenBrainzMetadata(rows[mbid] ?? rows[mbid.toLowerCase()]),
+          listenBrainzMetadata(found[mbid] ?? found[mbid.toLowerCase()]),
         );
     }
     return picked.flatMap((row) => {
@@ -1399,6 +1349,17 @@ export class RecommendationCatalog {
         Number(result?.error ?? 0),
       );
     return result;
+  }
+
+  // A Last.fm list lookup where "not found" is simply an empty answer.
+  private async lastFmRows(
+    method: string,
+    params: Record<string, string>,
+    outer: string,
+    inner: string,
+  ) {
+    const result = await this.lastFm(method, params).catch(lastFmNotFound);
+    return result ? rows(result, outer, inner) : [];
   }
 
   private async json(url: string, headers?: Record<string, string>) {
@@ -1528,9 +1489,51 @@ function playableMetadata(track: TrackMetadata): TrackMetadata {
   };
 }
 
-function asArray(value: unknown) {
-  if (!value) return [];
-  return Array.isArray(value) ? value : [value];
+type Row = Record<string, unknown>;
+type RowParser = (row: Row) => TasteTrack | undefined;
+
+// Digs a list out of a provider response; a single item comes back bare.
+function rows(value: unknown, outer: string, inner: string): Row[] {
+  const list = (value as Record<string, Row> | undefined)?.[outer]?.[inner];
+  return Array.isArray(list) ? list : list ? [list as Row] : [];
+}
+
+function parsed(rows: Row[], parse: RowParser) {
+  return rows.flatMap((row) => {
+    const track = parse(row);
+    return track ? [track] : [];
+  });
+}
+
+// One listener's rows as contributions, minus what does not parse and, when
+// given, the songs the mix itself chose for them.
+function contributionsFrom(
+  rows: Row[],
+  parse: RowParser,
+  listener: { userId: string; source: string },
+  weight: (row: Row) => number,
+  skip?: Set<string>,
+): TasteContribution[] {
+  return rows.flatMap((row) => {
+    const track = parse(row);
+    if (!track || skip?.has(keyOf(track))) return [];
+    return [{ ...listener, weight: weight(row), ...track }];
+  });
+}
+
+function artistsFrom(
+  rows: Row[],
+  name: (row: Row) => unknown,
+  count: (row: Row) => unknown,
+): TasteArtist[] {
+  return rows.flatMap((row) => {
+    const artist = String(name(row) ?? "").trim();
+    return artist ? [{ name: artist, score: 1 + logCount(count(row)) }] : [];
+  });
+}
+
+function logCount(value: unknown) {
+  return Math.log10(Math.max(1, Number(value ?? 0)) + 1);
 }
 
 function lastFmArtist(value: unknown) {
