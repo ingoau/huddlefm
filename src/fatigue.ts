@@ -53,15 +53,6 @@ type UserFatigue = {
   skippedArtists: Map<string, number>;
 };
 
-function emptyUser(): UserFatigue {
-  return {
-    tracks: new Map(),
-    artists: new Map(),
-    skippedTracks: new Map(),
-    skippedArtists: new Map(),
-  };
-}
-
 function add(counts: Map<string, number>, key: string, value: number) {
   if (!key) return;
   counts.set(key, (counts.get(key) ?? 0) + value);
@@ -109,11 +100,17 @@ export class FatigueIndex {
   }
 
   private user(userId: string) {
-    const existing = this.users.get(userId);
-    if (existing) return existing;
-    const created = emptyUser();
-    this.users.set(userId, created);
-    return created;
+    let user = this.users.get(userId);
+    if (!user) {
+      user = {
+        tracks: new Map(),
+        artists: new Map(),
+        skippedTracks: new Map(),
+        skippedArtists: new Map(),
+      };
+      this.users.set(userId, user);
+    }
+    return user;
   }
 
   // The mean across listeners, not the maximum: one person being sick of a

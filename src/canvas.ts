@@ -66,6 +66,8 @@ export function canvasMarkdown(
     entries: T[],
     line: (entry: T, index: number) => string,
   ) => entries.map(line).join("\n") || "Nothing yet.";
+  const plural = (count: number, noun: string) =>
+    `${count} ${count === 1 ? noun : `${noun}s`}`;
   const render: Record<CanvasSection, () => string[]> = {
     summary: () => [
       "All-time listening across every HuddleFM session.",
@@ -88,7 +90,7 @@ export function canvasMarkdown(
       ranking(
         stats.topArtists,
         ({ artist, count }, index) =>
-          `${index + 1}. **${escapeMarkdown(artist)}** — ${count} ${count === 1 ? "play" : "plays"}`,
+          `${index + 1}. **${escapeMarkdown(artist)}** — ${plural(count, "play")}`,
       ),
     ],
     "top-tracks": () => [
@@ -96,7 +98,7 @@ export function canvasMarkdown(
       ranking(
         stats.topTracks,
         ({ title, artist, count }, index) =>
-          `${index + 1}. **${escapeMarkdown(title)}** — ${escapeMarkdown(artist)} · ${count} ${count === 1 ? "play" : "plays"}`,
+          `${index + 1}. **${escapeMarkdown(title)}** — ${escapeMarkdown(artist)} · ${plural(count, "play")}`,
       ),
     ],
     "top-channels": () => [
@@ -104,7 +106,7 @@ export function canvasMarkdown(
       ranking(
         stats.topChannels,
         ({ channelId, count }, index) =>
-          `${index + 1}. ![](#${channelId}) — ${count} ${count === 1 ? "song" : "songs"}`,
+          `${index + 1}. ![](#${channelId}) — ${plural(count, "song")}`,
       ),
     ],
     controls: () => [
