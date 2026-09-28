@@ -133,6 +133,14 @@ function checked(state: InputState | undefined) {
   );
 }
 
+// The object without its undefined fields, for spreading into records that
+// distinguish an absent field from an unset one.
+function defined<Value extends object>(value: Value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as Partial<Value>;
+}
+
 function throwIfAborted(signal?: AbortSignal) {
   if (!signal?.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
@@ -404,21 +412,21 @@ export class Coordinator {
   async resume(actorId?: string) {
     const startedAt = Date.now();
     this.log.info({ event: "resume_started" }, "Resuming session");
-    const missing = await Promise.all(
-      [this.current, ...this.queue]
-        .filter(Boolean)
-        .map(async (entry) =>
-          entry!.filePath && (await Bun.file(entry!.filePath).exists())
-            ? undefined
-            : entry,
+    const missingEntries = (
+      await Promise.all(
+        [this.current, ...this.queue].map(async (entry) =>
+          entry &&
+          !(entry.filePath && (await Bun.file(entry.filePath).exists()))
+            ? entry
+            : undefined,
         ),
-    );
-    if (this.current && missing.includes(this.current)) {
-      this.current!.status = "preparing";
-      this.queue.unshift(this.current!);
+      )
+    ).filter((entry): entry is Entry => Boolean(entry));
+    if (this.current && missingEntries.includes(this.current)) {
+      this.current.status = "preparing";
+      this.queue.unshift(this.current);
       this.current = undefined;
     }
-    const missingEntries = missing.filter(Boolean) as Entry[];
     for (const entry of missingEntries) {
       entry.status = "preparing";
       entry.filePath = undefined;
@@ -480,14 +488,7 @@ export class Coordinator {
     const controller = new AbortController();
     this.preparations.set(entry.id, controller);
     try {
-      const prepared = this.tracks.prepare(
-        entry,
-        `data/media/${this.id}`,
-        entry.id,
-        controller.signal,
-        this.preparationPriority(entry),
-      );
-      const filePath = await prepared;
+      const filePath = await this.download(entry, controller);
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
         if (this.inactive() || !this.queue.includes(entry)) return;
@@ -518,17 +519,8 @@ export class Coordinator {
         "Restored track preparation failed",
       );
       await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (this.inactive() || !this.queue.includes(entry)) return;
-        this.queue = this.queue.filter((track) => track !== entry);
-        this.queueChanged();
-        this.store.setTrack(entry.id, { status: "failed" });
-        this.audit.record("track.failed", undefined, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-          reason: safeAuditError(error),
-        });
-        if (!this.current) await this.startNext();
+        if (this.dropFailed(entry, error) && !this.current)
+          await this.startNext();
       });
     }
   }
@@ -715,7 +707,6 @@ export class Coordinator {
         ok: false as const,
         error: "Join the huddle before using the player.",
       };
-    const capabilities = [...this.allowed];
     const host = this.hostId === userId || this.isManager(userId);
     const grant = this.integrations.get(userId);
     const scrobbling = this.scrobbling?.settings(userId, this.id);
@@ -736,9 +727,7 @@ export class Coordinator {
         ? "all (host/manager)"
         : grant
           ? [...grant.permissions]
-          : capabilities.length
-            ? capabilities
-            : [],
+          : [...this.allowed],
       nowPlaying: this.current
         ? {
             id: this.current.id,
@@ -1489,17 +1478,7 @@ export class Coordinator {
       const state = this.state;
       this.state = "suspended";
       this.playbackScrobbling?.pause();
-      this.autoplayGeneration++;
-      this.autoplayPending = false;
-      for (const controller of this.preparations.values()) controller.abort();
-      this.preparations.clear();
-      clearTimeout(this.idleTimer);
-      clearTimeout(this.idleWarningTimer);
-      clearTimeout(this.aloneTimer);
-      clearTimeout(this.pausedTimer);
-      clearTimeout(this.pausedWarningTimer);
-      clearTimeout(this.anchorTimer);
-      clearTimeout(this.renderTimer);
+      this.stopWork();
       this.store.suspendSession(
         this.id,
         {
@@ -1759,26 +1738,20 @@ export class Coordinator {
         type: command.type,
         error: "session_inactive",
       });
+    let result: Parameters<typeof wrapIntegrationResult>[2];
     try {
       // Commands check permissions synchronously, and a grant holder may also
       // be a workspace admin.
       await this.primeManager(userId);
-      const result = await this.runIntegrationCommand(userId, command);
-      return this.slack.dm(
-        userId,
-        wrapIntegrationResult(command.type, requestTs, result),
-        { channelId: dmChannelId, threadTs: requestTs },
-      );
+      result = await this.runIntegrationCommand(userId, command);
     } catch (error) {
-      return this.slack.dm(
-        userId,
-        wrapIntegrationResult(command.type, requestTs, {
-          ok: false,
-          error: message(error),
-        }),
-        { channelId: dmChannelId, threadTs: requestTs },
-      );
+      result = { ok: false, error: message(error) };
     }
+    return this.slack.dm(
+      userId,
+      wrapIntegrationResult(command.type, requestTs, result),
+      { channelId: dmChannelId, threadTs: requestTs },
+    );
   }
 
   private async runIntegrationCommand(
@@ -1849,25 +1822,12 @@ export class Coordinator {
     }
   }
 
+  // The agent status without the fields that only Slack-side agents need.
   private integrationStatus(userId: string) {
     const status = this.agentStatus(userId);
     if (!status.ok) return status;
-    return {
-      ok: true as const,
-      state: status.state,
-      volumePercent: status.volumePercent,
-      playbackSeconds: status.playbackSeconds,
-      displayMode: status.displayMode,
-      autoplay: status.autoplay,
-      loopMode: status.loopMode,
-      transitionMode: status.transitionMode,
-      duckingMode: status.duckingMode,
-      anchorEnabled: status.anchorEnabled,
-      yourCapabilities: status.yourCapabilities,
-      nowPlaying: status.nowPlaying,
-      queue: status.queue,
-      queueLimit: status.queueLimit,
-    };
+    const { hostId: _hostId, youAreHost, scrobbling, ...shared } = status;
+    return shared;
   }
 
   private isIntegrationAction(actionId: string) {
@@ -1896,24 +1856,18 @@ export class Coordinator {
         interaction.userId,
         "That control request is no longer pending.",
       );
+    clearTimeout(pending.timer);
+    this.pendingIntegrations.delete(pending.userId);
     if (interaction.actionId === "integration_decline") {
-      clearTimeout(pending.timer);
-      this.pendingIntegrations.delete(pending.userId);
       await this.replyIntegration(pending, {
         ok: true,
         type: "grant_declined",
       });
-      if (interaction.responseUrl)
-        await this.slack
-          .replaceOriginal(
-            interaction.responseUrl,
-            `Declined <@${pending.userId}>'s control request.`,
-          )
-          .catch(() => {});
-      return;
+      return this.replaceOriginal(
+        interaction,
+        `Declined <@${pending.userId}>'s control request.`,
+      );
     }
-    clearTimeout(pending.timer);
-    this.pendingIntegrations.delete(pending.userId);
     this.integrations.set(pending.userId, {
       permissions: new Set(pending.permissions),
       events: new Set(pending.events),
@@ -1931,19 +1885,28 @@ export class Coordinator {
       ...(status.ok ? status : {}),
     });
     await this.render();
-    if (interaction.responseUrl)
-      await this.slack
-        .replaceOriginal(
-          interaction.responseUrl,
-          `Granted <@${pending.userId}> control of this session.`,
-          integrationGrantedBlocks({
-            sessionId: this.id,
-            requestId: pending.id,
-            userId: pending.userId,
-            permissions: pending.permissions,
-          }),
-        )
-        .catch(() => {});
+    await this.replaceOriginal(
+      interaction,
+      `Granted <@${pending.userId}> control of this session.`,
+      integrationGrantedBlocks({
+        sessionId: this.id,
+        requestId: pending.id,
+        userId: pending.userId,
+        permissions: pending.permissions,
+      }),
+    );
+  }
+
+  // Rewrites the ephemeral a host answered from, when Slack still lets us.
+  private async replaceOriginal(
+    interaction: Interaction,
+    text: string,
+    blocks?: unknown[],
+  ) {
+    if (!interaction.responseUrl) return;
+    await this.slack
+      .replaceOriginal(interaction.responseUrl, text, blocks)
+      .catch(() => {});
   }
 
   private async revokeIntegration(requestId: string, interaction: Interaction) {
@@ -1966,19 +1929,12 @@ export class Coordinator {
       { ok: true, type: "grant_revoked" },
     );
     await this.render();
-    if (interaction.responseUrl)
-      await this.slack
-        .replaceOriginal(
-          interaction.responseUrl,
-          `Revoked <@${userId}>'s control of this session.`,
-        )
-        .catch(() => {});
+    await this.replaceOriginal(
+      interaction,
+      `Revoked <@${userId}>'s control of this session.`,
+    );
     if (interaction.viewId && interaction.viewHash)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+      await this.updateSettings(interaction);
   }
 
   private replyIntegration(
@@ -2135,10 +2091,12 @@ export class Coordinator {
       artist: entry.artist,
     });
     void this.recommendations?.refreshUser(interaction.userId);
+    const discovery =
+      entry.discovery === undefined ? {} : { discovery: entry.discovery };
     this.audit.record("track.liked", interaction.userId, {
       sessionId: this.id,
       ...auditTrack(entry),
-      ...(entry.discovery === undefined ? {} : { discovery: entry.discovery }),
+      ...discovery,
     });
     this.log.info(
       {
@@ -2165,9 +2123,7 @@ export class Coordinator {
                 sessionId: this.id,
                 title: entry.title,
                 artist: entry.artist,
-                ...(entry.discovery === undefined
-                  ? {}
-                  : { discovery: entry.discovery }),
+                ...discovery,
               }),
             }),
           ]),
@@ -2387,21 +2343,11 @@ export class Coordinator {
       },
       "Preparing queued track",
     );
-    const prepared = this.tracks.prepare(
-      entry,
-      `data/media/${this.id}`,
-      entry.id,
-      controller.signal,
-      this.preparationPriority(entry),
-    );
+    const prepared = this.download(entry, controller);
     try {
       const filePath = await prepared;
       await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (this.state === "suspended") return;
-        if (this.state === "ended" || !this.queue.includes(entry))
-          return removePreparedMedia(filePath);
-        this.prepared(entry, filePath);
+        if (!(await this.acceptPrepared(entry, filePath))) return;
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
@@ -2434,18 +2380,8 @@ export class Coordinator {
         "Queued track preparation failed",
       );
       await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (this.inactive() || !this.queue.includes(entry)) return;
-        entry.status = "failed";
-        this.queue = this.queue.filter((item) => item !== entry);
-        this.queueChanged();
-        this.store.setTrack(entry.id, { status: "failed" });
+        if (!this.dropFailed(entry, error)) return;
         this.notifyTrack("queue.removed", entry, { reason: "failed" });
-        this.audit.record("track.failed", undefined, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-          reason: safeAuditError(error),
-        });
         await this.notice(
           entry.requesterId,
           `Could not prepare ${entry.title}: ${message(error)}`,
@@ -2460,30 +2396,65 @@ export class Coordinator {
     }
   }
 
+  private download(entry: Entry, controller: AbortController) {
+    return this.tracks.prepare(
+      entry,
+      `data/media/${this.id}`,
+      entry.id,
+      controller.signal,
+      this.preparationPriority(entry),
+    );
+  }
+
+  // Takes in a finished download, or discards it when the session no longer
+  // wants the track. A suspended session keeps the file for its resume.
+  private async acceptPrepared(entry: Entry, filePath: string) {
+    this.preparations.delete(entry.id);
+    if (this.state === "suspended") return false;
+    if (this.state === "ended" || !this.queue.includes(entry)) {
+      await removePreparedMedia(filePath);
+      return false;
+    }
+    this.prepared(entry, filePath);
+    return true;
+  }
+
+  // Drops a track whose preparation failed, unless the session has already
+  // moved on from it. Says whether it was still queued.
+  private dropFailed(entry: Entry, error: unknown) {
+    this.preparations.delete(entry.id);
+    if (this.inactive() || !this.queue.includes(entry)) return false;
+    entry.status = "failed";
+    this.queue = this.queue.filter((track) => track !== entry);
+    this.queueChanged();
+    this.store.setTrack(entry.id, { status: "failed" });
+    this.audit.record("track.failed", undefined, {
+      sessionId: this.id,
+      ...auditTrack(entry),
+      reason: safeAuditError(error),
+    });
+    return true;
+  }
+
   // When someone pressed Play something, a mix that produces nothing falls
   // back to a random currently-popular song, and they hear about it if even
   // that fails.
   private scheduleAutoplay(playSomethingBy?: string) {
-    const context =
-      this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "";
+    const context = this.autoplayContext();
     const seeds = [this.current, ...[...this.history].reverse()]
       .flatMap((track) => (track && !track.automatic ? [track.sourceId] : []))
       .filter((id, index, all) => all.indexOf(id) === index)
       .slice(0, 3);
-    const huddleMix = this.autoplayMode === "huddle" && this.recommendations;
     if (
       !this.autoplayOn() ||
       this.loopMode !== "off" ||
       this.autoplayPending ||
       this.inactive() ||
-      this.queue.some((track) => !track.automatic) ||
-      this.queue.some((track) => track.automatic) ||
-      this.queue.length + Number(Boolean(this.current)) >=
-        this.config.queueLimit
+      !this.autoplayHasRoom()
     )
       return;
     if (this.autoplayMode === "related" && (!context || !seeds.length)) return;
-    if (this.autoplayMode === "huddle" && !huddleMix) return;
+    if (this.autoplayMode === "huddle" && !this.recommendations) return;
     const generation = this.autoplayGeneration;
     this.autoplayPending = true;
     this.queueRender();
@@ -2526,6 +2497,19 @@ export class Coordinator {
       },
       "Finding autoplay recommendation",
     );
+    const giveUp = async (reason: string) => {
+      this.audit.record("autoplay.recommendation_failed", undefined, {
+        sessionId: this.id,
+        seedSourceIds: seeds,
+        reason,
+      });
+      if (playSomethingBy)
+        await this.notice(
+          playSomethingBy,
+          "Could not find anything to play; add a song to get started.",
+        );
+      return false;
+    };
     try {
       const recent = this.history.slice(-autoplayRecentWindow);
       const excluded = new Set([
@@ -2632,11 +2616,6 @@ export class Coordinator {
         );
         if (played !== undefined) return played;
       }
-      this.audit.record("autoplay.recommendation_failed", undefined, {
-        sessionId: this.id,
-        seedSourceIds: seeds,
-        reason: "no usable recommendations",
-      });
       this.log.warn(
         {
           event: "autoplay_recommendation_unavailable",
@@ -2644,18 +2623,8 @@ export class Coordinator {
         },
         "No usable autoplay recommendation found",
       );
-      if (playSomethingBy)
-        await this.notice(
-          playSomethingBy,
-          "Could not find anything to play; add a song to get started.",
-        );
-      return false;
+      return await giveUp("no usable recommendations");
     } catch (error) {
-      this.audit.record("autoplay.recommendation_failed", undefined, {
-        sessionId: this.id,
-        seedSourceIds: seeds,
-        reason: safeAuditError(error),
-      });
       this.logTrackFailure(
         {
           event: "autoplay_recommendation_failed",
@@ -2664,12 +2633,7 @@ export class Coordinator {
         error,
         "Autoplay recommendation failed",
       );
-      if (playSomethingBy)
-        await this.notice(
-          playSomethingBy,
-          "Could not find anything to play; add a song to get started.",
-        );
-      return false;
+      return giveUp(safeAuditError(error));
     }
   }
 
@@ -2771,35 +2735,32 @@ export class Coordinator {
     return (
       this.autoplayOn() &&
       generation === this.autoplayGeneration &&
-      this.state !== "ended" &&
-      this.state !== "suspended" &&
-      (this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "") ===
-        context &&
-      !this.queue.some((track) => !track.automatic) &&
-      !this.queue.some((track) => track.automatic) &&
-      this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit
+      !this.inactive() &&
+      this.autoplayContext() === context &&
+      this.autoplayHasRoom()
+    );
+  }
+
+  // The song an autoplay pick would follow on from.
+  private autoplayContext() {
+    return this.current?.sourceId ?? this.history.at(-1)?.sourceId ?? "";
+  }
+
+  // Autoplay only ever tops up an empty queue, one song at a time.
+  private autoplayHasRoom() {
+    return (
+      !this.queue.length &&
+      Number(Boolean(this.current)) < this.config.queueLimit
     );
   }
 
   private async prepareAutoplay(entry: Entry, controller: AbortController) {
     const startedAt = Date.now();
-    const prepared = this.tracks.prepare(
-      entry,
-      `data/media/${this.id}`,
-      entry.id,
-      controller.signal,
-      this.preparationPriority(entry),
-    );
+    const prepared = this.download(entry, controller);
     try {
       const filePath = await prepared;
       return await this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (this.state === "suspended") return false;
-        if (this.state === "ended" || !this.queue.includes(entry)) {
-          await removePreparedMedia(filePath);
-          return false;
-        }
-        this.prepared(entry, filePath);
+        if (!(await this.acceptPrepared(entry, filePath))) return false;
         if (!this.current) await this.startNext();
         else {
           await this.render();
@@ -2827,17 +2788,7 @@ export class Coordinator {
         "Autoplay track preparation failed",
       );
       return this.enqueue(async () => {
-        this.preparations.delete(entry.id);
-        if (this.inactive() || !this.queue.includes(entry)) return false;
-        entry.status = "failed";
-        this.queue = this.queue.filter((track) => track !== entry);
-        this.queueChanged();
-        this.store.setTrack(entry.id, { status: "failed" });
-        this.audit.record("track.failed", undefined, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-          reason: safeAuditError(error),
-        });
+        if (!this.dropFailed(entry, error)) return false;
         if (!this.current) await this.startNext();
         else await this.render();
         return false;
@@ -2845,9 +2796,13 @@ export class Coordinator {
     }
   }
 
-  private takeQueuedAutoplay() {
+  private cancelAutoplay() {
     this.autoplayGeneration++;
     this.autoplayPending = false;
+  }
+
+  private takeQueuedAutoplay() {
+    this.cancelAutoplay();
     const automatic = this.queue.filter((track) => track.automatic);
     this.queue = this.queue.filter((track) => !track.automatic);
     if (automatic.length) this.queueChanged();
@@ -3008,10 +2963,7 @@ export class Coordinator {
   }
 
   artworkPath(entryId: string, token: string) {
-    if (token !== this.mediaToken) return;
-    const filePath = [this.current, ...this.queue, ...this.history].find(
-      (entry) => entry?.id === entryId,
-    )?.filePath;
+    const filePath = this.audioPath(entryId, token);
     return filePath ? embeddedArtworkPath(filePath) : undefined;
   }
 
@@ -3192,6 +3144,12 @@ export class Coordinator {
         this.current.filePath
       ) {
         const finished = this.current;
+        const transition = defined({
+          introSeconds: finished.introSeconds,
+          outroSeconds: finished.outroSeconds,
+          fadeInSeconds: finished.fadeInSeconds,
+          fadeOutSeconds: finished.fadeOutSeconds,
+        });
         const looping: Entry = {
           sourceInput: finished.sourceInput,
           canonicalUrl: finished.canonicalUrl,
@@ -3206,20 +3164,9 @@ export class Coordinator {
           id: crypto.randomUUID(),
           requesterId: finished.requesterId,
           ...(finished.automatic ? { automatic: true } : {}),
-          status: finished.filePath ? "ready" : "queued",
-          ...(finished.filePath ? { filePath: finished.filePath } : {}),
-          ...(finished.introSeconds !== undefined
-            ? { introSeconds: finished.introSeconds }
-            : {}),
-          ...(finished.outroSeconds !== undefined
-            ? { outroSeconds: finished.outroSeconds }
-            : {}),
-          ...(finished.fadeInSeconds !== undefined
-            ? { fadeInSeconds: finished.fadeInSeconds }
-            : {}),
-          ...(finished.fadeOutSeconds !== undefined
-            ? { fadeOutSeconds: finished.fadeOutSeconds }
-            : {}),
+          status: "ready",
+          filePath: finished.filePath,
+          ...transition,
         };
         this.queue.push(looping);
         this.store.addTrack({
@@ -3227,23 +3174,11 @@ export class Coordinator {
           sessionId: this.id,
           status: looping.status,
         });
-        if (looping.filePath)
-          this.store.setTrack(looping.id, {
-            status: "ready",
-            filePath: looping.filePath,
-            ...(looping.introSeconds !== undefined
-              ? { introSeconds: looping.introSeconds }
-              : {}),
-            ...(looping.outroSeconds !== undefined
-              ? { outroSeconds: looping.outroSeconds }
-              : {}),
-            ...(looping.fadeInSeconds !== undefined
-              ? { fadeInSeconds: looping.fadeInSeconds }
-              : {}),
-            ...(looping.fadeOutSeconds !== undefined
-              ? { fadeOutSeconds: looping.fadeOutSeconds }
-              : {}),
-          });
+        this.store.setTrack(looping.id, {
+          status: "ready",
+          filePath: looping.filePath,
+          ...transition,
+        });
         this.queueChanged();
       }
     }
@@ -3554,8 +3489,7 @@ export class Coordinator {
   }
 
   private async clearQueue(userId: string) {
-    this.autoplayGeneration++;
-    this.autoplayPending = false;
+    this.cancelAutoplay();
     const cleared = this.queue;
     const count = cleared.length;
     this.queue = [];
@@ -3998,6 +3932,15 @@ export class Coordinator {
     );
   }
 
+  // Redraws the settings modal an interaction came from.
+  private updateSettings(interaction: Interaction, page?: number) {
+    return this.slack.updateModal(
+      interaction.viewId!,
+      interaction.viewHash,
+      this.settingsViewFor(interaction, page),
+    );
+  }
+
   private integrationSettingsPage(interaction: Interaction) {
     try {
       const page = JSON.parse(interaction.metadata || "{}").integrationPage;
@@ -4015,12 +3958,7 @@ export class Coordinator {
       );
     const parsed = parseIntegrationSettingsPage(interaction.value);
     if (!parsed || parsed.sessionId !== this.id) return;
-    if (interaction.viewId)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction, parsed.page),
-      );
+    if (interaction.viewId) await this.updateSettings(interaction, parsed.page);
   }
 
   private settingsView(userId: string, integrationPage = 0) {
@@ -4401,22 +4339,14 @@ export class Coordinator {
     if (!this.scrobbling) return;
     this.scrobbling.disconnectLastFm(interaction.userId);
     if (interaction.viewId && interaction.viewHash)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+      await this.updateSettings(interaction);
   }
 
   private async disconnectListenBrainz(interaction: Interaction) {
     if (!this.scrobbling) return;
     this.scrobbling.disconnectListenBrainz(interaction.userId);
     if (interaction.viewId && interaction.viewHash)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+      await this.updateSettings(interaction);
   }
 
   private async toggleSessionScrobbling(interaction: Interaction) {
@@ -4441,12 +4371,7 @@ export class Coordinator {
     if (enabled) this.playbackScrobbling?.sessionEnabled(interaction.userId);
     if (interaction.responseUrl)
       await this.slack.deleteOriginal(interaction.responseUrl);
-    if (interaction.viewId)
-      await this.slack.updateModal(
-        interaction.viewId,
-        interaction.viewHash,
-        this.settingsViewFor(interaction),
-      );
+    if (interaction.viewId) await this.updateSettings(interaction);
     else
       await this.notice(
         interaction.userId,
@@ -4966,17 +4891,12 @@ export class Coordinator {
 
   private refreshIdle() {
     if (this.inactive()) return;
-    const alone = ![...this.participants].some((id) => id !== this.botUserId);
-    if (alone && !this.aloneTimer) {
-      void this.post(
-        this.room.uiChannelId,
-        this.room.uiThreadTs,
+    const alone = () =>
+      ![...this.participants].some((id) => id !== this.botUserId);
+    if (alone() && !this.aloneTimer) {
+      this.warnLeaving(
+        "alone",
         "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
-      ).catch((error) =>
-        this.log.warn(
-          { event: "alone_notice_failed", err: error },
-          "Could not post alone timeout notice",
-        ),
       );
       this.log.debug(
         { event: "alone_timeout_scheduled", timeoutMs: this.config.aloneMs },
@@ -4986,90 +4906,92 @@ export class Coordinator {
         () =>
           void this.enqueue(async () => {
             this.aloneTimer = undefined;
-            if (![...this.participants].some((id) => id !== this.botUserId))
-              await this.end(undefined, "alone timeout");
+            if (alone()) await this.end(undefined, "alone timeout");
           }),
         this.config.aloneMs,
       );
-    } else if (!alone) {
+    } else if (!alone()) {
       clearTimeout(this.aloneTimer);
       this.aloneTimer = undefined;
     }
+    this.holdLeaveTimer(
+      "idle",
+      () => !this.current,
+      this.config.idleMs,
+      "Nothing is playing, so I’ll leave in 2 minutes.",
+    );
+    this.holdLeaveTimer(
+      "paused",
+      () => this.state === "paused",
+      this.config.pausedMs,
+      "Playback is paused, so I’ll leave in 2 minutes.",
+    );
+  }
 
-    if (!this.current && !this.idleTimer) {
-      this.idleWarningTimer = setTimeout(
-        () => {
-          this.idleWarningTimer = undefined;
-          if (!this.current)
-            void this.post(
-              this.room.uiChannelId,
-              this.room.uiThreadTs,
-              "Nothing is playing, so I’ll leave in 2 minutes.",
-            ).catch((error) =>
-              this.log.warn(
-                { event: "idle_notice_failed", err: error },
-                "Could not post idle timeout notice",
-              ),
-            );
-        },
-        Math.max(0, this.config.idleMs - this.config.warningMs),
-      );
-      this.idleTimer = setTimeout(
-        () =>
-          void this.enqueue(async () => {
-            this.idleTimer = undefined;
-            if (!this.current) await this.end(undefined, "idle timeout");
-          }),
-        this.config.idleMs,
-      );
-      this.log.debug(
-        { event: "idle_timeout_scheduled", timeoutMs: this.config.idleMs },
-        "Idle timeout scheduled",
-      );
-    } else if (this.current) {
-      clearTimeout(this.idleTimer);
-      this.idleTimer = undefined;
-      clearTimeout(this.idleWarningTimer);
-      this.idleWarningTimer = undefined;
+  // Keeps a leave timer running, with a warning partway through, for as long
+  // as `still()` holds, and drops both the moment it stops holding.
+  private holdLeaveTimer(
+    kind: "idle" | "paused",
+    still: () => boolean,
+    timeoutMs: number,
+    warning: string,
+  ) {
+    const timer = `${kind}Timer` as const;
+    const warningTimer = `${kind}WarningTimer` as const;
+    if (!still()) {
+      clearTimeout(this[timer]);
+      this[timer] = undefined;
+      clearTimeout(this[warningTimer]);
+      this[warningTimer] = undefined;
+      return;
     }
+    if (this[timer]) return;
+    this[warningTimer] = setTimeout(
+      () => {
+        this[warningTimer] = undefined;
+        if (still()) this.warnLeaving(kind, warning);
+      },
+      Math.max(0, timeoutMs - this.config.warningMs),
+    );
+    this[timer] = setTimeout(
+      () =>
+        void this.enqueue(async () => {
+          this[timer] = undefined;
+          if (still()) await this.end(undefined, `${kind} timeout`);
+        }),
+      timeoutMs,
+    );
+    this.log.debug(
+      { event: `${kind}_timeout_scheduled`, timeoutMs },
+      `${capitalize(kind)} timeout scheduled`,
+    );
+  }
 
-    if (this.state === "paused" && !this.pausedTimer) {
-      this.pausedWarningTimer = setTimeout(
-        () => {
-          this.pausedWarningTimer = undefined;
-          if (this.state === "paused")
-            void this.post(
-              this.room.uiChannelId,
-              this.room.uiThreadTs,
-              "Playback is paused, so I’ll leave in 2 minutes.",
-            ).catch((error) =>
-              this.log.warn(
-                { event: "paused_notice_failed", err: error },
-                "Could not post paused timeout notice",
-              ),
-            );
-        },
-        Math.max(0, this.config.pausedMs - this.config.warningMs),
-      );
-      this.pausedTimer = setTimeout(
-        () =>
-          void this.enqueue(async () => {
-            this.pausedTimer = undefined;
-            if (this.state === "paused")
-              await this.end(undefined, "paused timeout");
-          }),
-        this.config.pausedMs,
-      );
-      this.log.debug(
-        { event: "paused_timeout_scheduled", timeoutMs: this.config.pausedMs },
-        "Paused timeout scheduled",
-      );
-    } else if (this.state !== "paused") {
-      clearTimeout(this.pausedTimer);
-      this.pausedTimer = undefined;
-      clearTimeout(this.pausedWarningTimer);
-      this.pausedWarningTimer = undefined;
-    }
+  private warnLeaving(kind: "alone" | "idle" | "paused", text: string) {
+    void this.post(this.room.uiChannelId, this.room.uiThreadTs, text).catch(
+      (error) =>
+        this.log.warn(
+          { event: `${kind}_notice_failed`, err: error },
+          `Could not post ${kind} timeout notice`,
+        ),
+    );
+  }
+
+  // Stops everything in flight: autoplay, downloads and timers.
+  private stopWork() {
+    this.cancelAutoplay();
+    for (const controller of this.preparations.values()) controller.abort();
+    this.preparations.clear();
+    for (const timer of [
+      this.idleTimer,
+      this.idleWarningTimer,
+      this.aloneTimer,
+      this.pausedTimer,
+      this.pausedWarningTimer,
+      this.anchorTimer,
+      this.renderTimer,
+    ])
+      clearTimeout(timer);
   }
 
   private async end(userId: string | undefined, reason: string) {
@@ -5092,17 +5014,7 @@ export class Coordinator {
     );
     this.state = "ended";
     this.playbackScrobbling?.finish();
-    this.autoplayGeneration++;
-    this.autoplayPending = false;
-    for (const controller of this.preparations.values()) controller.abort();
-    this.preparations.clear();
-    clearTimeout(this.idleTimer);
-    clearTimeout(this.idleWarningTimer);
-    clearTimeout(this.aloneTimer);
-    clearTimeout(this.pausedTimer);
-    clearTimeout(this.pausedWarningTimer);
-    clearTimeout(this.anchorTimer);
-    clearTimeout(this.renderTimer);
+    this.stopWork();
     clearTimeout(this.queueModalTimer);
     this.queueViews.clear();
     this.store.endSession(
