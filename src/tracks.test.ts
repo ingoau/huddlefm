@@ -27,6 +27,9 @@ import {
   type TrackMetadata,
 } from "./tracks.ts";
 
+const testCatalog = () =>
+  new TrackCatalog({ durationSeconds: 1_200, downloadBytes: 100_000_000 });
+
 test("parses bulk link lists with comments and blank lines", () => {
   expect(
     parseBulkLinkList(`
@@ -466,10 +469,7 @@ test("drops artwork that points at private destinations", async () => {
 });
 
 test("uses search metadata without extracting it again", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   const track = {
     sourceInput: "https://music.youtube.com/watch?v=test",
     canonicalUrl: "https://music.youtube.com/watch?v=test",
@@ -486,10 +486,7 @@ test("uses search metadata without extracting it again", async () => {
 });
 
 test("limits track preparation globally and prioritizes queued work", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   const gates = new Map(
     ["a", "b", "c", "d"].map((id) => [id, Promise.withResolvers<void>()]),
   );
@@ -531,10 +528,7 @@ test("limits track preparation globally and prioritizes queued work", async () =
 });
 
 test("requests high-resolution YouTube Music artwork", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "music", {
     searchSongs: async () => [
       {
@@ -559,10 +553,7 @@ test("requests high-resolution YouTube Music artwork", async () => {
 });
 
 test("only accepts video IDs from getUpNexts runtime data", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "music", {
     getUpNexts: async () => [
       { videoId: "abcdefghijk", title: 42 },
@@ -579,10 +570,7 @@ test("only accepts video IDs from getUpNexts runtime data", async () => {
 });
 
 test("upNextTracks reads the shapes ytmusic-api actually returns", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "music", {
     getUpNexts: async () => [
       // What the library returns at runtime, despite its types.
@@ -638,10 +626,7 @@ test("upNextTracks reads the shapes ytmusic-api actually returns", async () => {
 });
 
 test("searchSong prefers an artist match from YouTube Music results", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "music", {
     searchSongs: async (query: string) => {
       expect(query).toBe("Karma Police Radiohead");
@@ -676,10 +661,7 @@ test("searchSong prefers an artist match from YouTube Music results", async () =
 });
 
 test("offers and expands albums only for bulk searches", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "music", {
     searchAlbums: async () => [
       {
@@ -717,10 +699,7 @@ test("offers and expands albums only for bulk searches", async () => {
 });
 
 test("expands remembered YouTube playlists", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "music", {
     getPlaylistVideos: async () => [
       {
@@ -812,10 +791,7 @@ test("parses Navidrome share info from injected page state", () => {
 });
 
 test("offers and expands Navidrome shares", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "proxy", { url: "http://127.0.0.1:9" });
   Reflect.set(catalog, "resolveNavidromeShare", async (input: string) => [
     {
@@ -864,10 +840,7 @@ test("offers and expands Navidrome shares", async () => {
 });
 
 test("resolves single-track Navidrome shares through resolveUrl", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "proxy", { url: "http://127.0.0.1:9" });
   Reflect.set(catalog, "resolveNavidromeShare", async (input: string) => [
     {
@@ -936,10 +909,7 @@ test("finds conservative fade lengths from track loudness", () => {
 });
 
 test("popularTracks combines home quick picks with a featured hits playlist", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   const browsed: string[] = [];
   Reflect.set(catalog, "music", {
     getHomeSections: async () => [
@@ -1032,10 +1002,7 @@ test("popularTracks combines home quick picks with a featured hits playlist", as
 });
 
 test("popularTracks still returns quick picks when the playlist fails", async () => {
-  const catalog = new TrackCatalog({
-    durationSeconds: 1_200,
-    downloadBytes: 100_000_000,
-  });
+  const catalog = testCatalog();
   Reflect.set(catalog, "music", {
     getHomeSections: async () => [
       {
