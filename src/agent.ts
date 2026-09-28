@@ -1,5 +1,10 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { ToolLoopAgent, stepCountIs, tool } from "ai";
+import {
+  ToolLoopAgent,
+  stepCountIs,
+  tool,
+  type ToolExecutionOptions,
+} from "ai";
 import { z } from "zod";
 import { capture as captureAnalytics } from "./analytics.ts";
 import type { Coordinator } from "./coordinator.ts";
@@ -9,10 +14,6 @@ import {
   loopModes,
   permissionPresets,
   transitionModes,
-  type AutoplayMode,
-  type DisplayMode,
-  type LoopMode,
-  type TransitionMode,
 } from "./store.ts";
 import { logger } from "./logger.ts";
 
@@ -25,14 +26,14 @@ export const agentModel = "google/gemini-3.5-flash-lite";
 const mentionPattern = (botUserId: string) =>
   new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g");
 
-/** True when the message is only an @mention (plus whitespace). */
-export function isBareMention(text: string, botUserId: string) {
-  return text.replace(mentionPattern(botUserId), "").trim() === "";
-}
-
 /** Strip bot @mentions so the model sees the user's request. */
 export function stripMentions(text: string, botUserId: string) {
   return text.replace(mentionPattern(botUserId), "").trim();
+}
+
+/** True when the message is only an @mention (plus whitespace). */
+export function isBareMention(text: string, botUserId: string) {
+  return stripMentions(text, botUserId) === "";
 }
 
 export function agentConfigured() {
@@ -52,35 +53,24 @@ function openRouterModel() {
   })(agentModel);
 }
 
-function trackSummary(track: {
-  id: string;
-  title: string;
-  artist: string;
-  album?: string;
-  requesterId?: string;
-  automatic?: boolean;
-  status?: string;
-}) {
-  return {
-    id: track.id,
-    title: track.title,
-    artist: track.artist,
-    ...(track.album ? { album: track.album } : {}),
-    ...(track.requesterId ? { addedBy: track.requesterId } : {}),
-    ...(track.automatic ? { automatic: true } : {}),
-    ...(track.status ? { status: track.status } : {}),
-  };
-}
-
 function agentTools(coordinator: Coordinator, userId: string) {
+  // A tool that takes no input and only needs the abort signal.
+  const action = <Output>(
+    description: string,
+    run: (signal: AbortSignal | undefined) => Output,
+  ) => ({
+    description,
+    inputSchema: z.object({}),
+    execute: async (
+      _input: Record<string, never>,
+      { abortSignal }: ToolExecutionOptions<Record<string, unknown>>,
+    ) => run(abortSignal),
+  });
   return {
-    get_status: tool({
-      description:
-        "Get what's playing, the queue, volume, settings, host, and this user's permissions.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentStatus(userId, abortSignal),
-    }),
+    get_status: action(
+      "Get what's playing, the queue, volume, settings, host, and this user's permissions.",
+      (signal) => coordinator.agentStatus(userId, signal),
+    ),
     search_tracks: tool({
       description:
         "Search YouTube Music (and resolve media URLs) for songs, albums, or playlists. Use the returned reference values with add_tracks.",
@@ -133,53 +123,27 @@ function agentTools(coordinator: Coordinator, userId: string) {
           .optional()
           .describe("1-based queue position"),
       }),
-      execute: async (
-        { trackId, direction, playNext, position },
-        { abortSignal },
-      ) =>
-        coordinator.agentMove(
-          userId,
-          trackId,
-          {
-            direction,
-            playNext,
-            position,
-          },
-          abortSignal,
-        ),
+      execute: async ({ trackId, ...move }, { abortSignal }) =>
+        coordinator.agentMove(userId, trackId, move, abortSignal),
     }),
-    shuffle_queue: tool({
-      description:
-        "Randomize the order of the upcoming queue. The playing track is unaffected.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentShuffle(userId, abortSignal),
-    }),
-    clear_queue: tool({
-      description: "Clear all upcoming tracks from the queue.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentClear(userId, abortSignal),
-    }),
-    skip: tool({
-      description: "Skip to the next track.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentSkip(userId, abortSignal),
-    }),
-    previous: tool({
-      description:
-        "Go to the previous track, or restart the current track if it has been playing for more than a few seconds.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentPrevious(userId, abortSignal),
-    }),
-    pause_or_resume: tool({
-      description: "Toggle pause and resume for the current track.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentToggle(userId, abortSignal),
-    }),
+    shuffle_queue: action(
+      "Randomize the order of the upcoming queue. The playing track is unaffected.",
+      (signal) => coordinator.agentShuffle(userId, signal),
+    ),
+    clear_queue: action("Clear all upcoming tracks from the queue.", (signal) =>
+      coordinator.agentClear(userId, signal),
+    ),
+    skip: action("Skip to the next track.", (signal) =>
+      coordinator.agentSkip(userId, signal),
+    ),
+    previous: action(
+      "Go to the previous track, or restart the current track if it has been playing for more than a few seconds.",
+      (signal) => coordinator.agentPrevious(userId, signal),
+    ),
+    pause_or_resume: action(
+      "Toggle pause and resume for the current track.",
+      (signal) => coordinator.agentToggle(userId, signal),
+    ),
     seek: tool({
       description: "Seek relative to the current playback position.",
       inputSchema: z.object({
@@ -233,12 +197,10 @@ function agentTools(coordinator: Coordinator, userId: string) {
       execute: async (input, { abortSignal }) =>
         coordinator.agentUpdateSettings(userId, input, abortSignal),
     }),
-    claim_host: tool({
-      description: "Claim host when there is currently no host.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentClaimHost(userId, abortSignal),
-    }),
+    claim_host: action(
+      "Claim host when there is currently no host.",
+      (signal) => coordinator.agentClaimHost(userId, signal),
+    ),
     set_session_scrobbling: tool({
       description:
         "Enable or disable scrobbling for this user in the current session. Requires Last.fm or ListenBrainz to already be connected in Settings.",
@@ -250,12 +212,10 @@ function agentTools(coordinator: Coordinator, userId: string) {
       execute: async ({ enabled }, { abortSignal }) =>
         coordinator.agentSetSessionScrobbling(userId, enabled, abortSignal),
     }),
-    end_session: tool({
-      description: "End the listening session and leave the huddle.",
-      inputSchema: z.object({}),
-      execute: async (_input, { abortSignal }) =>
-        coordinator.agentEnd(userId, abortSignal),
-    }),
+    end_session: action(
+      "End the listening session and leave the huddle.",
+      (signal) => coordinator.agentEnd(userId, signal),
+    ),
   };
 }
 
@@ -319,6 +279,7 @@ export async function runAgentCommand(options: {
   activeAgentUsers.add(options.userId);
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? agentTimeoutMs;
+  let reply: { ok: boolean; text: string };
   try {
     // The tools below check permissions synchronously, so resolve whether this
     // user counts as a manager before any of them runs.
@@ -340,41 +301,23 @@ Display modes: ${displayModes.join(", ")}. Loop modes: ${loopModes.join(", ")}. 
       prompt,
       abortSignal: AbortSignal.timeout(timeoutMs),
     });
-    const reply = agentCommandResult(result);
-    captureAnalytics(reply.ok ? "agent.completed" : "agent.failed", {
-      distinctId: options.userId,
-      sessionId: options.coordinator.id,
-      properties: { durationMs: Date.now() - startedAt },
-    });
-    return reply;
+    reply = agentCommandResult(result);
   } catch (error) {
-    captureAnalytics("agent.failed", {
-      distinctId: options.userId,
-      sessionId: options.coordinator.id,
-      properties: { durationMs: Date.now() - startedAt },
-    });
     log.error(
       { event: "agent_failed", userId: options.userId, err: error },
       "Agent command failed",
     );
-    return {
+    reply = {
       ok: false,
       text: "I couldn't complete that request. Try again in a moment.",
     };
   } finally {
     activeAgentUsers.delete(options.userId);
   }
+  captureAnalytics(reply.ok ? "agent.completed" : "agent.failed", {
+    distinctId: options.userId,
+    sessionId: options.coordinator.id,
+    properties: { durationMs: Date.now() - startedAt },
+  });
+  return reply;
 }
-
-export type AgentSettingsPatch = {
-  displayMode?: DisplayMode;
-  autoplay?: boolean;
-  autoplayMode?: AutoplayMode;
-  loopMode?: LoopMode;
-  transitionMode?: TransitionMode;
-  anchorEnabled?: boolean;
-  permissionPreset?: keyof typeof permissionPresets;
-  hostUserId?: string;
-};
-
-export { trackSummary };
