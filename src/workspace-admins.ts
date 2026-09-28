@@ -35,9 +35,7 @@ export class WorkspaceAdmins {
   }
 
   isAdmin(userId: string) {
-    if (!this.options.enabled) return false;
-    const cached = this.cache.get(userId);
-    return cached !== undefined && !this.isStale(cached) && cached.admin;
+    return this.options.enabled && this.fresh(userId)?.admin === true;
   }
 
   // Awaiting this before a permission check means an admin's very first action
@@ -45,15 +43,15 @@ export class WorkspaceAdmins {
   // rather than extended. A fresh answer keeps every later check synchronous.
   resolve(userId: string) {
     if (!this.options.enabled) return Promise.resolve(false);
-    const cached = this.cache.get(userId);
-    if (cached && !this.isStale(cached)) return Promise.resolve(cached.admin);
-    return this.fetch(userId);
+    const cached = this.fresh(userId);
+    return cached ? Promise.resolve(cached.admin) : this.fetch(userId);
   }
 
-  private isStale(entry: { fetchedAt: number }) {
-    return (
-      this.now() - entry.fetchedAt >= (this.options.ttlMs ?? adminCacheTtlMs)
-    );
+  // The cached answer, unless it is older than the TTL.
+  private fresh(userId: string) {
+    const cached = this.cache.get(userId);
+    const ttlMs = this.options.ttlMs ?? adminCacheTtlMs;
+    return cached && this.now() - cached.fetchedAt < ttlMs ? cached : undefined;
   }
 
   private now() {
