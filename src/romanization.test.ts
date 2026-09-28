@@ -11,12 +11,17 @@ function line(words: string, extra: Partial<Lyric> = {}): Lyric {
   return { startTimeMs: 0, durationMs: 1000, words, ...extra };
 }
 
+const json = (body: unknown) =>
+  new Response(JSON.stringify(body), { status: 200 });
+
+const noFetch: RomanizeFetch = () => {
+  throw new Error("should not fetch");
+};
+
 test("leaves Latin lyrics untouched", async () => {
   const lines = [line("Hello world"), line("Another line")];
   await enrichLyricsWithRomanization(lines, {
-    fetch: (() => {
-      throw new Error("should not fetch");
-    }) as RomanizeFetch,
+    fetch: noFetch,
   });
   expect(lines.every((item) => !item.romanization)).toBe(true);
   expect(lyricsHaveRomanization(lines)).toBe(false);
@@ -29,19 +34,16 @@ test("keeps provider-supplied romanization", async () => {
   ];
   await enrichLyricsWithRomanization(lines, {
     fetch: (async () =>
-      new Response(
-        JSON.stringify({
-          lines: [
-            {
-              translation: "world",
-              romanization: "segye",
-              needsTranslation: true,
-            },
-          ],
-          detectedLang: "ko",
-        }),
-        { status: 200 },
-      )) as RomanizeFetch,
+      json({
+        lines: [
+          {
+            translation: "world",
+            romanization: "segye",
+            needsTranslation: true,
+          },
+        ],
+        detectedLang: "ko",
+      })) as RomanizeFetch,
   });
   expect(lines[0]!.romanization).toBe("annyeonghaseyo");
   expect(lines[1]!.romanization).toBe("segye");
@@ -58,10 +60,7 @@ test("enriches whitespace-only romanization values", async () => {
     fetch: (async (_input, init) => {
       const body = JSON.parse(String(init?.body));
       expect(body.lines).toEqual(["안녕하세요"]);
-      return new Response(
-        JSON.stringify({ lines: [{ romanization: "annyeonghaseyo" }] }),
-        { status: 200 },
-      );
+      return json({ lines: [{ romanization: "annyeonghaseyo" }] });
     }) as RomanizeFetch,
   });
   expect(lines[0]!.romanization).toBe("annyeonghaseyo");
@@ -81,24 +80,21 @@ test("uses Unison romanization when available", async () => {
       expect(body.lines).toEqual(["你好世界", "再见"]);
       expect(body.from).toBe("zh");
       expect(body.videoId).toBe("abc");
-      return new Response(
-        JSON.stringify({
-          lines: [
-            {
-              translation: "Hello World",
-              romanization: "Nǐ hǎo shìjiè",
-              needsTranslation: true,
-            },
-            {
-              translation: "Goodbye",
-              romanization: "Zàijiàn",
-              needsTranslation: true,
-            },
-          ],
-          detectedLang: "zh",
-        }),
-        { status: 200 },
-      );
+      return json({
+        lines: [
+          {
+            translation: "Hello World",
+            romanization: "Nǐ hǎo shìjiè",
+            needsTranslation: true,
+          },
+          {
+            translation: "Goodbye",
+            romanization: "Zàijiàn",
+            needsTranslation: true,
+          },
+        ],
+        detectedLang: "zh",
+      });
     }) as RomanizeFetch,
   });
   expect(urls).toEqual(["https://unison.boidu.dev/translate"]);
@@ -117,32 +113,26 @@ test("romanizes mixed scripts in language-specific batches", async () => {
       };
       batches.push({ from: body.from, lines: body.lines });
       if (body.from === "ko")
-        return new Response(
-          JSON.stringify({
-            lines: [
-              {
-                translation: "hello",
-                romanization: "annyeonghaseyo",
-                needsTranslation: true,
-              },
-            ],
-            detectedLang: "ko",
-          }),
-          { status: 200 },
-        );
-      return new Response(
-        JSON.stringify({
+        return json({
           lines: [
             {
               translation: "hello",
-              romanization: "nǐ hǎo",
+              romanization: "annyeonghaseyo",
               needsTranslation: true,
             },
           ],
-          detectedLang: "zh",
-        }),
-        { status: 200 },
-      );
+          detectedLang: "ko",
+        });
+      return json({
+        lines: [
+          {
+            translation: "hello",
+            romanization: "nǐ hǎo",
+            needsTranslation: true,
+          },
+        ],
+        detectedLang: "zh",
+      });
     }) as RomanizeFetch,
   });
   expect(batches.map(({ from, lines }) => ({ from, lines }))).toEqual([
@@ -161,23 +151,17 @@ test("falls back to Google romaji when Unison omits romanization", async () => {
       const url = String(input);
       urls.push(url);
       if (url.includes("unison.boidu.dev"))
-        return new Response(
-          JSON.stringify({
-            lines: [
-              {
-                translation: "Hello",
-                romanization: null,
-                needsTranslation: true,
-              },
-            ],
-            detectedLang: "ja",
-          }),
-          { status: 200 },
-        );
-      return new Response(
-        JSON.stringify([[["こんにちは", "こんにちは", null, "Konnichiwa"]]]),
-        { status: 200 },
-      );
+        return json({
+          lines: [
+            {
+              translation: "Hello",
+              romanization: null,
+              needsTranslation: true,
+            },
+          ],
+          detectedLang: "ja",
+        });
+      return json([[["こんにちは", "こんにちは", null, "Konnichiwa"]]]);
     }) as RomanizeFetch,
   });
   expect(urls[0]).toContain("unison.boidu.dev/translate");
@@ -192,16 +176,8 @@ test("shares one timeout signal across sequential providers", async () => {
     fetch: (async (input, init) => {
       signals.push(init?.signal);
       if (String(input).includes("unison.boidu.dev"))
-        return new Response(
-          JSON.stringify({ lines: [{ romanization: null }] }),
-          {
-            status: 200,
-          },
-        );
-      return new Response(
-        JSON.stringify([[["こんにちは", "こんにちは", null, "Konnichiwa"]]]),
-        { status: 200 },
-      );
+        return json({ lines: [{ romanization: null }] });
+      return json([[["こんにちは", "こんにちは", null, "Konnichiwa"]]]);
     }) as RomanizeFetch,
   });
   expect(signals).toHaveLength(2);
@@ -240,19 +216,16 @@ test("skips instrumental lines and music-note placeholders", async () => {
   const lines = [line("♪", { isInstrumental: true }), line("♪"), line("한글")];
   await enrichLyricsWithRomanization(lines, {
     fetch: (async () =>
-      new Response(
-        JSON.stringify({
-          lines: [
-            {
-              translation: "Hangul",
-              romanization: "hangeul",
-              needsTranslation: true,
-            },
-          ],
-          detectedLang: "ko",
-        }),
-        { status: 200 },
-      )) as RomanizeFetch,
+      json({
+        lines: [
+          {
+            translation: "Hangul",
+            romanization: "hangeul",
+            needsTranslation: true,
+          },
+        ],
+        detectedLang: "ko",
+      })) as RomanizeFetch,
   });
   expect(lines[0]!.romanization).toBeUndefined();
   expect(lines[1]!.romanization).toBeUndefined();
@@ -307,9 +280,7 @@ test("attaches timed romanization when enriching lyrics", async () => {
   ];
 
   await enrichLyricsWithRomanization(lines, {
-    fetch: (() => {
-      throw new Error("should not fetch");
-    }) as RomanizeFetch,
+    fetch: noFetch,
   });
 
   expect(lines[0]!.romanization).toBe("Kyoushin de kurushindeshi batou");
@@ -326,9 +297,7 @@ test("keeps punctuation attached to romanized words", async () => {
     }),
   ];
   await enrichLyricsWithRomanization(lines, {
-    fetch: (() => {
-      throw new Error("should not fetch");
-    }) as RomanizeFetch,
+    fetch: noFetch,
   });
   expect(lines[0]!.romanization).toBe("Q. Kōshin De Furu Inseki Masshō Ka?");
   expect(lines[0]!.timedRomanization?.map((part) => part.words.trim())).toEqual(
@@ -339,9 +308,7 @@ test("keeps punctuation attached to romanized words", async () => {
 test("keeps consecutive punctuation in one romanization token", async () => {
   const lines = [line("本当?!", { romanization: "Hontō ? !" })];
   await enrichLyricsWithRomanization(lines, {
-    fetch: (() => {
-      throw new Error("should not fetch");
-    }) as RomanizeFetch,
+    fetch: noFetch,
   });
 
   expect(lines[0]!.romanization).toBe("Hontō?!");
