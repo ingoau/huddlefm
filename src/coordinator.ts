@@ -28,7 +28,6 @@ import {
   type DuckingMode,
   type LoopMode,
   type SavedSession,
-  type ScrobblingMode,
   type TransitionMode,
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
@@ -102,6 +101,27 @@ type Entry = TrackMetadata & {
   fadeInSeconds?: number;
   fadeOutSeconds?: number;
 };
+
+type InputState = Interaction["state"][string][string];
+
+// The option a select block holds, when it is one of `modes`.
+function selected<Mode extends string>(
+  state: InputState | undefined,
+  modes: readonly Mode[],
+) {
+  const value = state?.selected_option?.value as Mode | undefined;
+  return value && modes.includes(value) ? value : undefined;
+}
+
+// Whether a single-option checkbox block is ticked, or undefined when the
+// block was not part of the submission.
+function checked(state: InputState | undefined) {
+  if (!state) return undefined;
+  return (
+    state.selected_options?.some((option) => option.value === "enabled") ??
+    false
+  );
+}
 
 function throwIfAborted(signal?: AbortSignal) {
   if (!signal?.aborted) return;
@@ -1150,18 +1170,16 @@ export class Coordinator {
           ok: false as const,
           error: "Join the huddle before using the player.",
         };
-      const changed: string[] = [];
       const before = this.settingsSnapshot();
       if (
-        patch.hostUserId !== undefined ||
-        patch.permissionPreset !== undefined
-      ) {
-        if (!this.settingsAdmin(userId))
-          return {
-            ok: false as const,
-            error: "Only the host can change permissions or transfer host.",
-          };
-      }
+        (patch.hostUserId !== undefined ||
+          patch.permissionPreset !== undefined) &&
+        !this.settingsAdmin(userId)
+      )
+        return {
+          ok: false as const,
+          error: "Only the host can change permissions or transfer host.",
+        };
       if (
         (patch.displayMode !== undefined ||
           patch.autoplay !== undefined ||
@@ -1193,12 +1211,15 @@ export class Coordinator {
         return { ok: false as const, error: "Invalid ducking mode." };
       if (patch.loopMode !== undefined && !loopModes.includes(patch.loopMode))
         return { ok: false as const, error: "Invalid loop mode." };
+      if (
+        patch.autoplayMode !== undefined &&
+        !autoplayModes.includes(patch.autoplayMode)
+      )
+        return { ok: false as const, error: "Invalid autoplay mode." };
       const permissionPreset =
         patch.permissionPreset === undefined
           ? undefined
-          : permissionPresets[
-              patch.permissionPreset as keyof typeof permissionPresets
-            ];
+          : permissionPresets[patch.permissionPreset];
       if (patch.permissionPreset !== undefined && !permissionPreset)
         return { ok: false as const, error: "Invalid permission preset." };
       if (patch.hostUserId !== undefined) {
@@ -1213,77 +1234,16 @@ export class Coordinator {
             error: "That user is not in this huddle.",
           };
       }
-      if (
-        patch.displayMode !== undefined &&
-        patch.displayMode !== this.displayMode
-      ) {
-        this.displayMode = patch.displayMode;
-        this.sendMedia({ type: "display_mode", mode: patch.displayMode });
-        this.store.setSession(this.id, { displayMode: patch.displayMode });
-        changed.push(`displayMode=${patch.displayMode}`);
-      }
-      if (
-        patch.autoplayMode !== undefined &&
-        !autoplayModes.includes(patch.autoplayMode)
-      )
-        return { ok: false as const, error: "Invalid autoplay mode." };
-      const nextAutoplay =
-        patch.autoplayMode ??
-        (patch.autoplay === undefined
-          ? undefined
-          : parseAutoplayMode(patch.autoplay));
-      if (nextAutoplay !== undefined && nextAutoplay !== this.autoplayMode) {
-        this.autoplayMode = nextAutoplay;
-        this.store.setSession(this.id, { autoplay: nextAutoplay });
-        if (nextAutoplay === "off") await this.removeQueuedAutoplay();
-        changed.push(`autoplay=${nextAutoplay}`);
-      }
-      if (patch.loopMode !== undefined && patch.loopMode !== this.loopMode) {
-        this.loopMode = patch.loopMode;
-        this.store.setSession(this.id, { loopMode: patch.loopMode });
-        if (patch.loopMode !== "off") await this.removeQueuedAutoplay();
-        this.syncPreloads();
-        changed.push(`loopMode=${patch.loopMode}`);
-      }
-      if (patch.transitionMode !== undefined) {
-        this.transitionMode = patch.transitionMode;
-        this.sendMedia({
-          type: "transition_mode",
-          mode: patch.transitionMode,
-        });
-        this.store.setSession(this.id, {
-          transitionMode: patch.transitionMode,
-        });
-        changed.push(`transitionMode=${patch.transitionMode}`);
-      }
-      if (
-        patch.duckingMode !== undefined &&
-        patch.duckingMode !== this.duckingMode
-      ) {
-        this.duckingMode = patch.duckingMode;
-        this.sendMedia({ type: "ducking_mode", mode: patch.duckingMode });
-        this.store.setSession(this.id, { duckingMode: patch.duckingMode });
-        changed.push(`duckingMode=${patch.duckingMode}`);
-      }
-      if (
-        patch.anchorEnabled !== undefined &&
-        patch.anchorEnabled !== this.anchorEnabled
-      ) {
-        if (!patch.anchorEnabled) clearTimeout(this.anchorTimer);
-        this.anchorEnabled = patch.anchorEnabled;
-        this.store.setSession(this.id, {
-          anchorEnabled: patch.anchorEnabled,
-        });
-        changed.push(`anchorEnabled=${patch.anchorEnabled}`);
-      }
+      const changed = await this.applySettings({
+        ...patch,
+        autoplayMode:
+          patch.autoplayMode ??
+          (patch.autoplay === undefined
+            ? undefined
+            : parseAutoplayMode(patch.autoplay)),
+      });
       if (permissionPreset) {
-        this.allowed = new Set(permissionPreset);
-        for (const capability of capabilities)
-          this.store.setPermission(
-            this.id,
-            capability,
-            this.allowed.has(capability),
-          );
+        this.setPermissions(permissionPreset);
         changed.push(`permissions=${patch.permissionPreset}`);
       }
       if (patch.hostUserId !== undefined) {
@@ -4799,87 +4759,30 @@ export class Coordinator {
       this.sendMedia({ type: "volume", value: this.volume });
       this.store.setSession(this.id, { volume: this.volume });
     }
-    if (this.can(interaction.userId, "configure-settings")) {
-      const displayMode = interaction.state.display?.mode?.selected_option
-        ?.value as DisplayMode | undefined;
-      if (
-        displayMode &&
-        displayModes.includes(displayMode) &&
-        displayMode !== this.displayMode
-      ) {
-        this.displayMode = displayMode;
-        this.sendMedia({ type: "display_mode", mode: displayMode });
-        this.store.setSession(this.id, { displayMode });
-      }
-      const autoplayMode = interaction.state.autoplay?.mode?.selected_option
-        ?.value as AutoplayMode | undefined;
-      if (autoplayMode && autoplayModes.includes(autoplayMode)) {
-        if (autoplayMode !== this.autoplayMode) {
-          this.autoplayMode = autoplayMode;
-          this.store.setSession(this.id, { autoplay: autoplayMode });
-          if (autoplayMode === "off") await this.removeQueuedAutoplay();
-        }
-      }
-      const loopMode = interaction.state.loop?.mode?.selected_option?.value as
-        LoopMode | undefined;
-      if (loopMode && loopModes.includes(loopMode)) {
-        if (loopMode !== this.loopMode) {
-          this.loopMode = loopMode;
-          this.store.setSession(this.id, { loopMode });
-          if (loopMode !== "off") await this.removeQueuedAutoplay();
-          this.syncPreloads();
-        }
-      }
-      const transitionMode = interaction.state.transition?.mode?.selected_option
-        ?.value as TransitionMode | undefined;
-      if (transitionMode && transitionModes.includes(transitionMode)) {
-        this.transitionMode = transitionMode;
-        this.sendMedia({ type: "transition_mode", mode: transitionMode });
-        this.store.setSession(this.id, { transitionMode });
-      }
-      const duckingMode = interaction.state.ducking?.mode?.selected_option
-        ?.value as DuckingMode | undefined;
-      if (
-        duckingMode &&
-        duckingModes.includes(duckingMode) &&
-        duckingMode !== this.duckingMode
-      ) {
-        this.duckingMode = duckingMode;
-        this.sendMedia({ type: "ducking_mode", mode: duckingMode });
-        this.store.setSession(this.id, { duckingMode });
-      }
-      const anchorState = interaction.state.anchor?.enabled;
-      if (anchorState) {
-        const anchorEnabled =
-          anchorState.selected_options?.some(
-            (option) => option.value === "enabled",
-          ) ?? false;
-        if (!anchorEnabled) clearTimeout(this.anchorTimer);
-        this.anchorEnabled = anchorEnabled;
-        this.store.setSession(this.id, { anchorEnabled });
-      }
-    }
+    const { state } = interaction;
+    if (this.can(interaction.userId, "configure-settings"))
+      await this.applySettings({
+        displayMode: selected(state.display?.mode, displayModes),
+        autoplayMode: selected(state.autoplay?.mode, autoplayModes),
+        loopMode: selected(state.loop?.mode, loopModes),
+        transitionMode: selected(state.transition?.mode, transitionModes),
+        duckingMode: selected(state.ducking?.mode, duckingModes),
+        anchorEnabled: checked(state.anchor?.enabled),
+      });
     const preset = admin
-      ? interaction.state.permission_preset?.selected?.selected_option?.value
+      ? state.permission_preset?.selected?.selected_option?.value
       : undefined;
-    const selected = admin
-      ? interaction.state.permissions?.selected?.selected_options
+    const chosen = admin
+      ? state.permissions?.selected?.selected_options
       : undefined;
-    if (preset || selected) {
-      this.allowed = new Set(
-        preset
-          ? permissionPresets[preset as keyof typeof permissionPresets]
-          : (selected!
-              .map((option) => option.value)
-              .filter(Boolean) as string[]),
+    if (preset)
+      this.setPermissions(
+        permissionPresets[preset as keyof typeof permissionPresets],
       );
-      for (const capability of capabilities)
-        this.store.setPermission(
-          this.id,
-          capability,
-          this.allowed.has(capability),
-        );
-    }
+    else if (chosen)
+      this.setPermissions(
+        chosen.map((option) => option.value).filter(Boolean) as string[],
+      );
     if (nextHost) this.setHost(nextHost);
     if (this.scrobbling) {
       try {
@@ -4888,43 +4791,27 @@ export class Coordinator {
           this.id,
         );
         let newlyEnabled = false;
-        const mode = interaction.state.scrobbling_mode?.mode?.selected_option
-          ?.value as ScrobblingMode | undefined;
-        if (mode && scrobblingModes.includes(mode))
-          this.scrobbling.setMode(interaction.userId, mode);
-        const huddleMixState = interaction.state.huddle_mix?.enabled;
-        if (huddleMixState) {
-          const optedIn =
-            huddleMixState.selected_options?.some(
-              (option) => option.value === "enabled",
-            ) ?? false;
+        const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
+        if (mode) this.scrobbling.setMode(interaction.userId, mode);
+        const optedIn = checked(state.huddle_mix?.enabled);
+        if (optedIn !== undefined)
           this.scrobbling.setHuddleMixOptIn(interaction.userId, optedIn);
+        const lastFm = checked(state.lastfm_scrobbling?.enabled);
+        if (lastFm !== undefined) {
+          newlyEnabled ||= lastFm && !userSettings.lastFmEnabled;
+          this.scrobbling.setLastFmEnabled(interaction.userId, lastFm);
         }
-        const lastFmState = interaction.state.lastfm_scrobbling?.enabled;
-        if (lastFmState) {
-          const enabled =
-            lastFmState.selected_options?.some(
-              (option) => option.value === "enabled",
-            ) ?? false;
-          newlyEnabled ||= enabled && !userSettings.lastFmEnabled;
-          this.scrobbling.setLastFmEnabled(interaction.userId, enabled);
-        }
-        const listenBrainzState =
-          interaction.state.listenbrainz_scrobbling?.enabled;
+        const listenBrainz = checked(state.listenbrainz_scrobbling?.enabled);
         const listenBrainzToken =
-          interaction.state.listenbrainz_token?.value?.value?.trim();
-        if (listenBrainzState) {
-          const enabled =
-            listenBrainzState.selected_options?.some(
-              (option) => option.value === "enabled",
-            ) ?? false;
+          state.listenbrainz_token?.value?.value?.trim();
+        if (listenBrainz !== undefined) {
           newlyEnabled ||=
-            enabled &&
+            listenBrainz &&
             (!userSettings.listenBrainzEnabled || Boolean(listenBrainzToken));
           await this.scrobbling.setListenBrainz(
             interaction.userId,
             listenBrainzToken || undefined,
-            enabled,
+            listenBrainz,
           );
         }
         const sessionEnabled = this.scrobbling.sessionEnabled(
@@ -4967,6 +4854,75 @@ export class Coordinator {
     if (!previous.anchorEnabled && this.anchorEnabled) await this.reanchor();
     else await this.render();
     this.scheduleAutoplay();
+  }
+
+  // Applies the session settings present in `patch`, leaving alone any that
+  // already hold that value, and names each one changed as `key=value`.
+  private async applySettings(patch: {
+    displayMode?: DisplayMode;
+    autoplayMode?: AutoplayMode;
+    loopMode?: LoopMode;
+    transitionMode?: TransitionMode;
+    duckingMode?: DuckingMode;
+    anchorEnabled?: boolean;
+  }) {
+    const changed: string[] = [];
+    const {
+      displayMode,
+      autoplayMode,
+      loopMode,
+      transitionMode,
+      duckingMode,
+      anchorEnabled,
+    } = patch;
+    if (displayMode !== undefined && displayMode !== this.displayMode) {
+      this.displayMode = displayMode;
+      this.sendMedia({ type: "display_mode", mode: displayMode });
+      this.store.setSession(this.id, { displayMode });
+      changed.push(`displayMode=${displayMode}`);
+    }
+    if (autoplayMode !== undefined && autoplayMode !== this.autoplayMode) {
+      this.autoplayMode = autoplayMode;
+      this.store.setSession(this.id, { autoplay: autoplayMode });
+      if (autoplayMode === "off") await this.removeQueuedAutoplay();
+      changed.push(`autoplay=${autoplayMode}`);
+    }
+    if (loopMode !== undefined && loopMode !== this.loopMode) {
+      this.loopMode = loopMode;
+      this.store.setSession(this.id, { loopMode });
+      if (loopMode !== "off") await this.removeQueuedAutoplay();
+      this.syncPreloads();
+      changed.push(`loopMode=${loopMode}`);
+    }
+    if (transitionMode !== undefined) {
+      this.transitionMode = transitionMode;
+      this.sendMedia({ type: "transition_mode", mode: transitionMode });
+      this.store.setSession(this.id, { transitionMode });
+      changed.push(`transitionMode=${transitionMode}`);
+    }
+    if (duckingMode !== undefined && duckingMode !== this.duckingMode) {
+      this.duckingMode = duckingMode;
+      this.sendMedia({ type: "ducking_mode", mode: duckingMode });
+      this.store.setSession(this.id, { duckingMode });
+      changed.push(`duckingMode=${duckingMode}`);
+    }
+    if (anchorEnabled !== undefined && anchorEnabled !== this.anchorEnabled) {
+      if (!anchorEnabled) clearTimeout(this.anchorTimer);
+      this.anchorEnabled = anchorEnabled;
+      this.store.setSession(this.id, { anchorEnabled });
+      changed.push(`anchorEnabled=${anchorEnabled}`);
+    }
+    return changed;
+  }
+
+  private setPermissions(allowed: Iterable<string>) {
+    this.allowed = new Set(allowed);
+    for (const capability of capabilities)
+      this.store.setPermission(
+        this.id,
+        capability,
+        this.allowed.has(capability),
+      );
   }
 
   private async hostLeft() {
