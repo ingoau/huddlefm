@@ -17,6 +17,17 @@ export function optionalText(value?: string) {
   return text || undefined;
 }
 
+export type MediaBackend = "browser" | "native";
+
+/**
+ * Which media backend joins Huddles. The browser (headless Chromium running
+ * the Chime JS SDK) stays the default; `native` opts into the Chromium-free
+ * backend in src/native-media.
+ */
+export function parseMediaBackend(value?: string): MediaBackend {
+  return value?.trim().toLowerCase() === "native" ? "native" : "browser";
+}
+
 export function loadConfig() {
   for (const name of required)
     if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -63,6 +74,7 @@ export function loadConfig() {
     lastFmSharedSecret: process.env.LASTFM_SHARED_SECRET,
     posthogApiKey: process.env.POSTHOG_API_KEY,
     posthogHost: process.env.POSTHOG_HOST ?? "https://us.i.posthog.com",
+    mediaBackend: parseMediaBackend(process.env.MEDIA_BACKEND),
     chromePath:
       process.env.CHROME_PATH ??
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

@@ -17,7 +17,11 @@ import { safeError } from "./error-message.ts";
 import { controlDenied } from "./local-control.ts";
 import { flushLogs, logger } from "./logger.ts";
 import { LyricsCatalog } from "./lyrics.ts";
-import { MediaBrowserPool, type MediaBrowser } from "./media-browser.ts";
+import { MediaBrowserPool } from "./media-browser.ts";
+import {
+  NativeMediaSession,
+  type MediaMessage,
+} from "./native-media/session.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import {
@@ -201,11 +205,18 @@ function canvasIntegrations() {
 
 type SocketData = { sessionId: string };
 type Gate = ReturnType<typeof Promise.withResolvers<void>>;
+/** One Huddle's media backend: the browser page or the native process. */
+type MediaSession = {
+  start(bootstrap: ChimeBootstrap): Promise<void>;
+  /** Delivers a coordinator message; false when nothing is connected. */
+  send(message: unknown): boolean;
+  close(): Promise<void>;
+};
 type Runtime = {
   sourceChannelId: string;
   callId: string;
   bootstrap: ChimeBootstrap;
-  browser: MediaBrowser;
+  media: MediaSession;
   socket?: ServerWebSocket<SocketData>;
   coordinator?: Coordinator;
   mediaState?: { type: string; details?: unknown };
@@ -308,7 +319,7 @@ function notFound() {
 }
 
 async function discardRuntime(runtime: Runtime) {
-  await runtime.browser.close();
+  await runtime.media.close();
   runtimes.delete(runtime.bootstrap.sessionId);
 }
 
@@ -563,7 +574,7 @@ async function joinHuddle(
       sourceChannelId: channelId,
       callId: joined.huddleCallId,
       bootstrap,
-      browser: mediaBrowsers.session(server.url.origin),
+      media: createMediaSession(() => runtime),
     };
     runtimes.set(bootstrap.sessionId, runtime);
     log.debug(
@@ -581,7 +592,7 @@ async function joinHuddle(
       30_000,
     );
     try {
-      await runtime.browser.start(bootstrap);
+      await runtime.media.start(bootstrap);
       await gate.promise;
       log.info(
         {
@@ -609,7 +620,7 @@ async function joinHuddle(
       audit,
       config,
       bootstrap.bridgeToken,
-      (message) => runtime?.socket?.send(JSON.stringify(message)),
+      (message) => void runtime?.media.send(message),
       async () => {
         const gate = (runtime!.leaveGate = Promise.withResolvers<void>());
         const timer = setTimeout(gate.resolve, 5_000);
@@ -1201,12 +1212,13 @@ const server = Bun.serve<SocketData>({
         if (denied) return denied;
         const runtime = selectedRuntime(request);
         if (runtime instanceof Response) return runtime;
-        runtime?.socket?.send(JSON.stringify({ type: "tone", frequency: 440 }));
+        const sent =
+          runtime?.media.send({ type: "tone", frequency: 440 }) ?? false;
         log.debug(
-          { event: "local_tone_requested", active: Boolean(runtime?.socket) },
+          { event: "local_tone_requested", active: sent },
           "Local control requested test tone",
         );
-        return Response.json({ ok: Boolean(runtime?.socket) });
+        return Response.json({ ok: sent });
       },
     },
     "/leave": {
@@ -1282,33 +1294,11 @@ const server = Bun.serve<SocketData>({
       const runtime = runtimes.get(socket.data.sessionId);
       if (!runtime) return socket.close();
       const message = JSON.parse(String(raw));
-      runtime.mediaState = { type: message.type, details: message.details };
-      const ownSession = message.sessionId === runtime.bootstrap.sessionId;
-      const detail = detailMessage(message.details);
-      if (ownSession && message.type === "joined") runtime.joinGate?.resolve();
-      if (ownSession && (message.type === "fatal" || message.type === "ended"))
-        runtime.joinGate?.reject(new Error(`Chime join failed: ${detail}`));
-      if (ownSession && message.type === "ended") runtime.leaveGate?.resolve();
       if (message.type === "ready")
         socket.send(
           JSON.stringify({ type: "bootstrap", payload: runtime.bootstrap }),
         );
-      if (ownSession)
-        runtime.coordinator?.mediaEvent(message.type, message.details);
-      const fields = {
-        event: "media_message",
-        mediaSessionId: runtime.bootstrap.sessionId,
-        mediaEvent: String(message.type),
-        ...(message.type === "fatal" ? { error: detail } : {}),
-      };
-      if (message.type === "fatal")
-        log.error(
-          { ...fields, err: new Error(detail) },
-          "Media page reported fatal error",
-        );
-      else if (message.type === "playback_position")
-        log.trace(fields, "Media playback position received");
-      else log.info(fields, "Media message received");
+      handleMediaMessage(runtime, message);
     },
     close(socket) {
       const runtime = runtimes.get(socket.data.sessionId);
@@ -1324,6 +1314,68 @@ const server = Bun.serve<SocketData>({
     },
   },
 });
+
+/**
+ * The media backend for a new runtime. The browser backend drives the media
+ * page through the /bridge WebSocket; the native one runs its own process and
+ * reports through the same messages.
+ */
+function createMediaSession(current: () => Runtime | undefined): MediaSession {
+  if (config.mediaBackend === "native")
+    return new NativeMediaSession(
+      (message) => {
+        const runtime = current();
+        if (runtime) handleMediaMessage(runtime, message);
+      },
+      (entryId) => {
+        const runtime = current();
+        return runtime?.coordinator?.audioPath(
+          entryId,
+          runtime.bootstrap.bridgeToken,
+        );
+      },
+    );
+  const browser = mediaBrowsers.session(server.url.origin);
+  return {
+    start: (bootstrap) => browser.start(bootstrap),
+    send: (message) => {
+      const socket = current()?.socket;
+      socket?.send(JSON.stringify(message));
+      return Boolean(socket);
+    },
+    close: () => browser.close(),
+  };
+}
+
+/** Handles an event from a runtime's media backend, whichever it is. */
+function handleMediaMessage(runtime: Runtime, message: MediaMessage) {
+  runtime.mediaState = { type: message.type, details: message.details };
+  const ownSession = message.sessionId === runtime.bootstrap.sessionId;
+  const detail = detailMessage(message.details);
+  if (ownSession && message.type === "joined") runtime.joinGate?.resolve();
+  if (ownSession && (message.type === "fatal" || message.type === "ended"))
+    runtime.joinGate?.reject(new Error(`Chime join failed: ${detail}`));
+  if (ownSession && message.type === "ended") runtime.leaveGate?.resolve();
+  if (ownSession)
+    runtime.coordinator?.mediaEvent(
+      message.type,
+      message.details as Parameters<Coordinator["mediaEvent"]>[1],
+    );
+  const fields = {
+    event: "media_message",
+    mediaSessionId: runtime.bootstrap.sessionId,
+    mediaEvent: String(message.type),
+    ...(message.type === "fatal" ? { error: detail } : {}),
+  };
+  if (message.type === "fatal")
+    log.error(
+      { ...fields, err: new Error(detail) },
+      "Media page reported fatal error",
+    );
+  else if (message.type === "playback_position")
+    log.trace(fields, "Media playback position received");
+  else log.info(fields, "Media message received");
+}
 
 function selectedRuntime(request: Request) {
   const sessionId = new URL(request.url).searchParams.get("sessionId");
@@ -1675,7 +1727,7 @@ async function shutdownSteps() {
     [...runtimes.values()].map(
       (runtime) =>
         runtime.coordinator?.suspendForRestart(resumeUntil) ??
-        runtime.browser.close(),
+        runtime.media.close(),
     ),
   );
   log.debug({ event: "shutdown_media_browsers" }, "Closing media browsers");

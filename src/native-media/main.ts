@@ -1,0 +1,266 @@
+// The native media backend for one Huddle, run as a child process by
+// NativeMediaSession. It reads the bootstrap and then the coordinator's media
+// messages as JSON lines on stdin, and writes the same events the media page
+// sends, plus log lines, as JSON lines on stdout.
+import { Application, createEncoder, Signal } from "libopus-wasm";
+import type { ChimeBootstrap } from "../slack-huddle.ts";
+import { errorMessage } from "../error-message.ts";
+import { AudioEngine } from "./audio-engine.ts";
+import {
+  ChimeLink,
+  statusCodes,
+  type ChimeAttendee,
+  type ChimeMeeting,
+} from "./chime-link.ts";
+import { FfmpegDecoder, sampleRate } from "./decoder.ts";
+import { SpeechSignals } from "./speech.ts";
+import { VideoCard } from "./video-card.ts";
+import { VideoFeed } from "./video-feed.ts";
+
+type Level = "trace" | "debug" | "info" | "warn" | "error";
+
+const frameSamples = 960; // 20 ms at 48 kHz
+const frameMs = (frameSamples / sampleRate) * 1_000;
+/** Frames the pacer may fall behind before it skips ahead instead of bursting. */
+const maxCatchUpFrames = 10;
+/** The page waits this long after `play` before swapping the card. */
+const trackSwapDelayMs = 220;
+
+let sessionId: string | undefined;
+function write(line: unknown) {
+  process.stdout.write(`${JSON.stringify(line)}\n`);
+}
+function emit(type: string, details?: unknown) {
+  write({ type, details, sessionId });
+}
+function log(
+  level: Level,
+  event: string,
+  message: string,
+  fields: Record<string, unknown> = {},
+) {
+  write({ log: { level, event, message, ...fields } });
+}
+
+let engine: AudioEngine | undefined;
+let link: ChimeLink | undefined;
+let card: VideoCard | undefined;
+let feed: VideoFeed | undefined;
+let pacer: ReturnType<typeof setInterval> | undefined;
+let leaving: Promise<void> | undefined;
+let trackSwap = 0;
+let wantVideo = true;
+
+async function start(bootstrap: ChimeBootstrap) {
+  sessionId = bootstrap.sessionId;
+  const audio = new AudioEngine(
+    (url, startSeconds) => new FfmpegDecoder(url, startSeconds),
+    emit,
+  );
+  engine = audio;
+  audio.setVolume(bootstrap.initialVolume);
+  audio.setDuckingMode(bootstrap.duckingMode);
+  const videoCard = new VideoCard(
+    () => audio.progress(),
+    (message) =>
+      log("warn", "native_artwork_failed", "Artwork failed to load", {
+        error: message,
+      }),
+  );
+  card = videoCard;
+  let speech: SpeechSignals | undefined;
+  const chime = new ChimeLink(
+    bootstrap.meeting as unknown as ChimeMeeting,
+    bootstrap.attendee as unknown as ChimeAttendee,
+    wantVideo,
+    {
+      log: (level, event, message, fields) =>
+        log(level, event, message, fields),
+      onFrame: (frame) => speech?.handle(frame),
+      onConnected: (reconnect) => {
+        if (reconnect) speech?.reset();
+        syncVideo();
+      },
+      onPictureLoss: () => {},
+      onTerminal: (code, reason) => {
+        log("warn", "native_media_ended", "Chime session ended", {
+          code,
+          reason,
+        });
+        void finish(code);
+      },
+    },
+  );
+  link = chime;
+  speech = new SpeechSignals(chime.attendeeId, audio.ducking, audio.applyDuck);
+  feed = new VideoFeed(
+    () => videoCard.rgba(),
+    (nals, timestamp) => chime.sendVideo(nals, timestamp),
+    (message) =>
+      log("warn", "native_video_failed", "Video encoder stopped", {
+        error: message,
+      }),
+  );
+  const startedAt = Date.now();
+  await chime.start();
+  log("info", "native_media_joined", "Native media joined Chime", {
+    durationMs: Date.now() - startedAt,
+    video: chime.sendingVideo,
+  });
+  await startPacer(audio, chime);
+  emit("joined");
+}
+
+function syncVideo() {
+  if (!feed || !link) return;
+  if (link.sendingVideo && wantVideo) feed.start();
+  else feed.stop();
+}
+
+async function startPacer(audio: AudioEngine, chime: ChimeLink) {
+  const opus = await createEncoder({
+    application: Application.Audio,
+    signal: Signal.Music,
+    channels: 2,
+    sampleRate: 48_000,
+    bitrate: 128_000,
+    complexity: 10,
+    vbr: true,
+    fec: true,
+    packetLossPercent: 5,
+  });
+  let reported = false;
+  let base = performance.now();
+  let sent = 0;
+  pacer = setInterval(() => {
+    const due = Math.floor((performance.now() - base) / frameMs);
+    if (due - sent > maxCatchUpFrames) {
+      // After a stall, carry on from now rather than rushing out a burst.
+      base = performance.now() - frameMs;
+      sent = 0;
+    }
+    const target = Math.floor((performance.now() - base) / frameMs);
+    while (sent < target) {
+      sent++;
+      const samples = audio.render(frameSamples);
+      for (let index = 0; index < samples.length; index++)
+        samples[index] = Math.max(-1, Math.min(1, samples[index]!));
+      if (chime.sendAudio(opus.encodeFloat(samples)) && !reported) {
+        reported = true;
+        emit("audio_outbound", {
+          bytesSent: chime.stats.audioBytes,
+          packetsSent: chime.stats.audioPackets,
+        });
+      }
+    }
+  }, 10);
+}
+
+function handle(message: Record<string, any>) {
+  if (message.type === "bootstrap") return;
+  if (message.type === "leave") {
+    void leave();
+    return;
+  }
+  if (!engine || leaving) return;
+  if (message.type === "display_mode") {
+    wantVideo = message.mode !== "off";
+    link?.setVideo(wantVideo);
+    syncVideo();
+    return;
+  }
+  // The native card has no lyrics view yet; the default card stands in.
+  if (message.type === "lyrics" || message.type === "lyrics_unavailable")
+    return;
+  engine.handle(message);
+  if (message.type === "play") {
+    const swap = ++trackSwap;
+    setTimeout(() => {
+      if (swap !== trackSwap || engine?.current !== message.entryId) return;
+      card?.setTrack(
+        String(message.title ?? ""),
+        message.requesterLabel
+          ? `${message.artist} — ${message.requesterLabel}`
+          : String(message.artist ?? ""),
+        message.artwork,
+      );
+    }, trackSwapDelayMs);
+  }
+  if (message.type === "stop") {
+    trackSwap++;
+    card?.reset();
+  }
+}
+
+async function leave() {
+  leaving ??= (async () => {
+    emit("leaving");
+    await finish(statusCodes.left);
+  })();
+  return leaving;
+}
+
+let finishing: Promise<void> | undefined;
+function finish(code: number) {
+  finishing ??= (async () => {
+    clearInterval(pacer);
+    engine?.dispose();
+    feed?.stop();
+    await link?.leave().catch(() => {});
+    emit("ended", { code });
+    // Let stdout drain before exiting.
+    await Bun.sleep(50);
+    process.exit(0);
+  })();
+  return finishing;
+}
+
+async function main() {
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let started = false;
+  const reader = Bun.stdin.stream().getReader();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffered += decoder.decode(value, { stream: true });
+    let newline = buffered.indexOf("\n");
+    while (newline >= 0) {
+      const line = buffered.slice(0, newline).trim();
+      buffered = buffered.slice(newline + 1);
+      newline = buffered.indexOf("\n");
+      if (!line) continue;
+      let message: Record<string, any>;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        log("warn", "native_bad_message", "Ignored a malformed media message");
+        continue;
+      }
+      if (!started && message.type === "bootstrap") {
+        started = true;
+        start(message.payload).catch((error) => {
+          emit("fatal", { message: errorMessage(error) });
+          void finish(statusCodes.taskFailed);
+        });
+        continue;
+      }
+      try {
+        handle(message);
+      } catch (error) {
+        emit(
+          message.type === "play" || message.type === "resume"
+            ? "track_error"
+            : "fatal",
+          { entryId: engine?.current, message: errorMessage(error) },
+        );
+      }
+    }
+  }
+  // The parent went away without saying leave: leave the Huddle anyway.
+  await leave();
+}
+
+process.on("SIGTERM", () => void leave());
+process.on("SIGINT", () => void leave());
+void main();
