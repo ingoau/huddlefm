@@ -12,9 +12,7 @@ const deleteSettledErrors = new Set([
 
 // Slack reports why a call failed in the response body rather than the message.
 export function slackErrorCode(error: unknown) {
-  if (!error || typeof error !== "object" || !("data" in error))
-    return undefined;
-  const data = error.data;
+  const data = (error as { data?: { error?: unknown } } | undefined)?.data;
   if (!data || typeof data !== "object" || !("error" in data)) return undefined;
   return String(data.error);
 }
@@ -240,17 +238,25 @@ export class SlackAppAdapter {
   }
 
   async deleteOriginal(responseUrl: string) {
-    const response = await fetch(responseUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ delete_original: true }),
-    });
-    if (!response.ok)
-      throw new Error(`response_url deletion failed: ${response.status}`);
+    await this.respond(responseUrl, { delete_original: true }, "deletion");
     log.debug(
       { event: "original_response_deleted" },
       "Slack original response deleted",
     );
+  }
+
+  private async respond(
+    responseUrl: string,
+    body: Record<string, unknown>,
+    action: string,
+  ) {
+    const response = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok)
+      throw new Error(`response_url ${action} failed: ${response.status}`);
   }
 
   async ephemeral(
@@ -379,17 +385,11 @@ export class SlackAppAdapter {
   }
 
   async replaceOriginal(responseUrl: string, text: string, blocks?: unknown[]) {
-    const response = await fetch(responseUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        replace_original: true,
-        text,
-        ...(blocks ? { blocks } : {}),
-      }),
-    });
-    if (!response.ok)
-      throw new Error(`response_url replace failed: ${response.status}`);
+    await this.respond(
+      responseUrl,
+      { replace_original: true, text, ...(blocks ? { blocks } : {}) },
+      "replace",
+    );
     log.debug(
       { event: "original_response_replaced" },
       "Slack original response replaced",
