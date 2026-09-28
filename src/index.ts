@@ -925,14 +925,16 @@ async function restoreEndedSession(interaction: Interaction) {
     interaction.messageTs !== session.uiTs
   )
     return;
-  if (Date.now() >= session.resumeUntil) {
-    await cleanupEndedSession(session.id);
-    await slackApp.ephemeral(
+  const notify = (text: string) =>
+    slackApp.ephemeral(
       session.channelId,
       interaction.userId,
-      "That session can no longer be restored.",
+      text,
       session.threadTs,
     );
+  if (Date.now() >= session.resumeUntil) {
+    await cleanupEndedSession(session.id);
+    await notify("That session can no longer be restored.");
     return;
   }
   if (restoring.has(session.id)) return;
@@ -953,12 +955,7 @@ async function restoreEndedSession(interaction: Interaction) {
   try {
     const room = await savedHuddleRoom(session);
     if (!room) {
-      await slackApp.ephemeral(
-        session.channelId,
-        interaction.userId,
-        "That Huddle is no longer active.",
-        session.threadTs,
-      );
+      await notify("That Huddle is no longer active.");
       return;
     }
     if (!huddleHasParticipant(room, interaction.userId)) {
@@ -970,12 +967,7 @@ async function restoreEndedSession(interaction: Interaction) {
         },
         "Manual restore refused because the user is not in the Huddle",
       );
-      await slackApp.ephemeral(
-        session.channelId,
-        interaction.userId,
-        "Join the Huddle first, then I can restore that session.",
-        session.threadTs,
-      );
+      await notify("Join the Huddle first, then I can restore that session.");
       return;
     }
     await joinHuddle(
@@ -1012,12 +1004,7 @@ async function restoreEndedSession(interaction: Interaction) {
       },
       "Manual session restore failed",
     );
-    await slackApp.ephemeral(
-      session.channelId,
-      interaction.userId,
-      `I couldn’t restore that session: ${safeError(error)}`,
-      session.threadTs,
-    );
+    await notify(`I couldn’t restore that session: ${safeError(error)}`);
   } finally {
     restoring.delete(session.id);
   }
@@ -1102,17 +1089,14 @@ async function joinMentionedHuddle(
     { type: "ThreadActivity" }
   >,
 ) {
+  const notify = (text: string) =>
+    slackApp.ephemeral(event.channelId, event.userId, text, event.threadTs);
   const room = await slackHuddle.activeHuddleRoom(
     event.channelId,
     event.threadTs,
   );
   if (!room) {
-    await slackApp.ephemeral(
-      event.channelId,
-      event.userId,
-      "This isn’t an active Huddle thread.",
-      event.threadTs,
-    );
+    await notify("This isn’t an active Huddle thread.");
     return false;
   }
   if (
@@ -1131,11 +1115,8 @@ async function joinMentionedHuddle(
       },
       "Huddle join refused because the user is not in the Huddle",
     );
-    await slackApp.ephemeral(
-      event.channelId,
-      event.userId,
+    await notify(
       "Join the Huddle first, then mention me and I’ll bring the music.",
-      event.threadTs,
     );
     return false;
   }
