@@ -1,0 +1,10 @@
+{
+  "name": "huddlefm-native-chime-spike",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "libopus-wasm": "0.4.1",
+    "node-datachannel": "0.33.4",
+    "protobufjs": "8.8.0"
+  }
+}
