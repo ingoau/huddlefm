@@ -44,18 +44,18 @@ export class CompanionChannels {
       this.store.clearCompanionChannel(sourceChannelId);
       channelId = undefined;
     }
-    if (!channelId) channelId = await this.create(sourceChannelId);
-    await this.restrict(channelId, hostId);
-    await this.add(channelId, hostId, "host").catch((error) => {
-      this.abortSetup(channelId, [hostId]);
-      throw error;
-    });
-    return channelId;
+    return this.setup(
+      channelId ?? (await this.create(sourceChannelId)),
+      hostId,
+    );
   }
 
   async replace(sourceChannelId: string, hostId: string) {
     this.store.clearCompanionChannel(sourceChannelId);
-    const channelId = await this.create(sourceChannelId);
+    return this.setup(await this.create(sourceChannelId), hostId);
+  }
+
+  private async setup(channelId: string, hostId: string) {
     await this.restrict(channelId, hostId);
     await this.add(channelId, hostId, "host").catch((error) => {
       this.abortSetup(channelId, [hostId]);
@@ -80,12 +80,10 @@ export class CompanionChannels {
               },
               "Could not add Huddle participant to companion channel",
             );
-            await this.app
-              .dm(
-                userId,
-                "I couldn’t add you to the HuddleFM controls channel. Ask the host to restart the session.",
-              )
-              .catch(() => {});
+            await this.notify(
+              userId,
+              "I couldn’t add you to the HuddleFM controls channel. Ask the host to restart the session.",
+            );
           }),
         ),
     );
@@ -133,18 +131,25 @@ export class CompanionChannels {
   }
 
   endSession(sessionId: string, channelId: string, userIds: string[]) {
-    const deadline = Date.now() + cleanupDelayMs;
-    for (const userId of userIds)
-      if (userId !== this.userId)
-        this.store.scheduleCompanionRemoval(channelId, userId, deadline);
+    const deadline = this.scheduleRemovals(channelId, userIds);
     this.store.scheduleSessionMessageCleanup(sessionId, deadline);
   }
 
   abortSetup(channelId: string, userIds: string[]) {
+    this.scheduleRemovals(channelId, new Set(userIds));
+  }
+
+  private scheduleRemovals(channelId: string, userIds: Iterable<string>) {
     const deadline = Date.now() + cleanupDelayMs;
-    for (const userId of new Set(userIds))
+    for (const userId of userIds)
       if (userId !== this.userId)
         this.store.scheduleCompanionRemoval(channelId, userId, deadline);
+    return deadline;
+  }
+
+  // A DM that is nice to have: nothing depends on it reaching the user.
+  private notify(userId: string, text: string) {
+    return this.app.dm(userId, text).catch(() => {});
   }
 
   abandonSession(sessionId: string) {
@@ -237,12 +242,10 @@ export class CompanionChannels {
           { event: "posting_restriction_failed", channelId, err: error },
           "Could not restrict companion channel posting",
         );
-        await this.app
-          .dm(
-            hostId,
-            `I couldn’t restrict posting in <#${channelId}>, so anyone in it can post there. You can change this in the channel’s settings.`,
-          )
-          .catch(() => {});
+        await this.notify(
+          hostId,
+          `I couldn’t restrict posting in <#${channelId}>, so anyone in it can post there. You can change this in the channel’s settings.`,
+        );
       });
   }
 
@@ -312,14 +315,9 @@ function inviteNotice(
   sourceChannelId: string | undefined,
   reason: InviteReason,
 ) {
-  if (sourceChannelId) {
-    if (reason === "host")
-      return `You invited me to a huddle in <#${sourceChannelId}>, so I've added you to <#${channelId}> to control the music.`;
-    return `You joined a huddle in <#${sourceChannelId}>, so I've added you to <#${channelId}> to control the music.`;
-  }
-  if (reason === "host")
-    return `You invited me to a huddle, so I've added you to <#${channelId}> to control the music.`;
-  return `You joined a huddle, so I've added you to <#${channelId}> to control the music.`;
+  const cause = reason === "host" ? "You invited me to" : "You joined";
+  const where = sourceChannelId ? ` in <#${sourceChannelId}>` : "";
+  return `${cause} a huddle${where}, so I've added you to <#${channelId}> to control the music.`;
 }
 
 function retryDelay(attempts: number) {
