@@ -16,6 +16,7 @@ import {
   parseDuckingMode,
   type DuckDecision,
 } from "./ducking.ts";
+import { errorMessage } from "./error-message.ts";
 import { volumeGain } from "./volume.ts";
 import "./media-page.css";
 
@@ -336,10 +337,6 @@ function cancelTransition(keepId = currentId) {
 
 function currentDeck() {
   return currentId ? decks.get(currentId) : undefined;
-}
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function resetLyricState() {

@@ -44,7 +44,7 @@ export type ScrobblingMode = (typeof scrobblingModes)[number];
 export const autoplayModes = ["off", "related", "huddle"] as const;
 export type AutoplayMode = (typeof autoplayModes)[number];
 
-function modeOf<M extends string>(modes: readonly M[], value: unknown) {
+export function modeOf<M extends string>(modes: readonly M[], value: unknown) {
   return modes.includes(value as M) ? (value as M) : undefined;
 }
 

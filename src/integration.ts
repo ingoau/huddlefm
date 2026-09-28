@@ -5,6 +5,7 @@ import {
   duckingModes,
   loopModes,
   transitionModes,
+  modeOf,
 } from "./store.ts";
 import { confirm, permissionLabels, plain } from "./coordinator-ui.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
@@ -160,20 +161,21 @@ export function parseIntegrationMessage(text: string): IntegrationParseResult {
     query: string(body.query),
     reference: string(body.reference),
     trackId: string(body.trackId),
-    direction: mode(["up", "down"] as const, body.direction),
+    direction: modeOf(["up", "down"] as const, body.direction),
     playNext: boolean(body.playNext),
     position: number(body.position),
     seconds: number(body.seconds),
     percent: number(body.percent),
-    displayMode: mode(displayModes, body.displayMode),
+    displayMode: modeOf(displayModes, body.displayMode),
     autoplay: boolean(body.autoplay),
     autoplayMode:
-      mode(autoplayModes, body.autoplayMode) ??
-      mode(autoplayModes, body.autoplay),
-    loopMode: mode(loopModes, body.loop) ?? mode(loopModes, body.loopMode),
-    transitionMode: mode(transitionModes, body.transitionMode),
+      modeOf(autoplayModes, body.autoplayMode) ??
+      modeOf(autoplayModes, body.autoplay),
+    loopMode: modeOf(loopModes, body.loop) ?? modeOf(loopModes, body.loopMode),
+    transitionMode: modeOf(transitionModes, body.transitionMode),
     duckingMode:
-      mode(duckingModes, body.ducking) ?? mode(duckingModes, body.duckingMode),
+      modeOf(duckingModes, body.ducking) ??
+      modeOf(duckingModes, body.duckingMode),
     anchorEnabled: boolean(body.anchorEnabled),
   };
   return { ok: true, command: { type, ...defined(fields) } };
@@ -185,10 +187,6 @@ const number = (value: unknown) =>
   typeof value === "number" ? value : undefined;
 const boolean = (value: unknown) =>
   typeof value === "boolean" ? value : undefined;
-
-function mode<T extends string>(modes: readonly T[], value: unknown) {
-  return modes.includes(value as T) ? (value as T) : undefined;
-}
 
 function defined<T extends object>(value: T) {
   return Object.fromEntries(
