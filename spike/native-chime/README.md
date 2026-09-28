@@ -155,6 +155,7 @@ Both played the same arpeggio into the same huddle, one after the other. Chromiu
 | Video                                | VP9 (libvpx), 30 fps, about 50 kbps                           | H.264 baseline, 15 fps, about 190 kbps      |
 | Server-reported loss / RTT           | 0 / 25–38 ms                                                  | 0 / 26–34 ms                                |
 
+- The listener heard no real difference in audio quality between the two.
 - The harness's own bun process (56 MB, 1% CPU) is not counted for Chromium, since the bot's process exists either way.
 - The first native card run used 23% CPU. ffmpeg re-decoded the PNG every frame and filled an 800 kbps target on a still image. Decoding once, looping the frame, CRF 30 and a 3 s keyframe interval brought ffmpeg from 17.5% to 7%. The testsrc pipeline still uses the fixed bitrate.
 - Chromium's browser and GPU processes are shared between huddles, so each extra huddle costs it less than the single-huddle figure. That was not measured.
