@@ -9,6 +9,8 @@ export type ChimeBootstrap = {
   attendee: Record<string, unknown>;
   initialVolume: number;
   duckingMode: DuckingMode;
+  /** How much later than the audio position the lyrics follow. */
+  lyricsOffsetMs: number;
   bridgeToken: string;
 };
 

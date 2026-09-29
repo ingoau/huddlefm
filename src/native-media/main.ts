@@ -15,6 +15,7 @@ import {
 } from "./chime-link.ts";
 import { FfmpegDecoder, sampleRate } from "./decoder.ts";
 import { SpeechSignals } from "./speech.ts";
+import type { LyricsCredits } from "./lyrics-view.ts";
 import { VideoCard, type DisplayMode } from "./video-card.ts";
 import { VideoFeed } from "./video-feed.ts";
 
@@ -55,7 +56,14 @@ let wantVideo = true;
 /** The entry the card shows, which trails `play` by the swap delay. */
 let shownEntry: string | undefined;
 /** The best lyrics so far for the current entry, like the page's. */
-let lyrics: { entryId: string; priority: number; lines: Lyric[] } | undefined;
+let lyrics:
+  | {
+      entryId: string;
+      priority: number;
+      lines: Lyric[];
+      credits: LyricsCredits;
+    }
+  | undefined;
 let noLyrics: string | undefined;
 
 async function start(bootstrap: ChimeBootstrap) {
@@ -73,6 +81,7 @@ async function start(bootstrap: ChimeBootstrap) {
       log("warn", "native_artwork_failed", "Artwork failed to load", {
         error: message,
       }),
+    { lyricsOffset: (bootstrap.lyricsOffsetMs ?? 0) / 1_000 },
   );
   card = videoCard;
   let speech: SpeechSignals | undefined;
@@ -218,7 +227,7 @@ function handle(message: Record<string, any>) {
         message.artwork,
       );
       if (lyrics && lyrics.entryId === message.entryId)
-        card?.setLyrics(lyrics.lines);
+        card?.setLyrics(lyrics.lines, lyrics.credits);
       else if (noLyrics === message.entryId) card?.setLyricsUnavailable();
     }, trackSwapDelayMs);
   }
@@ -236,9 +245,15 @@ function handleLyrics(message: Record<string, any>) {
   const priority = Number(message.priority);
   if (entryId !== engine?.current || !Array.isArray(message.lines)) return;
   if (lyrics?.entryId === entryId && !(priority < lyrics.priority)) return;
-  lyrics = { entryId, priority, lines: message.lines };
+  const credits: LyricsCredits = {
+    songwriters: Array.isArray(message.songwriters)
+      ? message.songwriters.map(String)
+      : undefined,
+    source: typeof message.source === "string" ? message.source : undefined,
+  };
+  lyrics = { entryId, priority, lines: message.lines, credits };
   noLyrics = undefined;
-  if (shownEntry === entryId) card?.setLyrics(message.lines);
+  if (shownEntry === entryId) card?.setLyrics(message.lines, credits);
 }
 
 async function leave() {

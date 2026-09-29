@@ -13,6 +13,9 @@ const romanRowHeight = romanFontSize * 1.4;
 const backgroundGap = 10;
 /** How far below its place a line starts when lyrics fly in. */
 const enterDistance = 90;
+/** The credits come up this long after the last line ends. */
+const creditsDelayMs = 1_500;
+const creditsGap = 18;
 /** Space above and below each line. */
 const linePadding = 13;
 /** Room around a line's own canvas for lift, glow and blur. */
@@ -100,7 +103,21 @@ type DotsItem = {
   y: Spring;
   active: boolean;
 };
-type Item = LineItem | DotsItem;
+/** Who wrote the song and where the lyrics came from, after the last line. */
+type CreditsItem = {
+  kind: "credits";
+  start: number;
+  end: number;
+  align: Align;
+  y: Spring;
+  active: boolean;
+  rows: { text: string; size: number; alpha: number }[];
+  height: number;
+  canvas?: Canvas;
+};
+type Item = LineItem | DotsItem | CreditsItem;
+
+export type LyricsCredits = { songwriters?: string[]; source?: string };
 
 type Piece = { text: string; start: number; end: number };
 
@@ -176,10 +193,14 @@ export class LyricsView {
     lines: Lyric[],
     readonly width: number,
     private ratio = 1,
+    credits: LyricsCredits = {},
   ) {
     const measure = createCanvas(1, 1).getContext("2d");
     this.items = this.build(lines, measure);
     this.synced = lines.some((line) => line.startTimeMs > 0);
+    const last = this.items.at(-1);
+    const creditsItem = last && this.credits(credits, last.end, measure);
+    if (creditsItem) this.items.push(creditsItem);
   }
 
   get empty() {
@@ -196,7 +217,7 @@ export class LyricsView {
     return this.items.every(
       (item) =>
         item.y.settled &&
-        (item.kind === "dots" ||
+        (item.kind !== "line" ||
           (item.scale.settled &&
             item.shown.settled &&
             (item.bright === 0 || item.bright === 1))),
@@ -328,6 +349,16 @@ export class LyricsView {
         if (fade > 0.001) this.drawDots(context, item, time, fade);
         continue;
       }
+      if (item.kind === "credits") {
+        const fade =
+          alpha *
+          Math.min(
+            fadeAt(top + creditsGap),
+            fadeAt(top + item.height - linePadding),
+          );
+        if (fade > 0.001) this.drawCredits(context, item, fade);
+        continue;
+      }
       const extent = item.mainHeight + backgroundExtent(item) + linePadding * 2;
       if (top + extent < -bleed || top > height + bleed) {
         // Off screen: let the canvases go until the line comes back.
@@ -373,6 +404,7 @@ export class LyricsView {
 
   private layoutHeight(item: Item) {
     if (item.kind === "dots") return item.active ? dotsHeight : 0;
+    if (item.kind === "credits") return item.height;
     return (
       item.mainHeight +
       (item.active ? backgroundExtent(item) : 0) +
@@ -428,6 +460,61 @@ export class LyricsView {
         if (next) item.align = next.align;
       }
     return withDots;
+  }
+
+  private credits(
+    credits: LyricsCredits,
+    lastEnd: number,
+    measure: SKRSContext2D,
+  ): CreditsItem | undefined {
+    const rows: CreditsItem["rows"] = [];
+    const add = (text: string, size: number, alpha: number) => {
+      measure.font = `600 ${size}px ${fonts()}`;
+      for (const row of wrapText(measure, text, this.width))
+        rows.push({ text: row, size, alpha });
+    };
+    const writers = credits.songwriters?.filter(Boolean) ?? [];
+    if (writers.length) add(`Written by: ${writers.join(", ")}`, 17, 0.5);
+    if (credits.source) add(`Lyrics from ${credits.source}`, 13, 0.32);
+    if (!rows.length) return;
+    const height =
+      creditsGap +
+      rows.reduce((sum, row) => sum + row.size * 1.45, 0) +
+      linePadding;
+    return {
+      kind: "credits",
+      start: lastEnd + creditsDelayMs,
+      end: Infinity,
+      align: "left",
+      y: new Spring(0, motion.scroll),
+      active: false,
+      rows,
+      height,
+    };
+  }
+
+  /** Drawn once into its own canvas, then moved about like the lines. */
+  private drawCredits(context: SKRSContext2D, item: CreditsItem, fade: number) {
+    if (!item.canvas) {
+      item.canvas = createCanvas(
+        Math.ceil(this.width * this.ratio),
+        Math.ceil(item.height * this.ratio),
+      );
+      const target = item.canvas.getContext("2d");
+      target.scale(this.ratio, this.ratio);
+      target.textBaseline = "alphabetic";
+      let y = creditsGap;
+      for (const row of item.rows) {
+        target.font = `600 ${row.size}px ${fonts()}`;
+        target.fillStyle = white(row.alpha);
+        target.fillText(row.text, 0, y + row.size);
+        y += row.size * 1.45;
+      }
+    }
+    context.save();
+    context.globalAlpha = fade;
+    context.drawImage(item.canvas, 0, item.y.position, this.width, item.height);
+    context.restore();
   }
 
   private dots(start: number, end: number, align: Align): DotsItem {

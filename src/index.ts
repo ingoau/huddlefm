@@ -68,6 +68,7 @@ captureAnalytics("app.started", {
     trackDownloadLimitBytes: config.downloadBytes,
     initialVolume: config.initialVolume,
     duckingMode: config.duckingMode,
+    lyricsOffsetMs: config.lyricsOffsetMs,
     loudnessNormalization: config.loudnessNormalization,
     trackPreparationConcurrency: config.preparationConcurrency,
     mediaCacheLimitBytes: config.mediaCacheBytes,
@@ -571,6 +572,7 @@ async function joinHuddle(
       attendee: joined.chimeAttendee,
       initialVolume: restored?.volume ?? config.initialVolume,
       duckingMode: restored?.duckingMode ?? config.duckingMode,
+      lyricsOffsetMs: config.lyricsOffsetMs,
       bridgeToken: crypto.randomUUID(),
     };
     runtime = {

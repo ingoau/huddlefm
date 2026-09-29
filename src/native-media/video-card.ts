@@ -7,7 +7,7 @@ import {
 } from "@napi-rs/canvas";
 import type { Lyric } from "@braccato/core";
 import { fonts } from "./fonts.ts";
-import { LyricsView } from "./lyrics-view.ts";
+import { LyricsView, type LyricsCredits } from "./lyrics-view.ts";
 import { clamp, ease, easeOut, lerp, motion, Tween } from "./motion.ts";
 
 /** The card is laid out at the media page's 720px viewport... */
@@ -32,8 +32,21 @@ const frame = {
   width: Math.round(86 * unit),
   height: Math.round(layoutSize - 29 * unit - 34),
 };
-/** The blurred backdrop is drawn this much smaller, then scaled up. */
-const backdropScale = 0.25;
+// The backdrop: the artwork three times over, turning and drifting, drawn
+// tiny over half as much again as the card and blurred, then scaled up.
+const flowSize = 128;
+const flowReach = 1.5;
+const flowBlur = (76 * flowSize) / (layoutSize * flowReach);
+/** Seconds for the backdrop to wind down on pause, or back up on resume. */
+const flowEase = 0.35;
+const backdropFps = 12;
+/** How far down the lyrics layout's cover, shadow and header reach. */
+const foregroundBand = 190;
+const flowLayers = [
+  { size: 1.5, spin: 0.11, orbit: 0.08, speed: 0.21, phase: 0, alpha: 1 },
+  { size: 1.05, spin: -0.17, orbit: 0.14, speed: 0.29, phase: 2.1, alpha: 0.8 },
+  { size: 0.75, spin: 0.23, orbit: 0.18, speed: 0.37, phase: 4.2, alpha: 0.65 },
+];
 
 // A track change, in seconds. The backdrop crossfades while the cover, the
 // title, the artist and the lyrics each leave and arrive on their own.
@@ -78,6 +91,8 @@ export type CardProgress = { position: number; duration?: number };
 export type VideoCardOptions = {
   /** Milliseconds, for animation; a fixed clock lets a test step frames. */
   now?: () => number;
+  /** Seconds the lyrics trail the audio position, to match what is heard. */
+  lyricsOffset?: number;
 };
 
 type Track = {
@@ -108,7 +123,15 @@ type Outgoing = Track & { leftAt: number };
 export class VideoCard {
   private canvas = createCanvas(cardSize, cardSize);
   private context = this.canvas.getContext("2d");
+  /** The background and foreground together, as the lyrics go over them. */
   private stage = createCanvas(cardSize, cardSize);
+  /** The covers, the shade and the header, which only move on a change. */
+  private foreground = createCanvas(cardSize, cardSize);
+  private flow = createCanvas(flowSize, flowSize);
+  private flowGraded = createCanvas(flowSize, flowSize);
+  private flowTime = 0;
+  private flowSpeed = 0;
+  private backgroundAt = -Infinity;
   private track: Track = {
     title: "Ready for music",
     artist: "Waiting for the next track",
@@ -126,6 +149,7 @@ export class VideoCard {
   private frame: Buffer | undefined;
   private stageDirty = true;
   private now: () => number;
+  private lyricsOffset: number;
 
   private preferredMode: DisplayMode = "default";
   private lyricsAvailable: boolean | undefined;
@@ -144,6 +168,7 @@ export class VideoCard {
     options: VideoCardOptions = {},
   ) {
     this.now = options.now ?? (() => performance.now());
+    this.lyricsOffset = options.lyricsOffset ?? 0;
   }
 
   /**
@@ -191,7 +216,7 @@ export class VideoCard {
     const now = this.seconds();
     const track = this.track;
     track.cover = this.croppedCover(image);
-    track.backdrop = this.blurredBackdrop(image);
+    track.backdrop = this.flowSource(image);
     // Late artwork fades in over the placeholder; on time, it arrives with
     // the cover.
     if (track.coverAt !== undefined) {
@@ -211,8 +236,8 @@ export class VideoCard {
     this.applyMode();
   }
 
-  setLyrics(lines: Lyric[]) {
-    const view = new LyricsView(lines, frame.width, ratio);
+  setLyrics(lines: Lyric[], credits: LyricsCredits = {}) {
+    const view = new LyricsView(lines, frame.width, ratio, credits);
     const usable = !view.empty && view.synced;
     this.track.view = usable ? view : undefined;
     this.track.viewAt = this.seconds();
@@ -245,10 +270,12 @@ export class VideoCard {
     this.lastFrameAt = now;
     this.waitForArtwork(now);
     this.dropOutgoing(now);
+    this.advanceFlow(now, delta);
 
     const lyricsAlpha = this.lyricsIn.value(now);
     const view = this.track.view;
-    if (view && lyricsAlpha > 0) view.update(songTime, delta, frame.height);
+    if (view && lyricsAlpha > 0)
+      view.update(songTime - this.lyricsOffset, delta, frame.height);
     const lyricsMoving =
       lyricsAlpha > 0 &&
       ((Boolean(view) &&
@@ -256,7 +283,12 @@ export class VideoCard {
           !view!.settled ||
           progressOf(now, this.track.viewAt, lyricsEnter) < 1)) ||
         Boolean(this.outgoing?.view));
-    const stageMoving = this.stageMoving(now);
+    const foregroundMoving = this.foregroundMoving(now);
+    // The backdrop is all blur and moves slowly: half the frame rate is
+    // plenty, and the frames between can go unsent when nothing else moves.
+    const backgroundDue =
+      this.backgroundMoving(now) && now - this.backgroundAt >= 1 / backdropFps;
+    const stageMoving = foregroundMoving || backgroundDue;
     const key = `${formatTime(position)}|${formatTime(duration)}|${Math.round(amount * 528 * ratio)}`;
     if (
       this.frame &&
@@ -267,12 +299,32 @@ export class VideoCard {
     )
       return this.frame;
     this.frameKey = key;
-    if (stageMoving || this.stageDirty) {
-      this.drawStage(now);
-      this.stageDirty = stageMoving;
-    }
     const context = this.context;
     context.setTransform(1, 0, 0, 1, 0, 0);
+    if (foregroundMoving || this.stageDirty) this.drawForeground(now);
+    if (stageMoving || this.stageDirty) {
+      const stage = this.stage.getContext("2d");
+      this.drawBackground(stage);
+      // In the settled lyrics layout only the top of the foreground has
+      // anything in it.
+      const band =
+        !foregroundMoving && this.layout.value(now) >= 1
+          ? Math.ceil(foregroundBand * ratio)
+          : cardSize;
+      stage.drawImage(
+        this.foreground,
+        0,
+        0,
+        cardSize,
+        band,
+        0,
+        0,
+        cardSize,
+        band,
+      );
+      this.backgroundAt = now;
+      this.stageDirty = foregroundMoving;
+    }
     context.drawImage(this.stage, 0, 0);
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     if (lyricsAlpha > 0.001) this.drawLyrics(now, lyricsAlpha);
@@ -370,7 +422,7 @@ export class VideoCard {
     this.stageDirty = true;
   }
 
-  private stageMoving(now: number) {
+  private foregroundMoving(now: number) {
     const track = this.track;
     return (
       [this.layout, this.rounding, this.shade].some(
@@ -379,9 +431,32 @@ export class VideoCard {
       Boolean(this.outgoing) ||
       now - track.enteredAt < headerEnter + artistDelay ||
       progressOf(now, track.coverAt, coverEnter) < 1 ||
-      (track.artworkAt !== undefined && now - track.artworkAt < coverEnter) ||
-      now - this.backdrop.at < backdropFade
+      (track.artworkAt !== undefined && now - track.artworkAt < coverEnter)
     );
+  }
+
+  private backgroundMoving(now: number) {
+    const backdrop = this.backdrop;
+    return (
+      now - backdrop.at < backdropFade ||
+      // Hidden under the full-bleed cover in the default layout.
+      (this.flowSpeed > 0 &&
+        this.layout.value(now) > 0.001 &&
+        Boolean(backdrop.current ?? backdrop.previous))
+    );
+  }
+
+  /**
+   * The backdrop moves while the track plays, winding down on a pause and
+   * back up on resume rather than stopping dead.
+   */
+  private advanceFlow(now: number, delta: number) {
+    const playing = this.clockRunning(now);
+    const target = playing ? 1 : 0;
+    this.flowSpeed +=
+      (target - this.flowSpeed) * (1 - Math.exp(-delta / flowEase));
+    if (!playing && this.flowSpeed < 0.002) this.flowSpeed = 0;
+    this.flowTime += delta * this.flowSpeed;
   }
 
   /** The card's clock, in seconds like the motion settings. */
@@ -439,57 +514,55 @@ export class VideoCard {
     return canvas;
   }
 
-  /** #artwork: the cover blurred, darkened and saturated behind everything. */
-  private blurredBackdrop(image: Image) {
-    // inset: -18%, drawn small so the 76px blur is cheap.
-    const size = Math.round(layoutSize * 1.36 * backdropScale);
+  /** The artwork, small, for the moving backdrop to turn and drift. */
+  private flowSource(image: Image) {
+    const size = 64;
     const canvas = createCanvas(size, size);
-    const context = canvas.getContext("2d");
     const scale = Math.max(size / image.width, size / image.height);
-    context.filter = `blur(${76 * backdropScale}px) brightness(0.54) saturate(1.55)`;
-    context.drawImage(
-      image,
-      (size - image.width * scale) / 2,
-      (size - image.height * scale) / 2,
-      image.width * scale,
-      image.height * scale,
-    );
-    context.filter = "none";
+    canvas
+      .getContext("2d")
+      .drawImage(
+        image,
+        (size - image.width * scale) / 2,
+        (size - image.height * scale) / 2,
+        image.width * scale,
+        image.height * scale,
+      );
     return canvas;
   }
 
-  /** Everything but the lyrics and the timeline. */
-  private drawStage(now: number) {
-    const context = this.stage.getContext("2d");
-    context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const size = layoutSize;
-    const layout = this.layout.value(now);
-    context.fillStyle = "#0a0a0c";
-    context.fillRect(0, 0, size, size);
-
-    // #artwork, crossfading between tracks.
+  /**
+   * #artwork under #stage::before, drawn on the tiny flow canvas (it is all
+   * blur and gradient, so nothing is lost) and scaled up in one opaque pass.
+   */
+  private drawBackground(context: SKRSContext2D) {
+    const now = this.seconds();
     const mix = ease(progressOf(now, this.backdrop.at, backdropFade));
-    const drawn = size * 1.36 * 1.1;
+    const flow = this.flow.getContext("2d");
+    flow.clearRect(0, 0, flowSize, flowSize);
     for (const [image, alpha] of [
       [this.backdrop.previous, 1 - mix],
       [this.backdrop.current, mix],
-    ] as const) {
-      if (!image || alpha <= 0.001) continue;
-      context.globalAlpha = 0.86 * alpha;
-      context.drawImage(
-        image,
-        (size - drawn) / 2,
-        (size - drawn) / 2,
-        drawn,
-        drawn,
-      );
-    }
-    context.globalAlpha = 1;
-    // #stage::before
+    ] as const)
+      if (image && alpha > 0.001) this.drawFlow(flow, image, alpha);
+    const graded = this.flowGraded.getContext("2d");
+    graded.setTransform(1, 0, 0, 1, 0, 0);
+    graded.fillStyle = "#0a0a0c";
+    graded.fillRect(0, 0, flowSize, flowSize);
+    graded.globalAlpha = 0.86;
+    graded.filter = `blur(${flowBlur}px) brightness(0.54) saturate(1.55)`;
+    graded.drawImage(this.flow, 0, 0);
+    graded.filter = "none";
+    graded.globalAlpha = 1;
+    // #stage::before, in card units.
+    const size = layoutSize;
+    const scale = flowSize / (size * flowReach);
+    const inset = ((flowReach - 1) / 2) * flowSize;
+    graded.setTransform(scale, 0, 0, scale, inset, inset);
     const angle = (115 * Math.PI) / 180;
     const dx = (Math.sin(angle) * size) / 2;
     const dy = (-Math.cos(angle) * size) / 2;
-    const wash = context.createLinearGradient(
+    const wash = graded.createLinearGradient(
       size / 2 - dx,
       size / 2 - dy,
       size / 2 + dx,
@@ -498,9 +571,50 @@ export class VideoCard {
     wash.addColorStop(0, "rgba(0, 0, 0, 0.22)");
     wash.addColorStop(0.48, "rgba(5, 5, 8, 0.5)");
     wash.addColorStop(1, "rgba(0, 0, 0, 0.66)");
-    context.fillStyle = wash;
-    context.fillRect(0, 0, size, size);
+    graded.fillStyle = wash;
+    graded.fillRect(0, 0, size, size);
+    // Just the card's part of the flow canvas, stretched over the card.
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.drawImage(
+      this.flowGraded,
+      inset,
+      inset,
+      flowSize - inset * 2,
+      flowSize - inset * 2,
+      0,
+      0,
+      cardSize,
+      cardSize,
+    );
+    context.restore();
+  }
 
+  private drawFlow(context: SKRSContext2D, image: Canvas, alpha: number) {
+    const time = this.flowTime;
+    for (const layer of flowLayers) {
+      const angle = layer.phase + time * layer.speed;
+      const side = flowSize * layer.size;
+      context.save();
+      context.globalAlpha = alpha * layer.alpha;
+      context.translate(
+        flowSize * (0.5 + layer.orbit * Math.cos(angle)),
+        flowSize * (0.5 + layer.orbit * Math.sin(angle * 0.8)),
+      );
+      context.rotate(layer.phase + time * layer.spin);
+      context.drawImage(image, -side / 2, -side / 2, side, side);
+      context.restore();
+    }
+  }
+
+  /** The covers, the shade and the header, on a transparent layer. */
+  private drawForeground(now: number) {
+    const context = this.foreground.getContext("2d");
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, cardSize, cardSize);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const size = layoutSize;
+    const layout = this.layout.value(now);
     const track = this.track;
     const coverIn = easeOut(progressOf(now, track.coverAt, coverEnter));
     const outgoing = this.outgoing;

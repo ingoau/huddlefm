@@ -70,6 +70,7 @@ export function loadConfig() {
     ),
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.5),
     duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
+    lyricsOffsetMs: parseWholeNumber(process.env.LYRICS_OFFSET_MS, 0, -10_000),
     loudnessNormalization: process.env.LOUDNESS_NORMALIZATION === "true",
     preparationConcurrency: parseWholeNumber(
       process.env.TRACK_PREPARATION_CONCURRENCY,

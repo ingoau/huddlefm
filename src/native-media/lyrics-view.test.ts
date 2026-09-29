@@ -166,6 +166,24 @@ describe("lyrics view", () => {
     expect(view.settled).toBe(true);
   });
 
+  test("credits follow the last line and take the focus once it ends", () => {
+    const view = new LyricsView(song, 600, 1, {
+      songwriters: ["Amy Allen", "Bruno Mars"],
+      source: "Better Lyrics",
+    });
+    const items = view.describe();
+    expect(items.at(-1)!.kind).toBe("credits");
+    view.update(22, 0, 480);
+    expect(view.focusIndex).toBe(items.length - 2);
+    view.update(25, 0, 480);
+    expect(view.focusIndex).toBe(items.length - 1);
+  });
+
+  test("no credits when there is nothing to credit", () => {
+    const view = new LyricsView(song, 600, 1, {});
+    expect(view.describe().at(-1)!.kind).toBe("line");
+  });
+
   test("draws without throwing at every stage of a song", () => {
     const view = new LyricsView(song, 600);
     const canvas = createCanvas(600, 480);
@@ -270,6 +288,25 @@ describe("video card", () => {
   test("draws at the card's size", () => {
     const { card: value } = card();
     expect(value.rgba().length).toBe(cardSize * cardSize * 4);
+  });
+
+  test("the lyrics offset delays the lyrics against the audio", () => {
+    let now = 0;
+    const focusAt = (lyricsOffset: number) => {
+      now = 0;
+      const value = new VideoCard(
+        () => ({ position: 6.5, duration: 30 }),
+        () => {},
+        { now: () => now, lyricsOffset },
+      );
+      value.setDisplayMode("lyrics");
+      value.setLyrics(song);
+      // Past the lyrics fading in.
+      for (; now < 1_000; now += 1_000 / 30) value.rgba();
+      return (value as any).track.view.focusIndex;
+    };
+    expect(focusAt(0)).toBe(2);
+    expect(focusAt(2)).toBe(1);
   });
 
   test("keeps redrawing while lyrics play", () => {
