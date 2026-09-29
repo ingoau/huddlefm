@@ -103,18 +103,21 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Playback and limits
 
-| Variable                       | Default          | Purpose                                        |
-| ------------------------------ | ---------------- | ---------------------------------------------- |
-| `QUEUE_LIMIT`                  | `50`             | Maximum tracks in the queue                    |
-| `TRACK_DURATION_LIMIT_SECONDS` | `1200`           | Maximum track duration                         |
-| `TRACK_DOWNLOAD_LIMIT_BYTES`   | `100000000`      | Maximum download size                          |
-| `INITIAL_VOLUME`               | `0.5`            | Starting volume as a fraction of max           |
-| `DUCKING_MODE`                 | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`   |
-| `LOUDNESS_NORMALIZATION`       | `false`          | Set to `true` to enable -14 LUFS normalization |
-| `ALONE_TIMEOUT_MS`             | `120000`         | Leave when alone for this long                 |
-| `IDLE_TIMEOUT_MS`              | `600000`         | Leave when idle for this long                  |
-| `PAUSED_TIMEOUT_MS`            | `600000`         | Leave when paused for this long                |
-| `CHIME_MEDIA_REGION`           | `ap-southeast-2` | AWS region for Chime media                     |
+| Variable                        | Default          | Purpose                                                                                   |
+| ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
+| `QUEUE_LIMIT`                   | `50`             | Maximum tracks in the queue                                                               |
+| `TRACK_DURATION_LIMIT_SECONDS`  | `1200`           | Maximum track duration                                                                    |
+| `TRACK_DOWNLOAD_LIMIT_BYTES`    | `100000000`      | Maximum download size                                                                     |
+| `INITIAL_VOLUME`                | `0.5`            | Starting volume as a fraction of max                                                      |
+| `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                              |
+| `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to enable -14 LUFS normalization                                            |
+| `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all Huddles                                |
+| `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`     | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache |
+| `MEDIA_CACHE_MAX_AGE_DAYS`      | `30`             | Re-download cached tracks older than this; `0` keeps them until evicted for space         |
+| `ALONE_TIMEOUT_MS`              | `120000`         | Leave when alone for this long                                                            |
+| `IDLE_TIMEOUT_MS`               | `600000`         | Leave when idle for this long                                                             |
+| `PAUSED_TIMEOUT_MS`             | `600000`         | Leave when paused for this long                                                           |
+| `CHIME_MEDIA_REGION`            | `ap-southeast-2` | AWS region for Chime media                                                                |
 
 #### Runtime and logging
 

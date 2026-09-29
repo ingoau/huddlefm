@@ -1,11 +1,16 @@
 import YTMusic from "ytmusic-api";
-import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { logger } from "./logger.ts";
+import { type CachedMedia, MediaCache } from "./media-cache.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 
 const log = logger.child({ component: "tracks" });
 const maxEmbeddedArtworkBytes = 5 * 1024 * 1024;
+// Extracted stream URLs outlive this by hours, so a download soon after its
+// link was resolved can reuse the extraction instead of repeating it.
+const extractionReuseMs = 60 * 60_000;
+const maxReusableExtractions = 64;
 
 // A track failure that is caused by the media itself, not by a fault in
 // HuddleFM. The message is stable and safe to show in Slack; `detail` keeps the
@@ -121,7 +126,7 @@ function anonymousFailure(line: string) {
 // Normalizing is a nicety, so a track ffmpeg can't normalize still plays at
 // its original level instead of failing to prepare. It runs as its own step
 // rather than through yt-dlp, which skips conversion (and so normalization)
-// for downloads that are already Opus.
+// for downloads that are already Opus. Says whether the track was normalized.
 export async function normalizeLoudness(
   filePath: string,
   entryId: string,
@@ -153,6 +158,7 @@ export async function normalizeLoudness(
     if ((await stat(normalizedPath)).size > maxBytes)
       throw new Error("Normalized track exceeds the download limit");
     await rename(normalizedPath, filePath);
+    return true;
   } catch (error) {
     await rm(normalizedPath, { force: true });
     if (signal?.aborted) throw error;
@@ -165,6 +171,7 @@ export async function normalizeLoudness(
       },
       "Playing track without loudness normalization",
     );
+    return false;
   }
 }
 
@@ -253,6 +260,8 @@ export class TrackCatalog {
   private proxy?: PublicNetworkProxy;
   private activePreparations = 0;
   private transitions = new Map<string, TransitionData>();
+  private extractions = new Map<string, { info: string; expiresAt: number }>();
+  private cache: MediaCache;
   private preparationQueue: {
     priority: number;
     run: () => Promise<string>;
@@ -265,12 +274,32 @@ export class TrackCatalog {
       durationSeconds: number;
       downloadBytes: number;
       loudnessNormalization?: boolean;
+      preparationConcurrency?: number;
+      mediaCacheBytes?: number;
+      mediaCacheMaxAgeDays?: number;
+      mediaCacheDirectory?: string;
     },
-  ) {}
+  ) {
+    this.cache = new MediaCache(
+      limits.mediaCacheDirectory ?? "data/cache/media",
+      {
+        maxBytes: limits.mediaCacheBytes ?? 0,
+        maxAgeMs: (limits.mediaCacheMaxAgeDays ?? 0) * 86_400_000,
+      },
+    );
+  }
 
   async initialize() {
     const startedAt = Date.now();
     log.info({ event: "initialization_started" }, "Initializing track catalog");
+    await this.cache
+      .initialize()
+      .catch((error) =>
+        log.warn(
+          { event: "media_cache_initialization_failed", err: error },
+          "Preparing tracks without reading the media cache",
+        ),
+      );
     this.proxy = await PublicNetworkProxy.start();
     try {
       await this.music.initialize();
@@ -487,6 +516,7 @@ export class TrackCatalog {
         await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxyUrl),
       );
     this.validate(track);
+    this.rememberExtraction(canonicalUrl, metadata);
     return urlResolved(track, startedAt);
   }
 
@@ -679,6 +709,17 @@ export class TrackCatalog {
     signal?: AbortSignal,
     priority = 0,
   ) {
+    // A cached track is only linked into place, so it skips the queue that
+    // holds back downloads.
+    if (this.cache.enabled) {
+      const cached = await this.restoreCached(
+        track,
+        directory,
+        entryId,
+        signal,
+      );
+      if (cached) return cached;
+    }
     return new Promise<string>((resolve, reject) => {
       this.preparationQueue.push({
         priority,
@@ -706,6 +747,60 @@ export class TrackCatalog {
     return this.transitions.get(filePath);
   }
 
+  private async restoreCached(
+    track: TrackMetadata,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
+    const startedAt = Date.now();
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+    await mkdir(directory, { recursive: true });
+    const filePath = `${directory}/${entryId}.opus`;
+    const coverPath = embeddedArtworkPath(filePath);
+    const media = await this.cache.restore(
+      this.cacheKey(track),
+      filePath,
+      coverPath,
+    );
+    if (!media) return;
+    try {
+      if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+      // Only a download that kept its source read the source's tags, and
+      // this request needs them.
+      if (shouldRetainSourceForMetadata(track) && !media.embedded) {
+        await removePreparedMedia(filePath);
+        return;
+      }
+      const bytes = (await stat(filePath)).size;
+      if (bytes > this.limits.downloadBytes)
+        throw new TrackError("Track exceeds the download limit");
+      if (media.duration > this.limits.durationSeconds)
+        throw new TrackError("Track exceeds the duration limit");
+      if (media.embedded) applyEmbeddedMetadata(track, media.embedded);
+      if (!track.duration) track.duration = media.duration;
+      if (track.artwork) await rm(coverPath, { force: true });
+      this.transitions.set(filePath, media.transition);
+      log.info(
+        {
+          event: "download_cached",
+          entryId,
+          sourceId: track.sourceId,
+          title: track.title,
+          artist: track.artist,
+          bytes,
+          durationSeconds: media.duration,
+          durationMs: Date.now() - startedAt,
+        },
+        "Track restored from media cache",
+      );
+      return filePath;
+    } catch (error) {
+      await removePreparedMedia(filePath);
+      throw error;
+    }
+  }
+
   private async download(
     track: TrackMetadata,
     directory: string,
@@ -713,6 +808,16 @@ export class TrackCatalog {
     signal?: AbortSignal,
   ) {
     const startedAt = Date.now();
+    // How long each step took, so slow preparations can be traced to one.
+    const stages: Record<string, number> = {};
+    const timed = async <T>(stage: string, step: () => Promise<T>) => {
+      const stageStartedAt = Date.now();
+      try {
+        return await step();
+      } finally {
+        stages[stage] = (stages[stage] ?? 0) + Date.now() - stageStartedAt;
+      }
+    };
     log.info(
       { event: "download_started", entryId, sourceId: track.sourceId },
       "Track download started",
@@ -738,50 +843,75 @@ export class TrackCatalog {
       "after_move:filepath",
       "--output",
       path,
-      "--",
-      track.canonicalUrl,
     ];
-    let result;
-    try {
-      result = await run([...this.extractor(), ...download], 180_000, signal);
-    } catch (error) {
-      // The thrown message is classified, so match the raw extractor line.
-      const detail = trackFailureDetail(error) ?? String(error);
-      if (signal?.aborted || !detail.includes("HTTP Error 403")) throw error;
-      log.warn(
-        { event: "download_retry", entryId, sourceId: track.sourceId },
-        "Retrying track download with embedded player",
-      );
-      result = await run(
-        [
-          ...this.extractor(),
-          "--extractor-args",
-          "youtube:player_client=web_embedded",
-          ...download,
-        ],
-        180_000,
-        signal,
-      );
+    const extraction = this.reusableExtraction(track.canonicalUrl);
+    let result = extraction
+      ? await timed("download", () =>
+          this.downloadExtracted(
+            extraction,
+            download,
+            track,
+            directory,
+            entryId,
+            signal,
+          ),
+        )
+      : undefined;
+    const extractionReused = Boolean(result);
+    if (!result) {
+      try {
+        result = await timed("download", () =>
+          run(
+            [...this.extractor(), ...download, "--", track.canonicalUrl],
+            180_000,
+            signal,
+          ),
+        );
+      } catch (error) {
+        // The thrown message is classified, so match the raw extractor line.
+        const detail = trackFailureDetail(error) ?? String(error);
+        if (signal?.aborted || !detail.includes("HTTP Error 403")) throw error;
+        log.warn(
+          { event: "download_retry", entryId, sourceId: track.sourceId },
+          "Retrying track download with embedded player",
+        );
+        result = await timed("download_retry", () =>
+          run(
+            [
+              ...this.extractor(),
+              "--extractor-args",
+              "youtube:player_client=web_embedded",
+              ...download,
+              "--",
+              track.canonicalUrl,
+            ],
+            180_000,
+            signal,
+          ),
+        );
+      }
     }
     const filePath = result.stdout.trim().split("\n").at(-1);
     if (!filePath || !(await Bun.file(filePath).exists()))
       throw new Error("Extractor produced no playable file");
     try {
+      let embedded: EmbeddedMetadata | undefined;
       if (keepSource) {
+        embedded = {};
         const sourcePath = await retainedSourcePath(filePath);
         if (sourcePath) {
           try {
-            applyEmbeddedMetadata(
-              track,
-              await probeEmbeddedMetadata(sourcePath, signal),
-            );
-            if (!track.artwork) {
-              await extractEmbeddedArtwork(
-                sourcePath,
-                embeddedArtworkPath(filePath),
-                signal,
-              );
-            }
+            await timed("embedded_metadata", async () => {
+              embedded = await probeEmbeddedMetadata(sourcePath, signal);
+              applyEmbeddedMetadata(track, embedded);
+              if (!track.artwork) {
+                await extractEmbeddedArtwork(
+                  sourcePath,
+                  embeddedArtworkPath(filePath),
+                  signal,
+                );
+              }
+            });
           } finally {
             await rm(sourcePath, { force: true });
           }
@@ -790,19 +920,21 @@ export class TrackCatalog {
       let bytes = (await stat(filePath)).size;
       if (bytes > this.limits.downloadBytes)
         throw new TrackError("Track exceeds the download limit");
-      const probe = await run(
-        [
-          "ffprobe",
-          "-v",
-          "error",
-          "-show_entries",
-          "format=duration",
-          "-of",
-          "default=noprint_wrappers=1:nokey=1",
-          filePath,
-        ],
-        15_000,
-        signal,
+      const probe = await timed("probe", () =>
+        run(
+          [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            filePath,
+          ],
+          15_000,
+          signal,
+        ),
       );
       const duration = Number(probe.stdout.trim());
       if (!Number.isFinite(duration) || duration <= 0)
@@ -810,12 +942,17 @@ export class TrackCatalog {
       if (duration > this.limits.durationSeconds)
         throw new TrackError("Track exceeds the duration limit");
       if (!track.duration) track.duration = duration;
+      // A fallback taken below is kept out of the cache, so a later download
+      // of the track can do better.
+      let complete = true;
       if (this.limits.loudnessNormalization) {
-        await normalizeLoudness(
-          filePath,
-          entryId,
-          this.limits.downloadBytes,
-          signal,
+        complete = await timed("normalize", () =>
+          normalizeLoudness(
+            filePath,
+            entryId,
+            this.limits.downloadBytes,
+            signal,
+          ),
         );
         bytes = (await stat(filePath)).size;
       }
@@ -826,30 +963,45 @@ export class TrackCatalog {
         fadeOutSeconds: 0,
       };
       try {
-        const analysis = await run(
-          [
-            "ffmpeg",
-            "-hide_banner",
-            "-i",
-            filePath,
-            "-af",
-            "silencedetect=noise=-60dB:d=0.25,aresample=1000,asetnsamples=n=250:p=1,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level",
-            "-f",
-            "null",
-            "-",
-          ],
-          30_000,
-          signal,
+        const analysis = await timed("analyze", () =>
+          run(
+            [
+              "ffmpeg",
+              "-hide_banner",
+              "-i",
+              filePath,
+              "-af",
+              "silencedetect=noise=-60dB:d=0.25,aresample=1000,asetnsamples=n=250:p=1,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level",
+              "-f",
+              "null",
+              "-",
+            ],
+            30_000,
+            signal,
+          ),
         );
         transition = transitionData(analysis.stderr, duration);
       } catch (error) {
         if (signal?.aborted) throw error;
+        complete = false;
         log.warn(
           { event: "transition_analysis_failed", entryId, err: error },
           "Using untrimmed track boundaries",
         );
       }
       this.transitions.set(filePath, transition);
+      if (this.cache.enabled && complete) {
+        const coverPath = embeddedArtworkPath(filePath);
+        const media: CachedMedia = {
+          duration,
+          transition,
+          embedded,
+          cover: await Bun.file(coverPath).exists(),
+        };
+        await timed("cache", () =>
+          this.cache.store(this.cacheKey(track), filePath, coverPath, media),
+        );
+      }
       log.info(
         {
           event: "download_completed",
@@ -860,6 +1012,8 @@ export class TrackCatalog {
           bytes,
           durationSeconds: duration,
           ...transition,
+          extractionReused,
+          stages,
           durationMs: Date.now() - startedAt,
         },
         "Track download completed",
@@ -875,8 +1029,91 @@ export class TrackCatalog {
     }
   }
 
+  // Downloads from the extraction that resolving the link already did. Stream
+  // URLs can still have gone stale, so any failure hands back to a fresh
+  // extraction.
+  private async downloadExtracted(
+    info: string,
+    download: string[],
+    track: TrackMetadata,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
+    // Not named after the entry, which would read as a retained source.
+    const infoPath = `${directory}/extraction-${entryId}.json`;
+    try {
+      await writeFile(infoPath, info);
+      return await run(
+        [...this.extractor(), "--load-info-json", infoPath, ...download],
+        180_000,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      log.warn(
+        {
+          event: "extraction_reuse_failed",
+          entryId,
+          sourceId: track.sourceId,
+          reason: trackFailureDetail(error),
+          err: error,
+        },
+        "Extracting track again",
+      );
+      return;
+    } finally {
+      await rm(infoPath, { force: true });
+    }
+  }
+
+  private rememberExtraction(canonicalUrl: string, metadata: unknown) {
+    // Captions and thumbnail lists are most of an extraction's size and play
+    // no part in downloading the audio.
+    const {
+      automatic_captions: _captions,
+      subtitles: _subtitles,
+      heatmap: _heatmap,
+      thumbnails: _thumbnails,
+      ...info
+    } = record(metadata);
+    this.extractions.delete(canonicalUrl);
+    this.extractions.set(canonicalUrl, {
+      info: JSON.stringify(info),
+      expiresAt: Date.now() + extractionReuseMs,
+    });
+    for (const [url, { expiresAt }] of this.extractions)
+      if (
+        this.extractions.size > maxReusableExtractions ||
+        expiresAt <= Date.now()
+      )
+        this.extractions.delete(url);
+  }
+
+  private reusableExtraction(canonicalUrl: string) {
+    const extraction = this.extractions.get(canonicalUrl);
+    if (!extraction) return;
+    if (extraction.expiresAt > Date.now()) return extraction.info;
+    this.extractions.delete(canonicalUrl);
+  }
+
+  private cacheKey(track: TrackMetadata) {
+    // The same video is reached through several URLs, so key it by its ID.
+    const source =
+      isYoutubeVideoId(track.sourceId) && youtubeUrl(track.canonicalUrl)
+        ? `youtube:${track.sourceId}`
+        : track.canonicalUrl;
+    const variant = this.limits.loudnessNormalization ? "normalized" : "source";
+    return new Bun.CryptoHasher("sha256")
+      .update(`${variant}\n${source}`)
+      .digest("hex")
+      .slice(0, 32);
+  }
+
   private startPreparations() {
-    while (this.activePreparations < 2) {
+    while (
+      this.activePreparations < (this.limits.preparationConcurrency ?? 2)
+    ) {
       const preparation = this.preparationQueue.shift();
       if (!preparation) return;
       this.activePreparations++;
@@ -1345,6 +1582,16 @@ export function parseBulkLinkList(text: string) {
     else invalid.push(line);
   }
   return { links, invalid };
+}
+
+function youtubeUrl(input: string) {
+  const host = parseHttpUrl(input)?.hostname.toLowerCase();
+  return Boolean(
+    host &&
+    (host === "youtu.be" ||
+      host === "youtube.com" ||
+      host.endsWith(".youtube.com")),
+  );
 }
 
 function youtubePlaylistId(url: URL) {
