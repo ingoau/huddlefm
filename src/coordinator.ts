@@ -86,6 +86,7 @@ import {
   type IntegrationCommand,
 } from "./integration.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
+import { playbackReportView } from "./playback-report.ts";
 import {
   changedSettings,
   settingsChanges,
@@ -324,6 +325,13 @@ export class Coordinator {
     ) => {},
     private recommendations?: RecommendationCatalog,
     private workspaceAdmins?: WorkspaceAdmins,
+    // Present when this Huddle's native media may give way to the browser.
+    private mediaFallback?: {
+      /** Whether the Huddle is still on native media that can fall back. */
+      available(): boolean;
+      /** Starts the move to the browser without waiting for it. */
+      start(userId: string, reportId: string): void;
+    },
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
@@ -447,10 +455,7 @@ export class Coordinator {
       huddleId: this.room.huddleId,
     });
     this.sessionChanged();
-    this.sendMedia({ type: "volume", value: this.volume });
-    this.sendMedia({ type: "display_mode", mode: this.displayMode });
-    this.sendMedia({ type: "transition_mode", mode: this.transitionMode });
-    this.sendMedia({ type: "ducking_mode", mode: this.duckingMode });
+    this.sendMediaSettings();
     this.prefetchRecommendations();
     if (!this.current) await this.startNext();
     else {
@@ -460,18 +465,7 @@ export class Coordinator {
         this.state === "playing",
         this.playbackSeconds,
       );
-      this.sendMedia(await this.playMessage(this.current));
-      if (this.playbackSeconds)
-        this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
-      if (this.state === "paused") this.sendMedia({ type: "pause" });
-      const entry = this.current;
-      void this.loadLyrics(entry).then((lyrics) => {
-        if (this.current !== entry) return;
-        if (lyrics)
-          this.sendMedia({ type: "lyrics", entryId: entry.id, ...lyrics });
-        else this.sendMedia({ type: "lyrics_unavailable", entryId: entry.id });
-      });
-      this.syncPreloads();
+      await this.sendCurrent(this.current);
       await this.render();
       this.refreshIdle();
       this.scheduleAutoplay();
@@ -486,6 +480,73 @@ export class Coordinator {
       },
       "Session resumed",
     );
+  }
+
+  private sendMediaSettings() {
+    this.sendMedia({ type: "volume", value: this.volume });
+    this.sendMedia({ type: "display_mode", mode: this.displayMode });
+    this.sendMedia({ type: "transition_mode", mode: this.transitionMode });
+    this.sendMedia({ type: "ducking_mode", mode: this.duckingMode });
+  }
+
+  // Picks the current song back up where it was, for a media backend that
+  // has just joined: after a restart, or in place of one that failed.
+  private async sendCurrent(entry: Entry) {
+    this.sendMedia(await this.playMessage(entry));
+    if (this.playbackSeconds)
+      this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
+    if (this.state === "paused") this.sendMedia({ type: "pause" });
+    void this.loadLyrics(entry).then((lyrics) => {
+      if (this.current !== entry) return;
+      if (lyrics)
+        this.sendMedia({ type: "lyrics", entryId: entry.id, ...lyrics });
+      else this.sendMedia({ type: "lyrics_unavailable", entryId: entry.id });
+    });
+    this.syncPreloads();
+  }
+
+  /**
+   * The Huddle is moving from native media to the browser. The player drops
+   * its report button, and a move nobody asked for is explained in the
+   * thread, since everyone just heard the music stop.
+   */
+  mediaFallbackStarted(automatic: boolean) {
+    if (this.inactive()) return;
+    this.queueRender();
+    if (automatic)
+      void this.post(
+        this.room.uiChannelId,
+        this.room.uiThreadTs,
+        "Playback hit a problem, so I switched to the backup player. The music should be back in a few seconds.",
+      ).catch((error) =>
+        this.log.warn(
+          { event: "media_fallback_notice_failed", err: error },
+          "Could not post media fallback notice",
+        ),
+      );
+  }
+
+  /** Replays the session into a media backend that joined in place of another. */
+  mediaReplaced() {
+    return this.enqueue(async () => {
+      if (this.inactive()) return;
+      this.sendMediaSettings();
+      if (this.current) await this.sendCurrent(this.current);
+      else this.syncPreloads();
+      this.log.info(
+        { event: "media_replaced", entryId: this.current?.id },
+        "Playback handed to the replacement media backend",
+      );
+    });
+  }
+
+  /** What was playing, for the audit trail of a media fallback. */
+  playbackSnapshot() {
+    return {
+      state: this.state,
+      playbackSeconds: this.playbackSeconds,
+      ...(this.current ? auditTrack(this.current) : {}),
+    };
   }
 
   private async prepareRestored(entry: Entry) {
@@ -626,6 +687,7 @@ export class Coordinator {
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
         open_settings: () => this.settingsModal(interaction),
+        report_playback_problem: () => this.reportPlaybackProblem(interaction),
         end_session: () => this.end(interaction.userId, "ended by host"),
         claim_host: () => this.claimHost(interaction),
         connect_lastfm: () => this.lastFmModal(interaction),
@@ -4797,6 +4859,18 @@ export class Coordinator {
                 : ""
             }`,
           ),
+          ...when(
+            this.mediaFallback?.available(),
+            actions(`playback_help_${id}`, [
+              button(
+                "report_playback_problem",
+                plain("Playback not working?"),
+                {
+                  value,
+                },
+              ),
+            ]),
+          ),
         ],
       },
       {
@@ -4849,6 +4923,18 @@ export class Coordinator {
         ],
       },
     ];
+  }
+
+  // Starts the move to the backup player before asking anything, so the music
+  // comes back whether or not the form is ever sent.
+  private async reportPlaybackProblem(interaction: Interaction) {
+    const reportId = crypto.randomUUID();
+    const switched = Boolean(this.mediaFallback?.available());
+    if (switched) this.mediaFallback!.start(interaction.userId, reportId);
+    await this.slack.modal(
+      interaction.triggerId,
+      playbackReportView({ sessionId: this.id, reportId, switched }),
+    );
   }
 
   private async notice(user: string, text: string) {

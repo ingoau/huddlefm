@@ -126,7 +126,7 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 | ---------------- | -------------------------------- | -------------------------------------------------------------------- |
 | `BIND_ADDRESS`   | `127.0.0.1`                      | HTTP bind address (loopback is fine; Compose does not publish ports) |
 | `PORT`           | `3210`                           | HTTP port                                                            |
-| `MEDIA_BACKEND`  | `browser`                        | `native` joins Huddles without Chromium (experimental, see below)    |
+| `MEDIA_BACKEND`  | `browser`                        | `native` or `native-with-fallback` (experimental, see below)         |
 | `CHROME_PATH`    | `/usr/bin/chromium` in the image | Chromium executable path                                             |
 | `LOG_LEVEL`      | `info`                           | Minimum operational log level (`debug`, `trace`, …)                  |
 | `LOG_FILE`       | `data/logs/huddlefm.jsonl`       | Rotated JSON log path; set empty to disable file logging             |
@@ -140,6 +140,10 @@ With `MEDIA_BACKEND=native`, HuddleFM joins each Huddle's Chime meeting itself i
 Everything else behaves the same, except that the video tile is drawn natively at 540×540 and 24 fps. It has the same default and lyrics layouts as the browser's, with syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
 
 Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`, the same as the browser backend. Leave the variable unset to keep the browser backend.
+
+With `MEDIA_BACKEND=native-with-fallback`, Huddles start on the native backend but can move to Chromium for the rest of the session. That happens automatically when native media crashes, fails to join, or loses its connection, and when someone presses **Playback not working?** under the player. The button switches straight away, so the music drops out for a few seconds, then asks what went wrong. A session that fell back stays on Chromium if it is restored.
+
+Each switch is written to `data/audit.jsonl` as `media.fallback` (with `trigger` set to `automatic` or `report`), and each submitted form as `media.problem_reported`. A switch from the button and its form share a `reportId`. Both events also go to PostHog when it is configured. The operational log's `media_fallback_started` entry carries the native backend's recent warnings, errors and stats.
 
 ### Updating
 
