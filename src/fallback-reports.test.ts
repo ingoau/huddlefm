@@ -64,3 +64,13 @@ test("keeps only the newest reports, and none past their age", () =>
     // The oldest recent report went, and so did the one past its age.
     expect(files).toContain(`${recent}-b.json`);
   }));
+
+test("drops reports past their age even under the count limit", () =>
+  withDirectory(async (directory) => {
+    await writeFile(join(directory, "2001-01-01T00-00-00.000Z-old.json"), "{}");
+    const reports = new FallbackReports(directory, 200);
+    await reports.update(reportId, { trigger: "automatic" });
+    const files = await readdir(directory);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toEndWith(`-${reportId}.json`);
+  }));
