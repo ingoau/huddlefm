@@ -292,6 +292,7 @@ describe("AudioEngine", () => {
     engine.setVolume(0);
     expect(Math.max(...engine.render(960).map(Math.abs))).toBe(0);
     engine.setVolume(1);
+    engine.render(960 * 25); // let the compressor settle
     const loud = Math.max(...engine.render(960).map(Math.abs));
     engine.applyDuck({ gain: 0.15, rampSeconds: 0 });
     engine.render(960 * 25); // let the compressor settle
@@ -325,6 +326,7 @@ describe("AudioEngine", () => {
     expect(Math.max(...engine.render(960).map(Math.abs))).toBeGreaterThan(0.1);
     engine.handle(play("a"));
     engine.setVolume(0);
+    engine.render(960); // flush the compressor's 6 ms look-ahead
     expect(Math.max(...engine.render(960).map(Math.abs))).toBe(0);
   });
 });
