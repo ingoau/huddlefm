@@ -210,8 +210,11 @@ describe("motion", () => {
     tween.set(1, 0, 100);
     expect(tween.value(50)).toBeGreaterThan(0);
     expect(tween.value(50)).toBeLessThan(1);
+    // Retargeting mid-flight starts from where the tween is, not where it
+    // was going.
+    const midway = tween.value(50);
     tween.set(0, 50, 100);
-    expect(tween.value(50)).toBeCloseTo(tween.value(50), 5);
+    expect(tween.value(50)).toBeCloseTo(midway, 5);
     expect(tween.value(150)).toBe(0);
     expect(tween.settled(150)).toBe(true);
   });
