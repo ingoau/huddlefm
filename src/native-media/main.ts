@@ -16,8 +16,8 @@ import {
 import { FfmpegDecoder, sampleRate } from "./decoder.ts";
 import { SpeechSignals } from "./speech.ts";
 import type { LyricsCredits } from "./lyrics-view.ts";
-import { VideoCard, type DisplayMode } from "./video-card.ts";
-import { VideoFeed } from "./video-feed.ts";
+import type { DisplayMode } from "./video-card.ts";
+import { VideoThread } from "./video-thread.ts";
 
 type Level = "trace" | "debug" | "info" | "warn" | "error";
 
@@ -46,8 +46,8 @@ function log(
 
 let engine: AudioEngine | undefined;
 let link: ChimeLink | undefined;
-let card: VideoCard | undefined;
-let feed: VideoFeed | undefined;
+/** The video card and its encoder, drawn in a worker off this thread. */
+let card: VideoThread | undefined;
 let pacer: ReturnType<typeof setInterval> | undefined;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 let leaving: Promise<void> | undefined;
@@ -75,15 +75,10 @@ async function start(bootstrap: ChimeBootstrap) {
   engine = audio;
   audio.setVolume(bootstrap.initialVolume);
   audio.setDuckingMode(bootstrap.duckingMode);
-  const videoCard = new VideoCard(
-    () => audio.progress(),
-    (message) =>
-      log("warn", "native_artwork_failed", "Artwork failed to load", {
-        error: message,
-      }),
-    { lyricsOffset: (bootstrap.lyricsOffsetMs ?? 0) / 1_000 },
-  );
-  card = videoCard;
+  card = new VideoThread((bootstrap.lyricsOffsetMs ?? 0) / 1_000, {
+    onAccessUnit: (nals, timestamp) => link?.sendVideo(nals, timestamp),
+    log: (event, message, fields) => log("warn", event, message, fields),
+  });
   let speech: SpeechSignals | undefined;
   const chime = new ChimeLink(
     bootstrap.meeting as unknown as ChimeMeeting,
@@ -98,7 +93,7 @@ async function start(bootstrap: ChimeBootstrap) {
         syncVideo();
       },
       onVideoChanged: () => syncVideo(),
-      onPictureLoss: () => feed?.requestKeyframe(),
+      onPictureLoss: () => card?.requestKeyframe(),
       onTerminal: (code, reason) => {
         log("warn", "native_media_ended", "Chime session ended", {
           code,
@@ -110,14 +105,6 @@ async function start(bootstrap: ChimeBootstrap) {
   );
   link = chime;
   speech = new SpeechSignals(chime.attendeeId, audio.ducking, audio.applyDuck);
-  feed = new VideoFeed(
-    () => videoCard.rgba(),
-    (nals, timestamp) => chime.sendVideo(nals, timestamp),
-    (message) =>
-      log("warn", "native_video_failed", "Video encoder stopped", {
-        error: message,
-      }),
-  );
   const startedAt = Date.now();
   await chime.start();
   log("info", "native_media_joined", "Native media joined Chime", {
@@ -139,9 +126,8 @@ async function start(bootstrap: ChimeBootstrap) {
 }
 
 function syncVideo() {
-  if (!feed || !link) return;
-  if (link.sendingVideo && wantVideo) feed.start();
-  else feed.stop();
+  if (!link) return;
+  card?.setVideo(link.sendingVideo && wantVideo);
 }
 
 async function startPacer(audio: AudioEngine, chime: ChimeLink) {
@@ -180,6 +166,7 @@ async function startPacer(audio: AudioEngine, chime: ChimeLink) {
         });
       }
     }
+    card?.tick(audio.progress());
   }, 10);
 }
 
@@ -271,7 +258,7 @@ function finish(code: number) {
     clearInterval(pacer);
     clearInterval(statsTimer);
     engine?.dispose();
-    feed?.stop();
+    await card?.stop();
     await link?.leave().catch(() => {});
     emit("ended", { code });
     // Let stdout drain before exiting.

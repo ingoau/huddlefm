@@ -7,13 +7,15 @@ import {
 } from "@napi-rs/canvas";
 import type { Lyric } from "@braccato/core";
 import { fonts } from "./fonts.ts";
+import { cardSize } from "./video-format.ts";
 import { LyricsView, type LyricsCredits } from "./lyrics-view.ts";
 import { clamp, ease, easeOut, lerp, motion, Tween } from "./motion.ts";
 
-/** The card is laid out at the media page's 720px viewport... */
+/**
+ * The card is laid out at the media page's 720px viewport, then drawn at the
+ * smaller size it is sent at.
+ */
 const layoutSize = 720;
-/** ...and drawn and sent at this size, which costs about half as much. */
-export const cardSize = 540;
 const ratio = cardSize / layoutSize;
 const maxArtworkBytes = 15_000_000;
 

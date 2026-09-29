@@ -13,8 +13,7 @@ import {
   senderReport,
 } from "./rtp.ts";
 import { statusCodes } from "./status-codes.ts";
-import { cardSize } from "./video-card.ts";
-import { videoFps, videoMaxKbps } from "./video-feed.ts";
+import { cardSize, videoFps, videoMaxKbps } from "./video-format.ts";
 
 export { statusCodes };
 

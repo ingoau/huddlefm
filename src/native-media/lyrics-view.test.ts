@@ -3,7 +3,8 @@ import type { Lyric, LyricPart } from "@braccato/core";
 import { createCanvas } from "@napi-rs/canvas";
 import { LyricsView } from "./lyrics-view.ts";
 import { cubicBezier, Spring, spring, Tween } from "./motion.ts";
-import { cardSize, VideoCard } from "./video-card.ts";
+import { VideoCard } from "./video-card.ts";
+import { cardSize } from "./video-format.ts";
 
 const part = (
   words: string,

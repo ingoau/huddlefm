@@ -1,13 +1,5 @@
 import { AnnexBSplitter } from "./rtp.ts";
-import { cardSize } from "./video-card.ts";
-
-/**
- * Smooth enough for the lyrics and the layout swaps, and a fifth cheaper than
- * the page's 30.
- */
-export const videoFps = 24;
-/** The Chime JS SDK's default ceiling for a camera. */
-export const videoMaxKbps = 1_400;
+import { cardSize, videoFps, videoMaxKbps } from "./video-format.ts";
 /** An unchanged frame is skipped, but one still goes out this often. */
 const keepAliveMs = 500;
 /** Seconds between keyframes, so a new viewer gets a picture quickly. */
@@ -95,6 +87,8 @@ export class VideoFeed {
     private frame: () => Buffer,
     private onAccessUnit: (nals: Buffer[], timestamp: number) => void,
     private onError: (message: string) => void,
+    /** The running encoder's pid, or undefined once there is none. */
+    private onEncoder: (pid: number | undefined) => void = () => {},
   ) {}
 
   get running() {
@@ -109,6 +103,7 @@ export class VideoFeed {
       stderr: "pipe",
     });
     this.encoder = encoder;
+    this.onEncoder(encoder.pid);
     this.awaitingKeyframe = true;
     void this.read(encoder);
     void encoder.exited.then(async (code) => {
@@ -165,6 +160,7 @@ export class VideoFeed {
     const encoder = this.encoder;
     this.encoder = undefined;
     if (!encoder) return;
+    this.onEncoder(undefined);
     try {
       void encoder.stdin.end();
     } catch {}
