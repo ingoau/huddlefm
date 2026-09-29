@@ -137,10 +137,7 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 With `MEDIA_BACKEND=native`, HuddleFM joins each Huddle's Chime meeting itself instead of through headless Chromium. Each Huddle's media runs in its own Bun process, which uses much less memory and CPU and joins faster.
 
-Everything else behaves the same, with a few differences:
-
-- The video tile is drawn natively at 540×540 and 24 fps. It has the same default and lyrics layouts as the browser's, with syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
-- Turning the display off, or back on, briefly reconnects the bot to the call.
+Everything else behaves the same, except that the video tile is drawn natively at 540×540 and 24 fps. It has the same default and lyrics layouts as the browser's, with syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
 
 Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`, the same as the browser backend. Leave the variable unset to keep the browser backend.
 

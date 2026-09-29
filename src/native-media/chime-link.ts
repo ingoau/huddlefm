@@ -61,6 +61,10 @@ type Connection = {
   peer: Peer;
   audio: Track;
   video?: Track;
+  // node-datachannel closes the native track when a wrapper is garbage
+  // collected, and every addTrack for a mid returns a new wrapper around the
+  // same track, so each one stays referenced until the connection goes.
+  tracks: Track[];
   /** Whether this connection's offer asked to send video. */
   requestedVideo: boolean;
   opusPayloadType: number;
@@ -76,13 +80,15 @@ export type ChimeLinkEvents = {
   onFrame(frame: SignalFrame): void;
   /** A connection (first or reconnected) is carrying media. */
   onConnected(reconnect: boolean): void;
+  /** The live connection started or stopped sending video. */
+  onVideoChanged(): void;
   onPictureLoss(): void;
   /** The session cannot continue; `code` is a MeetingSessionStatusCode. */
   onTerminal(code: number, reason: string): void;
 };
 
 export function iceServers(turn: TurnCredentials) {
-  return turn.uris.flatMap((uri) => {
+  return (turn.uris ?? []).flatMap((uri) => {
     const match = uri.match(/^(turns?):([^:?]+):(\d+)(?:\?transport=(\w+))?/);
     if (!match) return [];
     const [, scheme, hostname, port, transport] = match;
@@ -115,6 +121,8 @@ export class ChimeLink {
   private wantVideo: boolean;
   private stopping = false;
   private reconnecting?: Promise<void>;
+  // Video changes run one at a time on the live connection.
+  private renegotiating: Promise<void> = Promise.resolve();
   private watchdog?: ReturnType<typeof setInterval>;
   // One audio session and one set of SSRCs for the attendee's lifetime, so a
   // reconnect continues the same streams.
@@ -138,6 +146,8 @@ export class ChimeLink {
     private attendee: ChimeAttendee,
     video: boolean,
     private events: ChimeLinkEvents,
+    // Chime is only reachable through TURN; tests connect on loopback.
+    private relayOnly = true,
   ) {
     this.attendeeId = attendee.AttendeeId;
     this.wantVideo = video;
@@ -155,14 +165,8 @@ export class ChimeLink {
     this.connection = await this.connect();
     this.watchdog = setInterval(() => this.checkSilence(), 1_000);
     this.events.onConnected(false);
-    this.reconcileVideo(this.connection);
-  }
-
-  // A display change that lands while a connection is being built only takes
-  // effect on the next one, so rebuild once more if they disagree.
-  private reconcileVideo(connection: Connection) {
-    if (connection.requestedVideo !== this.wantVideo)
-      this.lost(connection, "video changed while connecting", true);
+    // A display change that landed while connecting is applied now.
+    this.renegotiateVideo();
   }
 
   /** Sends one Opus frame covering `samples` samples at 48 kHz. */
@@ -214,15 +218,77 @@ export class ChimeLink {
 
   /**
    * Starts or stops the video tile. Chime negotiates video per SUBSCRIBE, so
-   * this rebuilds the connection with the new offer; audio pauses for about a
-   * second while it does.
+   * like the JS SDK this flips the video m-line between sendrecv and inactive
+   * and subscribes again on the live connection; audio keeps flowing. A
+   * connection still being built picks the change up when it is published.
    */
   setVideo(enabled: boolean) {
     if (enabled === this.wantVideo) return;
     this.wantVideo = enabled;
-    const connection = this.connection;
-    if (connection && !this.stopping)
-      this.lost(connection, enabled ? "video enabled" : "video disabled", true);
+    this.renegotiateVideo();
+  }
+
+  private renegotiateVideo() {
+    // Errors are handled inside; the catch only keeps later changes chained.
+    this.renegotiating = this.renegotiating
+      .then(() => this.renegotiate(this.connection))
+      .catch(() => {});
+  }
+
+  private async renegotiate(connection: Connection | undefined) {
+    while (
+      connection &&
+      connection === this.connection &&
+      connection.open &&
+      !this.stopping &&
+      connection.requestedVideo !== this.wantVideo
+    ) {
+      const video = this.wantVideo;
+      try {
+        const track = connection.peer.addTrack(this.videoDescription(video));
+        connection.tracks.push(track);
+        const offer = await this.renegotiatedOffer(connection.peer);
+        if (connection !== this.connection || connection.dead) return;
+        const ack = await this.sendSubscribe(connection, offer, video);
+        if (connection !== this.connection || connection.dead) return;
+        this.applyAnswer(connection, ack, video ? track : undefined);
+        this.watchVideo(connection);
+        this.events.log(
+          "info",
+          "chime_video_renegotiated",
+          video ? "Started the video tile" : "Stopped the video tile",
+          { video: Boolean(connection.video) },
+        );
+        this.events.onVideoChanged();
+      } catch (error) {
+        // If Chime will not renegotiate in place, rebuilding the connection
+        // with the new offer still works.
+        this.events.log(
+          "warn",
+          "chime_renegotiation_failed",
+          "Could not change video in place; rebuilding the connection",
+          { error: error instanceof Error ? error.message : String(error) },
+        );
+        this.lost(connection, "video renegotiation failed", true);
+        return;
+      }
+    }
+  }
+
+  /** The offer libdatachannel makes after a track changed direction. */
+  private renegotiatedOffer(peer: Peer) {
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timed out creating a renegotiation offer")),
+        5_000,
+      );
+      peer.onLocalDescription((sdp: string, type: string) => {
+        if (type !== "offer") return;
+        clearTimeout(timer);
+        resolve(peer.localDescription()?.sdp ?? sdp);
+      });
+      peer.setLocalDescription();
+    });
   }
 
   async leave(timeoutMs = 3_000) {
@@ -273,7 +339,7 @@ export class ChimeLink {
       signaling.join(this.audioSessionId);
       const ack = await signaling.wait("JOIN_ACK");
       const turn = ack.joinack?.turn_credentials;
-      if (!turn?.uris?.length)
+      if (!turn || (this.relayOnly && !turn.uris?.length))
         throw new Error("Chime JOIN_ACK carried no TURN servers");
       await signaling.wait("INDEX", 5_000).catch(() => undefined);
       connection = this.createPeer(signaling, turn);
@@ -296,24 +362,19 @@ export class ChimeLink {
   private createPeer(signaling: ChimeSignaling, turn: TurnCredentials) {
     const peer = new PeerConnection("chime", {
       iceServers: iceServers(turn),
-      iceTransportPolicy: "relay",
+      iceTransportPolicy: this.relayOnly ? "relay" : "all",
     });
     const audio = new Audio("0", "SendRecv");
     audio.addOpusCodec(111, opusProfile);
     audio.addSSRC(this.audioSsrc, "huddlefm", "huddlefm", "audio");
     const audioTrack = peer.addTrack(audio);
-    // Like amazon-chime-sdk-js, always offer a video m-line, inactive when not
-    // sending; the server will not set up the session without one.
-    const video = new Video("1", this.wantVideo ? "SendRecv" : "Inactive");
-    video.addH264Codec(102, h264Profile);
-    if (this.wantVideo)
-      video.addSSRC(this.videoSsrc, "huddlefm", "huddlefm", "video");
-    const videoTrack = peer.addTrack(video);
+    const videoTrack = peer.addTrack(this.videoDescription(this.wantVideo));
     return {
       signaling,
       peer,
       audio: audioTrack,
       video: this.wantVideo ? videoTrack : undefined,
+      tracks: [audioTrack, videoTrack],
       requestedVideo: this.wantVideo,
       opusPayloadType: 111,
       h264PayloadType: 102,
@@ -322,8 +383,18 @@ export class ChimeLink {
     } satisfies Connection;
   }
 
+  // Like amazon-chime-sdk-js, always offer a video m-line, inactive when not
+  // sending; the server will not set up the session without one. Adding it
+  // again under the same mid replaces the track's description.
+  private videoDescription(send: boolean) {
+    const video = new Video("1", send ? "SendRecv" : "Inactive");
+    video.addH264Codec(102, h264Profile);
+    if (send) video.addSSRC(this.videoSsrc, "huddlefm", "huddlefm", "video");
+    return video;
+  }
+
   private async subscribe(connection: Connection) {
-    const { peer, signaling } = connection;
+    const { peer } = connection;
     const gathered = new Promise<void>((resolve) =>
       peer.onGatheringStateChange(
         (state: string) => state === "complete" && resolve(),
@@ -336,13 +407,29 @@ export class ChimeLink {
     peer.setLocalDescription();
     // Chime takes the whole offer at once; there is no trickle ICE.
     await Promise.race([gathered, Bun.sleep(10_000)]);
-    // SDP.withUnifiedPlanFormat() in the JS SDK marks the offer this way.
-    const offer = peer
-      .localDescription()!
-      .sdp.replace(/^o=\S+/m, "o=mozilla-chrome");
-    if (!/typ relay/.test(offer))
+    const offer = peer.localDescription()!.sdp;
+    if (this.relayOnly && !/typ relay/.test(offer))
       throw new Error("No TURN relay candidate; Chime media is unreachable");
-    const video = Boolean(connection.video);
+    const ack = await this.sendSubscribe(
+      connection,
+      offer,
+      connection.requestedVideo,
+    );
+    this.applyAnswer(connection, ack, connection.video);
+    await Promise.race([
+      opened,
+      Bun.sleep(15_000).then(() => {
+        throw new Error("Chime media did not connect within 15 s");
+      }),
+    ]);
+  }
+
+  private async sendSubscribe(
+    connection: Connection,
+    offer: string,
+    video: boolean,
+  ) {
+    const signaling = connection.signaling;
     signaling.send("SUBSCRIBE", {
       sub: {
         duplex: video ? 3 : 1, // DUPLEX while sending video, otherwise RX
@@ -374,19 +461,31 @@ export class ChimeLink {
             : []),
         ],
         receive_stream_ids: [0], // one 0 per video m-line that is not recvonly
-        sdp_offer: offer,
+        // SDP.withUnifiedPlanFormat() in the JS SDK marks the offer this way.
+        sdp_offer: offer.replace(/^o=\S+/m, "o=mozilla-chrome"),
         audio_host: this.meeting.MediaPlacement.AudioHostUrl,
         audio_checkin: false,
         audio_muted: false,
       },
     });
     const ack = await signaling.wait("SUBSCRIBE_ACK");
-    const answer = ack.suback?.sdp_answer;
-    if (!answer)
+    if (!ack.suback?.sdp_answer)
       throw new Error(
         `Chime refused SUBSCRIBE: ${ack.error?.status ?? "no answer"} ${ack.error?.description ?? ""}`,
       );
-    if (video && ack.suback?.duplex === "RX") {
+    return ack;
+  }
+
+  /** Applies a SUBSCRIBE_ACK's answer and records what Chime agreed to. */
+  private applyAnswer(
+    connection: Connection,
+    ack: SignalFrame,
+    videoTrack: Track | undefined,
+  ) {
+    const answer = ack.suback!.sdp_answer!;
+    connection.requestedVideo = Boolean(videoTrack);
+    connection.video = videoTrack;
+    if (videoTrack && ack.suback?.duplex === "RX") {
       // 206, VideoCallSwitchToViewOnly: no video slot, but audio carries on.
       this.events.log(
         "warn",
@@ -396,7 +495,7 @@ export class ChimeLink {
       );
       connection.video = undefined;
     }
-    peer.setRemoteDescription(
+    connection.peer.setRemoteDescription(
       answer
         .split("\r\n")
         .filter((line) => !/typ srflx/.test(line))
@@ -409,12 +508,13 @@ export class ChimeLink {
     connection.h264PayloadType = Number(
       answer.match(/a=rtpmap:(\d+) H264\/90000/i)?.[1] ?? 102,
     );
-    await Promise.race([
-      opened,
-      Bun.sleep(15_000).then(() => {
-        throw new Error("Chime media did not connect within 15 s");
-      }),
-    ]);
+  }
+
+  private watchVideo(connection: Connection) {
+    connection.video?.onMessage((packet: Buffer) => {
+      if (isRtcp(packet) && countPictureLoss(packet))
+        this.events.onPictureLoss();
+    });
   }
 
   private watch(connection: Connection) {
@@ -447,10 +547,7 @@ export class ChimeLink {
       if (state === "failed" || state === "closed")
         this.lost(connection, `peer ${state}`);
     });
-    connection.video?.onMessage((packet: Buffer) => {
-      if (isRtcp(packet) && countPictureLoss(packet))
-        this.events.onPictureLoss();
-    });
+    this.watchVideo(connection);
     signaling.startPings();
     connection.reportTimer = setInterval(() => {
       if (!connection.open) return;

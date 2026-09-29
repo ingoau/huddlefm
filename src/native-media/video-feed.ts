@@ -12,6 +12,8 @@ export const videoMaxKbps = 1_400;
 const keepAliveMs = 500;
 /** Seconds between keyframes, so a new viewer gets a picture quickly. */
 const keyframeSeconds = 2;
+/** Keyframe requests this soon after a keyframe wait out the rest. */
+const minKeyframeGapMs = 500;
 
 /**
  * ffmpeg's arguments: raw RGBA in, stamped with the wall clock as it arrives
@@ -74,11 +76,18 @@ export function encoderArgs(size = cardSize) {
  * Encodes card frames with ffmpeg and hands out access units with 90 kHz
  * timestamps. A frame the card did not redraw is not sent again, which leaves
  * a still card a couple of frames a second instead of the full rate.
+ * Keyframes come every two seconds, and sooner when a viewer asks for one
+ * (PLI) through `requestKeyframe`.
  */
 export class VideoFeed {
   private encoder?: Bun.Subprocess<"pipe", "pipe", "pipe">;
   private timer?: ReturnType<typeof setInterval>;
-  private startedAt = 0;
+  // One timestamp base for every encoder this feed runs, so a restart
+  // continues the stream instead of jumping back to zero.
+  private readonly epoch = performance.now();
+  private keyframeAt = 0;
+  private awaitingKeyframe = false;
+  private keyframeTimer?: ReturnType<typeof setTimeout>;
   private sent: Buffer | undefined;
   private sentAt = 0;
 
@@ -100,7 +109,7 @@ export class VideoFeed {
       stderr: "pipe",
     });
     this.encoder = encoder;
-    this.startedAt = performance.now();
+    this.awaitingKeyframe = true;
     void this.read(encoder);
     void encoder.exited.then(async (code) => {
       if (this.encoder !== encoder) return;
@@ -110,8 +119,7 @@ export class VideoFeed {
         stderr.trim().split("\n").at(-1) || `video encoder exited with ${code}`,
       );
     });
-    this.sent = undefined;
-    this.timer = setInterval(() => {
+    const write = () => {
       try {
         const frame = this.frame();
         const now = performance.now();
@@ -121,12 +129,39 @@ export class VideoFeed {
         encoder.stdin.write(frame);
         void encoder.stdin.flush();
       } catch {}
-    }, 1_000 / videoFps);
+    };
+    // The first frame goes in now rather than a tick later, even if the card
+    // has not changed, so the opening keyframe is out as soon as ffmpeg is.
+    this.sent = undefined;
+    write();
+    this.timer = setInterval(write, 1_000 / videoFps);
+  }
+
+  /**
+   * Answers a viewer's request for a full picture. ffmpeg cannot be told to
+   * make a keyframe mid-stream, but a new encoder opens with one, so this
+   * restarts it. Requests that arrive while that keyframe is still coming, or
+   * together from several viewers, share one restart.
+   */
+  requestKeyframe() {
+    if (!this.encoder || this.awaitingKeyframe || this.keyframeTimer) return;
+    const wait = this.keyframeAt + minKeyframeGapMs - performance.now();
+    this.keyframeTimer = setTimeout(
+      () => {
+        this.keyframeTimer = undefined;
+        if (!this.encoder) return;
+        this.stop();
+        this.start();
+      },
+      Math.max(0, wait),
+    );
   }
 
   stop() {
     clearInterval(this.timer);
     this.timer = undefined;
+    clearTimeout(this.keyframeTimer);
+    this.keyframeTimer = undefined;
     const encoder = this.encoder;
     this.encoder = undefined;
     if (!encoder) return;
@@ -143,11 +178,21 @@ export class VideoFeed {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
-        for (const nals of splitter.push(value))
+        for (const nals of splitter.push(value)) {
+          // A replaced encoder's last frames would corrupt the new stream.
+          if (this.encoder !== encoder) return;
+          if (nals.some((nal) => (nal[0]! & 0x1f) === 5)) {
+            // Any keyframe, scheduled or requested, answers pending requests.
+            this.awaitingKeyframe = false;
+            this.keyframeAt = performance.now();
+            clearTimeout(this.keyframeTimer);
+            this.keyframeTimer = undefined;
+          }
           this.onAccessUnit(
             nals,
-            Math.round((performance.now() - this.startedAt) * 90) >>> 0,
+            Math.round((performance.now() - this.epoch) * 90) >>> 0,
           );
+        }
       }
     } catch {}
   }
