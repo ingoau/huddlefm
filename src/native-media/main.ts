@@ -82,6 +82,7 @@ async function start(bootstrap: ChimeBootstrap) {
         if (reconnect) speech?.reset();
         syncVideo();
       },
+      onVideoChanged: () => syncVideo(),
       onPictureLoss: () => {},
       onTerminal: (code, reason) => {
         log("warn", "native_media_ended", "Chime session ended", {
