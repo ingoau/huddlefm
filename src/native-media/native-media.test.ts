@@ -220,16 +220,54 @@ describe("audio helpers", () => {
     expect(queue.frames).toBe(0);
   });
 
-  test("the compressor follows Chromium's default curve and makeup", () => {
+  test("the compressor follows Chromium's default curve", () => {
     const compressor = new Compressor();
     expect(compressor.curve(-60)).toBe(-60);
-    expect(compressor.curve(0)).toBeCloseTo(-22, 5);
+    // The knee runs from the threshold up to +6 dB, so full scale is still
+    // inside it.
+    expect(compressor.curve(0)).toBeCloseTo(-6.06, 1);
     const silence = new Float32Array(960);
     expect(Math.max(...compressor.process(silence))).toBe(0);
-    const loud = new Float32Array(48_000).fill(1);
-    compressor.process(loud);
-    // Full scale settles at -22 dB plus about 13 dB of makeup gain.
-    expect(loud.at(-1)!).toBeCloseTo(10 ** (-8.8 / 20), 2);
+  });
+
+  // Peaks of a steady 200 Hz tone after one second, measured from Chromium's
+  // own DynamicsCompressorNode with its defaults in an OfflineAudioContext.
+  test.each([
+    [-40, -36.34],
+    [-30, -26.34],
+    [-24, -20.34],
+    [-18, -14.57],
+    [-12, -9.4],
+    [-6, -5.15],
+    [-3, -3.51],
+    [0, -2.26],
+  ])("a %d dBFS tone comes out at %d dBFS, as in Chromium", (input, output) => {
+    const compressor = new Compressor();
+    const gain = 10 ** (input / 20);
+    const samples = new Float32Array(48_000 * 4);
+    for (let frame = 0; frame < 48_000 * 2; frame++)
+      samples[frame * 2] = samples[frame * 2 + 1] =
+        gain * Math.sin((2 * Math.PI * 200 * frame) / 48_000);
+    for (let offset = 0; offset < samples.length; offset += 1920)
+      compressor.process(samples.subarray(offset, offset + 1920));
+    const peak = Math.max(...samples.subarray(48_000 * 2).map(Math.abs));
+    expect(20 * Math.log10(peak)).toBeCloseTo(output, 1);
+  });
+
+  test("the compressor looks ahead, so a sudden loud hit does not clip", () => {
+    const compressor = new Compressor();
+    const samples = new Float32Array(48_000 * 4);
+    for (let frame = 0; frame < 48_000 * 2; frame++)
+      samples[frame * 2] = samples[frame * 2 + 1] =
+        (frame < 48_000 ? 0.03 : 0.9) *
+        Math.sin((2 * Math.PI * 100 * frame) / 48_000);
+    compressor.process(samples);
+    expect(Math.max(...samples.map(Math.abs))).toBeLessThan(1);
+    // Six milliseconds of delay, as in Chromium.
+    const impulse = new Float32Array(960 * 2);
+    impulse[0] = impulse[1] = 0.001;
+    new Compressor().process(impulse);
+    expect(impulse.findIndex((sample) => sample !== 0)).toBe(288 * 2);
   });
 });
 

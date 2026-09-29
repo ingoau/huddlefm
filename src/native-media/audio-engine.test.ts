@@ -325,6 +325,7 @@ describe("AudioEngine", () => {
     expect(Math.max(...engine.render(960).map(Math.abs))).toBeGreaterThan(0.1);
     engine.handle(play("a"));
     engine.setVolume(0);
+    engine.render(960); // flush the compressor's 6 ms look-ahead
     expect(Math.max(...engine.render(960).map(Math.abs))).toBe(0);
   });
 });
