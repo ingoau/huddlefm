@@ -83,7 +83,7 @@ async function start(bootstrap: ChimeBootstrap) {
         syncVideo();
       },
       onVideoChanged: () => syncVideo(),
-      onPictureLoss: () => {},
+      onPictureLoss: () => feed?.requestKeyframe(),
       onTerminal: (code, reason) => {
         log("warn", "native_media_ended", "Chime session ended", {
           code,

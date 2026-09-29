@@ -194,6 +194,14 @@ describe("RTP", () => {
     const pli = [0x81, 206, 0, 2, 0, 0, 0, 1, 0, 0, 0, 2];
     expect(countPictureLoss(Buffer.from([...receiverReport, ...pli]))).toBe(1);
   });
+
+  test("counts full intra requests as picture loss", () => {
+    const fir = [
+      0x84, 206, 0, 4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0, 0, 0,
+    ];
+    const nack = [0x81, 205, 0, 3, 0, 0, 0, 1, 0, 0, 0, 2, 0, 5, 0, 0];
+    expect(countPictureLoss(Buffer.from([...fir, ...nack]))).toBe(1);
+  });
 });
 
 describe("audio helpers", () => {
