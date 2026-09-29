@@ -36,7 +36,9 @@ export class Compressor {
   private readIndex = 0;
   private writeIndex: number;
 
-  private detectorAverage = 0;
+  // Chromium starts the detector at 0, which ducks the first few hundred
+  // milliseconds of a session; starting it at 1 skips that dip.
+  private detectorAverage = 1;
   private compressorGain = 1;
   private maxAttackDifference = -1;
   private divisionFrame = 0;
@@ -64,7 +66,8 @@ export class Compressor {
     this.makeup = (1 / this.saturate(1)) ** 0.6;
     this.attackFrames = Math.max(0.001, attackSeconds) * sampleRate;
     this.detectorReleaseFrames = detectorReleaseSeconds * sampleRate;
-    // A quartic through the four release zones at x = 0, 1, 2 and 3.
+    // A quartic through the four release zones at x = 0, 1, 2 and 3. The
+    // coefficients are Chromium's own, so keep them exactly as they are.
     const [y1, y2, y3, y4] = releaseZones.map(
       (zone) => zone * releaseSeconds * sampleRate,
     ) as [number, number, number, number];

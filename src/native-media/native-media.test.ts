@@ -262,7 +262,9 @@ describe("audio helpers", () => {
         (frame < 48_000 ? 0.03 : 0.9) *
         Math.sin((2 * Math.PI * 100 * frame) / 48_000);
     compressor.process(samples);
-    expect(Math.max(...samples.map(Math.abs))).toBeLessThan(1);
+    expect(
+      samples.reduce((peak, sample) => Math.max(peak, Math.abs(sample)), 0),
+    ).toBeLessThan(1);
     // Six milliseconds of delay, as in Chromium.
     const impulse = new Float32Array(960 * 2);
     impulse[0] = impulse[1] = 0.001;

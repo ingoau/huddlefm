@@ -292,6 +292,7 @@ describe("AudioEngine", () => {
     engine.setVolume(0);
     expect(Math.max(...engine.render(960).map(Math.abs))).toBe(0);
     engine.setVolume(1);
+    engine.render(960 * 25); // let the compressor settle
     const loud = Math.max(...engine.render(960).map(Math.abs));
     engine.applyDuck({ gain: 0.15, rampSeconds: 0 });
     engine.render(960 * 25); // let the compressor settle
