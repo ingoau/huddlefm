@@ -46,14 +46,17 @@ export function isRtcp(packet: Uint8Array) {
   return type >= 192 && type <= 223;
 }
 
-/** Counts picture loss indications in a compound RTCP packet. */
+/**
+ * Counts requests for a keyframe in a compound RTCP packet: picture loss
+ * indications and full intra requests.
+ */
 export function countPictureLoss(packet: Buffer) {
   let count = 0;
   let offset = 0;
   while (offset + 4 <= packet.length) {
     const type = packet[offset + 1];
     const format = (packet[offset] ?? 0) & 0x1f;
-    if (type === 206 && format === 1) count++;
+    if (type === 206 && (format === 1 || format === 4)) count++;
     offset += (packet.readUInt16BE(offset + 2) + 1) * 4;
   }
   return count;
