@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -197,7 +204,9 @@ test.skipIf(!Bun.which("ffmpeg"))(
       ]);
       expect(encoded.exitCode).toBe(0);
       expect(integratedLoudness(filePath)).toBeLessThan(-40);
-      await normalizeLoudness(filePath, "entry", 100_000_000);
+      expect(await normalizeLoudness(filePath, "entry", 100_000_000)).toBe(
+        true,
+      );
       expect(integratedLoudness(filePath)).toBeCloseTo(-14, 0);
       expect(await readdir(directory)).toEqual(["entry.opus"]);
     } finally {
@@ -227,7 +236,9 @@ test.skipIf(!Bun.which("ffmpeg"))(
       ]);
       expect(encoded.exitCode).toBe(0);
       const original = await readFile(filePath);
-      await normalizeLoudness(filePath, "entry", original.byteLength);
+      expect(
+        await normalizeLoudness(filePath, "entry", original.byteLength),
+      ).toBe(false);
       expect(await readFile(filePath)).toEqual(original);
       expect(await readdir(directory)).toEqual(["entry.opus"]);
     } finally {
@@ -243,7 +254,9 @@ test.skipIf(!Bun.which("ffmpeg"))(
     const filePath = join(directory, "entry.opus");
     try {
       await writeFile(filePath, "not audio");
-      await normalizeLoudness(filePath, "entry", 100_000_000);
+      expect(await normalizeLoudness(filePath, "entry", 100_000_000)).toBe(
+        false,
+      );
       expect(await readFile(filePath, "utf8")).toBe("not audio");
       expect(await readdir(directory)).toEqual(["entry.opus"]);
     } finally {
@@ -526,6 +539,184 @@ test("limits track preparation globally and prioritizes queued work", async () =
   for (const id of ["b", "c", "d"]) gates.get(id)!.resolve();
   await Promise.all(work);
 });
+
+test("runs as many preparations at once as configured", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    preparationConcurrency: 3,
+  });
+  const gate = Promise.withResolvers<void>();
+  const started: string[] = [];
+  Reflect.set(
+    catalog,
+    "download",
+    async (_track: unknown, _dir: string, id: string) => {
+      started.push(id);
+      await gate.promise;
+      return id;
+    },
+  );
+  const track = {
+    sourceInput: "https://example.com",
+    canonicalUrl: "https://example.com",
+    sourceId: "test",
+    title: "Test",
+    artist: "Artist",
+  };
+  const work = ["a", "b", "c", "d"].map((id) =>
+    catalog.prepare(track, "data", id),
+  );
+  expect(started).toEqual(["a", "b", "c"]);
+  gate.resolve();
+  await Promise.all(work);
+  expect(started).toEqual(["a", "b", "c", "d"]);
+});
+
+// Stands in for yt-dlp: logs its arguments, fails a reused extraction when
+// told the stream URLs have gone stale, and otherwise "downloads" the fixture.
+async function fakeExtractor(directory: string, audio: string, stale = false) {
+  const script = join(directory, "yt-dlp");
+  const calls = join(directory, "calls.log");
+  await writeFile(
+    script,
+    `#!/bin/sh
+echo "$*" >> '${calls}'
+case "$*" in *--load-info-json*)
+  ${stale ? `echo "ERROR: unable to download video data: HTTP Error 403: Forbidden" >&2; exit 1` : `:`};;
+esac
+while [ $# -gt 0 ]; do
+  case "$1" in --load-info-json) cp "$2" '${directory}/loaded.json';; --output) output="$2";; esac
+  shift
+done
+path=$(printf '%s' "$output" | sed 's/%(ext)s/opus/')
+cp '${audio}' "$path"
+echo "$path"
+`,
+  );
+  await chmod(script, 0o755);
+  return {
+    command: () => [script],
+    calls: async () =>
+      (await readFile(calls, "utf8").catch(() => "")).trim().split("\n"),
+  };
+}
+
+async function audioFixture(directory: string) {
+  const audio = join(directory, "fixture.opus");
+  const encoded = Bun.spawnSync([
+    "ffmpeg",
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:duration=3",
+    "-c:a",
+    "libopus",
+    audio,
+  ]);
+  expect(encoded.exitCode).toBe(0);
+  return audio;
+}
+
+const youtubeTrack = (canonicalUrl: string): TrackMetadata => ({
+  sourceInput: canonicalUrl,
+  canonicalUrl,
+  sourceId: "dQw4w9WgXcQ",
+  title: "Never Gonna Give You Up",
+  artist: "Rick Astley",
+  artwork: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+});
+
+test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
+  "downloads from the resolving extraction, then serves repeats from the cache",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-prepare-"));
+    try {
+      const catalog = new TrackCatalog({
+        durationSeconds: 1_200,
+        downloadBytes: 100_000_000,
+        mediaCacheBytes: 100_000_000,
+        mediaCacheDirectory: join(directory, "cache"),
+      });
+      await Reflect.get(catalog, "cache").initialize();
+      const extractor = await fakeExtractor(
+        directory,
+        await audioFixture(directory),
+      );
+      Reflect.set(catalog, "extractor", extractor.command);
+      const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+      Reflect.get(catalog, "rememberExtraction").call(catalog, url, {
+        id: "dQw4w9WgXcQ",
+        formats: [{ format_id: "251" }],
+        automatic_captions: { en: [{ url: "https://example.com/captions" }] },
+      });
+
+      const first = await catalog.prepare(
+        youtubeTrack(url),
+        join(directory, "first"),
+        "a",
+      );
+      expect(await extractor.calls()).toHaveLength(1);
+      expect((await extractor.calls())[0]).toContain("--load-info-json");
+      expect(
+        JSON.parse(await readFile(join(directory, "loaded.json"), "utf8")),
+      ).toEqual({ id: "dQw4w9WgXcQ", formats: [{ format_id: "251" }] });
+      expect(await readdir(join(directory, "first"))).toEqual(["a.opus"]);
+
+      // The same video from YouTube Music, in another session.
+      const repeat = youtubeTrack(
+        "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+      );
+      const second = await catalog.prepare(
+        repeat,
+        join(directory, "second"),
+        "b",
+      );
+      expect(await extractor.calls()).toHaveLength(1);
+      expect(await readFile(second)).toEqual(await readFile(first));
+      expect(catalog.transition(second)).toEqual(catalog.transition(first));
+      expect(repeat.duration).toBeCloseTo(3, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
+  "extracts again when a reused extraction has gone stale",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-prepare-"));
+    try {
+      const catalog = testCatalog();
+      const extractor = await fakeExtractor(
+        directory,
+        await audioFixture(directory),
+        true,
+      );
+      Reflect.set(catalog, "extractor", extractor.command);
+      const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+      Reflect.get(catalog, "rememberExtraction").call(catalog, url, {
+        id: "dQw4w9WgXcQ",
+      });
+
+      const filePath = await catalog.prepare(
+        youtubeTrack(url),
+        join(directory, "session"),
+        "a",
+      );
+      const calls = await extractor.calls();
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toContain("--load-info-json");
+      expect(calls[1]).not.toContain("--load-info-json");
+      expect(calls[1]).toEndWith(`-- ${url}`);
+      expect(await readdir(join(directory, "session"))).toEqual(["a.opus"]);
+      expect(await Bun.file(filePath).exists()).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test("requests high-resolution YouTube Music artwork", async () => {
   const catalog = testCatalog();

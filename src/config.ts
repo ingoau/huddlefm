@@ -17,6 +17,22 @@ export function optionalText(value?: string) {
   return text || undefined;
 }
 
+/**
+ * A whole number no smaller than `minimum`, or `fallback` when the value is
+ * unset or not one. A typo must not leave, say, track preparation with no
+ * slots at all.
+ */
+export function parseWholeNumber(
+  value: string | undefined,
+  fallback: number,
+  minimum = 0,
+) {
+  const text = value?.trim();
+  if (!text) return fallback;
+  const parsed = Number(text);
+  return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
+}
+
 export type MediaBackend = "browser" | "native";
 
 /**
@@ -55,6 +71,19 @@ export function loadConfig() {
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.5),
     duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
     loudnessNormalization: process.env.LOUDNESS_NORMALIZATION === "true",
+    preparationConcurrency: parseWholeNumber(
+      process.env.TRACK_PREPARATION_CONCURRENCY,
+      2,
+      1,
+    ),
+    mediaCacheBytes: parseWholeNumber(
+      process.env.MEDIA_CACHE_LIMIT_BYTES,
+      1_000_000_000,
+    ),
+    mediaCacheMaxAgeDays: parseWholeNumber(
+      process.env.MEDIA_CACHE_MAX_AGE_DAYS,
+      30,
+    ),
     aloneMs: Number(process.env.ALONE_TIMEOUT_MS ?? 120_000),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),

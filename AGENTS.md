@@ -75,6 +75,7 @@ The coordinator communicates with this page over WebSocket. Audio files are expo
 
 #### Additional services include:
 
+- `src/media-cache.ts`: keeps prepared tracks on disk, keyed by source, so a repeated song is hardlinked into its session instead of downloaded again.
 - `src/lyrics.ts`: queries multiple lyric providers concurrently and selects the best synchronized result.
 - `src/scrobbling.ts`: tracks each participant's actual listening time and submits eligible listens to Last.fm or ListenBrainz.
 - `src/audit-log.ts`: writes append-only JSONL audit events.
