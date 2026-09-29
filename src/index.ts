@@ -9,11 +9,12 @@ import {
 import { AuditLog } from "./audit-log.ts";
 import { canvasMarkdown } from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
+import { FallbackReports } from "./fallback-reports.ts";
 import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, type MediaBackend } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { parseLikeValue } from "./coordinator-ui.ts";
-import { safeError } from "./error-message.ts";
+import { redactSecrets, safeError } from "./error-message.ts";
 import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
 import { flushLogs, logger } from "./logger.ts";
@@ -21,8 +22,14 @@ import { LyricsCatalog } from "./lyrics.ts";
 import { MediaBrowserPool } from "./media-browser.ts";
 import {
   NativeMediaSession,
+  nativeMediaFailed,
   type MediaMessage,
 } from "./native-media/session.ts";
+import {
+  parsePlaybackReport,
+  playbackReportCallbackId,
+} from "./playback-report.ts";
+import { recentLogs } from "./recent-logs.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import {
@@ -133,6 +140,8 @@ const audit = new AuditLog(
 );
 if (store.needsUsageBackfill())
   store.importUsage(await audit.historicalUsage());
+const fallbackReports = new FallbackReports();
+fallbackReports.start();
 const slackHuddle = new SlackHuddleAdapter(config);
 const mediaBrowsers = new MediaBrowserPool(config.chromePath);
 const runtimes = new Map<string, Runtime>();
@@ -216,11 +225,16 @@ type MediaSession = {
   /** Delivers a coordinator message; false when nothing is connected. */
   send(message: unknown): boolean;
   close(): Promise<void>;
+  /** Recent problems the backend saw, for a report on why it was given up. */
+  diagnostics?(): unknown[];
 };
 type Runtime = {
   sourceChannelId: string;
   callId: string;
   bootstrap: ChimeBootstrap;
+  backend: MediaBackend;
+  /** Whether this Huddle has moved from native media to the browser. */
+  fellBack: boolean;
   media: MediaSession;
   socket?: ServerWebSocket<SocketData>;
   coordinator?: Coordinator;
@@ -326,6 +340,224 @@ function notFound() {
 async function discardRuntime(runtime: Runtime) {
   await runtime.media.close();
   runtimes.delete(runtime.bootstrap.sessionId);
+}
+
+/** Starts a runtime's media backend and waits for it to join Chime. */
+async function joinMedia(runtime: Runtime) {
+  const gate = (runtime.joinGate = Promise.withResolvers<void>());
+  // The gate can be rejected while start() is still loading the page, before
+  // anything awaits it, and Bun exits on an unhandled rejection.
+  gate.promise.catch(() => {});
+  const timer = setTimeout(
+    () => gate.reject(new Error("Timed out joining Chime")),
+    30_000,
+  );
+  try {
+    await runtime.media.start(runtime.bootstrap);
+    await gate.promise;
+  } finally {
+    clearTimeout(timer);
+    runtime.joinGate = undefined;
+  }
+}
+
+/**
+ * Whether a runtime can still move from native media to the browser: only
+ * with MEDIA_BACKEND=native-with-fallback, only once, and never while the
+ * session is leaving on purpose.
+ */
+function canFallBack(runtime: Runtime) {
+  return (
+    config.media.fallback &&
+    runtime.backend === "native" &&
+    !runtime.leaveGate &&
+    !shuttingDown &&
+    runtimes.get(runtime.bootstrap.sessionId) === runtime
+  );
+}
+
+/**
+ * Swaps a runtime's native media for the browser. The native process leaves
+ * Chime first, and the browser joins with the same attendee, so the Huddle
+ * sees the bot drop out for a moment rather than a second copy of it. Each
+ * swap gets a report file in data/reports with what led up to it and how
+ * it went.
+ */
+async function moveToBrowser(
+  runtime: Runtime,
+  cause: {
+    reason: string;
+    sessionId?: string;
+    userId?: string;
+    reportId?: string;
+    playback?: Record<string, unknown>;
+  },
+) {
+  const native = runtime.media;
+  runtime.backend = "browser";
+  runtime.fellBack = true;
+  // Swapped in before the native process closes, so its parting `ended`
+  // no longer counts as this runtime's.
+  runtime.media = createMediaSession(() => runtime, "browser");
+  const startedAt = Date.now();
+  const reportId = cause.reportId ?? crypto.randomUUID();
+  const trigger = cause.userId ? "report" : "automatic";
+  const mediaSessionId = runtime.bootstrap.sessionId;
+  const appLogs = () => recentLogs.take(cause.sessionId, mediaSessionId);
+  audit.record("media.fallback", cause.userId, {
+    sessionId: cause.sessionId,
+    mediaSessionId,
+    callId: runtime.callId,
+    trigger,
+    reason: cause.reason,
+    reportId,
+    ...cause.playback,
+  });
+  log.warn(
+    {
+      event: "media_fallback_started",
+      sessionId: cause.sessionId,
+      mediaSessionId,
+      trigger,
+      reason: cause.reason,
+      reportId,
+    },
+    "Falling back from native media to the browser",
+  );
+  void fallbackReports.update(reportId, {
+    trigger,
+    reason: cause.reason,
+    ...(cause.userId ? { reportedBy: cause.userId } : {}),
+    sessionId: cause.sessionId,
+    callId: runtime.callId,
+    mediaSessionId,
+    playback: cause.playback,
+    lastMediaEvent: runtime.mediaState && {
+      type: runtime.mediaState.type,
+      details: redactSecrets(
+        JSON.stringify(runtime.mediaState.details ?? null),
+      ),
+    },
+    nativeLogs: native.diagnostics?.() ?? [],
+    appLogs: appLogs(),
+  });
+  try {
+    await native.close();
+    await joinMedia(runtime);
+    void fallbackReports.update(reportId, {
+      outcome: { status: "joined", durationMs: Date.now() - startedAt },
+      appLogs: appLogs(),
+    });
+  } catch (error) {
+    void fallbackReports.update(reportId, {
+      outcome: {
+        status: "failed",
+        durationMs: Date.now() - startedAt,
+        error: safeError(error),
+      },
+      appLogs: appLogs(),
+    });
+    throw error;
+  }
+}
+
+/**
+ * Moves a running session to the browser and replays what was playing, or
+ * ends the session, with its Restore button, when the browser cannot join.
+ */
+async function fallBackToBrowser(
+  runtime: Runtime,
+  cause: { reason: string; userId?: string; reportId?: string },
+) {
+  const coordinator = runtime.coordinator;
+  if (!coordinator || !canFallBack(runtime)) return;
+  const startedAt = Date.now();
+  const reportId = cause.reportId ?? crypto.randomUUID();
+  store.setSession(coordinator.id, { mediaFallback: true });
+  const moved = moveToBrowser(runtime, {
+    ...cause,
+    reportId,
+    sessionId: coordinator.id,
+    playback: coordinator.playbackSnapshot(),
+  });
+  coordinator.mediaFallbackStarted(!cause.userId);
+  // The session can end while the browser is still joining; its page must
+  // not outlive the runtime that was discarded without it.
+  const discarded = () => runtimes.get(runtime.bootstrap.sessionId) !== runtime;
+  try {
+    await moved;
+    if (discarded()) return await runtime.media.close();
+    await coordinator.mediaReplaced();
+    void fallbackReports.update(reportId, {
+      replayed: true,
+      appLogs: recentLogs.take(coordinator.id, runtime.bootstrap.sessionId),
+    });
+    log.info(
+      {
+        event: "media_fallback_completed",
+        sessionId: coordinator.id,
+        reportId,
+        durationMs: Date.now() - startedAt,
+      },
+      "Fell back to browser media",
+    );
+  } catch (error) {
+    if (discarded()) return await runtime.media.close();
+    log.error(
+      {
+        event: "media_fallback_failed",
+        sessionId: coordinator.id,
+        reportId,
+        durationMs: Date.now() - startedAt,
+        err: error,
+      },
+      "Browser media could not take over from native media",
+    );
+    coordinator.mediaEvent("fatal");
+  }
+}
+
+/**
+ * Saves what someone said went wrong. Handled here rather than on the
+ * Coordinator so a report sent after the session ended is still kept.
+ */
+function recordPlaybackReport(interaction: Interaction) {
+  const report = parsePlaybackReport(interaction);
+  if (!report) return;
+  audit.record("media.problem_reported", interaction.userId, report);
+  const { reportId, sessionId, switched, ...answers } = report;
+  void fallbackReports.update(reportId, {
+    answers: {
+      userId: interaction.userId,
+      submittedAt: new Date().toISOString(),
+      ...answers,
+    },
+    // A report from a Huddle already on the browser switched nothing, so
+    // its file starts here and gets the session's logs now.
+    ...(switched
+      ? {}
+      : {
+          trigger: "report",
+          sessionId,
+          switched,
+          // The browser's own lines carry only its media session ID.
+          appLogs: recentLogs.take(
+            sessionId,
+            [...runtimes.values()].find(
+              (runtime) => runtime.coordinator?.id === sessionId,
+            )?.bootstrap.sessionId,
+          ),
+        }),
+  });
+  log.info(
+    {
+      event: "media_problem_reported",
+      sessionId: report.sessionId,
+      reportId: report.reportId,
+      problems: report.problems,
+    },
+    "Playback problem reported",
+  );
 }
 
 function removeMediaFiles(sessionId: string) {
@@ -576,11 +808,17 @@ async function joinHuddle(
       lyricsOffsetMs: config.lyricsOffsetMs,
       bridgeToken: crypto.randomUUID(),
     };
+    // A session that already fell back rejoins with the browser rather than
+    // the backend that failed it.
+    const fellBack = Boolean(restored?.mediaFallback && config.media.fallback);
+    const backend = fellBack ? "browser" : config.media.backend;
     runtime = {
       sourceChannelId: channelId,
       callId: joined.huddleCallId,
       bootstrap,
-      media: createMediaSession(() => runtime),
+      backend,
+      fellBack,
+      media: createMediaSession(() => runtime, backend),
     };
     runtimes.set(bootstrap.sessionId, runtime);
     log.debug(
@@ -589,21 +827,32 @@ async function joinHuddle(
         mediaSessionId: bootstrap.sessionId,
         channelId,
         callId: joined.huddleCallId,
+        backend,
       },
       "Media runtime created",
     );
-    const gate = (runtime.joinGate = Promise.withResolvers<void>());
-    const timer = setTimeout(
-      () => gate.reject(new Error("Timed out joining Chime")),
-      30_000,
-    );
     try {
-      await runtime.media.start(bootstrap);
-      await gate.promise;
+      try {
+        await joinMedia(runtime);
+      } catch (error) {
+        // A Huddle that ended, or that sent the bot away, while native media
+        // was joining would turn the browser away just the same.
+        const ended = error instanceof Error ? error.cause : undefined;
+        if (
+          !canFallBack(runtime) ||
+          (ended && !nativeMediaFailed(ended as MediaMessage))
+        )
+          throw error;
+        await moveToBrowser(runtime, {
+          reason: `Native media could not join: ${safeError(error)}`,
+          sessionId: restored?.id,
+        });
+      }
       log.info(
         {
           event: "media_joined",
           mediaSessionId: bootstrap.sessionId,
+          backend: runtime.backend,
           durationMs: Date.now() - startedAt,
         },
         "Media page joined Chime",
@@ -611,9 +860,6 @@ async function joinHuddle(
     } catch (error) {
       await discardRuntime(runtime);
       throw error;
-    } finally {
-      clearTimeout(timer);
-      runtime.joinGate = undefined;
     }
     const coordinator = (runtime.coordinator = new Coordinator(
       joined,
@@ -656,17 +902,35 @@ async function joinHuddle(
       },
       recommendations,
       workspaceAdmins,
+      config.media.fallback
+        ? {
+            available: () => canFallBack(runtime!),
+            start: (userId, reportId) =>
+              void fallBackToBrowser(runtime!, {
+                reason: "Reported by a user",
+                userId,
+                reportId,
+              }),
+          }
+        : undefined,
     ));
     try {
       if (restored) await coordinator.resume(resumeActorId);
       else await coordinator.start();
+      // Marked after start, which is what creates a new session's row.
+      if (runtime.fellBack)
+        store.setSession(coordinator.id, { mediaFallback: true });
       store.setSessionParticipants(
         coordinator.id,
         coordinator.participantIds(),
       );
       captureAnalytics("media.joined", {
         sessionId: coordinator.id,
-        properties: { mediaSessionId: bootstrap.sessionId },
+        properties: {
+          mediaSessionId: bootstrap.sessionId,
+          backend: runtime.backend,
+          fellBack: runtime.fellBack,
+        },
       });
     } catch (error) {
       await discardRuntime(runtime);
@@ -1324,12 +1588,17 @@ const server = Bun.serve<SocketData>({
  * page through the /bridge WebSocket; the native one runs its own process and
  * reports through the same messages.
  */
-function createMediaSession(current: () => Runtime | undefined): MediaSession {
-  if (config.mediaBackend === "native")
-    return new NativeMediaSession(
+function createMediaSession(
+  current: () => Runtime | undefined,
+  backend: MediaBackend,
+): MediaSession {
+  if (backend === "native") {
+    const session: NativeMediaSession = new NativeMediaSession(
       (message) => {
         const runtime = current();
-        if (runtime) handleMediaMessage(runtime, message);
+        // A process that was swapped out for the browser still reports its
+        // own leaving, which must not end the session it handed over.
+        if (runtime?.media === session) handleMediaMessage(runtime, message);
       },
       (entryId) => {
         const runtime = current();
@@ -1339,6 +1608,8 @@ function createMediaSession(current: () => Runtime | undefined): MediaSession {
         );
       },
     );
+    return session;
+  }
   const browser = mediaBrowsers.session(server.url.origin);
   return {
     start: (bootstrap) => browser.start(bootstrap),
@@ -1356,15 +1627,31 @@ function handleMediaMessage(runtime: Runtime, message: MediaMessage) {
   runtime.mediaState = { type: message.type, details: message.details };
   const ownSession = message.sessionId === runtime.bootstrap.sessionId;
   const detail = detailMessage(message.details);
-  if (ownSession && message.type === "joined") runtime.joinGate?.resolve();
-  if (ownSession && (message.type === "fatal" || message.type === "ended"))
-    runtime.joinGate?.reject(new Error(`Chime join failed: ${detail}`));
-  if (ownSession && message.type === "ended") runtime.leaveGate?.resolve();
-  if (ownSession)
-    runtime.coordinator?.mediaEvent(
-      message.type,
-      message.details as Parameters<Coordinator["mediaEvent"]>[1],
-    );
+  // Native media that fails mid-session hands over to the browser instead of
+  // ending it. A failure while joining rejects the join gate as usual, and
+  // joinHuddle falls back from there.
+  if (
+    ownSession &&
+    runtime.coordinator &&
+    nativeMediaFailed(message) &&
+    canFallBack(runtime)
+  )
+    void fallBackToBrowser(runtime, {
+      reason: `Native media ${message.type}: ${detail}`,
+    });
+  else {
+    if (ownSession && message.type === "joined") runtime.joinGate?.resolve();
+    if (ownSession && (message.type === "fatal" || message.type === "ended"))
+      runtime.joinGate?.reject(
+        new Error(`Chime join failed: ${detail}`, { cause: message }),
+      );
+    if (ownSession && message.type === "ended") runtime.leaveGate?.resolve();
+    if (ownSession)
+      runtime.coordinator?.mediaEvent(
+        message.type,
+        message.details as Parameters<Coordinator["mediaEvent"]>[1],
+      );
+  }
   const fields = {
     event: "media_message",
     mediaSessionId: runtime.bootstrap.sessionId,
@@ -1417,7 +1704,9 @@ slackApp.onAction = (interaction) =>
     ? restoreEndedSession(interaction)
     : interaction.actionId === "unlike_track"
       ? undoLike(interaction)
-      : coordinatorFor(interaction)?.action(interaction);
+      : interaction.actionId === playbackReportCallbackId
+        ? recordPlaybackReport(interaction)
+        : coordinatorFor(interaction)?.action(interaction);
 await slackApp.start();
 // Huddle member events ride the private realtime gateway, which drops them
 // whenever its socket cycles, so periodically and after every reconnect the
@@ -1716,6 +2005,7 @@ async function shutdownSteps() {
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
   clearInterval(reconcileTimer);
+  fallbackReports.stop();
   companions.stop();
   for (const timer of endCleanupTimers.values()) clearTimeout(timer);
   log.debug({ event: "shutdown_canvas_wait" }, "Waiting for Canvas update");
@@ -1753,6 +2043,7 @@ async function shutdownSteps() {
   store.close();
   log.debug({ event: "shutdown_audit" }, "Flushing audit log");
   await audit.flush();
+  await fallbackReports.flush();
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

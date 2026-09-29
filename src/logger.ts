@@ -1,6 +1,7 @@
 import pino from "pino";
 import { captureException } from "./analytics.ts";
 import { redactSecrets, safeError } from "./error-message.ts";
+import { recentLogs } from "./recent-logs.ts";
 
 const level = process.env.LOG_LEVEL ?? "info";
 const file = process.env.LOG_FILE ?? "data/logs/huddlefm.jsonl";
@@ -83,6 +84,15 @@ export const logger = pino(
           args[0] && typeof args[0] === "object"
             ? (args[0] as Record<string, unknown>)
             : undefined;
+        recentLogs.record(
+          this.levels.labels[level] ?? String(level),
+          { ...this.bindings(), ...fields },
+          typeof args[0] === "string"
+            ? args[0]
+            : typeof args[1] === "string"
+              ? args[1]
+              : undefined,
+        );
         if (level >= 50 && fields?.err) {
           const bindings = this.bindings();
           const userId = [fields.userId, fields.inviterUserId].find(

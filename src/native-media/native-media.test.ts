@@ -11,7 +11,12 @@ import {
 import { decodeFrame, encodeFrame, rawFrameType } from "./signaling.ts";
 import { normalizedVolume, SpeechSignals } from "./speech.ts";
 import { iceServers } from "./chime-link.ts";
-import { withLocalAudio } from "./session.ts";
+import {
+  NativeMediaSession,
+  nativeMediaFailed,
+  withLocalAudio,
+} from "./session.ts";
+import { statusCodes } from "./status-codes.ts";
 
 describe("signaling frames", () => {
   test("round-trip through the Chime protobuf with a type byte", () => {
@@ -262,5 +267,81 @@ describe("native session messages", () => {
   test("other messages pass through untouched", () => {
     const message = { type: "seek", seconds: 3 };
     expect(withLocalAudio(message, audioPath)).toBe(message);
+  });
+});
+
+describe("native media diagnostics", () => {
+  test("keep recent lines at every level and media events", () => {
+    const messages: unknown[] = [];
+    const session = new NativeMediaSession((message) => messages.push(message));
+    const receive = (line: unknown) =>
+      Reflect.get(session, "receive").call(session, JSON.stringify(line), {
+        debug() {},
+        info() {},
+        warn() {},
+        error() {},
+        trace() {},
+      });
+    receive({
+      log: { level: "debug", event: "chime_ice", message: "Candidate" },
+    });
+    receive({
+      log: { level: "warn", event: "chime_reconnect", message: "Reconnecting" },
+    });
+    receive({ type: "playback_position", details: { seconds: 3 } });
+    receive({ type: "fatal", details: { message: "relay lost" } });
+    expect(messages).toEqual([
+      { type: "playback_position", details: { seconds: 3 } },
+      { type: "fatal", details: { message: "relay lost" } },
+    ]);
+    expect(session.diagnostics().map(({ at: _at, ...entry }) => entry)).toEqual(
+      [
+        { level: "debug", event: "chime_ice", message: "Candidate" },
+        { level: "warn", event: "chime_reconnect", message: "Reconnecting" },
+        {
+          level: "error",
+          event: "media_fatal",
+          message: "fatal",
+          details: { message: "relay lost" },
+        },
+      ],
+    );
+  });
+
+  test("keep only the most recent entries", () => {
+    const session = new NativeMediaSession(() => {});
+    const receive = Reflect.get(session, "receive").bind(session);
+    const quiet = { debug() {}, info() {}, warn() {}, error() {}, trace() {} };
+    for (let index = 0; index < 250; index++)
+      receive(
+        JSON.stringify({
+          log: { level: "debug", event: "tick", message: String(index) },
+        }),
+        quiet,
+      );
+    const kept = session.diagnostics();
+    expect(kept).toHaveLength(200);
+    expect(kept[0]).toMatchObject({ message: "50" });
+    expect(kept.at(-1)).toMatchObject({ message: "249" });
+  });
+});
+
+describe("native media failures", () => {
+  test("count crashes and lost connections, not a Huddle that is over", () => {
+    const ended = (code?: number) => ({ type: "ended", details: { code } });
+    expect(nativeMediaFailed({ type: "fatal" })).toBeTrue();
+    expect(nativeMediaFailed(ended(statusCodes.taskFailed))).toBeTrue();
+    expect(
+      nativeMediaFailed(ended(statusCodes.signalingClosedUnexpectedly)),
+    ).toBeTrue();
+    expect(nativeMediaFailed(ended())).toBeTrue();
+    expect(nativeMediaFailed(ended(statusCodes.left))).toBeFalse();
+    expect(nativeMediaFailed(ended(statusCodes.meetingEnded))).toBeFalse();
+    expect(nativeMediaFailed(ended(statusCodes.attendeeRemoved))).toBeFalse();
+    expect(
+      nativeMediaFailed(ended(statusCodes.joinedFromAnotherDevice)),
+    ).toBeFalse();
+    expect(nativeMediaFailed({ type: "stalled" })).toBeFalse();
+    expect(nativeMediaFailed({ type: "joined" })).toBeFalse();
   });
 });

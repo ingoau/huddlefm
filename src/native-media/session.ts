@@ -29,6 +29,11 @@ function redactFields(fields: Record<string, unknown>) {
 }
 
 const levels = new Set(["trace", "debug", "info", "warn", "error"]);
+/**
+ * How many recent lines a session keeps for a fallback report. They are kept
+ * at every level, since the log file usually leaves out debug detail.
+ */
+const diagnosticsLimit = 200;
 // The child needs no Slack credentials, so it only gets what running Bun and
 // ffmpeg takes.
 const inheritedEnv = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"];
@@ -64,6 +69,26 @@ export function withLocalAudio(
   return message;
 }
 
+// Ends that mean the Huddle is over or the bot was sent away, which the
+// browser would meet just the same.
+const deliberateEnds = new Set<number>([
+  statusCodes.left,
+  statusCodes.joinedFromAnotherDevice,
+  statusCodes.meetingEnded,
+  statusCodes.attendeeRemoved,
+]);
+
+/** Whether a media event means native media broke, rather than was left. */
+export function nativeMediaFailed(message: MediaMessage) {
+  if (message.type === "fatal") return true;
+  if (message.type !== "ended") return false;
+  const code =
+    message.details && typeof message.details === "object"
+      ? (message.details as { code?: unknown }).code
+      : undefined;
+  return typeof code !== "number" || !deliberateEnds.has(code);
+}
+
 /**
  * Runs one Huddle's native media in its own Bun process (src/native-media/
  * main.ts), so a crash in native WebRTC or media code ends that one session
@@ -76,6 +101,7 @@ export class NativeMediaSession {
   // The child exits by itself after reporting `ended`; that exit is expected.
   private ended = false;
   private sessionId?: string;
+  private recent: Record<string, unknown>[] = [];
 
   constructor(
     private onMessage: (message: MediaMessage) => void,
@@ -89,6 +115,7 @@ export class NativeMediaSession {
     this.closing = false;
     this.ended = false;
     this.sessionId = bootstrap.sessionId;
+    this.recent = [];
     const childLog = log.child({ mediaSessionId: bootstrap.sessionId });
     const env = Object.fromEntries(
       inheritedEnv.flatMap((name) =>
@@ -105,16 +132,18 @@ export class NativeMediaSession {
       "Native media process started",
     );
     void this.readLines(child.stdout, (line) => this.receive(line, childLog));
-    void this.readLines(child.stderr, (line) =>
-      childLog.warn(
-        { event: "native_media_stderr" },
-        redactSecrets(line).slice(0, 2_000),
-      ),
-    );
+    void this.readLines(child.stderr, (line) => {
+      const message = redactSecrets(line).slice(0, 2_000);
+      this.remember("warn", "native_media_stderr", message);
+      childLog.warn({ event: "native_media_stderr" }, message);
+    });
     void child.exited.then((exitCode) => {
       if (this.child !== child) return;
       this.child = undefined;
       if (this.closing || this.ended) return;
+      this.remember("error", "native_media_exited", "Exited unexpectedly", {
+        exitCode,
+      });
       childLog.error(
         { event: "native_media_exited", exitCode },
         "Native media process exited unexpectedly",
@@ -131,6 +160,14 @@ export class NativeMediaSession {
       });
     });
     this.write({ type: "bootstrap", payload: bootstrap });
+  }
+
+  /**
+   * The process's recent log lines and media events at every level, oldest
+   * first, for a report on why this session was given up.
+   */
+  diagnostics() {
+    return [...this.recent];
   }
 
   /** Sends a coordinator message; false when no media process is running. */
@@ -155,6 +192,22 @@ export class NativeMediaSession {
       { event: "native_media_closed", mediaSessionId: this.sessionId },
       "Native media process closed",
     );
+  }
+
+  private remember(
+    level: string,
+    event: string,
+    message: string,
+    fields: Record<string, unknown> = {},
+  ) {
+    this.recent.push({
+      at: new Date().toISOString(),
+      level,
+      event,
+      message,
+      ...fields,
+    });
+    if (this.recent.length > diagnosticsLimit) this.recent.shift();
   }
 
   private write(message: unknown) {
@@ -185,13 +238,26 @@ export class NativeMediaSession {
       const method = levels.has(String(level))
         ? (level as "trace" | "debug" | "info" | "warn" | "error")
         : "info";
+      const safeFields = redactFields(fields);
+      const text = redactSecrets(String(message ?? ""));
+      this.remember(method, event ?? "native_media_log", text, safeFields);
       childLog[method](
-        { event: event ?? "native_media_log", ...redactFields(fields) },
-        redactSecrets(String(message ?? "")),
+        { event: event ?? "native_media_log", ...safeFields },
+        text,
       );
       return;
     }
     if (typeof parsed.type !== "string") return;
+    // Positions arrive several times a second and say nothing a report needs.
+    if (parsed.type !== "playback_position")
+      this.remember(
+        parsed.type === "fatal" ? "error" : "info",
+        `media_${parsed.type}`,
+        parsed.type,
+        parsed.details && typeof parsed.details === "object"
+          ? { details: redactFields(parsed.details as Record<string, unknown>) }
+          : {},
+      );
     if (parsed.type === "ended") this.ended = true;
     this.onMessage(parsed);
   }

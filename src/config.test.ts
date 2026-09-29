@@ -10,10 +10,25 @@ test("parses comma and whitespace separated IDs", () => {
 });
 
 test("uses the browser media backend unless native is chosen", () => {
-  expect(parseMediaBackend(undefined)).toBe("browser");
-  expect(parseMediaBackend("")).toBe("browser");
-  expect(parseMediaBackend("chromium")).toBe("browser");
-  expect(parseMediaBackend(" Native ")).toBe("native");
+  const browser = { backend: "browser", fallback: false } as const;
+  expect(parseMediaBackend(undefined)).toEqual(browser);
+  expect(parseMediaBackend("")).toEqual(browser);
+  expect(parseMediaBackend("chromium")).toEqual(browser);
+  expect(parseMediaBackend(" Native ")).toEqual({
+    backend: "native",
+    fallback: false,
+  });
+});
+
+test("native media can fall back to the browser", () => {
+  expect(parseMediaBackend("native-with-fallback")).toEqual({
+    backend: "native",
+    fallback: true,
+  });
+  expect(parseMediaBackend(" Native-With-Fallback ")).toEqual({
+    backend: "native",
+    fallback: true,
+  });
 });
 
 test("falls back when a count is unset, fractional, or too small", () => {

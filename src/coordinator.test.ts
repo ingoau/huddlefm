@@ -35,6 +35,7 @@ function setup(
   recommendations?: import("./recommendations.ts").RecommendationCatalog,
   workspaceAdmins?: WorkspaceAdmins,
   duckingMode: DuckingMode = "gentle",
+  mediaFallback?: ConstructorParameters<typeof Coordinator>[19],
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -212,6 +213,7 @@ function setup(
     (...args) => recordedMessages.push(args),
     recommendations,
     workspaceAdmins,
+    mediaFallback,
   );
   return {
     coordinator,
@@ -6112,4 +6114,134 @@ test("agent settings changes are audited by setting name", async () => {
     ],
   });
   await test.coordinator.endFromSlack();
+});
+
+function fallbackSetup() {
+  const fallback = { available: true, starts: [] as string[][] };
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      available: () => fallback.available,
+      start: (userId, reportId) => {
+        fallback.starts.push([userId, reportId]);
+        fallback.available = false;
+      },
+    },
+  );
+  return { ...result, fallback };
+}
+
+const reportButton = (rendered: unknown) =>
+  JSON.stringify(rendered ?? "").includes(
+    '"action_id":"report_playback_problem"',
+  );
+
+test("offers the playback report button only while native media can fall back", async () => {
+  const without = setup();
+  await without.coordinator.start();
+  expect(reportButton(without.posted[0])).toBeFalse();
+  await without.coordinator.endFromSlack();
+
+  const result = fallbackSetup();
+  await result.coordinator.start();
+  const player = JSON.stringify(result.posted[0]);
+  // It sits at the bottom of the player, above the queue.
+  expect(player.indexOf("report_playback_problem")).toBeGreaterThan(
+    player.indexOf('"block_id":"volume_status_'),
+  );
+  expect(player.indexOf("report_playback_problem")).toBeLessThan(
+    player.indexOf('"block_id":"next_'),
+  );
+  result.fallback.available = false;
+  result.coordinator.mediaFallbackStarted(false);
+  await until(() => result.updates.length > 0);
+  expect(reportButton(result.updates.at(-1))).toBeFalse();
+  await result.coordinator.endFromSlack();
+});
+
+test("reporting a playback problem switches first, then asks what went wrong", async () => {
+  const result = fallbackSetup();
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "report_playback_problem", "saved"),
+  );
+  expect(result.fallback.starts).toEqual([["host", expect.any(String)]]);
+  const [triggerId, view] = result.modals.at(-1) as [
+    string,
+    { callback_id: string; private_metadata: string },
+  ];
+  expect(triggerId).toBe("trigger");
+  expect(view.callback_id).toBe("playback_problem_report");
+  expect(JSON.parse(view.private_metadata)).toEqual({
+    sessionId: result.coordinator.id,
+    reportId: result.fallback.starts[0]![1],
+    switched: true,
+  });
+  expect(JSON.stringify(view)).toContain("switched this Huddle");
+
+  // A second press, from a player not yet redrawn, only asks.
+  await result.coordinator.action(
+    interaction(result.coordinator, "report_playback_problem", "saved"),
+  );
+  expect(result.fallback.starts).toHaveLength(1);
+  const [, again] = result.modals.at(-1) as [
+    string,
+    { private_metadata: string },
+  ];
+  expect(JSON.parse(again.private_metadata).switched).toBeFalse();
+  await result.coordinator.endFromSlack();
+});
+
+test("an automatic fallback is explained in the thread; a reported one is not", async () => {
+  const result = fallbackSetup();
+  await result.coordinator.start();
+  const posts = result.posted.length;
+  result.coordinator.mediaFallbackStarted(false);
+  expect(result.posted).toHaveLength(posts);
+  result.coordinator.mediaFallbackStarted(true);
+  expect(result.posted.at(-1)).toEqual([
+    "channel",
+    "1.0",
+    expect.stringContaining("switched to the backup player"),
+    undefined,
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a replacement media backend picks the song up where it was", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "current", playingTrack());
+  Reflect.set(result.coordinator, "state", "paused");
+  Reflect.set(result.coordinator, "playbackSeconds", 42);
+  result.media.length = 0;
+  await result.coordinator.mediaReplaced();
+  expect(result.media.slice(0, 5)).toEqual([
+    { type: "volume", value: 0.6 },
+    { type: "display_mode", mode: "default" },
+    { type: "transition_mode", mode: "none" },
+    { type: "ducking_mode", mode: "gentle" },
+    expect.objectContaining({ type: "play", entryId: "playing" }),
+  ]);
+  expect(result.media).toContainEqual({ type: "seek", seconds: 42 });
+  expect(result.media).toContainEqual({ type: "pause" });
+  expect(result.media).toContainEqual(
+    expect.objectContaining({ type: "preload" }),
+  );
+  expect(result.coordinator.playbackSnapshot()).toMatchObject({
+    state: "paused",
+    playbackSeconds: 42,
+    trackId: "playing",
+    title: "Worth Hearing Again",
+  });
+  await result.coordinator.endFromSlack();
 });
