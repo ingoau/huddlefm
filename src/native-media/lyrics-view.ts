@@ -18,8 +18,11 @@ const creditsDelayMs = 1_500;
 const creditsGap = 18;
 /** Space above and below each line. */
 const linePadding = 13;
-/** Room around a line's own canvas for lift, glow and blur. */
-const bleed = 24;
+/**
+ * Room around a line's own canvas for lift, glow and blur: an emphasised
+ * letter's glow reaches 24px past it, and the letter itself moves 5px or so.
+ */
+const bleed = 36;
 /** Duets leave this much of the width to the other side. */
 const duetInset = 0.15;
 /** Where the current line sits, as a share of the view's height. */
@@ -1097,20 +1100,22 @@ function layoutBlock(
     }
   }
 
-  const trailing = (value: Word) => {
-    const last = syllables[value.last]!;
-    return last.width - context.measureText(last.text.trimEnd()).width;
-  };
-  const widthOf = (value: Word) =>
+  // Measured once: the balanced wrap below tries a dozen widths.
+  const widths = words.map((value) =>
     syllables
       .slice(value.first, value.last + 1)
-      .reduce((sum, syllable) => sum + syllable.width, 0);
+      .reduce((sum, syllable) => sum + syllable.width, 0),
+  );
+  const trailings = words.map((value) => {
+    const last = syllables[value.last]!;
+    return last.width - context.measureText(last.text.trimEnd()).width;
+  });
   const wrap = (limit: number) => {
     const rows: number[][] = [[]];
     let x = 0;
-    for (const [index, value] of words.entries()) {
-      const width = widthOf(value);
-      if (x > 0 && x + width - trailing(value) > limit) {
+    for (let index = 0; index < words.length; index++) {
+      const width = widths[index]!;
+      if (x > 0 && x + width - trailings[index]! > limit) {
         rows.push([]);
         x = 0;
       }
@@ -1131,11 +1136,10 @@ function layoutBlock(
     rows = wrap(high);
   }
   for (const [rowIndex, row] of rows.entries()) {
-    const widths = row.map((index) => widthOf(words[index]!));
-    const lastWord = words[row.at(-1)!];
+    const last = row.at(-1);
     const rowWidth =
-      widths.reduce((sum, value) => sum + value, 0) -
-      (lastWord ? trailing(lastWord) : 0);
+      row.reduce((sum, index) => sum + widths[index]!, 0) -
+      (last === undefined ? 0 : trailings[last]!);
     let x = box.left + (box.align === "right" ? box.width - rowWidth : 0);
     for (const index of row) {
       const value = words[index]!;

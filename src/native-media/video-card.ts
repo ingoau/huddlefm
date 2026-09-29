@@ -178,6 +178,8 @@ export class VideoCard {
   beginChange(artworkUrl?: string) {
     const now = this.seconds();
     this.leave(now);
+    // The last track's artwork, if still loading, must not land on this one.
+    this.artworkRequest++;
     this.track = { title: "", artist: "", pending: true, enteredAt: now };
     if (artworkUrl) this.fetchArtwork(artworkUrl);
     this.stageDirty = true;
@@ -364,10 +366,14 @@ export class VideoCard {
 
   private fetchArtwork(url: string) {
     if (url !== this.artworkUrl || !this.artworkLoad) {
+      const load = this.loadArtwork(url);
       this.artworkUrl = url;
-      this.artworkLoad = this.loadArtwork(url);
-      // Nobody may wait on it if the change is abandoned.
-      this.artworkLoad.catch(() => {});
+      this.artworkLoad = load;
+      // Nobody may wait on it if the change is abandoned, and a failure is
+      // not kept: the same artwork is tried again next time.
+      load.catch(() => {
+        if (this.artworkLoad === load) this.artworkLoad = undefined;
+      });
     }
     return this.artworkLoad;
   }

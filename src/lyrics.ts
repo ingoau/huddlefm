@@ -46,9 +46,13 @@ export function songwritersFrom(ttml: string) {
       /<(?:[\w-]+:)?songwriter\b[^>]*>([^<]*)<\/(?:[\w-]+:)?songwriter>/g,
     ),
   ].map((match) => match[1]!);
+  const attribute = (attributes: string, name: string) =>
+    attributes.match(
+      new RegExp(`(?:^|\\s)${name}\\s*=\\s*(["'])(.*?)\\1`),
+    )?.[2];
   for (const [, attributes] of ttml.matchAll(/<(?:[\w-]+:)?meta\b([^>]*)>/g)) {
-    const key = attributes!.match(/\bkey="([^"]*)"/)?.[1];
-    const value = attributes!.match(/\bvalue="([^"]*)"/)?.[1];
+    const key = attribute(attributes!, "key");
+    const value = attribute(attributes!, "value");
     if (value && /^songwriters?$/i.test(key ?? "")) names.push(value);
   }
   return [

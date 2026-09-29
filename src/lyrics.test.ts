@@ -11,8 +11,8 @@ test("reads Apple's songwriters, decoding entities and dropping repeats", () => 
 });
 
 test("reads AMLL's songwriter meta tags in either attribute order", () => {
-  const ttml = `<tt><head><metadata><amll:meta key="songwriters" value="A &amp; B"/><amll:meta value="C" key="songwriters"/><amll:meta key="musicName" value="Song"/></metadata></head></tt>`;
-  expect(songwritersFrom(ttml)).toEqual(["A & B", "C"]);
+  const ttml = `<tt><head><metadata><amll:meta key="songwriters" value="A &amp; B"/><amll:meta value="C" key="songwriters"/><amll:meta key='songwriters' data-value="no" value='D'/><amll:meta key="musicName" value="Song"/></metadata></head></tt>`;
+  expect(songwritersFrom(ttml)).toEqual(["A & B", "C", "D"]);
 });
 
 test("credits nobody when the TTML names nobody", () => {

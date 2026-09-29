@@ -26,8 +26,9 @@ test("falls back when a count is unset, fractional, or too small", () => {
   expect(parseWholeNumber("lots", 2, 1)).toBe(2);
 });
 
-test("an offset may be negative, within its floor", () => {
+test("an offset may be negative, within its bounds", () => {
   expect(parseWholeNumber("-250", 0, -10_000)).toBe(-250);
   expect(parseWholeNumber("300", 0, -10_000)).toBe(300);
   expect(parseWholeNumber("-20000", 0, -10_000)).toBe(0);
+  expect(parseWholeNumber("150000", 0, -10_000, 10_000)).toBe(0);
 });
