@@ -122,11 +122,23 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 | ---------------- | -------------------------------- | -------------------------------------------------------------------- |
 | `BIND_ADDRESS`   | `127.0.0.1`                      | HTTP bind address (loopback is fine; Compose does not publish ports) |
 | `PORT`           | `3210`                           | HTTP port                                                            |
+| `MEDIA_BACKEND`  | `browser`                        | `native` joins Huddles without Chromium (experimental, see below)    |
 | `CHROME_PATH`    | `/usr/bin/chromium` in the image | Chromium executable path                                             |
 | `LOG_LEVEL`      | `info`                           | Minimum operational log level (`debug`, `trace`, …)                  |
 | `LOG_FILE`       | `data/logs/huddlefm.jsonl`       | Rotated JSON log path; set empty to disable file logging             |
 | `LOG_FILE_SIZE`  | `10m`                            | Maximum size of each log file                                        |
 | `LOG_FILE_COUNT` | `7`                              | Rotated files retained in addition to the active file                |
+
+#### Native media backend (experimental)
+
+With `MEDIA_BACKEND=native`, HuddleFM joins each Huddle's Chime meeting itself instead of through headless Chromium. Each Huddle's media runs in its own Bun process, which uses much less memory and CPU and joins faster.
+
+Everything else behaves the same, with a few differences:
+
+- The video tile is a static card: artwork, title, requester and a progress bar. It has no lyrics view.
+- Turning the display off, or back on, briefly reconnects the bot to the call.
+
+Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`, the same as the browser backend. Leave the variable unset to keep the browser backend.
 
 ### Updating
 

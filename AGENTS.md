@@ -71,6 +71,8 @@ Inside it, `src/media-page.ts`:
 
 The coordinator communicates with this page over WebSocket. Audio files are exposed through token-protected, loopback-only URLs.
 
+`MEDIA_BACKEND=native` swaps the browser for `src/native-media/`, which is experimental and off by default. Each Huddle's media runs in its own Bun process (`main.ts`, supervised by `session.ts`) that joins Chime directly: protobuf signaling (`signaling.ts`), a relay-only `node-datachannel` peer with reconnects (`chime-link.ts`), an audio engine that ports the media page's decks, transitions, volume, ducking and limiter (`audio-engine.ts`), and a static video card drawn with Skia and encoded with x264 (`video-card.ts`, `video-feed.ts`). It speaks the media page's message protocol over stdin/stdout, so the coordinator works with either backend.
+
 #### Additional services include:
 
 - `src/lyrics.ts`: queries multiple lyric providers concurrently and selects the best synchronized result.
