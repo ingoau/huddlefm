@@ -8,21 +8,17 @@ import {
 import type { Lyric } from "@braccato/core";
 import { fonts } from "./fonts.ts";
 import { LyricsView } from "./lyrics-view.ts";
-import {
-  clamp,
-  cubicBezier,
-  defaultMotion,
-  ease,
-  lerp,
-  Tween,
-  type CardMotion,
-} from "./motion.ts";
+import { clamp, ease, easeOut, lerp, motion, Tween } from "./motion.ts";
 
-export const cardSize = 720;
+/** The card is laid out at the media page's 720px viewport... */
+const layoutSize = 720;
+/** ...and drawn and sent at this size, which costs about half as much. */
+export const cardSize = 540;
+const ratio = cardSize / layoutSize;
 const maxArtworkBytes = 15_000_000;
 
 // The media page's geometry at its 720px viewport (see media-page.css).
-const unit = cardSize / 100;
+const unit = layoutSize / 100;
 const coverSmall = { x: 6 * unit, y: 6.7 * unit, scale: 0.15 };
 const coverRadius = 106;
 const headerDefault = { x: 7 * unit, y: 73 * unit };
@@ -32,10 +28,21 @@ const frame = {
   x: 7 * unit,
   y: 29 * unit,
   width: Math.round(86 * unit),
-  height: Math.round(cardSize - 29 * unit - 34),
+  height: Math.round(layoutSize - 29 * unit - 34),
 };
 /** The blurred backdrop is drawn this much smaller, then scaled up. */
 const backdropScale = 0.25;
+
+// A track change, in seconds. The backdrop crossfades while the cover, the
+// title, the artist and the lyrics each leave and arrive on their own.
+const leave = 0.2;
+const headerEnter = 0.38;
+const artistDelay = 0.05;
+const coverEnter = 0.42;
+const backdropFade = 0.7;
+const lyricsEnter = 0.3;
+/** How long a cover waits for its artwork before showing the placeholder. */
+const artworkPatience = 1.5;
 
 export type DisplayMode = "default" | "lyrics" | "off";
 
@@ -61,41 +68,65 @@ function ellipsize(context: SKRSContext2D, text: string, width: number) {
   return `${characters.slice(0, low).join("").trimEnd()}…`;
 }
 
+const progressOf = (now: number, since: number | undefined, span: number) =>
+  since === undefined ? 0 : clamp((now - since) / span);
+
 export type CardProgress = { position: number; duration?: number };
 
 export type VideoCardOptions = {
-  motion?: CardMotion;
   /** Milliseconds, for animation; a fixed clock lets a test step frames. */
   now?: () => number;
 };
+
+type Track = {
+  title: string;
+  artist: string;
+  /** The artwork cropped to a square at the card's size. */
+  cover?: Canvas;
+  backdrop?: Canvas;
+  view?: LyricsView;
+  /** Waiting for setTrack() after beginChange(): nothing to draw yet. */
+  pending?: boolean;
+  enteredAt: number;
+  coverAt?: number;
+  artworkAt?: number;
+  viewAt?: number;
+};
+
+type Outgoing = Track & { leftAt: number };
 
 /**
  * The video card: the media page's layouts drawn with Skia instead of a
  * browser. The default layout is full-bleed artwork with the title and the
  * timeline; the lyrics layout shrinks the artwork into the corner over its
  * blurred backdrop and scrolls synced lyrics beneath. Swapping layouts or
- * tracks animates like the page does. A frame is only redrawn while something
- * moves; otherwise the last one is handed out again.
+ * tracks animates. A frame is only redrawn while something moves; otherwise
+ * the last one is handed out again.
  */
 export class VideoCard {
   private canvas = createCanvas(cardSize, cardSize);
   private context = this.canvas.getContext("2d");
   private stage = createCanvas(cardSize, cardSize);
-  private lyricsCanvas = createCanvas(frame.width, frame.height);
-  private title = "Ready for music";
-  private artist = "Waiting for the next track";
-  private artwork: Image | undefined;
-  private backdrop: Canvas | undefined;
+  private track: Track = {
+    title: "Ready for music",
+    artist: "Waiting for the next track",
+    enteredAt: -Infinity,
+    coverAt: -Infinity,
+  };
+  private outgoing: Outgoing | undefined;
+  private backdrop: { current?: Canvas; previous?: Canvas; at: number } = {
+    at: -Infinity,
+  };
   private artworkRequest = 0;
+  private artworkUrl: string | undefined;
+  private artworkLoad: Promise<Image> | undefined;
   private frameKey = "";
   private frame: Buffer | undefined;
   private stageDirty = true;
-  private motion: CardMotion;
   private now: () => number;
 
   private preferredMode: DisplayMode = "default";
   private lyricsAvailable: boolean | undefined;
-  private view: LyricsView | undefined;
   private lastFrameAt: number | undefined;
   private clock = { position: -1, changedAt: -Infinity, shown: 0 };
 
@@ -104,66 +135,73 @@ export class VideoCard {
   private shade = new Tween(1);
   private lyricsIn = new Tween(0);
   private lyricsShift = new Tween(18);
-  private viewIn = new Tween(0);
-  private changing = new Tween(0);
-  private backdropOut = new Tween(0);
-  private artworkIn = new Tween(1);
 
   constructor(
     private progress: () => CardProgress | undefined,
     private onError: (message: string) => void = () => {},
     options: VideoCardOptions = {},
   ) {
-    this.motion = options.motion ?? defaultMotion;
     this.now = options.now ?? (() => performance.now());
   }
 
-  setTrack(title: string, artist: string, artworkUrl?: string) {
-    this.title = title || "Unknown title";
-    this.artist = artist;
-    this.artwork = undefined;
-    this.backdrop = undefined;
-    this.clearLyrics();
-    this.endChange();
-    const request = ++this.artworkRequest;
+  /**
+   * Starts the track change: the cover, title and lyrics leave while the
+   * backdrop stays. The artwork starts loading now, ahead of setTrack().
+   */
+  beginChange(artworkUrl?: string) {
+    const now = this.seconds();
+    this.leave(now);
+    this.track = { title: "", artist: "", pending: true, enteredAt: now };
+    if (artworkUrl) this.fetchArtwork(artworkUrl);
     this.stageDirty = true;
-    if (artworkUrl)
-      void this.loadArtwork(artworkUrl)
-        .then((image) => {
-          if (request !== this.artworkRequest) return;
-          this.showArtwork(image);
-        })
-        .catch((error) =>
-          this.onError(error instanceof Error ? error.message : String(error)),
-        );
+  }
+
+  setTrack(title: string, artist: string, artworkUrl?: string) {
+    const now = this.seconds();
+    this.leave(now);
+    const track: Track = {
+      title: title || "Unknown title",
+      artist,
+      enteredAt: now,
+    };
+    this.track = track;
+    this.lyricsAvailable = undefined;
+    this.applyMode();
+    this.stageDirty = true;
+    const request = ++this.artworkRequest;
+    if (!artworkUrl) {
+      this.artworkUrl = undefined;
+      this.showCover(track, now);
+      return;
+    }
+    void this.fetchArtwork(artworkUrl)
+      .then((image) => {
+        if (request === this.artworkRequest) this.showArtwork(image);
+      })
+      .catch((error) => {
+        if (request === this.artworkRequest) this.showCover(track);
+        this.onError(error instanceof Error ? error.message : String(error));
+      });
   }
 
   /** Shows artwork that is already decoded, skipping the fetch. */
   showArtwork(image: Image) {
-    this.artwork = image;
-    this.backdrop = this.blurredBackdrop(image);
     const now = this.seconds();
-    this.artworkIn.snap(0);
-    this.artworkIn.set(1, now, this.motion.fade * 1.5);
+    const track = this.track;
+    track.cover = this.croppedCover(image);
+    track.backdrop = this.blurredBackdrop(image);
+    // Late artwork fades in over the placeholder; on time, it arrives with
+    // the cover.
+    if (track.coverAt !== undefined) {
+      track.artworkAt = now;
+      this.fadeBackdrop(track, now);
+    } else this.showCover(track, now);
     this.stageDirty = true;
   }
 
   reset() {
     this.artworkRequest++;
-    this.title = "Ready for music";
-    this.artist = "Waiting for the next track";
-    this.artwork = undefined;
-    this.backdrop = undefined;
-    this.clearLyrics();
-    this.endChange();
-    this.stageDirty = true;
-  }
-
-  /** Fades the card out ahead of the next setTrack(), like the page's swap. */
-  beginChange() {
-    const now = this.seconds();
-    this.changing.set(1, now, this.motion.fade);
-    this.backdropOut.set(1, now, this.motion.fade * 2.6);
+    this.setTrack("Ready for music", "Waiting for the next track");
   }
 
   setDisplayMode(mode: DisplayMode) {
@@ -172,18 +210,18 @@ export class VideoCard {
   }
 
   setLyrics(lines: Lyric[]) {
-    const view = new LyricsView(lines, frame.width, this.motion);
-    this.view = view.empty || !view.synced ? undefined : view;
-    this.lyricsAvailable = Boolean(this.view);
+    const view = new LyricsView(lines, frame.width, ratio);
+    const usable = !view.empty && view.synced;
+    this.track.view = usable ? view : undefined;
+    this.track.viewAt = this.seconds();
+    this.lyricsAvailable = usable;
+    view.enter();
     this.lastFrameAt = undefined;
-    const now = this.seconds();
-    this.viewIn.snap(0);
-    this.viewIn.set(1, now, this.motion.fade * 1.5);
     this.applyMode();
   }
 
   setLyricsUnavailable() {
-    this.view = undefined;
+    this.track.view = undefined;
     this.lyricsAvailable = false;
     this.applyMode();
   }
@@ -203,16 +241,21 @@ export class VideoCard {
       0.1,
     );
     this.lastFrameAt = now;
-    const lyricsAlpha =
-      this.lyricsIn.value(now) * (1 - this.changing.value(now));
+    this.waitForArtwork(now);
+    this.dropOutgoing(now);
+
+    const lyricsAlpha = this.lyricsIn.value(now);
+    const view = this.track.view;
+    if (view && lyricsAlpha > 0) view.update(songTime, delta, frame.height);
     const lyricsMoving =
-      Boolean(this.view) &&
       lyricsAlpha > 0 &&
-      (this.clockRunning(now) || !this.view!.settled);
-    if (this.view && lyricsAlpha > 0)
-      this.view.update(songTime, delta, frame.height);
+      ((Boolean(view) &&
+        (this.clockRunning(now) ||
+          !view!.settled ||
+          progressOf(now, this.track.viewAt, lyricsEnter) < 1)) ||
+        Boolean(this.outgoing?.view));
     const stageMoving = this.stageMoving(now);
-    const key = `${formatTime(position)}|${formatTime(duration)}|${Math.round(amount * 528)}`;
+    const key = `${formatTime(position)}|${formatTime(duration)}|${Math.round(amount * 528 * ratio)}`;
     if (
       this.frame &&
       key === this.frameKey &&
@@ -227,8 +270,10 @@ export class VideoCard {
       this.stageDirty = stageMoving;
     }
     const context = this.context;
+    context.setTransform(1, 0, 0, 1, 0, 0);
     context.drawImage(this.stage, 0, 0);
-    if (lyricsAlpha > 0.001 && this.view) this.drawLyrics(now, lyricsAlpha);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    if (lyricsAlpha > 0.001) this.drawLyrics(now, lyricsAlpha);
     this.drawTimeline(context, position, duration, amount);
     // A copy of the pixels, RGBA and premultiplied, which is the same thing
     // for an opaque card. Five times quicker than getImageData().
@@ -243,36 +288,80 @@ export class VideoCard {
     return this.canvas.toBuffer("image/png");
   }
 
-  private clearLyrics() {
-    this.view = undefined;
-    this.lyricsAvailable = undefined;
-    this.applyMode();
+  /** Sends what is showing on its way out. */
+  private leave(now: number) {
+    if (this.track.pending) return;
+    this.outgoing = { ...this.track, leftAt: now };
   }
 
-  private endChange() {
-    const now = this.seconds();
-    this.changing.set(0, now, this.motion.fade);
-    this.backdropOut.set(0, now, this.motion.fade * 2.6);
+  private dropOutgoing(now: number) {
+    const outgoing = this.outgoing;
+    if (!outgoing || now - outgoing.leftAt < leave) return;
+    // In the default layout the old cover stays up until the new one covers
+    // it.
+    if (
+      this.layout.value(now) < 1 &&
+      progressOf(now, this.track.coverAt, coverEnter) < 1
+    )
+      return;
+    this.outgoing = undefined;
+    this.stageDirty = true;
+  }
+
+  private fetchArtwork(url: string) {
+    if (url !== this.artworkUrl || !this.artworkLoad) {
+      this.artworkUrl = url;
+      this.artworkLoad = this.loadArtwork(url);
+      // Nobody may wait on it if the change is abandoned.
+      this.artworkLoad.catch(() => {});
+    }
+    return this.artworkLoad;
+  }
+
+  private showCover(track: Track, now = this.seconds()) {
+    if (track !== this.track || track.coverAt !== undefined) return;
+    track.coverAt = now;
+    this.fadeBackdrop(track, now);
+    this.stageDirty = true;
+  }
+
+  /** Stops a slow download holding the placeholder back forever. */
+  private waitForArtwork(now: number) {
+    const track = this.track;
+    if (
+      !track.pending &&
+      track.coverAt === undefined &&
+      now - track.enteredAt > artworkPatience
+    )
+      this.showCover(track, now);
+  }
+
+  private fadeBackdrop(track: Track, now: number) {
+    if (this.backdrop.current === track.backdrop) return;
+    this.backdrop = {
+      previous: this.backdrop.current,
+      current: track.backdrop,
+      at: now,
+    };
   }
 
   private applyMode() {
     const lyrics =
       this.preferredMode === "lyrics" && this.lyricsAvailable !== false;
     const now = this.seconds();
-    const { duration, easing } = this.motion.layout;
-    const curve = cubicBezier(...easing);
+    const { duration, easing } = motion.layout;
     const target = lyrics ? 1 : 0;
     if (this.layout.target === target) return;
-    this.layout.set(target, now, duration, curve);
+    this.layout.set(target, now, duration, easing);
     this.rounding.set(target, now, duration, ease);
     this.shade.set(1 - target, now, duration / 2, ease);
-    this.lyricsShift.set(lyrics ? 0 : 18, now, duration, curve);
+    this.lyricsShift.set(lyrics ? 0 : 18, now, duration, easing);
     // Like the page: the lyrics wait for the artwork to get going, but leave
     // at once.
     this.lyricsIn.set(
       target,
       now,
-      this.motion.fade * 1.4,
+      motion.fade * 1.4,
       ease,
       lyrics ? duration * 0.26 : 0,
     );
@@ -280,17 +369,20 @@ export class VideoCard {
   }
 
   private stageMoving(now: number) {
-    return [
-      this.layout,
-      this.rounding,
-      this.shade,
-      this.changing,
-      this.backdropOut,
-      this.artworkIn,
-    ].some((tween) => !tween.settled(now));
+    const track = this.track;
+    return (
+      [this.layout, this.rounding, this.shade].some(
+        (tween) => !tween.settled(now),
+      ) ||
+      Boolean(this.outgoing) ||
+      now - track.enteredAt < headerEnter + artistDelay ||
+      progressOf(now, track.coverAt, coverEnter) < 1 ||
+      (track.artworkAt !== undefined && now - track.artworkAt < coverEnter) ||
+      now - this.backdrop.at < backdropFade
+    );
   }
 
-  /** The card's clock, in seconds like the motion presets. */
+  /** The card's clock, in seconds like the motion settings. */
   private seconds() {
     return this.now() / 1_000;
   }
@@ -330,10 +422,25 @@ export class VideoCard {
     return loadImage(bytes);
   }
 
+  /** background-size: cover, done once so each frame draws a small square. */
+  private croppedCover(image: Image) {
+    const canvas = createCanvas(cardSize, cardSize);
+    const context = canvas.getContext("2d");
+    const fit = Math.max(cardSize / image.width, cardSize / image.height);
+    context.drawImage(
+      image,
+      (cardSize - image.width * fit) / 2,
+      (cardSize - image.height * fit) / 2,
+      image.width * fit,
+      image.height * fit,
+    );
+    return canvas;
+  }
+
   /** #artwork: the cover blurred, darkened and saturated behind everything. */
   private blurredBackdrop(image: Image) {
     // inset: -18%, drawn small so the 76px blur is cheap.
-    const size = Math.round(cardSize * 1.36 * backdropScale);
+    const size = Math.round(layoutSize * 1.36 * backdropScale);
     const canvas = createCanvas(size, size);
     const context = canvas.getContext("2d");
     const scale = Math.max(size / image.width, size / image.height);
@@ -352,28 +459,30 @@ export class VideoCard {
   /** Everything but the lyrics and the timeline. */
   private drawStage(now: number) {
     const context = this.stage.getContext("2d");
-    const size = cardSize;
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const size = layoutSize;
     const layout = this.layout.value(now);
-    const changing = this.changing.value(now);
-    const content = 1 - changing;
     context.fillStyle = "#0a0a0c";
     context.fillRect(0, 0, size, size);
 
-    const backdrop = this.backdrop;
-    if (backdrop) {
-      const out = this.backdropOut.value(now);
-      const scale = lerp(1.1, 1.16, out);
-      const drawn = size * 1.36 * scale;
-      context.globalAlpha = 0.86 * (1 - out) * this.artworkIn.value(now);
+    // #artwork, crossfading between tracks.
+    const mix = ease(progressOf(now, this.backdrop.at, backdropFade));
+    const drawn = size * 1.36 * 1.1;
+    for (const [image, alpha] of [
+      [this.backdrop.previous, 1 - mix],
+      [this.backdrop.current, mix],
+    ] as const) {
+      if (!image || alpha <= 0.001) continue;
+      context.globalAlpha = 0.86 * alpha;
       context.drawImage(
-        backdrop,
+        image,
         (size - drawn) / 2,
         (size - drawn) / 2,
         drawn,
         drawn,
       );
-      context.globalAlpha = 1;
     }
+    context.globalAlpha = 1;
     // #stage::before
     const angle = (115 * Math.PI) / 180;
     const dx = (Math.sin(angle) * size) / 2;
@@ -390,7 +499,31 @@ export class VideoCard {
     context.fillStyle = wash;
     context.fillRect(0, 0, size, size);
 
-    this.drawCover(context, layout, content, now);
+    const track = this.track;
+    const coverIn = easeOut(progressOf(now, track.coverAt, coverEnter));
+    const outgoing = this.outgoing;
+    if (outgoing) {
+      // Shrinks away as a thumbnail; stays put as the full-bleed cover until
+      // the new one is over it.
+      const gone = easeOut(clamp((now - outgoing.leftAt) / leave));
+      this.drawCover(
+        context,
+        outgoing,
+        layout,
+        1 - 0.12 * gone * layout,
+        lerp(1, 1 - gone, layout) * (1 - coverIn * (1 - layout)),
+        now,
+      );
+    }
+    if (!track.pending && track.coverAt !== undefined)
+      this.drawCover(
+        context,
+        track,
+        layout,
+        lerp(lerp(1.04, 0.88, layout), 1, coverIn),
+        clamp(coverIn * 1.4),
+        now,
+      );
 
     // #stage::after, which keeps the text legible over bright artwork.
     const shade = this.shade.value(now);
@@ -406,110 +539,136 @@ export class VideoCard {
       context.globalAlpha = 1;
     }
 
+    if (outgoing) {
+      const gone = easeOut(clamp((now - outgoing.leftAt) / leave));
+      this.drawHeader(
+        context,
+        outgoing,
+        layout,
+        1 - gone,
+        -12 * gone,
+        1 - gone,
+        -12 * gone,
+      );
+    }
+    if (!track.pending) {
+      const title = easeOut(clamp((now - track.enteredAt) / headerEnter));
+      const artist = easeOut(
+        clamp((now - track.enteredAt - artistDelay) / headerEnter),
+      );
+      this.drawHeader(
+        context,
+        track,
+        layout,
+        title,
+        14 * (1 - title),
+        artist,
+        14 * (1 - artist),
+      );
+    }
+  }
+
+  private drawHeader(
+    context: SKRSContext2D,
+    track: Track,
+    layout: number,
+    titleAlpha: number,
+    titleShift: number,
+    artistAlpha: number,
+    artistShift: number,
+  ) {
     const left = lerp(headerDefault.x, headerLyrics.x, layout);
     const top = lerp(headerDefault.y, headerLyrics.y, layout);
-    context.globalAlpha = content;
     context.textBaseline = "top";
     context.textAlign = "left";
-    context.fillStyle = "#ffffff";
-    context.font = `700 34px ${fonts()}`;
-    context.fillText(
-      ellipsize(context, this.title, headerWidth),
-      left,
-      top + 2,
-    );
-    context.fillStyle = `rgba(255, 255, 255, ${lerp(0.76, 0.58, clamp(layout)).toFixed(3)})`;
-    context.font = `600 20px ${fonts()}`;
-    context.fillText(
-      ellipsize(context, this.artist, headerWidth),
-      left,
-      top + 45,
-    );
+    if (titleAlpha > 0.001) {
+      context.globalAlpha = titleAlpha;
+      context.fillStyle = "#ffffff";
+      context.font = `700 34px ${fonts()}`;
+      context.fillText(
+        ellipsize(context, track.title, headerWidth),
+        left,
+        top + 2 + titleShift,
+      );
+    }
+    if (artistAlpha > 0.001) {
+      context.globalAlpha = artistAlpha;
+      context.fillStyle = `rgba(255, 255, 255, ${lerp(0.76, 0.58, clamp(layout)).toFixed(3)})`;
+      context.font = `600 20px ${fonts()}`;
+      context.fillText(
+        ellipsize(context, track.artist, headerWidth),
+        left,
+        top + 45 + artistShift,
+      );
+    }
     context.globalAlpha = 1;
   }
 
   /** #cover: full bleed by default, a rounded thumbnail in the lyrics layout. */
   private drawCover(
     context: SKRSContext2D,
+    track: Track,
     layout: number,
-    content: number,
+    grow: number,
+    alpha: number,
     now: number,
   ) {
-    if (content <= 0.001) return;
-    const size = cardSize;
+    if (alpha <= 0.001) return;
+    const size = layoutSize;
     const scale = lerp(1, coverSmall.scale, layout);
-    const x = lerp(0, coverSmall.x, layout);
-    const y = lerp(0, coverSmall.y, layout);
-    const side = size * scale;
-    const radius = coverRadius * this.rounding.value(now) * scale;
+    const side = size * scale * grow;
+    const x = lerp(0, coverSmall.x, layout) + (size * scale - side) / 2;
+    const y = lerp(0, coverSmall.y, layout) + (size * scale - side) / 2;
+    const radius = coverRadius * this.rounding.value(now) * scale * grow;
     context.save();
-    context.globalAlpha = content;
+    context.globalAlpha = alpha;
     if (layout > 0.001) {
       // box-shadow: 0 40px 120px rgb(0 0 0 / 0.32), scaled with the cover.
       context.shadowColor = "rgba(0, 0, 0, 0.32)";
-      context.shadowBlur = 120 * scale;
-      context.shadowOffsetY = 40 * scale;
+      context.shadowBlur = 120 * scale * ratio;
+      context.shadowOffsetY = 40 * scale * ratio;
     }
     context.beginPath();
     context.roundRect(x, y, side, side, Math.max(0, radius));
-    context.fillStyle = this.artwork ? "#0a0a0c" : "rgba(255, 255, 255, 0.06)";
+    const artworkIn =
+      track.artworkAt === undefined
+        ? 1
+        : ease(clamp((now - track.artworkAt) / coverEnter));
+    const cover = track.cover;
+    context.fillStyle =
+      cover && artworkIn >= 1 ? "#0a0a0c" : "rgba(255, 255, 255, 0.06)";
     context.fill();
     context.shadowColor = "transparent";
-    const artwork = this.artwork;
-    if (artwork) {
+    if (cover) {
       context.clip();
-      context.globalAlpha = content * this.artworkIn.value(now);
-      // background-size: cover, centred.
-      const fit = Math.max(side / artwork.width, side / artwork.height);
-      const width = artwork.width * fit;
-      const height = artwork.height * fit;
-      context.drawImage(
-        artwork,
-        x + (side - width) / 2,
-        y + (side - height) / 2,
-        width,
-        height,
-      );
+      context.globalAlpha = alpha * artworkIn;
+      context.drawImage(cover, x, y, side, side);
     }
     context.restore();
   }
 
   private drawLyrics(now: number, alpha: number) {
-    const view = this.view!;
-    const context = this.lyricsCanvas.getContext("2d");
-    context.clearRect(0, 0, frame.width, frame.height);
-    view.draw(context, frame.height);
-    // mask-image: fade out toward the top and bottom edges. Only the two
-    // bands need touching; the middle is fully opaque.
-    const topBand = Math.ceil(frame.height * 0.12);
-    const bottomBand = Math.floor(frame.height * 0.78);
-    const top = context.createLinearGradient(0, 0, 0, topBand);
-    top.addColorStop(0, "rgba(0, 0, 0, 0)");
-    top.addColorStop(1, "rgba(0, 0, 0, 1)");
-    const bottom = context.createLinearGradient(0, bottomBand, 0, frame.height);
-    bottom.addColorStop(0, "rgba(0, 0, 0, 1)");
-    bottom.addColorStop(1, "rgba(0, 0, 0, 0)");
-    // destination-in composites the whole canvas, so each band is clipped.
-    for (const [fill, y, height] of [
-      [top, 0, topBand],
-      [bottom, bottomBand, frame.height - bottomBand],
-    ] as const) {
-      context.save();
-      context.beginPath();
-      context.rect(0, y, frame.width, height);
-      context.clip();
-      context.globalCompositeOperation = "destination-in";
-      context.fillStyle = fill;
-      context.fillRect(0, y, frame.width, height);
-      context.restore();
+    const context = this.context;
+    context.save();
+    context.translate(frame.x, frame.y + this.lyricsShift.value(now));
+    const outgoing = this.outgoing;
+    if (outgoing?.view) {
+      const gone = easeOut(clamp((now - outgoing.leftAt) / leave));
+      if (gone < 1) {
+        context.save();
+        context.translate(0, -24 * gone);
+        outgoing.view.draw(context, frame.height, alpha * (1 - gone));
+        context.restore();
+      }
     }
-    this.context.globalAlpha = alpha * this.viewIn.value(now);
-    this.context.drawImage(
-      this.lyricsCanvas,
-      frame.x,
-      frame.y + this.lyricsShift.value(now),
-    );
-    this.context.globalAlpha = 1;
+    const view = this.track.view;
+    if (view)
+      view.draw(
+        context,
+        frame.height,
+        alpha * ease(progressOf(now, this.track.viewAt, lyricsEnter)),
+      );
+    context.restore();
   }
 
   private drawTimeline(
@@ -518,7 +677,7 @@ export class VideoCard {
     duration: number,
     amount: number,
   ) {
-    const size = cardSize;
+    const size = layoutSize;
     const centre = size - 82 - 9;
     const barLeft = 48 + 36 + 12;
     const barRight = size - 48 - 36 - 12;

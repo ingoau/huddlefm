@@ -13,6 +13,7 @@ import {
   senderReport,
 } from "./rtp.ts";
 import { statusCodes } from "./status-codes.ts";
+import { cardSize } from "./video-card.ts";
 import { videoFps, videoMaxKbps } from "./video-feed.ts";
 
 export { statusCodes };
@@ -366,8 +367,8 @@ export class ChimeLink {
                   framerate: videoFps,
                   max_bitrate_kbps: videoMaxKbps,
                   attendee_id: this.attendeeId,
-                  width: 720,
-                  height: 720,
+                  width: cardSize,
+                  height: cardSize,
                 },
               ]
             : []),

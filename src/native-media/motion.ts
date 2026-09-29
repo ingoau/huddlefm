@@ -36,7 +36,6 @@ export function cubicBezier(x1: number, y1: number, x2: number, y2: number) {
 }
 
 export type Easing = (progress: number) => number;
-export type Bezier = [number, number, number, number];
 
 export const clamp = (value: number, min = 0, max = 1) =>
   Math.min(max, Math.max(min, value));
@@ -184,104 +183,30 @@ export const spring = (
   damping: dampingRatio * 2 * Math.sqrt(stiffness * mass),
 });
 
-/**
- * Everything that sets how the card moves. The presets differ only in feel;
- * each draws the same layout.
- */
-export type CardMotion = {
-  name: string;
+/** How the card moves: Apple Music's feel, a little quicker. */
+export const motion = {
   /** Scrolling between lines. */
-  scroll: SpringParams;
+  scroll: spring(300, 1, 0.9),
   /** Growing into and out of the current line. */
-  scale: SpringParams;
+  scale: spring(260, 1),
   /** Delay between one line starting to scroll and the next, in seconds. */
-  stagger: number;
+  stagger: 0.035,
   /** How early the view moves to a line before it is sung, in seconds. */
-  lead: number;
+  lead: 0.12,
   /** How big lines other than the current one are. */
-  inactiveScale: number;
+  inactiveScale: 0.94,
   /** Seconds for a line to light up or dim. */
-  brighten: number;
+  brighten: 0.18,
   /** Width of a syllable's soft leading edge, in ems. */
-  fadeWidth: number;
+  fadeWidth: 0.5,
   /** How far a sung syllable rises, in ems. */
-  lift: number;
+  lift: 0.05,
   /** Strength of the glow and swell on long held words. */
-  emphasis: number;
+  emphasis: 1,
   /** Blur at the top and bottom edges of the lyrics, in pixels. */
-  edgeBlur: number;
+  edgeBlur: 3.5,
   /** The default and lyrics layouts swapping. */
-  layout: { duration: number; easing: Bezier };
-  /** Content fading for a track change or a mode swap, in seconds. */
-  fade: number;
+  layout: { duration: 0.45, easing: cubicBezier(0.22, 1, 0.36, 1) },
+  /** Elements fading in and out, in seconds. */
+  fade: 0.18,
 };
-
-export const motionPresets = {
-  /** Apple Music's feel, a little quicker: the default. */
-  snappy: {
-    name: "snappy",
-    scroll: spring(300, 1, 0.9),
-    scale: spring(260, 1),
-    stagger: 0.035,
-    lead: 0.12,
-    inactiveScale: 0.94,
-    brighten: 0.18,
-    fadeWidth: 0.5,
-    lift: 0.05,
-    emphasis: 1,
-    edgeBlur: 3.5,
-    layout: { duration: 0.45, easing: [0.22, 1, 0.36, 1] },
-    fade: 0.18,
-  },
-  /** AMLL's timings, close to Apple Music itself. */
-  classic: {
-    name: "classic",
-    scroll: { stiffness: 200, damping: 2.2 * Math.sqrt(200), mass: 0.9 },
-    scale: { stiffness: 100, damping: 25, mass: 2 },
-    stagger: 0.05,
-    lead: 0,
-    inactiveScale: 0.97,
-    brighten: 0.3,
-    fadeWidth: 0.5,
-    lift: 0.05,
-    emphasis: 1,
-    edgeBlur: 4,
-    layout: { duration: 0.7, easing: [0.22, 1, 0.36, 1] },
-    fade: 0.25,
-  },
-  /** Underdamped springs that overshoot a touch, with a bigger size change. */
-  bouncy: {
-    name: "bouncy",
-    scroll: spring(260, 0.62, 0.9),
-    scale: spring(320, 0.5),
-    stagger: 0.045,
-    lead: 0.1,
-    inactiveScale: 0.9,
-    brighten: 0.15,
-    fadeWidth: 0.45,
-    lift: 0.08,
-    emphasis: 1.35,
-    edgeBlur: 3.5,
-    layout: { duration: 0.55, easing: [0.34, 1.4, 0.64, 1] },
-    fade: 0.16,
-  },
-  /** Quickest of all: stiff springs, a tight stagger and short fades. */
-  instant: {
-    name: "instant",
-    scroll: spring(520, 1, 0.8),
-    scale: spring(480, 1),
-    stagger: 0.02,
-    lead: 0.15,
-    inactiveScale: 0.95,
-    brighten: 0.1,
-    fadeWidth: 0.35,
-    lift: 0.04,
-    emphasis: 0.8,
-    edgeBlur: 3,
-    layout: { duration: 0.3, easing: [0.2, 0.9, 0.3, 1] },
-    fade: 0.12,
-  },
-} satisfies Record<string, CardMotion>;
-
-export type MotionPreset = keyof typeof motionPresets;
-export const defaultMotion: CardMotion = motionPresets.snappy;

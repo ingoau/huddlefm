@@ -206,7 +206,7 @@ function handle(message: Record<string, any>) {
     const swap = ++trackSwap;
     lyrics = undefined;
     noLyrics = undefined;
-    card?.beginChange();
+    card?.beginChange(message.artwork);
     setTimeout(() => {
       if (swap !== trackSwap || engine?.current !== message.entryId) return;
       shownEntry = message.entryId;

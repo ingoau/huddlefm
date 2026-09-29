@@ -3,7 +3,7 @@ import type { Lyric, LyricPart } from "@braccato/core";
 import { createCanvas } from "@napi-rs/canvas";
 import { LyricsView } from "./lyrics-view.ts";
 import { cubicBezier, Spring, spring, Tween } from "./motion.ts";
-import { VideoCard } from "./video-card.ts";
+import { cardSize, VideoCard } from "./video-card.ts";
 
 const part = (
   words: string,
@@ -155,6 +155,17 @@ describe("lyrics view", () => {
     expect(view.describe()[2]!.y).toBeLessThan(start[2]!);
   });
 
+  test("new lyrics fly up into place instead of snapping", () => {
+    const view = new LyricsView(song, 600);
+    view.enter();
+    view.update(4.2, 0, 480);
+    expect(view.settled).toBe(false);
+    // Before the next line comes up at 6s.
+    for (let frame = 1; frame < 45; frame++)
+      view.update(4.2 + frame / 30, 1 / 30, 480);
+    expect(view.settled).toBe(true);
+  });
+
   test("draws without throwing at every stage of a song", () => {
     const view = new LyricsView(song, 600);
     const canvas = createCanvas(600, 480);
@@ -238,6 +249,27 @@ describe("video card", () => {
     step(1, false);
     const fallback = value.rgba();
     expect(fallback.equals(plain)).toBe(true);
+  });
+
+  test("a track change animates, then settles on the new track", () => {
+    const { card: value, step } = card();
+    step(0.5, false);
+    const before = Buffer.from(value.rgba());
+    value.beginChange();
+    step(0.2, false);
+    value.setTrack("Next", "Someone");
+    const during = value.rgba();
+    step(0.1, false);
+    expect(value.rgba()).not.toBe(during);
+    step(2, false);
+    const after = value.rgba();
+    expect(value.rgba()).toBe(after);
+    expect(after.equals(before)).toBe(false);
+  });
+
+  test("draws at the card's size", () => {
+    const { card: value } = card();
+    expect(value.rgba().length).toBe(cardSize * cardSize * 4);
   });
 
   test("keeps redrawing while lyrics play", () => {

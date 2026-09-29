@@ -1,15 +1,7 @@
 import { createCanvas, type Canvas, type SKRSContext2D } from "@napi-rs/canvas";
 import type { Lyric, LyricPart } from "@braccato/core";
 import { fonts } from "./fonts.ts";
-import {
-  clamp,
-  cubicBezier,
-  defaultMotion,
-  easeOut,
-  lerp,
-  Spring,
-  type CardMotion,
-} from "./motion.ts";
+import { clamp, cubicBezier, easeOut, lerp, motion, Spring } from "./motion.ts";
 
 const fontSize = 40;
 const rowHeight = fontSize * 1.2;
@@ -17,6 +9,10 @@ const backgroundFontSize = 26;
 const backgroundRowHeight = backgroundFontSize * 1.25;
 const romanFontSize = 18;
 const romanRowHeight = romanFontSize * 1.4;
+/** Space between a line and its background vocals. */
+const backgroundGap = 10;
+/** How far below its place a line starts when lyrics fly in. */
+const enterDistance = 90;
 /** Space above and below each line. */
 const linePadding = 13;
 /** Room around a line's own canvas for lift, glow and blur. */
@@ -77,9 +73,15 @@ type LineItem = {
   end: number;
   align: Align;
   main: TextBlock;
-  roman?: { rows: { text: string; x: number }[]; height: number };
+  roman?: {
+    rows: { text: string; x: number; width: number }[];
+    height: number;
+  };
   background?: TextBlock;
   mainHeight: number;
+  /** Where the line's text starts and ends across the view. */
+  left: number;
+  right: number;
   y: Spring;
   scale: Spring;
   shown: Spring;
@@ -162,12 +164,17 @@ export class LyricsView {
   private items: Item[] = [];
   private focus = 0;
   private lastTime: number | undefined;
+  private entering = false;
   readonly synced: boolean;
 
+  /**
+   * @param width - Width in layout pixels, which the card draws at 720 wide
+   * @param ratio - Device pixels per layout pixel for the line canvases
+   */
   constructor(
     lines: Lyric[],
     readonly width: number,
-    private motion: CardMotion = defaultMotion,
+    private ratio = 1,
   ) {
     const measure = createCanvas(1, 1).getContext("2d");
     this.items = this.build(lines, measure);
@@ -176,6 +183,11 @@ export class LyricsView {
 
   get empty() {
     return this.items.length === 0;
+  }
+
+  /** Makes the first frame fly the lines up into place instead of snapping. */
+  enter() {
+    this.entering = true;
   }
 
   /** Whether nothing is still moving toward where it was last sent. */
@@ -229,7 +241,7 @@ export class LyricsView {
       time < this.lastTime - 50 ||
       time > this.lastTime + 1_500;
     this.lastTime = time;
-    const ahead = time + this.motion.lead * 1_000;
+    const ahead = time + motion.lead * 1_000;
 
     let focus = -1;
     let latest = -1;
@@ -256,19 +268,24 @@ export class LyricsView {
       targets[index] = top;
     }
 
+    const entering = jumped && this.entering;
+    this.entering = false;
     let delay = 0;
-    let step = jumped ? 0 : this.motion.stagger;
+    let step = jumped && !entering ? 0 : motion.stagger;
     for (const [index, item] of this.items.entries()) {
       const target = targets[index]!;
-      if (jumped) item.y.snap(target);
+      if (entering) {
+        item.y.snap(target + enterDistance);
+        item.y.set(target, delay);
+      } else if (jumped) item.y.snap(target);
       else if (Math.abs(item.y.target - target) > 0.5)
         item.y.set(target, delay);
-      if (item.y.position + heights[index]! >= 0) {
+      if (target + heights[index]! >= 0) {
         delay += step;
         if (index >= focus) step /= 1.05;
       }
       if (item.kind !== "line") continue;
-      const scale = item.active ? 1 : this.motion.inactiveScale;
+      const scale = item.active ? 1 : motion.inactiveScale;
       const shown = item.active ? 1 : 0;
       if (jumped) {
         item.scale.snap(scale);
@@ -277,12 +294,12 @@ export class LyricsView {
       } else {
         item.scale.set(scale);
         item.shown.set(shown);
-        const rate = 1 - Math.exp(-delta / (this.motion.brighten / 3));
+        const rate = 1 - Math.exp(-delta / (motion.brighten / 3));
         item.bright += (shown - item.bright) * rate;
         if (Math.abs(item.bright - shown) < 0.002) item.bright = shown;
       }
     }
-    if (!jumped)
+    if (!jumped || entering)
       for (const item of this.items) {
         item.y.update(delta);
         if (item.kind === "line") {
@@ -292,19 +309,25 @@ export class LyricsView {
       }
   }
 
-  /** Draws the view at the time last given to update(). */
-  draw(context: SKRSContext2D, height: number) {
+  /**
+   * Draws the view at the time last given to update(), faded out toward the
+   * top and bottom like the page's mask. Each line takes the fade at its far
+   * edge, so it is gone by the time it reaches the view's edge: no layer to
+   * mask, and nothing to clip.
+   */
+  draw(context: SKRSContext2D, height: number, alpha = 1) {
     const time = this.lastTime ?? 0;
     const focusY = height * focusPosition;
+    const fadeAt = (y: number) =>
+      clamp(Math.min(y / (height * 0.12), (height - y) / (height * 0.22)));
     for (const item of this.items) {
       const top = item.y.position;
       if (item.kind === "dots") {
-        if (top > -dotsHeight && top < height)
-          this.drawDots(context, item, time);
+        const fade = fadeAt(top + dotsHeight / 2) * alpha;
+        if (fade > 0.001) this.drawDots(context, item, time, fade);
         continue;
       }
-      const extent =
-        item.mainHeight + (item.background?.height ?? 0) + linePadding * 2;
+      const extent = item.mainHeight + backgroundExtent(item) + linePadding * 2;
       if (top + extent < -bleed || top > height + bleed) {
         // Off screen: let the canvases go until the line comes back.
         item.canvas = item.blurred = undefined;
@@ -318,17 +341,31 @@ export class LyricsView {
           : (centre - focusY) / Math.max(1, height - focusY);
       const edge = clamp((distance - 0.12) / 0.88);
       const blur =
-        Math.round(this.motion.edgeBlur * edge * edge * (1 - item.bright) * 4) /
-        4;
+        Math.round(motion.edgeBlur * edge * edge * (1 - item.bright) * 4) / 4;
+      const bottom =
+        top +
+        linePadding +
+        item.mainHeight +
+        item.shown.position * backgroundExtent(item);
+      const fade =
+        alpha * (centre < focusY ? fadeAt(top + linePadding) : fadeAt(bottom));
+      if (fade <= 0.001) continue;
       const image = this.lineImage(item, time, blur);
       const scale = item.scale.position;
       const pivotX = item.align === "right" ? this.width : 0;
       const pivotY = top + linePadding + item.main.anchor;
       context.save();
+      context.globalAlpha = fade;
       context.translate(pivotX, pivotY);
       context.scale(scale, scale);
       context.translate(-pivotX, -pivotY);
-      context.drawImage(image, -bleed, top + linePadding - bleed);
+      context.drawImage(
+        image,
+        item.left - bleed,
+        top + linePadding - bleed,
+        item.right - item.left + bleed * 2,
+        item.mainHeight + backgroundExtent(item) + bleed * 2,
+      );
       context.restore();
     }
   }
@@ -337,7 +374,7 @@ export class LyricsView {
     if (item.kind === "dots") return item.active ? dotsHeight : 0;
     return (
       item.mainHeight +
-      (item.active ? (item.background?.height ?? 0) : 0) +
+      (item.active ? backgroundExtent(item) : 0) +
       linePadding * 2
     );
   }
@@ -353,7 +390,7 @@ export class LyricsView {
           start: line.startTimeMs,
           end: line.startTimeMs + line.durationMs,
           align: "left",
-          y: new Spring(0, this.motion.scroll),
+          y: new Spring(0, motion.scroll),
           active: false,
         });
         continue;
@@ -398,7 +435,7 @@ export class LyricsView {
       start,
       end,
       align,
-      y: new Spring(0, this.motion.scroll),
+      y: new Spring(0, motion.scroll),
       active: false,
     };
   }
@@ -474,6 +511,7 @@ export class LyricsView {
         return {
           text,
           x: box.left + (align === "right" ? box.width - width : 0),
+          width,
         };
       });
       roman = { rows, height: rows.length * romanRowHeight + 4 };
@@ -488,6 +526,11 @@ export class LyricsView {
       });
       end = Math.max(end, ...background.map((value) => value.end));
     }
+    const spans = [
+      ...mainBlock.syllables,
+      ...(backgroundBlock?.syllables ?? []),
+      ...(roman?.rows ?? []),
+    ];
     return {
       kind: "line",
       start: line.startTimeMs,
@@ -497,9 +540,11 @@ export class LyricsView {
       roman,
       background: backgroundBlock,
       mainHeight: mainBlock.height + (roman?.height ?? 0),
-      y: new Spring(0, this.motion.scroll),
-      scale: new Spring(this.motion.inactiveScale, this.motion.scale),
-      shown: new Spring(0, this.motion.scale),
+      left: Math.floor(Math.min(...spans.map((span) => span.x))),
+      right: Math.ceil(Math.max(...spans.map((span) => span.x + span.width))),
+      y: new Spring(0, motion.scroll),
+      scale: new Spring(motion.inactiveScale, motion.scale),
+      shown: new Spring(0, motion.scale),
       bright: 0,
       active: false,
     };
@@ -512,8 +557,10 @@ export class LyricsView {
       moving && item.main.timed
         ? `t${time.toFixed(1)}|${item.bright}|${item.shown.position}`
         : `${item.bright.toFixed(3)}|${item.shown.position.toFixed(3)}`;
-    const width = this.width + bleed * 2;
-    const height = item.mainHeight + (item.background?.height ?? 0) + bleed * 2;
+    const width = Math.ceil((item.right - item.left + bleed * 2) * this.ratio);
+    const height = Math.ceil(
+      (item.mainHeight + backgroundExtent(item) + bleed * 2) * this.ratio,
+    );
     if (!item.canvas) item.canvas = createCanvas(width, height);
     if (contentKey !== item.contentKey) {
       item.contentKey = contentKey;
@@ -521,14 +568,18 @@ export class LyricsView {
       this.drawLine(item.canvas.getContext("2d"), item, time);
     }
     if (blur <= 0) return item.canvas;
+    // Blurred text has no fine detail to keep: blur at half size, which is
+    // far cheaper, and let the draw scale it back up.
     const blurKey = `${contentKey}|${blur}`;
-    if (!item.blurred) item.blurred = createCanvas(width, height);
+    const halfWidth = Math.ceil(width / 2);
+    const halfHeight = Math.ceil(height / 2);
+    if (!item.blurred) item.blurred = createCanvas(halfWidth, halfHeight);
     if (blurKey !== item.blurKey) {
       item.blurKey = blurKey;
       const context = item.blurred.getContext("2d");
-      context.clearRect(0, 0, width, height);
-      context.filter = `blur(${blur}px)`;
-      context.drawImage(item.canvas, 0, 0);
+      context.clearRect(0, 0, halfWidth, halfHeight);
+      context.filter = `blur(${(blur * this.ratio) / 2}px)`;
+      context.drawImage(item.canvas, 0, 0, width / 2, height / 2);
       context.filter = "none";
     }
     return item.blurred;
@@ -538,7 +589,8 @@ export class LyricsView {
     const canvas = item.canvas!;
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.save();
-    context.translate(bleed, bleed);
+    context.scale(this.ratio, this.ratio);
+    context.translate(bleed - item.left, bleed);
     this.drawBlock(context, item.main, time, item.bright, false);
     if (item.roman) {
       context.font = `600 ${romanFontSize}px ${fonts()}`;
@@ -555,7 +607,10 @@ export class LyricsView {
     const shown = clamp(item.shown.position, 0, 1.2);
     if (background && shown > 0.001) {
       // AMLL's reveal: slide out from behind the line, grow from 80%.
-      const top = item.mainHeight - (1 - shown) * 0.8 * background.height;
+      const top =
+        item.mainHeight +
+        backgroundGap -
+        (1 - shown) * 0.8 * (background.height + backgroundGap);
       const scale = 0.8 + 0.2 * shown;
       const pivotX = item.align === "right" ? this.width : 0;
       context.save();
@@ -592,8 +647,8 @@ export class LyricsView {
         );
       return;
     }
-    const fade = size * this.motion.fadeWidth;
-    const float = (isBackground ? 2 : 1) * this.motion.lift * size;
+    const fade = size * motion.fadeWidth;
+    const float = (isBackground ? 2 : 1) * motion.lift * size;
     for (const syllable of block.syllables) {
       const word = block.words[syllable.word]!;
       const baseline = syllable.row * block.rowHeight + size * 0.95;
@@ -643,7 +698,7 @@ export class LyricsView {
   ) {
     const emphasis = word.emphasis!;
     const size = block.size;
-    const strength = this.motion.emphasis;
+    const strength = motion.emphasis;
     const letters = block.syllables
       .slice(word.first, word.last + 1)
       .flatMap((value) => value.glyphs ?? []);
@@ -665,7 +720,7 @@ export class LyricsView {
       );
       const offsetY =
         (-swell * 0.025 * amount -
-          Math.sin(floatProgress * Math.PI) * this.motion.lift) *
+          Math.sin(floatProgress * Math.PI) * motion.lift) *
         size;
       const centreX = syllable.x + glyph.x + glyph.width / 2;
       const centreY = baseline - size * 0.35;
@@ -684,7 +739,12 @@ export class LyricsView {
     }
   }
 
-  private drawDots(context: SKRSContext2D, item: DotsItem, time: number) {
+  private drawDots(
+    context: SKRSContext2D,
+    item: DotsItem,
+    time: number,
+    fade: number,
+  ) {
     const total = item.end - item.start;
     const elapsed = time - item.start;
     if (elapsed < 0 || elapsed >= total) return;
@@ -703,6 +763,7 @@ export class LyricsView {
         alpha *= 1 - y;
       }
     }
+    alpha *= fade;
     if (alpha <= 0 || scale <= 0) return;
     const progress = clamp(elapsed / body);
     const groupWidth = dotSize * 3 + dotGap * 2;
@@ -729,6 +790,10 @@ export class LyricsView {
     context.restore();
   }
 }
+
+/** The room background vocals take under their line while it is current. */
+const backgroundExtent = (item: LineItem) =>
+  item.background ? item.background.height + backgroundGap : 0;
 
 /** Drops the whitespace and brackets a line starts and ends with. */
 function trimPieces(pieces: Piece[], brackets = false) {
