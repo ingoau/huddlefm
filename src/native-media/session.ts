@@ -18,6 +18,16 @@ type LogLine = {
   [field: string]: unknown;
 };
 
+/** Redacts string fields too: errors and reasons can quote server text. */
+function redactFields(fields: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [
+      key,
+      typeof value === "string" ? redactSecrets(value) : value,
+    ]),
+  );
+}
+
 const levels = new Set(["trace", "debug", "info", "warn", "error"]);
 // The child needs no Slack credentials, so it only gets what running Bun and
 // ffmpeg takes.
@@ -175,7 +185,7 @@ export class NativeMediaSession {
         ? (level as "trace" | "debug" | "info" | "warn" | "error")
         : "info";
       childLog[method](
-        { event: event ?? "native_media_log", ...fields },
+        { event: event ?? "native_media_log", ...redactFields(fields) },
         redactSecrets(String(message ?? "")),
       );
       return;

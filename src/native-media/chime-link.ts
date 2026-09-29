@@ -522,6 +522,18 @@ export class ChimeLink {
           this.teardown(connection);
           return;
         }
+        // The display changed while this connection was being built. Rebuild
+        // here: lost() cannot start another reconnect while this one runs.
+        if (connection.requestedVideo !== this.wantVideo) {
+          this.events.log(
+            "info",
+            "chime_renegotiating",
+            "Rebuilding the Chime connection",
+            { reason: "video changed while connecting" },
+          );
+          this.teardown(connection);
+          continue;
+        }
         this.connection = connection;
         this.stats.reconnects++;
         this.events.log("info", "chime_reconnected", "Chime reconnected", {
@@ -530,7 +542,6 @@ export class ChimeLink {
           video: Boolean(connection.video),
         });
         this.events.onConnected(true);
-        this.reconcileVideo(connection);
         return;
       } catch (error) {
         if (error instanceof TerminalError) {
