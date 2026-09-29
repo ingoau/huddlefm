@@ -14,6 +14,7 @@ const reportIdPattern = /^[0-9a-f-]{36}$/;
  */
 export class FallbackReports {
   private pending = Promise.resolve();
+  private pruneTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private directory = "data/reports",
@@ -46,6 +47,38 @@ export class FallbackReports {
         log.error(
           { event: "fallback_report_write_failed", reportId, err: error },
           "Could not write media fallback report",
+        );
+      }
+    });
+    this.pending = work;
+    return work;
+  }
+
+  /**
+   * Prunes now and then daily, so old reports go even when no new ones are
+   * being written.
+   */
+  start(intervalMs = 24 * 60 * 60_000) {
+    void this.cleanUp();
+    this.pruneTimer = setInterval(() => void this.cleanUp(), intervalMs);
+    this.pruneTimer.unref?.();
+  }
+
+  stop() {
+    clearInterval(this.pruneTimer);
+    this.pruneTimer = undefined;
+  }
+
+  /** Prunes in line with writes, so it never races one. */
+  cleanUp() {
+    const work = this.pending.then(async () => {
+      try {
+        await mkdir(this.directory, { recursive: true });
+        await this.prune();
+      } catch (error) {
+        log.error(
+          { event: "fallback_report_prune_failed", err: error },
+          "Could not prune media fallback reports",
         );
       }
     });

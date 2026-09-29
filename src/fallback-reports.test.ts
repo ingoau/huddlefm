@@ -74,3 +74,13 @@ test("drops reports past their age even under the count limit", () =>
     expect(files).toHaveLength(1);
     expect(files[0]).toEndWith(`-${reportId}.json`);
   }));
+
+test("cleans up old reports without a new one being written", () =>
+  withDirectory(async (directory) => {
+    await writeFile(join(directory, "2001-01-01T00-00-00.000Z-old.json"), "{}");
+    const reports = new FallbackReports(directory);
+    reports.start();
+    reports.stop();
+    await reports.flush();
+    expect(await readdir(directory)).toEqual([]);
+  }));

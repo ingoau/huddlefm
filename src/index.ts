@@ -140,6 +140,7 @@ const audit = new AuditLog(
 if (store.needsUsageBackfill())
   store.importUsage(await audit.historicalUsage());
 const fallbackReports = new FallbackReports();
+fallbackReports.start();
 const slackHuddle = new SlackHuddleAdapter(config);
 const mediaBrowsers = new MediaBrowserPool(config.chromePath);
 const runtimes = new Map<string, Runtime>();
@@ -2005,6 +2006,7 @@ async function shutdownSteps() {
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
   clearInterval(reconcileTimer);
+  fallbackReports.stop();
   companions.stop();
   for (const timer of endCleanupTimers.values()) clearTimeout(timer);
   log.debug({ event: "shutdown_canvas_wait" }, "Waiting for Canvas update");
