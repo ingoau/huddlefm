@@ -193,6 +193,8 @@ export class LyricsView {
   private lastTime: number | undefined;
   private entering = false;
   private sprite: Canvas | undefined;
+  /** How much of the sprite the last text was drawn into. */
+  private spriteUsed = { width: 0, height: 0 };
   readonly synced: boolean;
 
   /**
@@ -967,14 +969,30 @@ export class LyricsView {
       !this.sprite ||
       this.sprite.width < width ||
       this.sprite.height < height
-    )
+    ) {
       this.sprite = createCanvas(
         Math.max(width, this.sprite?.width ?? 0),
         Math.max(height, this.sprite?.height ?? 0),
       );
+      this.spriteUsed = { width: 0, height: 0 };
+    }
     const sprite = this.sprite.getContext("2d");
+    // Filtering reads a pixel past the part drawn out, so everything the last
+    // text left behind goes too, and this text stays within its part: a
+    // bigger glowing letter left there would show as a dash under the word.
+    const used = this.spriteUsed;
     sprite.setTransform(1, 0, 0, 1, 0, 0);
-    sprite.clearRect(0, 0, width, height);
+    sprite.clearRect(
+      0,
+      0,
+      Math.max(width, used.width),
+      Math.max(height, used.height),
+    );
+    this.spriteUsed = { width, height };
+    sprite.save();
+    sprite.beginPath();
+    sprite.rect(0, 0, width, height);
+    sprite.clip();
     sprite.setTransform(
       matrix.a,
       0,
@@ -984,6 +1002,7 @@ export class LyricsView {
       matrix.f - top,
     );
     paint(sprite);
+    sprite.restore();
     // Where the sprite's corner lands once moved and scaled about the pivot.
     const cornerX = (left - matrix.e) / matrix.a;
     const cornerY = (top - matrix.f) / matrix.d;

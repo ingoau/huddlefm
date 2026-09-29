@@ -252,6 +252,30 @@ describe("lyrics view", () => {
       view.draw(context, 480);
     }
   });
+
+  test("a word's frame is the same whatever was drawn before it", () => {
+    // A long held word glows in bigger sprites than the words rising around
+    // it; nothing of it may be left to show in theirs.
+    const words = ["you ", "made ", "such ", "a "];
+    const parts = words.map((words, index) => part(words, index * 300, 300));
+    const lines = [line(0, 4_000, [...parts, part("mess", 1_200, 3_000)])];
+    const render = (drawEvery: boolean) => {
+      const view = new LyricsView(lines, 619, 0.75);
+      const canvas = createCanvas(464, 300);
+      const context = canvas.getContext("2d");
+      context.scale(0.75, 0.75);
+      for (let seconds = 0; seconds <= 3; seconds += 1 / 24) {
+        view.update(seconds, 1 / 24, 400);
+        if (!drawEvery) continue;
+        context.clearRect(0, 0, 619, 400);
+        view.draw(context, 400);
+      }
+      context.clearRect(0, 0, 619, 400);
+      view.draw(context, 400);
+      return canvas.data();
+    };
+    expect(render(true).equals(render(false))).toBe(true);
+  });
 });
 
 describe("motion", () => {
