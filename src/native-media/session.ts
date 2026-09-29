@@ -40,7 +40,8 @@ const inheritedEnv = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"];
 
 /**
  * Points `play` and `preload` at the downloaded files instead of the loopback
- * /audio URLs, which ignore Range requests and so cannot be seeked by ffmpeg.
+ * /audio URLs, so ffmpeg reads them straight from disk. An entry without a
+ * file keeps its URL, which still seeks: /audio serves byte ranges.
  */
 export function withLocalAudio(
   message: unknown,

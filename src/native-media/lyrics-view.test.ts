@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Lyric, LyricPart } from "@braccato/core";
 import { createCanvas } from "@napi-rs/canvas";
+import { buildTimedRomanization } from "../timed-romanization.ts";
 import { LyricsView } from "./lyrics-view.ts";
 import { cubicBezier, Spring, spring, Tween } from "./motion.ts";
 import { VideoCard } from "./video-card.ts";
@@ -106,6 +107,62 @@ describe("lyrics view", () => {
       "a pa teu",
       undefined,
     ]);
+  });
+
+  test("sweeps timed romanization, and lights untimed lines' at once", () => {
+    const timed = line(
+      1_000,
+      2_000,
+      [
+        part("아", 1_000, 500),
+        part("파", 1_500, 500),
+        part("트", 2_000, 1_000),
+      ],
+      { romanization: "a pa teu" },
+    );
+    timed.timedRomanization = buildTimedRomanization(timed);
+    const untimed = line(4_000, 2_000, undefined, {
+      words: "아파트",
+      romanization: "a pa teu",
+    });
+    untimed.timedRomanization = buildTimedRomanization(untimed);
+    const view = new LyricsView([timed, untimed], 600);
+    expect(
+      view.describe().map(({ roman, romanTimed }) => ({ roman, romanTimed })),
+    ).toEqual([
+      { roman: "a pa teu", romanTimed: true },
+      { roman: "a pa teu", romanTimed: false },
+    ]);
+    const canvas = createCanvas(600, 480);
+    const context = canvas.getContext("2d");
+    for (let seconds = 0; seconds < 7; seconds += 0.25) {
+      view.update(seconds, 0.25, 480);
+      context.clearRect(0, 0, 600, 480);
+      view.draw(context, 480);
+    }
+  });
+
+  test("timed romanization leaves the background vocals to their own", () => {
+    const withBackground = line(
+      1_000,
+      3_000,
+      [
+        part("아파트 ", 1_000, 1_500),
+        part("(오 ", 2_500, 500, true),
+        part("예)", 3_000, 1_000, true),
+      ],
+      { romanization: "a pa teu (o ye)" },
+    );
+    withBackground.timedRomanization = buildTimedRomanization(withBackground);
+    const [item] = new LyricsView([withBackground], 600).describe();
+    expect(item).toMatchObject({
+      text: "아파트",
+      background: "오 예",
+      roman: "a pa teu",
+      romanTimed: true,
+      // Swept over the main vocals, done before the background vocals sing.
+      romanEnd: 2_500,
+    });
   });
 
   test("the sung line is current, larger, and shows its background vocals", () => {
