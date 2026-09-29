@@ -6,7 +6,12 @@ import {
 import { errorMessage } from "../error-message.ts";
 import { volumeGain } from "../volume.ts";
 import { Compressor } from "./compressor.ts";
-import { sampleRate, type Decoder, type DecoderFactory } from "./decoder.ts";
+import {
+  sampleRate,
+  type Decoder,
+  type DecoderFactory,
+  type DurationProbe,
+} from "./decoder.ts";
 
 export type MediaEmit = (type: string, details?: unknown) => void;
 export type TransitionMode = "none" | "gapless" | "adaptive";
@@ -34,6 +39,10 @@ class Deck {
   endedSent = false;
   errorSent = false;
   stalledSent = false;
+  /** The file's own length, once probed. */
+  duration: number | undefined;
+  /** Stops the duration probe when the deck goes. */
+  readonly probing = new AbortController();
 
   constructor(
     readonly entryId: string,
@@ -89,6 +98,7 @@ class Deck {
 
   close() {
     this.decoder.close();
+    this.probing.abort();
   }
 }
 
@@ -114,7 +124,8 @@ export class AudioEngine {
   private nextEntry: NextEntry | undefined;
   private currentOutro: number | undefined;
   private currentFadeOut = 0;
-  private currentDuration: number | undefined;
+  /** The length the coordinator listed, until the file has been probed. */
+  private listedDuration: number | undefined;
   private transitionMode: TransitionMode = "none";
   private transitioning = false;
   private handoff:
@@ -131,6 +142,7 @@ export class AudioEngine {
   constructor(
     private decoderFactory: DecoderFactory,
     private emit: MediaEmit,
+    private probe: DurationProbe = async () => undefined,
   ) {}
 
   /** Handles one coordinator media message. Returns false when unhandled. */
@@ -182,7 +194,12 @@ export class AudioEngine {
   progress() {
     const deck = this.currentId ? this.decks.get(this.currentId) : undefined;
     if (!deck) return undefined;
-    return { position: deck.position, duration: this.currentDuration };
+    return { position: deck.position, duration: this.durationOf(deck) };
+  }
+
+  /** Like the page's `audio.duration`: the file's, once it is known. */
+  private durationOf(deck: Deck) {
+    return deck.duration ?? this.listedDuration;
   }
 
   get current() {
@@ -196,7 +213,7 @@ export class AudioEngine {
     this.nextEntry = undefined;
     this.currentOutro = undefined;
     this.currentFadeOut = 0;
-    this.currentDuration = undefined;
+    this.listedDuration = undefined;
     for (const deck of this.decks.values()) deck.close();
     this.decks.clear();
   }
@@ -271,6 +288,11 @@ export class AudioEngine {
     existing?.close();
     const deck = new Deck(entryId, url, this.decoderFactory, startSeconds);
     this.decks.set(entryId, deck);
+    this.probe(url, deck.probing.signal)
+      .then((seconds) => {
+        if (seconds && seconds > 0) deck.duration = seconds;
+      })
+      .catch(() => {});
     return deck;
   }
 
@@ -306,7 +328,7 @@ export class AudioEngine {
     this.currentId = message.entryId;
     this.currentOutro = message.outroSeconds;
     this.currentFadeOut = message.fadeOutSeconds ?? 0;
-    this.currentDuration =
+    this.listedDuration =
       Number(message.duration) > 0 ? Number(message.duration) : undefined;
     const deck = this.deck(message.entryId, message.url);
     if (!alreadyPlaying) {
@@ -343,7 +365,7 @@ export class AudioEngine {
       message.seconds ?? deck.position + Number(message.offset ?? 0);
     const clamped = Math.max(
       0,
-      Math.min(this.currentDuration ?? Infinity, Number(seconds)),
+      Math.min(this.durationOf(deck) ?? Infinity, Number(seconds)),
     );
     deck.seek(clamped);
     deck.pastRestartThreshold = deck.position > 5;

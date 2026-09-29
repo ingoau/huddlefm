@@ -13,7 +13,7 @@ import {
   type ChimeAttendee,
   type ChimeMeeting,
 } from "./chime-link.ts";
-import { FfmpegDecoder, sampleRate } from "./decoder.ts";
+import { FfmpegDecoder, probeDuration, sampleRate } from "./decoder.ts";
 import { SpeechSignals } from "./speech.ts";
 import type { LyricsCredits } from "./lyrics-view.ts";
 import type { DisplayMode } from "./video-card.ts";
@@ -71,6 +71,7 @@ async function start(bootstrap: ChimeBootstrap) {
   const audio = new AudioEngine(
     (url, startSeconds) => new FfmpegDecoder(url, startSeconds),
     emit,
+    probeDuration,
   );
   engine = audio;
   audio.setVolume(bootstrap.initialVolume);

@@ -1,5 +1,6 @@
 import { createCanvas, type Canvas, type SKRSContext2D } from "@napi-rs/canvas";
 import type { Lyric, LyricPart } from "@braccato/core";
+import { buildTimedRomanization } from "../timed-romanization.ts";
 import { fonts } from "./fonts.ts";
 import { clamp, cubicBezier, easeOut, lerp, motion, Spring } from "./motion.ts";
 
@@ -9,6 +10,8 @@ const backgroundFontSize = 26;
 const backgroundRowHeight = backgroundFontSize * 1.25;
 const romanFontSize = 18;
 const romanRowHeight = romanFontSize * 1.4;
+/** Space between a line and its romanization. */
+const romanGap = 4;
 /** Space between a line and its background vocals. */
 const backgroundGap = 10;
 /** How far below its place a line starts when lyrics fly in. */
@@ -35,10 +38,14 @@ const dotsHeight = 40;
 const dotSize = 11;
 const dotGap = 7;
 
-/** How bright text is on a line that is not being sung. */
-const idleAlpha = 0.3;
-/** How bright a current line's syllables are before they are sung. */
-const unsungAlpha = 0.42;
+/**
+ * How bright text is: `idle` on a line that is not being sung, and on the
+ * current line, `unsung` before a syllable is sung and `sung` after.
+ */
+type Tone = { idle: number; unsung: number; sung: number };
+const lyricTone: Tone = { idle: 0.3, unsung: 0.42, sung: 1 };
+/** The page's romanization: dimmer, and never as bright as the lyrics. */
+const romanTone: Tone = { idle: 0.38, unsung: 0.5, sung: 0.78 };
 
 type Align = "left" | "right";
 
@@ -66,6 +73,8 @@ type TextBlock = {
   rows: number;
   timed: boolean;
   size: number;
+  weight: number;
+  tone: Tone;
   rowHeight: number;
   height: number;
   /** Where the scale pivots, in line coordinates. */
@@ -79,10 +88,8 @@ type LineItem = {
   end: number;
   align: Align;
   main: TextBlock;
-  roman?: {
-    rows: { text: string; x: number; width: number }[];
-    height: number;
-  };
+  /** Swept syllable by syllable when the line and its romanization are timed. */
+  roman?: TextBlock;
   background?: TextBlock;
   mainHeight: number;
   /** Where the line's text starts and ends across the view. */
@@ -245,7 +252,11 @@ export class LyricsView {
             background: item.background?.syllables
               .map((value) => value.text)
               .join(""),
-            roman: item.roman?.rows.map((row) => row.text).join(" "),
+            roman: item.roman?.syllables.map((value) => value.text).join(""),
+            romanTimed: item.roman?.timed,
+            romanEnd: item.roman
+              ? Math.max(...item.roman.syllables.map((value) => value.end))
+              : undefined,
             timed: item.main.timed,
             rows: item.main.rows,
             scale: item.scale.target,
@@ -585,28 +596,14 @@ export class LyricsView {
       timed,
     });
     let end = Math.max(lineEnd, ...main.map((value) => value.end));
-    // Romanization covers the whole line; the background vocals have their own.
-    let romanText = line.romanization?.trim();
-    if (romanText && background.length)
-      romanText = romanText.replace(/\s*\([^()]*\)\s*$/, "");
-    let roman: LineItem["roman"];
-    const mainText = main.map((value) => value.text).join("");
-    if (
-      romanText &&
-      nonLatin.test(mainText) &&
-      comparable(romanText) !== comparable(mainText)
-    ) {
-      measure.font = `600 ${romanFontSize}px ${fonts()}`;
-      const rows = wrapText(measure, romanText, box.width).map((text) => {
-        const width = measure.measureText(text).width;
-        return {
-          text,
-          x: box.left + (align === "right" ? box.width - width : 0),
-          width,
-        };
-      });
-      roman = { rows, height: rows.length * romanRowHeight + 4 };
-    }
+    const roman = this.buildRoman(
+      line,
+      main,
+      background.length > 0,
+      timed,
+      box,
+      measure,
+    );
     let backgroundBlock: TextBlock | undefined;
     if (background.length) {
       backgroundBlock = layoutBlock(measure, background, {
@@ -620,7 +617,7 @@ export class LyricsView {
     const spans = [
       ...mainBlock.syllables,
       ...(backgroundBlock?.syllables ?? []),
-      ...(roman?.rows ?? []),
+      ...(roman?.syllables ?? []),
     ];
     return {
       kind: "line",
@@ -630,7 +627,7 @@ export class LyricsView {
       main: mainBlock,
       roman,
       background: backgroundBlock,
-      mainHeight: mainBlock.height + (roman?.height ?? 0),
+      mainHeight: mainBlock.height + (roman ? romanGap + roman.height : 0),
       left: Math.floor(Math.min(...spans.map((span) => span.x))),
       right: Math.ceil(Math.max(...spans.map((span) => span.x + span.width))),
       y: new Spring(0, motion.scroll),
@@ -639,6 +636,70 @@ export class LyricsView {
       bright: 0,
       active: false,
     };
+  }
+
+  /**
+   * The romanization under a line in another script. It covers the whole
+   * line, so its trailing parenthesis goes when the background vocals are
+   * split out: they have their own. Like the page, it is swept syllable by
+   * syllable when both the line and the romanization are timed, and
+   * otherwise lights with the line.
+   */
+  private buildRoman(
+    line: Lyric,
+    main: Piece[],
+    hasBackground: boolean,
+    timed: boolean,
+    box: { left: number; width: number; align: Align },
+    measure: SKRSContext2D,
+  ): TextBlock | undefined {
+    const full = line.romanization?.trim();
+    if (!full) return;
+    const text = hasBackground ? full.replace(/\s*\([^()]*\)\s*$/, "") : full;
+    const mainText = main.map((value) => value.text).join("");
+    if (
+      !text ||
+      !nonLatin.test(mainText) ||
+      comparable(text) === comparable(mainText)
+    )
+      return;
+    // Without the background vocals' part, the rest is spread over the main
+    // vocals alone: left as it was, it would still be sweeping while the
+    // background vocals sing.
+    const timedRoman =
+      text === full || !line.timedRomanization?.length
+        ? line.timedRomanization
+        : buildTimedRomanization({
+            ...line,
+            romanization: text,
+            parts: line.parts?.filter((part) => !part.isBackground),
+          });
+    const parts = timed
+      ? (timedRoman ?? []).filter((part) => part.words.length > 0)
+      : [];
+    const swept = parts.some((part) => part.durationMs > 0);
+    const pieces: Piece[] = swept
+      ? parts.map((part) => ({
+          text: part.words,
+          start: part.startTimeMs,
+          end: part.startTimeMs + Math.max(0, part.durationMs),
+        }))
+      : (text.match(/\S+\s*/g) ?? []).map((word) => ({
+          text: word,
+          start: line.startTimeMs,
+          end: line.startTimeMs,
+        }));
+    trimPieces(pieces);
+    if (!pieces.length) return;
+    return layoutBlock(measure, pieces, {
+      ...box,
+      size: romanFontSize,
+      rowHeight: romanRowHeight,
+      timed: swept,
+      weight: 600,
+      tone: romanTone,
+      emphasis: false,
+    });
   }
 
   private lineImage(item: LineItem, time: number, blur: number) {
@@ -684,15 +745,11 @@ export class LyricsView {
     context.translate(bleed - item.left, bleed);
     this.drawBlock(context, item.main, time, item.bright, false);
     if (item.roman) {
-      context.font = `600 ${romanFontSize}px ${fonts()}`;
-      context.textBaseline = "alphabetic";
-      context.fillStyle = white(lerp(0.38, 0.78, item.bright));
-      for (const [index, row] of item.roman.rows.entries())
-        context.fillText(
-          row.text,
-          row.x,
-          item.main.height + 4 + index * romanRowHeight + romanFontSize,
-        );
+      context.save();
+      // Rows sit a full font size down, where the page's text lands.
+      context.translate(0, item.main.height + romanGap + romanFontSize * 0.05);
+      this.drawBlock(context, item.roman, time, item.bright, false);
+      context.restore();
     }
     const background = item.background;
     const shown = clamp(item.shown.position, 0, 1.2);
@@ -723,10 +780,11 @@ export class LyricsView {
     isBackground: boolean,
   ) {
     const size = block.size;
-    context.font = `700 ${size}px ${fonts()}`;
+    context.font = `${block.weight} ${size}px ${fonts()}`;
     context.textBaseline = "alphabetic";
-    const sung = lerp(idleAlpha, 1, bright);
-    const unsung = lerp(idleAlpha, unsungAlpha, bright);
+    const { tone } = block;
+    const sung = lerp(tone.idle, tone.sung, bright);
+    const unsung = lerp(tone.idle, tone.unsung, bright);
     if (!block.timed) {
       // No syllable timing: the whole line lights at once, never swept.
       context.fillStyle = white(sung);
@@ -1040,6 +1098,10 @@ type BlockBox = {
   size: number;
   rowHeight: number;
   timed: boolean;
+  weight?: number;
+  tone?: Tone;
+  /** Whether long held words may glow; the lyrics' own words do. */
+  emphasis?: boolean;
 };
 
 /**
@@ -1051,7 +1113,8 @@ function layoutBlock(
   pieces: Piece[],
   box: BlockBox,
 ): TextBlock {
-  context.font = `700 ${box.size}px ${fonts()}`;
+  const { weight = 700, tone = lyricTone, emphasis = true } = box;
+  context.font = `${weight} ${box.size}px ${fonts()}`;
   const syllables: Syllable[] = [];
   const words: Word[] = [];
   let word: Word | undefined;
@@ -1084,7 +1147,12 @@ function layoutBlock(
       .slice(value.first, value.last + 1)
       .map((syllable) => syllable.text)
       .join("");
-    if (!box.timed || !shouldEmphasize(text, value.end - value.start)) continue;
+    if (
+      !box.timed ||
+      !emphasis ||
+      !shouldEmphasize(text, value.end - value.start)
+    )
+      continue;
     value.emphasis = emphasisFor(
       value.end - value.start,
       index === words.length - 1,
@@ -1157,6 +1225,8 @@ function layoutBlock(
     rows: rows.length,
     timed: box.timed,
     size: box.size,
+    weight,
+    tone,
     rowHeight: box.rowHeight,
     height,
     anchor: height / 2,
