@@ -165,6 +165,7 @@ export class LyricsView {
   private focus = 0;
   private lastTime: number | undefined;
   private entering = false;
+  private sprite: Canvas | undefined;
   readonly synced: boolean;
 
   /**
@@ -659,16 +660,21 @@ export class LyricsView {
           : time >= syllable.start
             ? 1
             : 0;
-      if (progress <= 0) context.fillStyle = white(unsung);
-      else if (progress >= 1) context.fillStyle = white(sung);
-      else {
-        // The soft leading edge sweeps across the syllable as it is sung.
-        const edge = syllable.x - fade + progress * (syllable.width + fade);
-        const gradient = context.createLinearGradient(edge, 0, edge + fade, 0);
-        gradient.addColorStop(0, white(sung));
-        gradient.addColorStop(1, white(unsung));
-        context.fillStyle = gradient;
-      }
+      const paint = (target: SKRSContext2D) => {
+        target.font = context.font;
+        target.textBaseline = "alphabetic";
+        if (progress <= 0) target.fillStyle = white(unsung);
+        else if (progress >= 1) target.fillStyle = white(sung);
+        else {
+          // The soft leading edge sweeps across the syllable as it is sung.
+          const edge = syllable.x - fade + progress * (syllable.width + fade);
+          const gradient = target.createLinearGradient(edge, 0, edge + fade, 0);
+          gradient.addColorStop(0, white(sung));
+          gradient.addColorStop(1, white(unsung));
+          target.fillStyle = gradient;
+        }
+      };
+      paint(context);
       const emphasis = word.emphasis;
       if (!emphasis || !syllable.glyphs || bright <= 0) {
         const rise =
@@ -677,10 +683,34 @@ export class LyricsView {
           easeOut(
             clamp((time - word.start) / Math.max(1_000, word.end - word.start)),
           );
-        context.fillText(syllable.text, syllable.x, baseline - rise);
+        if (rise < 0.01) context.fillText(syllable.text, syllable.x, baseline);
+        else
+          this.drawSprite(
+            context,
+            {
+              x: syllable.x - 4,
+              y: baseline - size * 1.2,
+              width: syllable.width + 8,
+              height: size * 1.6,
+            },
+            (target) => {
+              paint(target);
+              target.fillText(syllable.text, syllable.x, baseline);
+            },
+            { dy: -rise },
+          );
         continue;
       }
-      this.drawEmphasis(context, block, syllable, word, time, baseline, bright);
+      this.drawEmphasis(
+        context,
+        block,
+        syllable,
+        word,
+        time,
+        baseline,
+        bright,
+        paint,
+      );
     }
     context.shadowBlur = 0;
     context.shadowColor = "transparent";
@@ -695,6 +725,7 @@ export class LyricsView {
     time: number,
     baseline: number,
     bright: number,
+    paint: (target: SKRSContext2D) => void,
   ) {
     const emphasis = word.emphasis!;
     const size = block.size;
@@ -724,19 +755,106 @@ export class LyricsView {
         size;
       const centreX = syllable.x + glyph.x + glyph.width / 2;
       const centreY = baseline - size * 0.35;
-      context.save();
-      context.translate(centreX + offsetX, centreY + offsetY);
-      context.scale(scale, scale);
-      context.translate(-centreX, -centreY);
       const glow = swell * emphasis.glow * strength;
-      if (glow > 0.01) {
-        context.shadowColor = white(glow);
-        context.shadowBlur = Math.min(0.3, emphasis.glow * 0.3) * size * 2;
-      }
-      context.fillText(glyph.text, syllable.x + glyph.x, baseline);
-      context.restore();
+      const reach = size * 0.7;
+      this.drawSprite(
+        context,
+        {
+          x: syllable.x + glyph.x - reach,
+          y: baseline - size - reach,
+          width: glyph.width + reach * 2,
+          height: size * 1.3 + reach * 2,
+        },
+        (target) => {
+          paint(target);
+          if (glow > 0.01) {
+            target.shadowColor = white(glow);
+            // Shadows ignore the transform, so this one is in device pixels.
+            target.shadowBlur =
+              Math.min(0.3, emphasis.glow * 0.3) *
+              size *
+              2 *
+              target.getTransform().a;
+          }
+          target.fillText(glyph.text, syllable.x + glyph.x, baseline);
+          target.shadowBlur = 0;
+          target.shadowColor = "transparent";
+        },
+        { dx: offsetX, dy: offsetY, scale, pivotX: centreX, pivotY: centreY },
+      );
       index++;
     }
+  }
+
+  /**
+   * Draws text that moves by fractions of a pixel. Skia snaps glyphs to whole
+   * pixels vertically, so a word rising a pixel or two would step instead of
+   * glide. Instead the text is drawn unmoved into a sprite lined up with the
+   * pixel grid, and the sprite is moved and scaled, which Skia filters
+   * smoothly.
+   *
+   * @param bounds - Where the unmoved text can reach, in the context's units
+   * @param paint - Draws the text in the context's units
+   */
+  private drawSprite(
+    context: SKRSContext2D,
+    bounds: { x: number; y: number; width: number; height: number },
+    paint: (target: SKRSContext2D) => void,
+    place: {
+      dx?: number;
+      dy?: number;
+      scale?: number;
+      pivotX?: number;
+      pivotY?: number;
+    },
+  ) {
+    const { dx = 0, dy = 0, scale = 1 } = place;
+    const { pivotX = bounds.x, pivotY = bounds.y } = place;
+    const matrix = context.getTransform();
+    const left = Math.floor(matrix.a * bounds.x + matrix.e);
+    const top = Math.floor(matrix.d * bounds.y + matrix.f);
+    const width = Math.ceil(matrix.a * bounds.width) + 2;
+    const height = Math.ceil(matrix.d * bounds.height) + 2;
+    if (
+      !this.sprite ||
+      this.sprite.width < width ||
+      this.sprite.height < height
+    )
+      this.sprite = createCanvas(
+        Math.max(width, this.sprite?.width ?? 0),
+        Math.max(height, this.sprite?.height ?? 0),
+      );
+    const sprite = this.sprite.getContext("2d");
+    sprite.setTransform(1, 0, 0, 1, 0, 0);
+    sprite.clearRect(0, 0, width, height);
+    sprite.setTransform(
+      matrix.a,
+      0,
+      0,
+      matrix.d,
+      matrix.e - left,
+      matrix.f - top,
+    );
+    paint(sprite);
+    // Where the sprite's corner lands once moved and scaled about the pivot.
+    const cornerX = (left - matrix.e) / matrix.a;
+    const cornerY = (top - matrix.f) / matrix.d;
+    const x = pivotX + dx + (cornerX - pivotX) * scale;
+    const y = pivotY + dy + (cornerY - pivotY) * scale;
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.drawImage(
+      this.sprite,
+      0,
+      0,
+      width,
+      height,
+      matrix.a * x + matrix.e,
+      matrix.d * y + matrix.f,
+      width * scale,
+      height * scale,
+    );
+    context.restore();
   }
 
   private drawDots(

@@ -22,7 +22,9 @@ const unit = layoutSize / 100;
 const coverSmall = { x: 6 * unit, y: 6.7 * unit, scale: 0.15 };
 const coverRadius = 106;
 const headerDefault = { x: 7 * unit, y: 73 * unit };
-const headerLyrics = { x: 26 * unit, y: 9.5 * unit };
+// The page puts the header at 9.5vh, which sits the title and artist 3.4px
+// above the middle of the artwork beside them; 10vh centres them.
+const headerLyrics = { x: 26 * unit, y: 10 * unit };
 const headerWidth = 66 * unit;
 const frame = {
   x: 7 * unit,
