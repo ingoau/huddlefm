@@ -1,8 +1,10 @@
 import { AnnexBSplitter } from "./rtp.ts";
 import { cardSize } from "./video-card.ts";
 
-/** The card changes at most every few hundred milliseconds. */
-export const videoFps = 5;
+/** The page captures at 30 fps; the lyrics and layout swaps need it. */
+export const videoFps = 30;
+/** The Chime JS SDK's default ceiling for a camera. */
+export const videoMaxKbps = 1_400;
 
 /**
  * Encodes card frames to H.264 constrained baseline with ffmpeg and hands out
@@ -53,11 +55,11 @@ export class VideoFeed {
         "-pix_fmt",
         "yuv420p",
         "-crf",
-        "28",
+        "26",
         "-maxrate",
-        "600k",
+        `${videoMaxKbps}k`,
         "-bufsize",
-        "1200k",
+        `${videoMaxKbps}k`,
         "-g",
         String(videoFps * 2),
         "-bf",

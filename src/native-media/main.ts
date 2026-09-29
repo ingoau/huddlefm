@@ -3,6 +3,7 @@
 // messages as JSON lines on stdin, and writes the same events the media page
 // sends, plus log lines, as JSON lines on stdout.
 import { Application, createEncoder, Signal } from "libopus-wasm";
+import type { Lyric } from "@braccato/core";
 import type { ChimeBootstrap } from "../slack-huddle.ts";
 import { errorMessage } from "../error-message.ts";
 import { AudioEngine } from "./audio-engine.ts";
@@ -14,7 +15,7 @@ import {
 } from "./chime-link.ts";
 import { FfmpegDecoder, sampleRate } from "./decoder.ts";
 import { SpeechSignals } from "./speech.ts";
-import { VideoCard } from "./video-card.ts";
+import { VideoCard, type DisplayMode } from "./video-card.ts";
 import { VideoFeed } from "./video-feed.ts";
 
 type Level = "trace" | "debug" | "info" | "warn" | "error";
@@ -51,6 +52,11 @@ let statsTimer: ReturnType<typeof setInterval> | undefined;
 let leaving: Promise<void> | undefined;
 let trackSwap = 0;
 let wantVideo = true;
+/** The entry the card shows, which trails `play` by the swap delay. */
+let shownEntry: string | undefined;
+/** The best lyrics so far for the current entry, like the page's. */
+let lyrics: { entryId: string; priority: number; lines: Lyric[] } | undefined;
+let noLyrics: string | undefined;
 
 async function start(bootstrap: ChimeBootstrap) {
   sessionId = bootstrap.sessionId;
@@ -176,18 +182,34 @@ function handle(message: Record<string, any>) {
   if (!engine || leaving) return;
   if (message.type === "display_mode") {
     wantVideo = message.mode !== "off";
+    card?.setDisplayMode(message.mode as DisplayMode);
     link?.setVideo(wantVideo);
     syncVideo();
     return;
   }
-  // The native card has no lyrics view yet; the default card stands in.
-  if (message.type === "lyrics" || message.type === "lyrics_unavailable")
+  if (message.type === "lyrics") {
+    handleLyrics(message);
     return;
+  }
+  if (message.type === "lyrics_unavailable") {
+    if (
+      message.entryId !== engine.current ||
+      lyrics?.entryId === message.entryId
+    )
+      return;
+    noLyrics = message.entryId;
+    if (shownEntry === message.entryId) card?.setLyricsUnavailable();
+    return;
+  }
   engine.handle(message);
   if (message.type === "play") {
     const swap = ++trackSwap;
+    lyrics = undefined;
+    noLyrics = undefined;
+    card?.beginChange();
     setTimeout(() => {
       if (swap !== trackSwap || engine?.current !== message.entryId) return;
+      shownEntry = message.entryId;
       card?.setTrack(
         String(message.title ?? ""),
         message.requesterLabel
@@ -195,12 +217,28 @@ function handle(message: Record<string, any>) {
           : String(message.artist ?? ""),
         message.artwork,
       );
+      if (lyrics && lyrics.entryId === message.entryId)
+        card?.setLyrics(lyrics.lines);
+      else if (noLyrics === message.entryId) card?.setLyricsUnavailable();
     }, trackSwapDelayMs);
   }
   if (message.type === "stop") {
     trackSwap++;
+    shownEntry = undefined;
+    lyrics = undefined;
+    noLyrics = undefined;
     card?.reset();
   }
+}
+
+function handleLyrics(message: Record<string, any>) {
+  const entryId = String(message.entryId);
+  const priority = Number(message.priority);
+  if (entryId !== engine?.current || !Array.isArray(message.lines)) return;
+  if (lyrics?.entryId === entryId && !(priority < lyrics.priority)) return;
+  lyrics = { entryId, priority, lines: message.lines };
+  noLyrics = undefined;
+  if (shownEntry === entryId) card?.setLyrics(message.lines);
 }
 
 async function leave() {
