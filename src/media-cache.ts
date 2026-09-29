@@ -131,6 +131,7 @@ export class MediaCache {
     return this.serialized(async () => {
       const suffix = crypto.randomUUID();
       const temporary = (name: string) => this.path(`${key}.${suffix}.${name}`);
+      let replacing = false;
       try {
         await mkdir(this.directory, { recursive: true });
         const cover =
@@ -150,6 +151,7 @@ export class MediaCache {
         if (cover) await linkOrCopy(cover, temporary("cover.jpg"));
         await writeFile(temporary("json"), JSON.stringify(stored));
         // An entry exists once its description does, so that goes last.
+        replacing = true;
         await rm(this.path(`${key}.json`), { force: true });
         await rename(temporary("opus"), this.path(`${key}.opus`));
         if (cover)
@@ -169,6 +171,9 @@ export class MediaCache {
             rm(temporary(name), { force: true }),
           ),
         );
+        // A replacement that stopped partway leaves neither entry intact, and
+        // what it did move would otherwise sit outside the size limit.
+        if (replacing) await this.remove(key).catch(() => undefined);
       }
     });
   }
@@ -177,7 +182,7 @@ export class MediaCache {
     try {
       const description = this.path(`${key}.json`);
       const media = JSON.parse(await readFile(description, "utf8")) as Stored;
-      if (media.version !== 1 || !(media.duration > 0)) return;
+      if (!validStored(media)) return;
       const [audio, cover, used] = await Promise.all([
         stat(this.path(`${key}.opus`)),
         media.cover ? stat(this.path(`${key}.cover.jpg`)) : undefined,
@@ -242,6 +247,26 @@ export class MediaCache {
     this.work = result.catch(() => undefined);
     return result;
   }
+}
+
+function validStored(media: Stored) {
+  const { transition, embedded } = media ?? {};
+  return (
+    media?.version === 1 &&
+    media.duration > 0 &&
+    typeof media.createdAt === "number" &&
+    typeof media.cover === "boolean" &&
+    (embedded === undefined ||
+      (typeof embedded === "object" && embedded !== null)) &&
+    typeof transition === "object" &&
+    transition !== null &&
+    [
+      transition.introSeconds,
+      transition.outroSeconds,
+      transition.fadeInSeconds,
+      transition.fadeOutSeconds,
+    ].every(Number.isFinite)
+  );
 }
 
 // A hard link shares the file without copying it. Sessions only ever read

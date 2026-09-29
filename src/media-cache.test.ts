@@ -173,3 +173,55 @@ test("a disabled cache keeps nothing", () =>
       ),
     ).toBeUndefined();
   }));
+
+test("forgets a track whose replacement failed partway", () =>
+  withDirectory(async (directory) => {
+    const cacheDirectory = join(directory, "cache");
+    const cache = new MediaCache(cacheDirectory, {
+      maxBytes: 1_000,
+      maxAgeMs: 0,
+    });
+    await cache.initialize();
+    const audio = join(directory, "a.opus");
+    const cover = join(directory, "a.cover.jpg");
+    await writeFile(audio, "audio");
+    await writeFile(cover, "cover");
+    await cache.store(key(1), audio, cover, media);
+    // Something in the way of the cover makes the replacement fail after the
+    // audio has already moved into place.
+    await mkdir(join(cacheDirectory, `${key(1)}.cover.jpg`, "blocked"), {
+      recursive: true,
+    });
+    await cache.store(key(1), audio, cover, { ...media, cover: true });
+
+    expect(
+      await cache.restore(
+        key(1),
+        join(directory, "b.opus"),
+        join(directory, "b.cover.jpg"),
+      ),
+    ).toBeUndefined();
+    expect(await readdir(cacheDirectory)).toEqual([`${key(1)}.cover.jpg`]);
+  }));
+
+test("ignores cached descriptions with malformed transitions", () =>
+  withDirectory(async (directory) => {
+    const cacheDirectory = join(directory, "cache");
+    await mkdir(cacheDirectory);
+    await writeFile(join(cacheDirectory, `${key(1)}.opus`), "audio");
+    await writeFile(
+      join(cacheDirectory, `${key(1)}.json`),
+      JSON.stringify({
+        ...media,
+        transition: { introSeconds: "soon" },
+        version: 1,
+        createdAt: Date.now(),
+      }),
+    );
+    const cache = new MediaCache(cacheDirectory, {
+      maxBytes: 1_000,
+      maxAgeMs: 0,
+    });
+    await cache.initialize();
+    expect(await readdir(cacheDirectory)).toEqual([]);
+  }));
