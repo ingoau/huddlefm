@@ -14,6 +14,7 @@ import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { parseLikeValue } from "./coordinator-ui.ts";
 import { safeError } from "./error-message.ts";
+import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
 import { flushLogs, logger } from "./logger.ts";
 import { LyricsCatalog } from "./lyrics.ts";
@@ -1250,10 +1251,8 @@ const server = Bun.serve<SocketData>({
         url.pathname.slice(7),
         token,
       );
-      return path
-        ? new Response(Bun.file(path), {
-            headers: { "cache-control": "no-store" },
-          })
+      return path && (await Bun.file(path).exists())
+        ? fileResponse(Bun.file(path), request, { "cache-control": "no-store" })
         : notFound();
     }
     if (url.pathname.startsWith("/artwork/")) {

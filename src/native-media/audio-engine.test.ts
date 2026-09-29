@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AudioEngine } from "./audio-engine.ts";
-import { sampleRate, type Decoder } from "./decoder.ts";
+import { sampleRate, type Decoder, type DurationProbe } from "./decoder.ts";
 
 class FakeDecoder implements Decoder {
   closed = false;
@@ -36,7 +36,7 @@ class FakeDecoder implements Decoder {
   }
 }
 
-function setup(trackSeconds = 30) {
+function setup(trackSeconds = 30, probe?: DurationProbe) {
   const events: { type: string; details?: any }[] = [];
   const decoders: FakeDecoder[] = [];
   const engine = new AudioEngine(
@@ -50,6 +50,7 @@ function setup(trackSeconds = 30) {
       return decoder;
     },
     (type, details) => events.push({ type, details }),
+    probe,
   );
   const run = (seconds: number) => {
     for (let frame = 0; frame < seconds * 50; frame++) engine.render(960);
@@ -111,6 +112,32 @@ describe("AudioEngine", () => {
     engine.handle({ type: "seek", offset: -10 });
     expect(of("playback_position").at(-1)!.details.seconds).toBe(20);
     expect(decoders.at(-1)!.start).toBe(20);
+  });
+
+  test("the file's own duration replaces the listed one once probed", async () => {
+    const probed: string[] = [];
+    const { engine, of } = setup(31.5, async (url) => {
+      probed.push(url);
+      return 31.5;
+    });
+    engine.handle(play("a", { duration: 30 }));
+    expect(engine.progress()!.duration).toBe(30);
+    await Bun.sleep(0);
+    expect(probed).toEqual(["http://127.0.0.1/audio/a"]);
+    expect(engine.progress()!.duration).toBe(31.5);
+    engine.handle({ type: "seek", seconds: 42 });
+    expect(of("playback_position").at(-1)!.details.seconds).toBe(31.5);
+    // Seeking reopens the decoder, not the probe.
+    expect(probed).toHaveLength(1);
+  });
+
+  test("a failed probe keeps the listed duration", async () => {
+    const { engine } = setup(30, async () => {
+      throw new Error("no ffprobe");
+    });
+    engine.handle(play("a", { duration: 30 }));
+    await Bun.sleep(0);
+    expect(engine.progress()!.duration).toBe(30);
   });
 
   test("a play for the entry already playing does not restart it", () => {
