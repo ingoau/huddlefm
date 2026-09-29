@@ -26,6 +26,8 @@ export function fileResponse(
     headers: {
       ...base,
       "content-type": file.type,
+      // Bun sizes a HEAD's slice from its start to the end of the file.
+      "content-length": String(end - start + 1),
       "content-range": `bytes ${start}-${end}/${size}`,
     },
   });

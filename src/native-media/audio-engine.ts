@@ -41,6 +41,8 @@ class Deck {
   stalledSent = false;
   /** The file's own length, once probed. */
   duration: number | undefined;
+  /** Stops the duration probe when the deck goes. */
+  readonly probing = new AbortController();
 
   constructor(
     readonly entryId: string,
@@ -96,6 +98,7 @@ class Deck {
 
   close() {
     this.decoder.close();
+    this.probing.abort();
   }
 }
 
@@ -285,7 +288,7 @@ export class AudioEngine {
     existing?.close();
     const deck = new Deck(entryId, url, this.decoderFactory, startSeconds);
     this.decks.set(entryId, deck);
-    this.probe(url)
+    this.probe(url, deck.probing.signal)
       .then((seconds) => {
         if (seconds && seconds > 0) deck.duration = seconds;
       })

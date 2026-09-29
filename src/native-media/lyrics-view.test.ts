@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Lyric, LyricPart } from "@braccato/core";
 import { createCanvas } from "@napi-rs/canvas";
-import { buildTimedRomanization } from "../romanization.ts";
+import { buildTimedRomanization } from "../timed-romanization.ts";
 import { LyricsView } from "./lyrics-view.ts";
 import { cubicBezier, Spring, spring, Tween } from "./motion.ts";
 import { VideoCard } from "./video-card.ts";
@@ -160,6 +160,8 @@ describe("lyrics view", () => {
       background: "오 예",
       roman: "a pa teu",
       romanTimed: true,
+      // Swept over the main vocals, done before the background vocals sing.
+      romanEnd: 2_500,
     });
   });
 

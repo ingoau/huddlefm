@@ -131,6 +131,18 @@ describe("AudioEngine", () => {
     expect(probed).toHaveLength(1);
   });
 
+  test("a deck that goes stops its duration probe", () => {
+    const signals: AbortSignal[] = [];
+    const { engine } = setup(30, (_url, signal) => {
+      signals.push(signal);
+      return new Promise(() => {});
+    });
+    engine.handle(play("a"));
+    expect(signals[0]!.aborted).toBe(false);
+    engine.handle({ type: "stop" });
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
   test("a failed probe keeps the listed duration", async () => {
     const { engine } = setup(30, async () => {
       throw new Error("no ffprobe");

@@ -60,10 +60,28 @@ describe("fileResponse", () => {
     const response = fileResponse(Bun.file(path), request("bytes=10-19"));
     expect(response.status).toBe(206);
     expect(response.headers.get("content-range")).toBe("bytes 10-19/100");
+    expect(response.headers.get("content-length")).toBe("10");
     expect(response.headers.get("content-type")).toBe(Bun.file(path).type);
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(
       bytes.slice(10, 20),
     );
+  });
+
+  test("a HEAD for a range gets the range's length", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (incoming) => fileResponse(Bun.file(path), incoming),
+    });
+    try {
+      const response = await fetch(server.url, {
+        method: "HEAD",
+        headers: { range: "bytes=10-19" },
+      });
+      expect(response.status).toBe(206);
+      expect(response.headers.get("content-length")).toBe("10");
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("refuses a range past the end", () => {

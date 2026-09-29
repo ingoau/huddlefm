@@ -18,14 +18,17 @@ export interface Decoder {
 export type DecoderFactory = (url: string, startSeconds: number) => Decoder;
 
 /** Finds how long a track's file really runs, in seconds. */
-export type DurationProbe = (url: string) => Promise<number | undefined>;
+export type DurationProbe = (
+  url: string,
+  signal: AbortSignal,
+) => Promise<number | undefined>;
 
 /**
  * Reads the file's own duration with ffprobe, which is what the page's
  * <audio> element reports: the length listed for a track can be off by a
  * second or more.
  */
-export async function probeDuration(url: string) {
+export async function probeDuration(url: string, signal: AbortSignal) {
   const probe = Bun.spawn(
     [
       "ffprobe",
@@ -37,7 +40,13 @@ export async function probeDuration(url: string) {
       "default=noprint_wrappers=1:nokey=1",
       url,
     ],
-    { stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 15_000 },
+    {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: 15_000,
+      signal,
+    },
   );
   const [output, exitCode] = await Promise.all([
     new Response(probe.stdout).text(),

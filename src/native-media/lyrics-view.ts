@@ -1,5 +1,6 @@
 import { createCanvas, type Canvas, type SKRSContext2D } from "@napi-rs/canvas";
 import type { Lyric, LyricPart } from "@braccato/core";
+import { buildTimedRomanization } from "../timed-romanization.ts";
 import { fonts } from "./fonts.ts";
 import { clamp, cubicBezier, easeOut, lerp, motion, Spring } from "./motion.ts";
 
@@ -253,6 +254,9 @@ export class LyricsView {
               .join(""),
             roman: item.roman?.syllables.map((value) => value.text).join(""),
             romanTimed: item.roman?.timed,
+            romanEnd: item.roman
+              ? Math.max(...item.roman.syllables.map((value) => value.end))
+              : undefined,
             timed: item.main.timed,
             rows: item.main.rows,
             scale: item.scale.target,
@@ -659,11 +663,22 @@ export class LyricsView {
       comparable(text) === comparable(mainText)
     )
       return;
+    // Without the background vocals' part, the rest is spread over the main
+    // vocals alone: left as it was, it would still be sweeping while the
+    // background vocals sing.
+    const timedRoman =
+      text === full || !line.timedRomanization?.length
+        ? line.timedRomanization
+        : buildTimedRomanization({
+            ...line,
+            romanization: text,
+            parts: line.parts?.filter((part) => !part.isBackground),
+          });
     const parts = timed
-      ? (line.timedRomanization ?? []).filter((part) => part.words.length > 0)
+      ? (timedRoman ?? []).filter((part) => part.words.length > 0)
       : [];
     const swept = parts.some((part) => part.durationMs > 0);
-    let pieces: Piece[] = swept
+    const pieces: Piece[] = swept
       ? parts.map((part) => ({
           text: part.words,
           start: part.startTimeMs,
@@ -674,7 +689,6 @@ export class LyricsView {
           start: line.startTimeMs,
           end: line.startTimeMs,
         }));
-    if (swept && text !== full) pieces = keepLetters(pieces, text);
     trimPieces(pieces);
     if (!pieces.length) return;
     return layoutBlock(measure, pieces, {
@@ -1075,24 +1089,6 @@ function wrapText(context: SKRSContext2D, text: string, width: number) {
   }
   if (row) rows.push(row);
   return rows;
-}
-
-/**
- * Keeps the pieces that spell out `text`'s letters, cutting the one that runs
- * past its end: a timed romanization shortened like its plain text.
- */
-function keepLetters(pieces: Piece[], text: string) {
-  let letters = text.replace(/\s/g, "").length;
-  const kept: Piece[] = [];
-  for (const piece of pieces) {
-    if (letters <= 0) break;
-    const characters = [...piece.text];
-    let cut = 0;
-    while (cut < characters.length && letters > 0)
-      if (!/\s/.test(characters[cut++]!)) letters--;
-    kept.push({ ...piece, text: characters.slice(0, cut).join("") });
-  }
-  return kept;
 }
 
 type BlockBox = {
