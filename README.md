@@ -143,7 +143,9 @@ Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`, the sam
 
 With `MEDIA_BACKEND=native-with-fallback`, Huddles start on the native backend but can move to Chromium for the rest of the session. That happens automatically when native media crashes, fails to join, or loses its connection, and when someone presses **Playback not working?** under the player. The button switches straight away, so the music drops out for a few seconds, then asks what went wrong. A session that fell back stays on Chromium if it is restored.
 
-Each switch is written to `data/audit.jsonl` as `media.fallback` (with `trigger` set to `automatic` or `report`), and each submitted form as `media.problem_reported`. A switch from the button and its form share a `reportId`. Both events also go to PostHog when it is configured. The operational log's `media_fallback_started` entry carries the native backend's recent warnings, errors and stats.
+Each switch gets a JSON file in `data/reports`, named by time and `reportId`. It holds why the switch happened, what was playing, the native backend's last 200 log lines and media events at every level (more than the log file keeps at `LOG_LEVEL=info`), this session's recent app log lines, whether the browser took over, and the form answers once they are sent. The newest 200 files are kept, for up to 30 days. They include Slack user IDs and whatever people type into the form, and stay on the host.
+
+The audit log (`data/audit.jsonl`) records each switch as `media.fallback`, with `trigger` set to `automatic` or `report`, and each submitted form as `media.problem_reported`, both with the `reportId`. These go to PostHog too when it is configured, which is the easiest way to count how often Huddles fall back.
 
 ### Updating
 

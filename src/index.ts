@@ -9,6 +9,7 @@ import {
 import { AuditLog } from "./audit-log.ts";
 import { canvasMarkdown } from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
+import { FallbackReports } from "./fallback-reports.ts";
 import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
 import { loadConfig, type MediaBackend } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
@@ -27,6 +28,7 @@ import {
   parsePlaybackReport,
   playbackReportCallbackId,
 } from "./playback-report.ts";
+import { recentLogs } from "./recent-logs.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import {
@@ -137,6 +139,7 @@ const audit = new AuditLog(
 );
 if (store.needsUsageBackfill())
   store.importUsage(await audit.historicalUsage());
+const fallbackReports = new FallbackReports();
 const slackHuddle = new SlackHuddleAdapter(config);
 const mediaBrowsers = new MediaBrowserPool(config.chromePath);
 const runtimes = new Map<string, Runtime>();
@@ -370,7 +373,9 @@ function canFallBack(runtime: Runtime) {
 /**
  * Swaps a runtime's native media for the browser. The native process leaves
  * Chime first, and the browser joins with the same attendee, so the Huddle
- * sees the bot drop out for a moment rather than a second copy of it.
+ * sees the bot drop out for a moment rather than a second copy of it. Each
+ * swap gets a report file in data/reports with what led up to it and how
+ * it went.
  */
 async function moveToBrowser(
   runtime: Runtime,
@@ -388,31 +393,61 @@ async function moveToBrowser(
   // Swapped in before the native process closes, so its parting `ended`
   // no longer counts as this runtime's.
   runtime.media = createMediaSession(() => runtime, "browser");
+  const startedAt = Date.now();
+  const reportId = cause.reportId ?? crypto.randomUUID();
   const trigger = cause.userId ? "report" : "automatic";
+  const mediaSessionId = runtime.bootstrap.sessionId;
+  const appLogs = () => recentLogs.take(cause.sessionId, mediaSessionId);
   audit.record("media.fallback", cause.userId, {
     sessionId: cause.sessionId,
-    mediaSessionId: runtime.bootstrap.sessionId,
+    mediaSessionId,
     callId: runtime.callId,
     trigger,
     reason: cause.reason,
-    ...(cause.reportId ? { reportId: cause.reportId } : {}),
+    reportId,
     ...cause.playback,
   });
   log.warn(
     {
       event: "media_fallback_started",
       sessionId: cause.sessionId,
-      mediaSessionId: runtime.bootstrap.sessionId,
+      mediaSessionId,
       trigger,
       reason: cause.reason,
-      reportId: cause.reportId,
-      lastMediaEvent: runtime.mediaState,
-      diagnostics: native.diagnostics?.() ?? [],
+      reportId,
     },
     "Falling back from native media to the browser",
   );
-  await native.close();
-  await joinMedia(runtime);
+  void fallbackReports.update(reportId, {
+    trigger,
+    reason: cause.reason,
+    ...(cause.userId ? { reportedBy: cause.userId } : {}),
+    sessionId: cause.sessionId,
+    callId: runtime.callId,
+    mediaSessionId,
+    playback: cause.playback,
+    lastMediaEvent: runtime.mediaState,
+    nativeLogs: native.diagnostics?.() ?? [],
+    appLogs: appLogs(),
+  });
+  try {
+    await native.close();
+    await joinMedia(runtime);
+    void fallbackReports.update(reportId, {
+      outcome: { status: "joined", durationMs: Date.now() - startedAt },
+      appLogs: appLogs(),
+    });
+  } catch (error) {
+    void fallbackReports.update(reportId, {
+      outcome: {
+        status: "failed",
+        durationMs: Date.now() - startedAt,
+        error: safeError(error),
+      },
+      appLogs: appLogs(),
+    });
+    throw error;
+  }
 }
 
 /**
@@ -473,6 +508,24 @@ function recordPlaybackReport(interaction: Interaction) {
   const report = parsePlaybackReport(interaction);
   if (!report) return;
   audit.record("media.problem_reported", interaction.userId, report);
+  const { reportId, sessionId, switched, ...answers } = report;
+  void fallbackReports.update(reportId, {
+    answers: {
+      userId: interaction.userId,
+      submittedAt: new Date().toISOString(),
+      ...answers,
+    },
+    // A report from a Huddle already on the browser switched nothing, so
+    // its file starts here and gets the session's logs now.
+    ...(switched
+      ? {}
+      : {
+          trigger: "report",
+          sessionId,
+          switched,
+          appLogs: recentLogs.take(sessionId),
+        }),
+  });
   log.info(
     {
       event: "media_problem_reported",
@@ -1959,6 +2012,7 @@ async function shutdownSteps() {
   store.close();
   log.debug({ event: "shutdown_audit" }, "Flushing audit log");
   await audit.flush();
+  await fallbackReports.flush();
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

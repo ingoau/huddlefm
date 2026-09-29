@@ -29,8 +29,11 @@ function redactFields(fields: Record<string, unknown>) {
 }
 
 const levels = new Set(["trace", "debug", "info", "warn", "error"]);
-/** How many recent warnings, errors and stats a session keeps for diagnostics. */
-const diagnosticsLimit = 30;
+/**
+ * How many recent lines a session keeps for a fallback report. They are kept
+ * at every level, since the log file usually leaves out debug detail.
+ */
+const diagnosticsLimit = 200;
 // The child needs no Slack credentials, so it only gets what running Bun and
 // ffmpeg takes.
 const inheritedEnv = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"];
@@ -159,8 +162,8 @@ export class NativeMediaSession {
   }
 
   /**
-   * The process's recent warnings, errors and stats, oldest first, for a
-   * report on why this session was given up.
+   * The process's recent log lines and media events at every level, oldest
+   * first, for a report on why this session was given up.
    */
   diagnostics() {
     return [...this.recent];
@@ -236,12 +239,7 @@ export class NativeMediaSession {
         : "info";
       const safeFields = redactFields(fields);
       const text = redactSecrets(String(message ?? ""));
-      if (
-        method === "warn" ||
-        method === "error" ||
-        event === "native_media_stats"
-      )
-        this.remember(method, event ?? "native_media_log", text, safeFields);
+      this.remember(method, event ?? "native_media_log", text, safeFields);
       childLog[method](
         { event: event ?? "native_media_log", ...safeFields },
         text,
@@ -249,7 +247,8 @@ export class NativeMediaSession {
       return;
     }
     if (typeof parsed.type !== "string") return;
-    if (parsed.type === "fatal" || parsed.type === "ended")
+    // Positions arrive several times a second and say nothing a report needs.
+    if (parsed.type !== "playback_position")
       this.remember(
         parsed.type === "fatal" ? "error" : "info",
         `media_${parsed.type}`,

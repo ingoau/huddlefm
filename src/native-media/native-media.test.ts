@@ -271,7 +271,7 @@ describe("native session messages", () => {
 });
 
 describe("native media diagnostics", () => {
-  test("keep recent warnings, stats and failures for a fallback report", () => {
+  test("keep recent lines at every level and media events", () => {
     const messages: unknown[] = [];
     const session = new NativeMediaSession((message) => messages.push(message));
     const receive = (line: unknown) =>
@@ -282,30 +282,21 @@ describe("native media diagnostics", () => {
         error() {},
         trace() {},
       });
-    receive({ log: { level: "debug", event: "noise", message: "quiet" } });
     receive({
-      log: {
-        level: "debug",
-        event: "native_media_stats",
-        message: "Native media stats",
-        audioPackets: 12,
-      },
+      log: { level: "debug", event: "chime_ice", message: "Candidate" },
     });
     receive({
       log: { level: "warn", event: "chime_reconnect", message: "Reconnecting" },
     });
+    receive({ type: "playback_position", details: { seconds: 3 } });
     receive({ type: "fatal", details: { message: "relay lost" } });
     expect(messages).toEqual([
+      { type: "playback_position", details: { seconds: 3 } },
       { type: "fatal", details: { message: "relay lost" } },
     ]);
     expect(session.diagnostics().map(({ at: _at, ...entry }) => entry)).toEqual(
       [
-        {
-          level: "debug",
-          event: "native_media_stats",
-          message: "Native media stats",
-          audioPackets: 12,
-        },
+        { level: "debug", event: "chime_ice", message: "Candidate" },
         { level: "warn", event: "chime_reconnect", message: "Reconnecting" },
         {
           level: "error",
@@ -321,17 +312,17 @@ describe("native media diagnostics", () => {
     const session = new NativeMediaSession(() => {});
     const receive = Reflect.get(session, "receive").bind(session);
     const quiet = { debug() {}, info() {}, warn() {}, error() {}, trace() {} };
-    for (let index = 0; index < 50; index++)
+    for (let index = 0; index < 250; index++)
       receive(
         JSON.stringify({
-          log: { level: "warn", event: "tick", message: String(index) },
+          log: { level: "debug", event: "tick", message: String(index) },
         }),
         quiet,
       );
     const kept = session.diagnostics();
-    expect(kept).toHaveLength(30);
-    expect(kept[0]).toMatchObject({ message: "20" });
-    expect(kept.at(-1)).toMatchObject({ message: "49" });
+    expect(kept).toHaveLength(200);
+    expect(kept[0]).toMatchObject({ message: "50" });
+    expect(kept.at(-1)).toMatchObject({ message: "249" });
   });
 });
 
