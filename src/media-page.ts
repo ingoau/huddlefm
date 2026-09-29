@@ -523,8 +523,14 @@ async function join(payload: {
   attendee: Record<string, unknown>;
   initialVolume: number;
   duckingMode?: string;
+  lyricsOffsetMs?: number;
 }) {
   mediaSessionId = payload.sessionId;
+  // Braccato subtracts this from the playback time, so positive is later.
+  lyrics.tickOptions = {
+    ...lyrics.tickOptions,
+    globalLyricOffset: (payload.lyricsOffsetMs ?? 0) / 1_000,
+  };
   await audioContext.resume();
   gain.gain.value = volumeGain(payload.initialVolume);
   applyDuck(ducking.setMode(parseDuckingMode(payload.duckingMode), Date.now()));

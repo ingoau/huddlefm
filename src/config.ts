@@ -26,11 +26,14 @@ export function parseWholeNumber(
   value: string | undefined,
   fallback: number,
   minimum = 0,
+  maximum = Number.MAX_SAFE_INTEGER,
 ) {
   const text = value?.trim();
   if (!text) return fallback;
   const parsed = Number(text);
-  return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
+  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : fallback;
 }
 
 export type MediaBackend = "browser" | "native";
@@ -70,6 +73,12 @@ export function loadConfig() {
     ),
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.5),
     duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
+    lyricsOffsetMs: parseWholeNumber(
+      process.env.LYRICS_OFFSET_MS,
+      0,
+      -10_000,
+      10_000,
+    ),
     loudnessNormalization: process.env.LOUDNESS_NORMALIZATION === "true",
     preparationConcurrency: parseWholeNumber(
       process.env.TRACK_PREPARATION_CONCURRENCY,

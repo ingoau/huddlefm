@@ -110,6 +110,7 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 | `TRACK_DOWNLOAD_LIMIT_BYTES`    | `100000000`      | Maximum download size                                                                     |
 | `INITIAL_VOLUME`                | `0.5`            | Starting volume as a fraction of max                                                      |
 | `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                              |
+| `LYRICS_OFFSET_MS`              | `0`              | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio |
 | `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to enable -14 LUFS normalization                                            |
 | `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all Huddles                                |
 | `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`     | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache |
@@ -136,7 +137,7 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 With `MEDIA_BACKEND=native`, HuddleFM joins each Huddle's Chime meeting itself instead of through headless Chromium. Each Huddle's media runs in its own Bun process, which uses much less memory and CPU and joins faster.
 
-Everything else behaves the same, except that the video tile is a static card: artwork, title, requester and a progress bar. It has no lyrics view.
+Everything else behaves the same, except that the video tile is drawn natively at 540×540 and 24 fps. It has the same default and lyrics layouts as the browser's, with syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
 
 Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`, the same as the browser backend. Leave the variable unset to keep the browser backend.
 

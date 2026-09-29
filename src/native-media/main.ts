@@ -3,6 +3,7 @@
 // messages as JSON lines on stdin, and writes the same events the media page
 // sends, plus log lines, as JSON lines on stdout.
 import { Application, createEncoder, Signal } from "libopus-wasm";
+import type { Lyric } from "@braccato/core";
 import type { ChimeBootstrap } from "../slack-huddle.ts";
 import { errorMessage } from "../error-message.ts";
 import { AudioEngine } from "./audio-engine.ts";
@@ -14,8 +15,9 @@ import {
 } from "./chime-link.ts";
 import { FfmpegDecoder, sampleRate } from "./decoder.ts";
 import { SpeechSignals } from "./speech.ts";
-import { VideoCard } from "./video-card.ts";
-import { VideoFeed } from "./video-feed.ts";
+import type { LyricsCredits } from "./lyrics-view.ts";
+import type { DisplayMode } from "./video-card.ts";
+import { VideoThread } from "./video-thread.ts";
 
 type Level = "trace" | "debug" | "info" | "warn" | "error";
 
@@ -44,13 +46,25 @@ function log(
 
 let engine: AudioEngine | undefined;
 let link: ChimeLink | undefined;
-let card: VideoCard | undefined;
-let feed: VideoFeed | undefined;
+/** The video card and its encoder, drawn in a worker off this thread. */
+let card: VideoThread | undefined;
 let pacer: ReturnType<typeof setInterval> | undefined;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
 let leaving: Promise<void> | undefined;
 let trackSwap = 0;
 let wantVideo = true;
+/** The entry the card shows, which trails `play` by the swap delay. */
+let shownEntry: string | undefined;
+/** The best lyrics so far for the current entry, like the page's. */
+let lyrics:
+  | {
+      entryId: string;
+      priority: number;
+      lines: Lyric[];
+      credits: LyricsCredits;
+    }
+  | undefined;
+let noLyrics: string | undefined;
 
 async function start(bootstrap: ChimeBootstrap) {
   sessionId = bootstrap.sessionId;
@@ -61,14 +75,10 @@ async function start(bootstrap: ChimeBootstrap) {
   engine = audio;
   audio.setVolume(bootstrap.initialVolume);
   audio.setDuckingMode(bootstrap.duckingMode);
-  const videoCard = new VideoCard(
-    () => audio.progress(),
-    (message) =>
-      log("warn", "native_artwork_failed", "Artwork failed to load", {
-        error: message,
-      }),
-  );
-  card = videoCard;
+  card = new VideoThread((bootstrap.lyricsOffsetMs ?? 0) / 1_000, {
+    onAccessUnit: (nals, timestamp) => link?.sendVideo(nals, timestamp),
+    log: (event, message, fields) => log("warn", event, message, fields),
+  });
   let speech: SpeechSignals | undefined;
   const chime = new ChimeLink(
     bootstrap.meeting as unknown as ChimeMeeting,
@@ -83,7 +93,7 @@ async function start(bootstrap: ChimeBootstrap) {
         syncVideo();
       },
       onVideoChanged: () => syncVideo(),
-      onPictureLoss: () => feed?.requestKeyframe(),
+      onPictureLoss: () => card?.requestKeyframe(),
       onTerminal: (code, reason) => {
         log("warn", "native_media_ended", "Chime session ended", {
           code,
@@ -95,14 +105,6 @@ async function start(bootstrap: ChimeBootstrap) {
   );
   link = chime;
   speech = new SpeechSignals(chime.attendeeId, audio.ducking, audio.applyDuck);
-  feed = new VideoFeed(
-    () => videoCard.rgba(),
-    (nals, timestamp) => chime.sendVideo(nals, timestamp),
-    (message) =>
-      log("warn", "native_video_failed", "Video encoder stopped", {
-        error: message,
-      }),
-  );
   const startedAt = Date.now();
   await chime.start();
   log("info", "native_media_joined", "Native media joined Chime", {
@@ -124,9 +126,8 @@ async function start(bootstrap: ChimeBootstrap) {
 }
 
 function syncVideo() {
-  if (!feed || !link) return;
-  if (link.sendingVideo && wantVideo) feed.start();
-  else feed.stop();
+  if (!link) return;
+  card?.setVideo(link.sendingVideo && wantVideo);
 }
 
 async function startPacer(audio: AudioEngine, chime: ChimeLink) {
@@ -165,6 +166,7 @@ async function startPacer(audio: AudioEngine, chime: ChimeLink) {
         });
       }
     }
+    card?.tick(audio.progress());
   }, 10);
 }
 
@@ -177,18 +179,34 @@ function handle(message: Record<string, any>) {
   if (!engine || leaving) return;
   if (message.type === "display_mode") {
     wantVideo = message.mode !== "off";
+    card?.setDisplayMode(message.mode as DisplayMode);
     link?.setVideo(wantVideo);
     syncVideo();
     return;
   }
-  // The native card has no lyrics view yet; the default card stands in.
-  if (message.type === "lyrics" || message.type === "lyrics_unavailable")
+  if (message.type === "lyrics") {
+    handleLyrics(message);
     return;
+  }
+  if (message.type === "lyrics_unavailable") {
+    if (
+      message.entryId !== engine.current ||
+      lyrics?.entryId === message.entryId
+    )
+      return;
+    noLyrics = message.entryId;
+    if (shownEntry === message.entryId) card?.setLyricsUnavailable();
+    return;
+  }
   engine.handle(message);
   if (message.type === "play") {
     const swap = ++trackSwap;
+    lyrics = undefined;
+    noLyrics = undefined;
+    card?.beginChange(message.artwork);
     setTimeout(() => {
       if (swap !== trackSwap || engine?.current !== message.entryId) return;
+      shownEntry = message.entryId;
       card?.setTrack(
         String(message.title ?? ""),
         message.requesterLabel
@@ -196,12 +214,34 @@ function handle(message: Record<string, any>) {
           : String(message.artist ?? ""),
         message.artwork,
       );
+      if (lyrics && lyrics.entryId === message.entryId)
+        card?.setLyrics(lyrics.lines, lyrics.credits);
+      else if (noLyrics === message.entryId) card?.setLyricsUnavailable();
     }, trackSwapDelayMs);
   }
   if (message.type === "stop") {
     trackSwap++;
+    shownEntry = undefined;
+    lyrics = undefined;
+    noLyrics = undefined;
     card?.reset();
   }
+}
+
+function handleLyrics(message: Record<string, any>) {
+  const entryId = String(message.entryId);
+  const priority = Number(message.priority);
+  if (entryId !== engine?.current || !Array.isArray(message.lines)) return;
+  if (lyrics?.entryId === entryId && !(priority < lyrics.priority)) return;
+  const credits: LyricsCredits = {
+    songwriters: Array.isArray(message.songwriters)
+      ? message.songwriters.map(String)
+      : undefined,
+    source: typeof message.source === "string" ? message.source : undefined,
+  };
+  lyrics = { entryId, priority, lines: message.lines, credits };
+  noLyrics = undefined;
+  if (shownEntry === entryId) card?.setLyrics(message.lines, credits);
 }
 
 async function leave() {
@@ -218,7 +258,7 @@ function finish(code: number) {
     clearInterval(pacer);
     clearInterval(statsTimer);
     engine?.dispose();
-    feed?.stop();
+    await card?.stop();
     await link?.leave().catch(() => {});
     emit("ended", { code });
     // Let stdout drain before exiting.

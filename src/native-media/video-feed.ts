@@ -1,15 +1,75 @@
 import { AnnexBSplitter } from "./rtp.ts";
-import { cardSize } from "./video-card.ts";
-
-/** The card changes at most every few hundred milliseconds. */
-export const videoFps = 5;
+import { cardSize, videoFps, videoMaxKbps } from "./video-format.ts";
+/** An unchanged frame is skipped, but one still goes out this often. */
+const keepAliveMs = 500;
+/** Seconds between keyframes, so a new viewer gets a picture quickly. */
+const keyframeSeconds = 2;
 /** Keyframe requests this soon after a keyframe wait out the rest. */
 const minKeyframeGapMs = 500;
 
 /**
- * Encodes card frames to H.264 constrained baseline with ffmpeg and hands out
- * access units with 90 kHz timestamps. Keyframes come every two seconds, and
- * sooner when a viewer asks for one (PLI) through `requestKeyframe`.
+ * ffmpeg's arguments: raw RGBA in, stamped with the wall clock as it arrives
+ * so frames can be skipped, and H.264 constrained baseline out, with keyframes
+ * on the clock rather than every so many frames.
+ */
+export function encoderArgs(size = cardSize) {
+  return [
+    "ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "rgba",
+    "-s",
+    `${size}x${size}`,
+    "-use_wallclock_as_timestamps",
+    "1",
+    "-i",
+    "pipe:0",
+    "-fps_mode",
+    "passthrough",
+    "-c:v",
+    "libx264",
+    // superfast on one thread: about a quarter less CPU than veryfast with
+    // sliced threads, at the same quality and a few percent more bits.
+    "-preset",
+    "superfast",
+    "-threads",
+    "1",
+    "-tune",
+    "zerolatency",
+    "-profile:v",
+    "baseline",
+    "-pix_fmt",
+    "yuv420p",
+    "-crf",
+    "26",
+    "-maxrate",
+    `${videoMaxKbps}k`,
+    "-bufsize",
+    `${videoMaxKbps}k`,
+    "-force_key_frames",
+    `expr:gte(t,n_forced*${keyframeSeconds})`,
+    "-g",
+    String(videoFps * keyframeSeconds),
+    "-bf",
+    "0",
+    "-x264-params",
+    "aud=1:repeat-headers=1",
+    "-f",
+    "h264",
+    "pipe:1",
+  ];
+}
+
+/**
+ * Encodes card frames with ffmpeg and hands out access units with 90 kHz
+ * timestamps. A frame the card did not redraw is not sent again, which leaves
+ * a still card a couple of frames a second instead of the full rate.
+ * Keyframes come every two seconds, and sooner when a viewer asks for one
+ * (PLI) through `requestKeyframe`.
  */
 export class VideoFeed {
   private encoder?: Bun.Subprocess<"pipe", "pipe", "pipe">;
@@ -20,11 +80,15 @@ export class VideoFeed {
   private keyframeAt = 0;
   private awaitingKeyframe = false;
   private keyframeTimer?: ReturnType<typeof setTimeout>;
+  private sent: Buffer | undefined;
+  private sentAt = 0;
 
   constructor(
     private frame: () => Buffer,
     private onAccessUnit: (nals: Buffer[], timestamp: number) => void,
     private onError: (message: string) => void,
+    /** The running encoder's pid, or undefined once there is none. */
+    private onEncoder: (pid: number | undefined) => void = () => {},
   ) {}
 
   get running() {
@@ -33,51 +97,13 @@ export class VideoFeed {
 
   start() {
     if (this.encoder) return;
-    const encoder = Bun.spawn(
-      [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgba",
-        "-s",
-        `${cardSize}x${cardSize}`,
-        "-r",
-        String(videoFps),
-        "-i",
-        "pipe:0",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-tune",
-        "zerolatency",
-        "-profile:v",
-        "baseline",
-        "-pix_fmt",
-        "yuv420p",
-        "-crf",
-        "28",
-        "-maxrate",
-        "600k",
-        "-bufsize",
-        "1200k",
-        "-g",
-        String(videoFps * 2),
-        "-bf",
-        "0",
-        "-x264-params",
-        "aud=1:repeat-headers=1",
-        "-f",
-        "h264",
-        "pipe:1",
-      ],
-      { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
-    );
+    const encoder = Bun.spawn(encoderArgs(), {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     this.encoder = encoder;
+    this.onEncoder(encoder.pid);
     this.awaitingKeyframe = true;
     void this.read(encoder);
     void encoder.exited.then(async (code) => {
@@ -90,12 +116,18 @@ export class VideoFeed {
     });
     const write = () => {
       try {
-        encoder.stdin.write(this.frame());
+        const frame = this.frame();
+        const now = performance.now();
+        if (frame === this.sent && now - this.sentAt < keepAliveMs) return;
+        this.sent = frame;
+        this.sentAt = now;
+        encoder.stdin.write(frame);
         void encoder.stdin.flush();
       } catch {}
     };
-    // The first frame goes in now rather than a tick later, so the opening
-    // keyframe is out as soon as ffmpeg is.
+    // The first frame goes in now rather than a tick later, even if the card
+    // has not changed, so the opening keyframe is out as soon as ffmpeg is.
+    this.sent = undefined;
     write();
     this.timer = setInterval(write, 1_000 / videoFps);
   }
@@ -128,6 +160,7 @@ export class VideoFeed {
     const encoder = this.encoder;
     this.encoder = undefined;
     if (!encoder) return;
+    this.onEncoder(undefined);
     try {
       void encoder.stdin.end();
     } catch {}

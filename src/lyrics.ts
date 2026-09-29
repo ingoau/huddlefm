@@ -11,7 +11,54 @@ export type LyricsPayload = {
   lines: Lyric[];
   source: string;
   priority: number;
+  /** Credited writers, when the provider's TTML names them. */
+  songwriters?: string[];
 };
+
+const xmlEntities: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+
+function decodeXml(text: string) {
+  return text.replace(/&(#x[\da-f]+|#\d+|\w+);/gi, (match, code: string) => {
+    if (code[0] !== "#") return xmlEntities[code] ?? match;
+    const point =
+      code[1]?.toLowerCase() === "x"
+        ? Number.parseInt(code.slice(2), 16)
+        : Number(code.slice(1));
+    return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
+      ? String.fromCodePoint(point)
+      : match;
+  });
+}
+
+/**
+ * The songwriters a TTML file credits: Apple's iTunesMetadata lists them as
+ * `<songwriter>` elements, AMLL's as `<amll:meta key="songwriters">` tags.
+ */
+export function songwritersFrom(ttml: string) {
+  const names = [
+    ...ttml.matchAll(
+      /<(?:[\w-]+:)?songwriter\b[^>]*>([^<]*)<\/(?:[\w-]+:)?songwriter>/g,
+    ),
+  ].map((match) => match[1]!);
+  const attribute = (attributes: string, name: string) =>
+    attributes.match(
+      new RegExp(`(?:^|\\s)${name}\\s*=\\s*(["'])(.*?)\\1`),
+    )?.[2];
+  for (const [, attributes] of ttml.matchAll(/<(?:[\w-]+:)?meta\b([^>]*)>/g)) {
+    const key = attribute(attributes!, "key");
+    const value = attribute(attributes!, "value");
+    if (value && /^songwriters?$/i.test(key ?? "")) names.push(value);
+  }
+  return [
+    ...new Set(names.map((name) => decodeXml(name).trim()).filter(Boolean)),
+  ];
+}
 
 function variants(track: TrackMetadata) {
   const featured = track.title.match(/\s*[([]feat\.\s+([^\])]+)[\])]/i);
@@ -52,8 +99,21 @@ async function fetchText(url: string) {
   return response.ok ? response.text() : undefined;
 }
 
-const payload = (lines: Lyric[], source: string, priority: number) =>
-  lines.length ? { lines, source, priority } : undefined;
+const payload = (
+  lines: Lyric[],
+  source: string,
+  priority: number,
+  ttml?: string,
+): LyricsPayload | undefined => {
+  if (!lines.length) return;
+  const songwriters = ttml ? songwritersFrom(ttml) : [];
+  return {
+    lines,
+    source,
+    priority,
+    ...(songwriters.length ? { songwriters } : {}),
+  };
+};
 
 function wordSyncedLines(ttml: string, track: TrackMetadata) {
   const parsed = parseTTMLContent(ttml, {
@@ -143,6 +203,7 @@ export class LyricsCatalog {
         wordSyncedLines(data.ttml, track),
         "Better Lyrics",
         0,
+        data.ttml,
       );
       if (found) return found;
     }
@@ -163,7 +224,12 @@ export class LyricsCatalog {
         continue;
       const ttml = await fetchText(lyricsUrl);
       if (!ttml) continue;
-      const found = payload(wordSyncedLines(ttml, track), "BiniLyrics", 2);
+      const found = payload(
+        wordSyncedLines(ttml, track),
+        "BiniLyrics",
+        2,
+        ttml,
+      );
       if (found) return found;
     }
   }
@@ -185,7 +251,12 @@ export class LyricsCatalog {
       const parsed = parseTTMLContent(data.lyrics, {
         songDurationMs: durationMs,
       });
-      return payload(parsed.lyrics, source, parsed.isWordSynced ? 1 : 7);
+      return payload(
+        parsed.lyrics,
+        source,
+        parsed.isWordSynced ? 1 : 7,
+        data.lyrics,
+      );
     }
     const lines =
       data.format === "lrc"
@@ -226,7 +297,7 @@ export class LyricsCatalog {
       `https://amlldb.bikonoo.com/raw-lyrics/${encodeURIComponent(match.file)}`,
     );
     if (!ttml) return;
-    return payload(wordSyncedLines(ttml, track), "AMLL TTML DB", 5);
+    return payload(wordSyncedLines(ttml, track), "AMLL TTML DB", 5, ttml);
   }
 
   private async lrclib(track: TrackMetadata) {

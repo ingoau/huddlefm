@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cardSize } from "./video-card.ts";
+import { cardSize } from "./video-format.ts";
 import { VideoFeed } from "./video-feed.ts";
 
 const hasFfmpeg = Boolean(Bun.which("ffmpeg"));
