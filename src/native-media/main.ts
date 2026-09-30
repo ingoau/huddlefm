@@ -88,11 +88,9 @@ async function start(bootstrap: ChimeBootstrap) {
     {
       log: (level, event, message, fields) =>
         log(level, event, message, fields),
+      onSignaling: () => speech?.reset(),
       onFrame: (frame) => speech?.handle(frame),
-      onConnected: (reconnect) => {
-        if (reconnect) speech?.reset();
-        syncVideo();
-      },
+      onConnected: () => syncVideo(),
       onVideoChanged: () => syncVideo(),
       onPictureLoss: () => card?.requestKeyframe(),
       onTerminal: (code, reason) => {

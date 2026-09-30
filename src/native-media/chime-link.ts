@@ -75,6 +75,11 @@ type Connection = {
 
 export type ChimeLinkEvents = {
   log: SignalingLog;
+  /**
+   * A signaling session is starting. Chime describes attendee presence afresh
+   * on each one, so state built from earlier frames no longer applies.
+   */
+  onSignaling(): void;
   /** Every decoded signaling frame, for volume and presence. */
   onFrame(frame: SignalFrame): void;
   /** A connection (first or reconnected) is carrying media. */
@@ -325,6 +330,11 @@ export class ChimeLink {
     );
     let connection: Connection | undefined;
     let terminal: TerminalError | undefined;
+    // Like the JS SDK's ListenForVolumeIndicatorsTask, listen before joining:
+    // Chime lists the attendees already here once, right after JOIN, and
+    // volumes are keyed by the stream ids that list assigns.
+    this.events.onSignaling();
+    signaling.onFrame((frame) => this.events.onFrame(frame));
     signaling.onFrame((frame) => {
       const status = frame.audio_status?.audio_status;
       if (status !== undefined && terminalAudioStatus[status])
@@ -529,9 +539,7 @@ export class ChimeLink {
       }
       if (audioStatus !== undefined && audioStatus !== 200) {
         this.lost(connection, `Chime audio status ${audioStatus}`);
-        return;
       }
-      this.events.onFrame(frame);
     });
     signaling.onClose((code, reason) => {
       if (code === 4410)

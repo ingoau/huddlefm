@@ -11,7 +11,7 @@ type Subscribe = { duplex: string; videoDirection: string | undefined };
  * A stand-in for Chime: a signaling WebSocket that answers JOIN and SUBSCRIBE,
  * with a real WebRTC peer behind it on loopback that counts the RTP it gets.
  */
-function fakeChime() {
+function fakeChime(afterJoin: Uint8Array[] = []) {
   const received = { audio: 0, video: 0 };
   const joins: number[] = [];
   const subscribes: Subscribe[] = [];
@@ -76,6 +76,7 @@ function fakeChime() {
             }),
           );
           socket.send(encodeFrame("INDEX", { index: { num_participants: 2 } }));
+          for (const frame of afterJoin) socket.send(frame);
         }
         if (frame.type === "SUBSCRIBE") {
           const offer: string = frame.sub.sdp_offer;
@@ -137,6 +138,7 @@ test("a display toggle renegotiates video on the live connection", async () => {
     true,
     {
       log: () => {},
+      onSignaling: () => {},
       onFrame: () => {},
       onConnected: (reconnect) => {
         if (reconnect) reconnects++;
@@ -189,4 +191,43 @@ test("a display toggle renegotiates video on the live connection", async () => {
     { duplex: "RX", videoDirection: "inactive" },
     { duplex: "DUPLEX", videoDirection: "sendrecv" },
   ]);
+}, 30_000);
+
+test("frames sent before media connects still reach the listener", async () => {
+  // Chime lists the attendees already in the meeting once, right after JOIN;
+  // missing it leaves their volumes unattributed, so nobody ever ducks.
+  const chime = fakeChime([
+    encodeFrame("AUDIO_STREAM_ID_INFO", {
+      audio_stream_id_info: {
+        streams: [{ audio_stream_id: 2, attendee_id: "person" }],
+      },
+    }),
+  ]);
+  cleanup.push(() => chime.stop());
+  const events: string[] = [];
+  const link = new ChimeLink(
+    { MediaPlacement: { SignalingUrl: chime.url, AudioHostUrl: "audio" } },
+    { AttendeeId: "bot", JoinToken: "token" },
+    false,
+    {
+      log: () => {},
+      onSignaling: () => events.push("signaling"),
+      onFrame: (frame) => {
+        const attendees = frame.audio_stream_id_info?.streams?.map(
+          (stream) => stream.attendee_id,
+        );
+        if (attendees) events.push(`streams ${attendees.join(",")}`);
+      },
+      onConnected: () => events.push("connected"),
+      onVideoChanged: () => {},
+      onPictureLoss: () => {},
+      onTerminal: (code, reason) => {
+        throw new Error(`terminal ${code}: ${reason}`);
+      },
+    },
+    false,
+  );
+  cleanup.push(() => link.leave());
+  await link.start();
+  expect(events).toEqual(["signaling", "streams person", "connected"]);
 }, 30_000);
