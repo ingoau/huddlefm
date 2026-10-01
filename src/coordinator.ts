@@ -4867,6 +4867,11 @@ export class Coordinator {
                 plain("Playback not working?"),
                 {
                   value,
+                  confirm: confirm(
+                    "Switch to the old player?",
+                    "The music will pause for a few seconds while everyone in the Huddle moves to the old player. Then you can tell us what went wrong.",
+                    "Switch",
+                  ),
                 },
               ),
             ]),
