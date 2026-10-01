@@ -40,6 +40,11 @@ const similarArtistsPerSeed = 4;
 const tracksPerSimilarArtist = 3;
 const listenBrainzFetchCount = 100;
 const listenBrainzSampleCount = 25;
+// A listener's top tracks are read deep, and each autoplay pick draws a fresh
+// score-weighted slice of their songs, so their best-known songs lead often
+// but the same handful does not lead every pick.
+const topTrackWindow = 150;
+const mixTasteSampleSize = 40;
 const recentAddLimit = 25;
 // An explicit like is the rarest and most deliberate signal the mix gets, and
 // the button is one way, so time is the only thing that takes one back. It
@@ -66,7 +71,10 @@ const mixPoolDiscoveryWeight = 3;
 const mixSameArtistBoost = 1.4;
 const mixArtistRunLimit = 2;
 const mixArtistRunDamping = 0.5;
-const mixFairnessWeight = 1;
+// Each listener's taste is scaled to the room's average total, so a deep
+// scrobble history does not drown out a few added songs; but by no more than
+// this either way, so one added song does not become an overwhelming favourite.
+const mixTasteScaleLimit = 4;
 const skipTrackPenalty = 0.2;
 const skipArtistPenalty = 0.6;
 const lanes = ["discover", "favourites"] as const;
@@ -246,6 +254,32 @@ export function mergeTaste(tracks: TasteContribution[]): ScoredTrack[] {
   for (const item of byKey.values())
     item.score *= 1 + 0.8 * (item.userIds.length - 1);
   return [...byKey.values()].sort((a, b) => b.score - a.score);
+}
+
+// Scales each listener's contributions to the same total weight, the mean of
+// the room's, within `mixTasteScaleLimit`. A listener alone is left as is.
+export function balanceTaste(
+  perListener: readonly (readonly TasteContribution[])[],
+): TasteContribution[] {
+  const totals = perListener.map((contributions) =>
+    contributions.reduce((sum, track) => sum + track.weight, 0),
+  );
+  const present = totals.filter((total) => total > 0);
+  const target = present.length
+    ? present.reduce((sum, total) => sum + total, 0) / present.length
+    : 0;
+  return perListener.flatMap((contributions, index) => {
+    const total = totals[index]!;
+    if (total <= 0) return [...contributions];
+    const scale = Math.min(
+      mixTasteScaleLimit,
+      Math.max(1 / mixTasteScaleLimit, target / total),
+    );
+    return contributions.map((track) => ({
+      ...track,
+      weight: track.weight * scale,
+    }));
+  });
 }
 
 export function skipSets(skipped: SkipPenalties = {}) {
@@ -496,6 +530,11 @@ export class RecommendationCatalog {
     // How many recent autoplay picks each listener's taste contributed to,
     // so the mix can favour whoever has been underserved.
     credited?: Record<string, number>;
+    // The listeners the previous autoplay pick was credited to.
+    lastCredited?: readonly string[];
+    // The listeners whose song is now playing: what follows on from it is
+    // credited to them.
+    nowPlayingListenerIds?: readonly string[];
     // How many tracks in a row the now-playing artist has had, including
     // the current one.
     artistRun?: number;
@@ -528,7 +567,9 @@ export class RecommendationCatalog {
     const known = new Set<string>();
     for (const profile of profiles)
       for (const key of profile.known) known.add(key);
-    const contributions = profiles.flatMap((profile) => profile.contributions);
+    const contributions = balanceTaste(
+      profiles.map((profile) => this.tasteSample(profile.contributions)),
+    );
     const relatedNudge = related
       .slice(0, 8)
       .map((track, index) =>
@@ -578,25 +619,6 @@ export class RecommendationCatalog {
         if (normalizeToken(primaryArtist(track.artist)) === playingArtist)
           track.score *= sameArtist;
     }
-    // Lift tracks from listeners whose taste has had fewer recent picks
-    // than the room average. Nobody is penalised for being well served.
-    const credited = options.credited ?? {};
-    const credits = listeners.map((userId) => credited[userId] ?? 0);
-    const averageCredit = credits.length
-      ? credits.reduce((sum, value) => sum + value, 0) / credits.length
-      : 0;
-    for (const track of ranked) {
-      const underserved = Math.max(
-        0,
-        ...track.userIds
-          .filter((userId) => knownBy.has(userId))
-          .map(
-            (userId) =>
-              (averageCredit - (credited[userId] ?? 0)) / (averageCredit + 1),
-          ),
-      );
-      if (underserved > 0) track.score *= 1 + mixFairnessWeight * underserved;
-    }
     // Push down whatever these listeners have already heard, or skipped, in
     // earlier Huddles. Applied last so it weighs the finished score.
     if (options.fatigue)
@@ -606,6 +628,16 @@ export class RecommendationCatalog {
     const recentKeys = new Set((options.recent ?? []).map(keyOf));
     const eligible = ranked.filter((track) => !recentKeys.has(keyOf(track)));
     const isDiscovery = (track: ScoredTrack) => !known.has(keyOf(track));
+    // A track is credited to the listeners whose taste put it forward, or,
+    // when it only follows on from the song playing, to whoever that song
+    // was for.
+    const seedOwners = (options.nowPlayingListenerIds ?? []).filter((userId) =>
+      knownBy.has(userId),
+    );
+    const creditsOf = (track: ScoredTrack) => {
+      const own = track.userIds.filter((userId) => knownBy.has(userId));
+      return own.length ? own : seedOwners;
+    };
     // A track counts as a seed for each listener who has actually played it,
     // which is a stronger signal than merely turning up in their similar
     // tracks or Discover pool.
@@ -619,36 +651,89 @@ export class RecommendationCatalog {
         score: track.score,
         seedCount: Math.max(1, played.length),
         discovery: isDiscovery(track),
-        listenerIds: track.userIds.filter((userId) => knownBy.has(userId)),
+        listenerIds: creditsOf(track),
         metadata,
       };
     };
     // Candidates come back in the sampled order, which the caller keeps:
     // re-sorting by score here would put the same track first every pick.
     const results: AutoplayCandidate[] = [];
+    const taken = new Set<string>();
     const resolveLane = async (tracks: ScoredTrack[], limit: number) => {
+      if (limit <= 0) return;
       const resolved = await this.resolvePlayable(
-        this.sampleByScore(tracks),
+        this.sampleByScore(tracks.filter((track) => !taken.has(keyOf(track)))),
         excluded,
         limit,
         mixResolveAttempts,
       );
       for (const candidate of resolved) {
         excluded.add(candidate.metadata.sourceId);
+        taken.add(keyOf(candidate.track));
         results.push(finish(candidate));
       }
     };
-    if (!options.discover) await resolveLane(eligible, mixCandidateLimit);
+    // With more than one listener, the pick goes to whoever's turn it is:
+    // their own lane leads, and only if it has nothing playable does the
+    // turn pass on. The room's ranking fills in behind.
+    const turns =
+      listeners.length > 1
+        ? this.turnOrder(listeners, options.credited, options.lastCredited)
+        : [];
+    const resolveTurn = async (tracks: ScoredTrack[], limit: number) => {
+      const start = results.length;
+      for (const userId of turns) {
+        const lane = tracks.filter((track) =>
+          creditsOf(track).includes(userId),
+        );
+        if (!lane.length) continue;
+        await resolveLane(lane, Math.ceil(limit / 2));
+        if (results.length > start) break;
+      }
+      await resolveLane(tracks, limit - (results.length - start));
+    };
+    if (!options.discover) await resolveTurn(eligible, mixCandidateLimit);
     else {
       // A discovery turn: lead with tracks nobody in the huddle has listened
       // to, then fall back to the usual ranking.
-      await resolveLane(eligible.filter(isDiscovery), mixDiscoveryLimit);
-      await resolveLane(
+      await resolveTurn(eligible.filter(isDiscovery), mixDiscoveryLimit);
+      await resolveTurn(
         eligible.filter((track) => !isDiscovery(track)),
         mixCandidateLimit - results.length,
       );
     }
     return results;
+  }
+
+  // A score-weighted draw of one listener's songs, each song's contributions
+  // merged first so a song every service agrees on is drawn as one.
+  private tasteSample(contributions: TasteContribution[]) {
+    const songs = mergeTaste(contributions);
+    if (songs.length <= mixTasteSampleSize) return contributions;
+    const drawn = new Set(
+      this.draw(songs, mixTasteSampleSize).map((song) => keyOf(song)),
+    );
+    return contributions.filter((track) => drawn.has(keyOf(track)));
+  }
+
+  // Whose turn it is: fewest recent picks first, ties drawn at random. Whoever
+  // the last pick served waits behind everyone else, so a newcomer catching
+  // up alternates with the room rather than taking several picks in a row.
+  private turnOrder(
+    listeners: readonly string[],
+    credited: Record<string, number> = {},
+    lastCredited: readonly string[] = [],
+  ) {
+    const last = new Set(lastCredited);
+    const tiebreak = new Map(
+      listeners.map((userId) => [userId, this.random()]),
+    );
+    return [...listeners].sort(
+      (a, b) =>
+        Number(last.has(a)) - Number(last.has(b)) ||
+        (credited[a] ?? 0) - (credited[b] ?? 0) ||
+        tiebreak.get(a)! - tiebreak.get(b)!,
+    );
   }
 
   // Reorders the strongest candidates with a score-weighted draw, so the
@@ -729,8 +814,9 @@ export class RecommendationCatalog {
         artist: like.artist,
       }));
     // Autoplay picks get scrobbled for everyone in the room, so they would
-    // otherwise turn up in every listener's recent listens and, boosted as a
-    // shared taste, come straight back into the mix.
+    // otherwise turn up in every listener's recent listens and top tracks
+    // and, boosted as a shared taste, come straight back into the mix: each
+    // play would make the next more likely.
     const autoplayed = new Set(this.store.recentAutomaticTracks().map(keyOf));
     const warn = (event: string, text: string) => (error: unknown) => {
       log.warn({ event, userId, err: error }, text);
@@ -1030,7 +1116,7 @@ export class RecommendationCatalog {
       this.lastFm("user.getTopTracks", {
         user: username,
         period: "3month",
-        limit: "30",
+        limit: String(topTrackWindow),
       }),
       this.lastFm("user.getRecentTracks", { user: username, limit: "30" }),
       this.lastFm("user.getTopArtists", {
@@ -1055,6 +1141,7 @@ export class RecommendationCatalog {
           lastFmTrack,
           listener,
           (row) => 1.5 + logCount(row.playcount),
+          autoplayed,
         ),
         ...contributionsFrom(
           rows(recent, "recenttracks", "track"),
@@ -1179,7 +1266,9 @@ export class RecommendationCatalog {
     const [listens, stats, artists, recommendations, allTime] =
       await Promise.all([
         get(`/user/${user}/listens?count=50`),
-        get(`/stats/user/${user}/recordings?range=quarter`),
+        get(
+          `/stats/user/${user}/recordings?range=quarter&count=${topTrackWindow}`,
+        ),
         get(
           `/stats/user/${user}/artists?range=quarter&count=${artistSeedWindow}`,
         ),
@@ -1212,6 +1301,7 @@ export class RecommendationCatalog {
           listenBrainzTrack,
           listener,
           (row) => 1.5 + logCount(row.listen_count),
+          autoplayed,
         ),
       ],
       known: new Set(

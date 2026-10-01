@@ -96,15 +96,44 @@ test("matches songs across services rather than by exact title", () => {
   ).toBeLessThan(0.6);
 });
 
-test("one listener's fatigue tilts the mix rather than vetoing it", () => {
+test("listeners who have never heard a song do not wash out the room's fatigue", () => {
   const fatigue = index({ plays: [play("host", "Heard")] });
   const track = { title: "Heard", artist: "Band" };
   const alone = fatigue.multiplier(track, ["host"]);
   const room = fatigue.multiplier(track, ["host", "guest", "third", "fourth"]);
   expect(alone).toBeLessThan(0.6);
-  // The other three have never heard it, so the room barely notices.
-  expect(room).toBeGreaterThan(0.85);
+  expect(room).toBe(alone);
+});
+
+test("one listener's fatigue tilts the mix rather than vetoing it", () => {
+  const fatigue = index({
+    plays: [
+      play("host", "Heard"),
+      play("host", "Heard"),
+      play("host", "Heard"),
+      // The guest heard it too, long enough ago to be ready for it again.
+      play("guest", "Heard", "Band", now - playHalfLifeMs * 3),
+    ],
+  });
+  const track = { title: "Heard", artist: "Band" };
+  const alone = fatigue.multiplier(track, ["host"]);
+  const room = fatigue.multiplier(track, ["host", "guest"]);
+  expect(alone).toBeLessThan(0.4);
+  expect(room).toBeGreaterThan(alone + 0.3);
   expect(room).toBeLessThan(1);
+});
+
+test("when nobody has heard a song, those who know the artist decide", () => {
+  const fatigue = index({
+    plays: Array.from({ length: 10 }, (_, i) => play("host", `Other ${i}`)),
+  });
+  const track = { title: "Unheard", artist: "Band" };
+  const alone = fatigue.multiplier(track, ["host"]);
+  expect(alone).toBeLessThan(1);
+  expect(fatigue.multiplier(track, ["host", "guest"])).toBe(alone);
+  expect(
+    fatigue.multiplier({ title: "Unheard", artist: "Stranger" }, ["host"]),
+  ).toBe(1);
 });
 
 test("a listener who is not there does not count", () => {

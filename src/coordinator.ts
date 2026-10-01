@@ -2746,9 +2746,17 @@ export class Coordinator {
         for (const listener of this.autoplayCredits.flat())
           credited[listener] = (credited[listener] ?? 0) + 1;
         const listeners = this.listenerIds();
+        const nowPlaying = this.current ?? this.history.at(-1);
         const extras = await this.recommendations.autoplayCandidates({
           userIds: listeners,
-          nowPlaying: this.current ?? this.history.at(-1),
+          nowPlaying,
+          // An autoplay pick was for whoever it was credited to; anything
+          // else was for whoever queued it.
+          nowPlayingListenerIds: nowPlaying?.automatic
+            ? (nowPlaying.listenerIds ?? [])
+            : nowPlaying
+              ? [nowPlaying.requesterId]
+              : [],
           recent: [...recent, ...(this.current ? [this.current] : [])],
           exclude: excluded,
           skipped: {
@@ -2758,6 +2766,7 @@ export class Coordinator {
           },
           discover,
           credited,
+          lastCredited: this.autoplayCredits.at(-1),
           artistRun: this.artistRun(),
           fatigue: loadFatigue(this.store, {
             userIds: listeners,
