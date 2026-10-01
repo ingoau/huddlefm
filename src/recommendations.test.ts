@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { FatigueIndex } from "./fatigue.ts";
 import {
   applySkipPenalties,
+  balanceTaste,
   likeHalfLifeMs,
   likeWindowMs,
   mergeTaste,
@@ -923,9 +924,47 @@ test("ListenBrainz recommendations ask for artist metadata and route heard ones 
   store.close();
 });
 
-test("huddle mix lifts an underserved listener's taste", async () => {
+test("balanceTaste gives each listener the same share, within a limit", () => {
+  const song = (userId: string, title: string, weight: number) => ({
+    userId,
+    weight,
+    source: "lastfm",
+    title,
+    artist: "Band",
+  });
+  const heavy = Array.from({ length: 30 }, (_, i) =>
+    song("heavy", `Heavy ${i}`, 4),
+  );
+  const light = [song("light", "Light", 30)];
+  const total = (
+    userId: string,
+    tracks: { userId: string; weight: number }[],
+  ) =>
+    tracks
+      .filter((track) => track.userId === userId)
+      .reduce((sum, track) => sum + track.weight, 0);
+  const balanced = balanceTaste([heavy, light]);
+  // 120 and 30 average to 75 each.
+  expect(total("heavy", balanced)).toBeCloseTo(75);
+  expect(total("light", balanced)).toBeCloseTo(75);
+  // One song is not scaled into an overwhelming favourite.
+  const lopsided = balanceTaste([heavy, [song("light", "Light", 2)]]);
+  expect(total("light", lopsided)).toBeCloseTo(8);
+  expect(total("heavy", lopsided)).toBeCloseTo(61);
+  // Alone, a listener's taste is left as it is.
+  expect(balanceTaste([heavy])).toEqual(heavy);
+});
+
+test("huddle mix takes turns between listeners", async () => {
   const store = new Store(":memory:");
-  addPastTrack(store, "host", "Host Pick", "Host Band", "hostpick001");
+  for (let i = 0; i < 6; i++)
+    addPastTrack(
+      store,
+      "host",
+      `Host Pick ${i}`,
+      `Host Band ${i}`,
+      `hostpick00${i}`,
+    );
   addPastTrack(store, "guest", "Guest Pick", "Guest Band", "guestpick01");
   const catalog = new RecommendationCatalog(
     store,
@@ -935,23 +974,72 @@ test("huddle mix lifts an underserved listener's taste", async () => {
     },
     { random: () => 0 },
   );
-  const even = await catalog.autoplayCandidates({
-    userIds: ["host", "guest"],
-  });
-  expect(even.map((c) => c.metadata.title).sort()).toEqual([
-    "Guest Pick",
-    "Host Pick",
-  ]);
-  expect(even[0]?.score).toBe(even[1]?.score);
-  const skewed = await catalog.autoplayCandidates({
+  const lead = async (
+    credited: Record<string, number>,
+    lastCredited: string[] = [],
+  ) => {
+    const [first] = await catalog.autoplayCandidates({
+      userIds: ["host", "guest"],
+      credited,
+      lastCredited,
+    });
+    return first?.listenerIds;
+  };
+  // Six songs to one do not make it the host's pick every time.
+  expect(await lead({ host: 1, guest: 1 }, ["host"])).toEqual(["guest"]);
+  // Whoever has had fewer recent picks goes first.
+  expect(await lead({ host: 4, guest: 0 })).toEqual(["guest"]);
+  expect(await lead({ host: 0, guest: 4 })).toEqual(["host"]);
+  // A newcomer catching up alternates with the room instead of taking
+  // every pick until the counts even out.
+  expect(await lead({ host: 5, guest: 0 }, ["guest"])).toEqual(["host"]);
+  store.close();
+});
+
+test("huddle mix passes the turn on when a listener has nothing to play", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Host Pick", "Host Band", "hostpick001");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async () => undefined,
+      upNextTracks: async () => [],
+    },
+    { random: () => 0 },
+  );
+  const candidates = await catalog.autoplayCandidates({
     userIds: ["host", "guest"],
     credited: { host: 4, guest: 0 },
   });
-  expect(skewed[0]?.metadata.title).toBe("Guest Pick");
-  expect(skewed[0]!.score).toBeGreaterThan(skewed[1]!.score);
-  expect(skewed[0]?.listenerIds).toEqual(["guest"]);
-  // Being well served never costs anything.
-  expect(skewed[1]?.score).toBe(even[1]?.score);
+  expect(candidates[0]?.metadata.title).toBe("Host Pick");
+  store.close();
+});
+
+test("a song that follows on from the one playing is credited to whoever it was for", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Host Pick", "Host Band", "hostpick001");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async () => undefined,
+      upNextTracks: async (id: string) =>
+        id === "guestsong01" ? [fakeSong("Follow On", "Neighbour")] : [],
+    },
+    { random: () => 0 },
+  );
+  const candidates = await catalog.autoplayCandidates({
+    userIds: ["host", "guest"],
+    nowPlaying: {
+      title: "Guest Song",
+      artist: "Guest Band",
+      sourceId: "guestsong01",
+    },
+    nowPlayingListenerIds: ["guest"],
+    credited: { host: 1, guest: 1 },
+    lastCredited: ["host"],
+  });
+  expect(candidates[0]?.metadata.title).toBe("Follow On");
+  expect(candidates[0]?.listenerIds).toEqual(["guest"]);
   store.close();
 });
 
@@ -1289,7 +1377,7 @@ test("huddle mix draws its lead by score instead of always taking the top", asyn
   }
 });
 
-test("recent autoplay picks do not count as a listener's recent scrobbles", async () => {
+test("recent autoplay picks count as neither a listener's recent scrobbles nor their top tracks", async () => {
   const store = new Store(":memory:");
   addPastTrack(store, "host", "Own Pick", "Band", "ownpickxxxx");
   store.createSession({
@@ -1324,7 +1412,18 @@ test("recent autoplay picks do not count as a listener's recent scrobbles", asyn
     },
     { lastFmApiKey: "key", random: () => 0 },
     lastFmStub({
-      "user.getTopTracks": { toptracks: { track: [] } },
+      "user.getTopTracks": {
+        toptracks: {
+          track: [
+            { name: "Mix Pick", artist: { name: "Stranger" }, playcount: "40" },
+            {
+              name: "Top Pick",
+              artist: { name: "Elsewhere" },
+              playcount: "40",
+            },
+          ],
+        },
+      },
       "user.getRecentTracks": {
         recenttracks: {
           track: [
@@ -1339,6 +1438,7 @@ test("recent autoplay picks do not count as a listener's recent scrobbles", asyn
   const candidates = await catalog.autoplayCandidates({ userIds: ["host"] });
   const titles = candidates.map((track) => track.metadata.title);
   expect(titles).toContain("Scrobbled");
+  expect(titles).toContain("Top Pick");
   expect(titles).not.toContain("Mix Pick");
   store.close();
 });

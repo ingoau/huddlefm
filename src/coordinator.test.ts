@@ -5603,7 +5603,13 @@ test("huddle mix credits the listeners behind recent picks", async () => {
   await enableHuddleMix(test.coordinator);
   await until(() => calls.length >= 2);
   expect(calls[0]).toMatchObject({ credited: {} });
-  expect(calls[1]).toMatchObject({ credited: { guest: 1 } });
+  expect(calls[0]?.lastCredited).toBeUndefined();
+  expect(calls[1]).toMatchObject({
+    credited: { guest: 1 },
+    lastCredited: ["guest"],
+    // What follows on from an autoplay pick is credited like the pick.
+    nowPlayingListenerIds: ["guest"],
+  });
   await test.coordinator.endFromSlack();
 });
 
@@ -5670,6 +5676,8 @@ test("huddle mix reports how long the current artist has been playing", async ()
   await enableHuddleMix(test.coordinator);
   await until(() => calls.length >= 1);
   expect(calls[0]).toMatchObject({ artistRun: 2 });
+  // A song someone queued was for them.
+  expect(calls[0]).toMatchObject({ nowPlayingListenerIds: ["host"] });
   await test.coordinator.endFromSlack();
 });
 

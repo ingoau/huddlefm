@@ -113,21 +113,32 @@ export class FatigueIndex {
     return user;
   }
 
-  // The mean across listeners, not the maximum: one person being sick of a
-  // song should tilt the mix, not veto it for everyone else.
+  // The mean across the listeners who have heard the song, not the maximum:
+  // one person being sick of a song should tilt the mix, not veto it for
+  // everyone else who has heard it too. Listeners who have never heard it
+  // have no say, so a room full of newcomers does not wash out the regulars'
+  // fatigue and send the same songs round again. When nobody has heard the
+  // song itself, those who know the artist decide.
   multiplier(
     track: { title: string; artist: string },
     listenerIds: readonly string[],
   ) {
     const key = trackKey(track.title, track.artist);
     const artist = artistKey(track.artist);
-    // A listener the mix has never recorded counts as a full 1: as far as it
-    // knows, they have not heard this. That is what keeps one listener who is
-    // sick of a song from deciding the song for the whole room.
-    const scores = listenerIds.map((userId) => {
+    const present = listenerIds.flatMap((userId) => {
       const user = this.users.get(userId);
-      if (!user) return 1;
-      return Math.max(
+      return user ? [user] : [];
+    });
+    const heardSong = present.filter(
+      (user) => user.tracks.has(key) || user.skippedTracks.has(key),
+    );
+    const judges = heardSong.length
+      ? heardSong
+      : present.filter(
+          (user) => user.artists.has(artist) || user.skippedArtists.has(artist),
+        );
+    const scores = judges.map((user) =>
+      Math.max(
         listenerFloor,
         1 /
           (1 +
@@ -135,8 +146,8 @@ export class FatigueIndex {
             playArtistWeight * (user.artists.get(artist) ?? 0) +
             skipWeight * (user.skippedTracks.get(key) ?? 0) +
             skipArtistWeight * (user.skippedArtists.get(artist) ?? 0)),
-      );
-    });
+      ),
+    );
     const listeners = scores.length
       ? scores.reduce((sum, score) => sum + score, 0) / scores.length
       : 1;
