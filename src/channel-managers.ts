@@ -1,3 +1,4 @@
+import type { RolePermissions } from "./config.ts";
 import { logger } from "./logger.ts";
 import { adminCacheTtlMs, adminLookupTimeoutMs } from "./workspace-admins.ts";
 
@@ -5,10 +6,11 @@ const log = logger.child({ component: "channel-managers" });
 
 export type ChannelManagerLookup = (channelId: string) => Promise<string[]>;
 
-// Tracks who manages each channel so a session's channel managers can always
-// end it. Permission checks are synchronous, so they read the cache this fills;
-// resolve() populates it before the checks that matter run. Answers are reused
-// for as long as workspace admin answers, and a lookup gets the same deadline.
+// Tracks who manages each channel so a session's channel managers can be
+// granted CHANNEL_MANAGER_PERMISSIONS. Permission checks are synchronous, so
+// they read the cache this fills; resolve() populates it before the checks that
+// matter run. Answers are reused for as long as workspace admin answers, and a
+// lookup gets the same deadline. Managers granted nothing are never looked up.
 export class ChannelManagers {
   private cache = new Map<
     string,
@@ -19,21 +21,29 @@ export class ChannelManagers {
   constructor(
     private lookup: ChannelManagerLookup,
     private options: {
+      permissions?: RolePermissions;
       ttlMs?: number;
       timeoutMs?: number;
       now?: () => number;
     } = {},
   ) {}
 
+  get permissions() {
+    return this.options.permissions ?? "end";
+  }
+
   isManager(channelId: string, userId: string) {
-    return this.fresh(channelId)?.managers.has(userId) === true;
+    return (
+      this.permissions !== "none" &&
+      this.fresh(channelId)?.managers.has(userId) === true
+    );
   }
 
   // A fresh answer keeps every later check synchronous; one too old to trust
   // is confirmed with Slack rather than extended.
   async resolve(channelId: string, userId: string) {
     // Direct messages have no channel managers to ask about.
-    if (channelId.startsWith("D")) return false;
+    if (this.permissions === "none" || channelId.startsWith("D")) return false;
     const cached = this.fresh(channelId);
     const managers = cached ? cached.managers : await this.fetch(channelId);
     return managers.has(userId);
@@ -64,8 +74,8 @@ export class ChannelManagers {
           { event: "channel_manager_lookup_failed", channelId, err: error },
           "Slack channel manager lookup failed",
         );
-        // A lookup outage must not hand out or extend the power to end a
-        // session, so forget what Slack last said and ask again next time.
+        // A lookup outage must not hand out or extend any powers, so forget
+        // what Slack last said and ask again next time.
         this.cache.delete(channelId);
         return new Set<string>();
       })

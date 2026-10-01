@@ -58,6 +58,50 @@ export function parseMediaBackend(value?: string): {
   };
 }
 
+/**
+ * What a Slack role may do in a session without joining its huddle: nothing,
+ * end the session, or everything a host can.
+ */
+export type RolePermissions = "none" | "end" | "host";
+
+const rolePermissionLevels: readonly string[] = ["none", "end", "host"];
+
+/**
+ * The permissions channel managers and workspace admins hold, with anything
+ * worth telling whoever runs the bot. Both default to ending the session. A
+ * value that is not a level falls back to that default rather than failing
+ * startup, and the legacy WORKSPACE_ADMINS_AS_MANAGERS still means host when
+ * WORKSPACE_ADMIN_PERMISSIONS is unset.
+ */
+export function parseRolePermissions(env: Record<string, string | undefined>) {
+  const warnings: string[] = [];
+  const level = (name: string, fallback: RolePermissions) => {
+    const text = optionalText(env[name])?.toLowerCase();
+    if (!text) return fallback;
+    if (rolePermissionLevels.includes(text)) return text as RolePermissions;
+    warnings.push(
+      `${name} must be none, end, or host; using ${fallback} instead`,
+    );
+    return fallback;
+  };
+  const legacyAdmins = optionalText(env.WORKSPACE_ADMINS_AS_MANAGERS);
+  const adminsSet = Boolean(optionalText(env.WORKSPACE_ADMIN_PERMISSIONS));
+  if (legacyAdmins)
+    warnings.push(
+      adminsSet
+        ? "WORKSPACE_ADMINS_AS_MANAGERS is ignored because WORKSPACE_ADMIN_PERMISSIONS is set"
+        : "WORKSPACE_ADMINS_AS_MANAGERS is deprecated; use WORKSPACE_ADMIN_PERMISSIONS instead",
+    );
+  return {
+    channelManagers: level("CHANNEL_MANAGER_PERMISSIONS", "end"),
+    workspaceAdmins: level(
+      "WORKSPACE_ADMIN_PERMISSIONS",
+      !adminsSet && legacyAdmins === "true" ? "host" : "end",
+    ),
+    warnings,
+  };
+}
+
 export function loadConfig() {
   for (const name of required)
     if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -109,7 +153,7 @@ export function loadConfig() {
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID,
-    adminsAreManagers: process.env.WORKSPACE_ADMINS_AS_MANAGERS === "true",
+    rolePermissions: parseRolePermissions(process.env),
     excludedUserIds: parseIds(process.env.EXCLUDED_USER_IDS),
     integrationUserIds: parseIds(process.env.INTEGRATION_USER_IDS),
     forcedCompanionChannelIds: parseIds(

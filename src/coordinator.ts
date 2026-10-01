@@ -45,6 +45,7 @@ import { safeError as message } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
 import type { ChannelManagers } from "./channel-managers.ts";
+import type { RolePermissions } from "./config.ts";
 import type { WorkspaceAdmins } from "./workspace-admins.ts";
 import {
   actions,
@@ -626,9 +627,7 @@ export class Coordinator {
 
   async action(interaction: Interaction) {
     this.scrobbling?.syncAnalyticsUser(interaction.userId);
-    await this.primeManager(interaction.userId);
-    if (this.endingAction(interaction))
-      await this.primeChannelManager(interaction.userId);
+    await this.primeRoles(interaction.userId, this.endingAction(interaction));
     this.log.debug(
       {
         event: "action_received",
@@ -658,7 +657,7 @@ export class Coordinator {
         !this.isParticipantOrManager(interaction.userId) &&
         !(
           this.endingAction(interaction) &&
-          this.isChannelManager(interaction.userId)
+          this.canEndFromOutside(interaction.userId)
         )
       )
         return this.rejectNonParticipant(interaction);
@@ -1385,7 +1384,7 @@ export class Coordinator {
   }
 
   async agentEnd(userId: string, signal?: AbortSignal) {
-    await this.primeChannelManager(userId);
+    await this.primeRoles(userId, true);
     return this.enqueue(async () => {
       throwIfAborted(signal);
       if (!this.can(userId, "end-session"))
@@ -1602,7 +1601,7 @@ export class Coordinator {
   private can(userId: string, capability: string) {
     if (this.isExcluded(userId)) return false;
     if (this.integrations.get(userId)?.permissions.has(capability)) return true;
-    if (capability === "end-session" && this.isChannelManager(userId))
+    if (capability === "end-session" && this.canEndFromOutside(userId))
       return true;
     return (
       this.isManager(userId) ||
@@ -1611,42 +1610,61 @@ export class Coordinator {
     );
   }
 
-  // A manager holds host powers in every session without joining the huddle:
-  // the configured manager, and workspace admins when the host runs with
-  // WORKSPACE_ADMINS_AS_MANAGERS enabled. Exclusion wins over both, so the bot
-  // and integration accounts cannot let themselves in this way.
+  // What a user may do in this session without joining the huddle. The
+  // configured manager holds host powers; workspace admins and managers of the
+  // Huddle's channel hold what WORKSPACE_ADMIN_PERMISSIONS and
+  // CHANNEL_MANAGER_PERMISSIONS grant, and someone who is both gets the
+  // higher. Exclusion wins over all of them, so the bot and integration
+  // accounts cannot let themselves in this way.
+  private outsidePermissions(userId: string): RolePermissions {
+    if (this.isExcluded(userId)) return "none";
+    if (userId === this.config.managerUserId) return "host";
+    const granted: RolePermissions[] = [];
+    if (this.workspaceAdmins?.isAdmin(userId))
+      granted.push(this.workspaceAdmins.permissions);
+    if (this.channelManagers?.isManager(this.roomId, userId))
+      granted.push(this.channelManagers.permissions);
+    if (granted.includes("host")) return "host";
+    return granted.includes("end") ? "end" : "none";
+  }
+
+  // A manager holds host powers in every session without joining the huddle.
   private isManager(userId: string) {
-    if (this.isExcluded(userId)) return false;
-    if (userId === this.config.managerUserId) return true;
-    return this.workspaceAdmins?.isAdmin(userId) === true;
+    return this.outsidePermissions(userId) === "host";
   }
 
-  // Permission checks are synchronous, so a user's admin status has to be in
-  // hand before the first one runs.
+  // Ending the session from outside the huddle takes any granted role.
+  private canEndFromOutside(userId: string) {
+    return this.outsidePermissions(userId) !== "none";
+  }
+
+  // Permission checks are synchronous, so the Slack roles that could make a
+  // user a manager have to be in hand before the first one runs.
   primeManager(userId: string) {
-    return this.workspaceAdmins?.resolve(userId) ?? Promise.resolve(false);
+    return this.primeRoles(userId, false);
   }
 
-  // Managers of the channel the Huddle is in can always end its session, even
-  // from outside the Huddle and whatever the permissions say. Exclusion still
-  // wins, so the bot and integration accounts cannot end sessions this way.
-  private isChannelManager(userId: string) {
-    return (
-      !this.isExcluded(userId) &&
-      this.channelManagers?.isManager(this.roomId, userId) === true
-    );
+  // Looks up the roles that could matter to what the user is doing, together
+  // so that one slow lookup does not wait on another. Roles that only end the
+  // session are looked up only for an action that can end it, and only for
+  // users who could not end it anyway.
+  private async primeRoles(userId: string, ending: boolean) {
+    if (this.isExcluded(userId)) return;
+    const needed: RolePermissions =
+      ending && !this.can(userId, "end-session") ? "end" : "host";
+    const matters = (permissions: RolePermissions) =>
+      permissions === "host" || (permissions === "end" && needed === "end");
+    const lookups: Promise<boolean>[] = [];
+    if (this.workspaceAdmins && matters(this.workspaceAdmins.permissions))
+      lookups.push(this.workspaceAdmins.resolve(userId));
+    if (this.channelManagers && matters(this.channelManagers.permissions))
+      lookups.push(this.channelManagers.resolve(this.roomId, userId));
+    await Promise.all(lookups);
   }
 
-  // Like primeManager, for channel managers. Only actions that can end the
-  // session need it, and only for users who could not end it anyway.
-  private async primeChannelManager(userId: string) {
-    if (!this.channelManagers || this.can(userId, "end-session")) return;
-    await this.channelManagers.resolve(this.roomId, userId);
-  }
-
-  // What a channel manager outside the Huddle may do: reach Settings and its
-  // End session button. A Settings submission changes only what the user is
-  // otherwise allowed to change.
+  // What a user granted only the end permission may do from outside the
+  // Huddle: reach Settings and its End session button. A Settings submission
+  // changes only what the user is otherwise allowed to change.
   private endingAction(interaction: Interaction) {
     if (interaction.type === "view_submission")
       return interaction.actionId !== "move_queue_track";

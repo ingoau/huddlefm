@@ -36,6 +36,14 @@ test("shares one lookup between concurrent checks", async () => {
   expect(lookups).toEqual(["C1"]);
 });
 
+test("never calls Slack while channel managers are granted nothing", async () => {
+  const { lookup, lookups } = tracked(["manager"]);
+  const managers = new ChannelManagers(lookup, { permissions: "none" });
+  expect(await managers.resolve("C1", "manager")).toBe(false);
+  expect(managers.isManager("C1", "manager")).toBe(false);
+  expect(lookups).toEqual([]);
+});
+
 test("never asks about direct messages", async () => {
   const { lookup, lookups } = tracked(["manager"]);
   const managers = new ChannelManagers(lookup);

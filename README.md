@@ -25,7 +25,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 
 ## Usage
 
-Invite the bot to a huddle or ping it in the thread. It will join the huddle and send a UI in the thread to add songs to the queue and control playback. You'll be the host by default. Managers of the huddle's channel can always end the session from Settings, even when they aren't in the huddle. If the UI gets buried by conversation in the thread, mention the bot with nothing else to bring it back to the bottom, or keep it at the bottom by enabling anchor in the settings.
+Invite the bot to a huddle or ping it in the thread. It will join the huddle and send a UI in the thread to add songs to the queue and control playback. You'll be the host by default. Managers of the huddle's channel and workspace admins can end the session from Settings, even when they aren't in the huddle; whoever runs the bot can change how much they may do with `CHANNEL_MANAGER_PERMISSIONS` and `WORKSPACE_ADMIN_PERMISSIONS`. If the UI gets buried by conversation in the thread, mention the bot with nothing else to bring it back to the bottom, or keep it at the bottom by enabling anchor in the settings.
 
 With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap Gemini model through OpenRouter and the same permissions you already have in the player UI. Replies are ephemeral. This also works in the original huddle thread when the session uses a forced companion controls channel (where the bot cannot post publicly).
 
@@ -80,16 +80,17 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Optional Slack behavior
 
-| Variable                       | Default | Purpose                                                                                                                               |
-| ------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `MANAGER_USER_ID`              | unset   | User who is always treated as a host                                                                                                  |
-| `WORKSPACE_ADMINS_AS_MANAGERS` | `false` | Treat every Slack workspace admin and owner as a manager                                                                              |
-| `EXCLUDED_USER_IDS`            | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                           |
-| `FORCE_COMPANION_CHANNEL_IDS`  | unset   | Channels that always get a separate HuddleFM controls channel                                                                         |
-| `SLACK_TEAM_ID`                | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                    |
-| `SLACK_CANVAS_ID`              | unset   | Canvas updated with all-time listening stats                                                                                          |
-| `CANVAS_SECTIONS`              | all     | Comma-separated canvas sections to show, in order: `summary`, `top artists`, `top tracks`, `top channels`, `controls`, `integrations` |
-| `FOOTER`                       | unset   | Optional mrkdwn footer under the queue controls                                                                                       |
+| Variable                      | Default | Purpose                                                                                                                                |
+| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                                                                   |
+| `CHANNEL_MANAGER_PERMISSIONS` | `end`   | What managers of a huddle's channel may do without joining: `none`, `end` the session, or everything a `host` can                      |
+| `WORKSPACE_ADMIN_PERMISSIONS` | `end`   | The same for Slack workspace admins and owners. Replaces `WORKSPACE_ADMINS_AS_MANAGERS=true`, which still means `host` until it is set |
+| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                            |
+| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                                                                          |
+| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                     |
+| `SLACK_CANVAS_ID`             | unset   | Canvas updated with all-time listening stats                                                                                           |
+| `CANVAS_SECTIONS`             | all     | Comma-separated canvas sections to show, in order: `summary`, `top artists`, `top tracks`, `top channels`, `controls`, `integrations`  |
+| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                                                                        |
 
 #### Optional features
 
