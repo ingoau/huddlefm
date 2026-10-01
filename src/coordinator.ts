@@ -519,7 +519,7 @@ export class Coordinator {
       void this.post(
         this.room.uiChannelId,
         this.room.uiThreadTs,
-        "Playback hit a problem, so I switched to the backup player. The music should be back in a few seconds.",
+        "Playback hit a problem, so I switched to the old player. The music should be back in a few seconds.",
       ).catch((error) =>
         this.log.warn(
           { event: "media_fallback_notice_failed", err: error },
@@ -4909,6 +4909,11 @@ export class Coordinator {
                 plain("Playback not working?"),
                 {
                   value,
+                  confirm: confirm(
+                    "Switch to the old player?",
+                    "The music will pause while it switches to the old player. Then you can tell us what went wrong.",
+                    "Switch",
+                  ),
                 },
               ),
             ]),
@@ -4967,7 +4972,7 @@ export class Coordinator {
     ];
   }
 
-  // Starts the move to the backup player before asking anything, so the music
+  // Starts the move to the old player before asking anything, so the music
   // comes back whether or not the form is ever sent.
   private async reportPlaybackProblem(interaction: Interaction) {
     const reportId = crypto.randomUUID();

@@ -6321,7 +6321,7 @@ test("an automatic fallback is explained in the thread; a reported one is not", 
   expect(result.posted.at(-1)).toEqual([
     "channel",
     "1.0",
-    expect.stringContaining("switched to the backup player"),
+    expect.stringContaining("switched to the old player"),
     undefined,
   ]);
   await result.coordinator.endFromSlack();

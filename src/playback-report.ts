@@ -19,13 +19,13 @@ const detailsMaxLength = 1_000;
 type ReportMetadata = {
   sessionId: string;
   reportId: string;
-  /** Whether pressing the button moved the Huddle to the backup player. */
+  /** Whether pressing the button moved the Huddle to the old player. */
   switched: boolean;
 };
 
 /**
  * Asks what went wrong after someone presses "Playback not working?". The
- * switch to the backup player has already started by the time this opens, so
+ * switch to the old player has already started by the time this opens, so
  * the form never holds up the fix.
  */
 export function playbackReportView(metadata: ReportMetadata) {
@@ -43,8 +43,8 @@ export function playbackReportView(metadata: ReportMetadata) {
     blocks: [
       section(
         metadata.switched
-          ? "I’ve switched this Huddle to the backup player. The music should be back in a few seconds."
-          : "This Huddle is already using the backup player.",
+          ? "I’ve switched this Huddle to the old player. The music should be back in a few seconds."
+          : "This Huddle is already using the old player.",
       ),
       input("problems", "What went wrong?", {
         type: "checkboxes",

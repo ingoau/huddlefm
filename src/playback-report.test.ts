@@ -28,7 +28,7 @@ test("the report form lists every problem, Other included", () => {
         switched: false,
       }),
     ),
-  ).toContain("already using the backup player");
+  ).toContain("already using the old player");
 });
 
 test("reads the ticked problems and any details", () => {
