@@ -63,6 +63,8 @@ log.info(
   "HuddleFM startup started",
 );
 const config = loadConfig();
+for (const warning of config.rolePermissions.warnings)
+  log.warn({ event: "config_warning" }, warning);
 await startAnalytics(config.posthogApiKey, config.posthogHost, (error) =>
   log.warn(
     { event: "posthog_delivery_failed", error: safeError(error) },
@@ -132,7 +134,7 @@ const recommendations = new RecommendationCatalog(store, catalog, config);
 const slackApp = new SlackAppAdapter(config);
 const workspaceAdmins = new WorkspaceAdmins(
   (userId) => slackApp.workspaceAdmin(userId),
-  { enabled: config.adminsAreManagers },
+  { permissions: config.rolePermissions.workspaceAdmins },
 );
 const audit = new AuditLog(
   "data/audit.jsonl",
@@ -144,8 +146,9 @@ if (store.needsUsageBackfill())
 const fallbackReports = new FallbackReports();
 fallbackReports.start();
 const slackHuddle = new SlackHuddleAdapter(config);
-const channelManagers = new ChannelManagers((channelId) =>
-  slackHuddle.channelManagers(channelId),
+const channelManagers = new ChannelManagers(
+  (channelId) => slackHuddle.channelManagers(channelId),
+  { permissions: config.rolePermissions.channelManagers },
 );
 const mediaBrowsers = new MediaBrowserPool(config.chromePath);
 const runtimes = new Map<string, Runtime>();

@@ -45,6 +45,7 @@ import { safeError as message } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
 import type { ChannelManagers } from "./channel-managers.ts";
+import type { RolePermissions } from "./config.ts";
 import type { WorkspaceAdmins } from "./workspace-admins.ts";
 import {
   actions,
@@ -626,9 +627,16 @@ export class Coordinator {
 
   async action(interaction: Interaction) {
     this.scrobbling?.syncAnalyticsUser(interaction.userId);
-    await this.primeManager(interaction.userId);
-    if (this.endingAction(interaction))
-      await this.primeChannelManager(interaction.userId);
+    const ending = this.endingAction(interaction);
+    // Settings opens with a trigger ID that expires after three seconds, which
+    // a role lookup can outlast. When one has to ask Slack, a loading view
+    // opens first and Settings replaces it, as updates need no trigger ID.
+    const loading =
+      interaction.actionId === "open_settings" &&
+      this.roleLookups(interaction.userId, ending).length
+        ? await this.openSettingsLoading(interaction)
+        : undefined;
+    await this.primeRoles(interaction.userId, ending);
     this.log.debug(
       {
         event: "action_received",
@@ -656,12 +664,9 @@ export class Coordinator {
         return this.integrationAction(interaction);
       if (
         !this.isParticipantOrManager(interaction.userId) &&
-        !(
-          this.endingAction(interaction) &&
-          this.isChannelManager(interaction.userId)
-        )
+        !(ending && this.canEndFromOutside(interaction.userId))
       )
-        return this.rejectNonParticipant(interaction);
+        return this.rejectNonParticipant(interaction, loading);
       if (interaction.type === "view_submission") {
         if (interaction.actionId === "move_queue_track")
           return this.queuePositionSubmission(interaction);
@@ -672,9 +677,10 @@ export class Coordinator {
         interaction.messageTs !== this.uiTs &&
         interaction.actionId !== "toggle_session_scrobbling"
       )
-        return this.notice(
+        return this.settingsNotice(
           interaction.userId,
           "That player is stale; use the newest one.",
+          loading,
         );
       const handlers: Record<string, () => Promise<void> | void> = {
         open_add_to_queue: () => this.addModal(interaction),
@@ -696,7 +702,7 @@ export class Coordinator {
         shuffle_queue: () => this.shuffleQueue(interaction),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
-        open_settings: () => this.settingsModal(interaction),
+        open_settings: () => this.settingsModal(interaction, loading),
         report_playback_problem: () => this.reportPlaybackProblem(interaction),
         end_session: () => this.end(interaction.userId, "ended by host"),
         claim_host: () => this.claimHost(interaction),
@@ -1385,7 +1391,7 @@ export class Coordinator {
   }
 
   async agentEnd(userId: string, signal?: AbortSignal) {
-    await this.primeChannelManager(userId);
+    await this.primeRoles(userId, true);
     return this.enqueue(async () => {
       throwIfAborted(signal);
       if (!this.can(userId, "end-session"))
@@ -1602,7 +1608,7 @@ export class Coordinator {
   private can(userId: string, capability: string) {
     if (this.isExcluded(userId)) return false;
     if (this.integrations.get(userId)?.permissions.has(capability)) return true;
-    if (capability === "end-session" && this.isChannelManager(userId))
+    if (capability === "end-session" && this.canEndFromOutside(userId))
       return true;
     return (
       this.isManager(userId) ||
@@ -1611,42 +1617,117 @@ export class Coordinator {
     );
   }
 
-  // A manager holds host powers in every session without joining the huddle:
-  // the configured manager, and workspace admins when the host runs with
-  // WORKSPACE_ADMINS_AS_MANAGERS enabled. Exclusion wins over both, so the bot
-  // and integration accounts cannot let themselves in this way.
+  // What a user may do in this session without joining the huddle. The
+  // configured manager holds host powers; workspace admins and managers of the
+  // Huddle's channel hold what WORKSPACE_ADMIN_PERMISSIONS and
+  // CHANNEL_MANAGER_PERMISSIONS grant, and someone who is both gets the
+  // higher. Exclusion wins over all of them, so the bot and integration
+  // accounts cannot let themselves in this way.
+  private outsidePermissions(userId: string): RolePermissions {
+    if (this.isExcluded(userId)) return "none";
+    if (userId === this.config.managerUserId) return "host";
+    const granted: RolePermissions[] = [];
+    if (this.workspaceAdmins?.isAdmin(userId))
+      granted.push(this.workspaceAdmins.permissions);
+    if (this.channelManagers?.isManager(this.roomId, userId))
+      granted.push(this.channelManagers.permissions);
+    if (granted.includes("host")) return "host";
+    return granted.includes("end") ? "end" : "none";
+  }
+
+  // A manager holds host powers in every session without joining the huddle.
   private isManager(userId: string) {
-    if (this.isExcluded(userId)) return false;
-    if (userId === this.config.managerUserId) return true;
-    return this.workspaceAdmins?.isAdmin(userId) === true;
+    return this.outsidePermissions(userId) === "host";
   }
 
-  // Permission checks are synchronous, so a user's admin status has to be in
-  // hand before the first one runs.
+  // Ending the session from outside the huddle takes any granted role.
+  private canEndFromOutside(userId: string) {
+    return this.outsidePermissions(userId) !== "none";
+  }
+
+  // Permission checks are synchronous, so the Slack roles that could make a
+  // user a manager have to be in hand before the first one runs.
   primeManager(userId: string) {
-    return this.workspaceAdmins?.resolve(userId) ?? Promise.resolve(false);
+    return this.primeRoles(userId, false);
   }
 
-  // Managers of the channel the Huddle is in can always end its session, even
-  // from outside the Huddle and whatever the permissions say. Exclusion still
-  // wins, so the bot and integration accounts cannot end sessions this way.
-  private isChannelManager(userId: string) {
-    return (
-      !this.isExcluded(userId) &&
-      this.channelManagers?.isManager(this.roomId, userId) === true
+  // Looks up the roles that could matter to what the user is doing, together
+  // so that one slow lookup does not wait on another.
+  private async primeRoles(userId: string, ending: boolean) {
+    await Promise.all(
+      this.roleLookups(userId, ending).map((lookup) => lookup()),
     );
   }
 
-  // Like primeManager, for channel managers. Only actions that can end the
-  // session need it, and only for users who could not end it anyway.
-  private async primeChannelManager(userId: string) {
-    if (!this.channelManagers || this.can(userId, "end-session")) return;
-    await this.channelManagers.resolve(this.roomId, userId);
+  // The role lookups that would have to ask Slack before the user's next
+  // permission check. Roles that only end the session matter only for an
+  // action that can end it, and only for users who could not end it anyway.
+  private roleLookups(userId: string, ending: boolean) {
+    if (this.isExcluded(userId)) return [];
+    const needed: RolePermissions =
+      ending && !this.can(userId, "end-session") ? "end" : "host";
+    const matters = (permissions: RolePermissions) =>
+      permissions === "host" || (permissions === "end" && needed === "end");
+    const lookups: (() => Promise<boolean>)[] = [];
+    const admins = this.workspaceAdmins;
+    if (admins && matters(admins.permissions) && !admins.known(userId))
+      lookups.push(() => admins.resolve(userId));
+    const managers = this.channelManagers;
+    if (
+      managers &&
+      matters(managers.permissions) &&
+      !managers.known(this.roomId)
+    )
+      lookups.push(() => managers.resolve(this.roomId, userId));
+    return lookups;
   }
 
-  // What a channel manager outside the Huddle may do: reach Settings and its
-  // End session button. A Settings submission changes only what the user is
-  // otherwise allowed to change.
+  // Opens Settings in a loading state, or nothing if Slack refuses, in which
+  // case Settings tries to open normally once the lookup is done.
+  private async openSettingsLoading(interaction: Interaction) {
+    try {
+      const view = await this.slack.modal(
+        interaction.triggerId,
+        this.settingsMessageView("Loading…"),
+      );
+      return view?.id ? { id: view.id, hash: view.hash } : undefined;
+    } catch (error) {
+      this.log.warn(
+        { event: "settings_loading_failed", err: error },
+        "Could not open the Settings loading view",
+      );
+      return undefined;
+    }
+  }
+
+  private settingsMessageView(text: string) {
+    return {
+      type: "modal",
+      title: plain("HuddleFM settings"),
+      close: plain("Close"),
+      blocks: [section(text)],
+    };
+  }
+
+  // Tells the user why Settings did not open: in the loading view when one is
+  // waiting on the answer, so it is not left loading, and in the thread
+  // otherwise.
+  private async settingsNotice(
+    userId: string,
+    text: string,
+    loading?: { id: string; hash?: string },
+  ) {
+    if (!loading) return this.notice(userId, text);
+    await this.slack.updateModal(
+      loading.id,
+      loading.hash,
+      this.settingsMessageView(text),
+    );
+  }
+
+  // What a user granted only the end permission may do from outside the
+  // Huddle: reach Settings and its End session button. A Settings submission
+  // changes only what the user is otherwise allowed to change.
   private endingAction(interaction: Interaction) {
     if (interaction.type === "view_submission")
       return interaction.actionId !== "move_queue_track";
@@ -2306,15 +2387,19 @@ export class Coordinator {
     return run;
   }
 
-  private rejectNonParticipant(interaction: Interaction) {
+  private rejectNonParticipant(
+    interaction: Interaction,
+    loading?: { id: string; hash?: string },
+  ) {
     this.audit.record("action.denied", interaction.userId, {
       sessionId: this.id,
       actionId: interaction.actionId,
       reason: "not in huddle",
     });
-    return this.notice(
+    return this.settingsNotice(
       interaction.userId,
       "Join the huddle before using the player.",
+      loading,
     );
   }
 
@@ -4016,21 +4101,32 @@ export class Coordinator {
     );
   }
 
-  private async settingsModal(interaction: Interaction) {
+  private async settingsModal(
+    interaction: Interaction,
+    loading?: { id: string; hash?: string },
+  ) {
     if (!this.canOpenSettings(interaction.userId)) {
       this.audit.record("action.denied", interaction.userId, {
         sessionId: this.id,
         capability: "settings",
       });
-      return this.notice(
+      return this.settingsNotice(
         interaction.userId,
         "You do not have permission to change settings.",
+        loading,
       );
     }
-    await this.slack.modal(
-      interaction.triggerId,
-      this.settingsViewFor(interaction),
-    );
+    if (loading)
+      await this.slack.updateModal(
+        loading.id,
+        loading.hash,
+        this.settingsViewFor(interaction),
+      );
+    else
+      await this.slack.modal(
+        interaction.triggerId,
+        this.settingsViewFor(interaction),
+      );
   }
 
   private settingsViewFor(interaction: Interaction, page?: number) {

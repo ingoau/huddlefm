@@ -12,9 +12,9 @@ function tracked(admins: string[]) {
   };
 }
 
-test("never calls Slack while disabled", async () => {
+test("never calls Slack while admins are granted nothing", async () => {
   const { lookup, lookups } = tracked(["admin"]);
-  const admins = new WorkspaceAdmins(lookup, { enabled: false });
+  const admins = new WorkspaceAdmins(lookup, { permissions: "none" });
   expect(await admins.resolve("admin")).toBe(false);
   expect(admins.isAdmin("admin")).toBe(false);
   expect(lookups).toEqual([]);
@@ -22,7 +22,7 @@ test("never calls Slack while disabled", async () => {
 
 test("resolves once and answers later checks from the cache", async () => {
   const { lookup, lookups } = tracked(["admin"]);
-  const admins = new WorkspaceAdmins(lookup, { enabled: true });
+  const admins = new WorkspaceAdmins(lookup, { permissions: "host" });
   expect(admins.isAdmin("admin")).toBe(false);
   expect(await admins.resolve("admin")).toBe(true);
   expect(admins.isAdmin("admin")).toBe(true);
@@ -34,7 +34,7 @@ test("resolves once and answers later checks from the cache", async () => {
 
 test("shares one lookup between concurrent checks", async () => {
   const { lookup, lookups } = tracked(["admin"]);
-  const admins = new WorkspaceAdmins(lookup, { enabled: true });
+  const admins = new WorkspaceAdmins(lookup, { permissions: "host" });
   expect(
     await Promise.all([admins.resolve("admin"), admins.resolve("admin")]),
   ).toEqual([true, true]);
@@ -50,7 +50,7 @@ test("confirms a stale answer with Slack before granting", async () => {
       lookups.push(userId);
       return admin;
     },
-    { enabled: true, ttlMs: 60_000, now: () => now },
+    { permissions: "host", ttlMs: 60_000, now: () => now },
   );
   expect(await admins.resolve("admin")).toBe(true);
   admin = false;
@@ -69,7 +69,7 @@ test("keeps host powers away when the lookup fails", async () => {
       failures++;
       throw new Error("ratelimited");
     },
-    { enabled: true },
+    { permissions: "host" },
   );
   expect(await admins.resolve("admin")).toBe(false);
   expect(admins.isAdmin("admin")).toBe(false);
@@ -88,7 +88,7 @@ test("drops manager access when a later lookup fails", async () => {
       if (fail) throw new Error("ratelimited");
       return true;
     },
-    { enabled: true, ttlMs: 60_000, now: () => now },
+    { permissions: "host", ttlMs: 60_000, now: () => now },
   );
   expect(await admins.resolve("admin")).toBe(true);
   fail = true;
@@ -104,7 +104,7 @@ test("drops manager access when a later lookup fails", async () => {
 
 test("denies access when the lookup never answers", async () => {
   const admins = new WorkspaceAdmins(() => new Promise<boolean>(() => {}), {
-    enabled: true,
+    permissions: "host",
     timeoutMs: 5,
   });
   expect(await admins.resolve("admin")).toBe(false);

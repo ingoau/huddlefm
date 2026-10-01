@@ -1,3 +1,4 @@
+import type { RolePermissions } from "./config.ts";
 import { logger } from "./logger.ts";
 
 const log = logger.child({ component: "workspace-admins" });
@@ -13,9 +14,10 @@ export const adminLookupTimeoutMs = 5_000;
 
 export type WorkspaceAdminLookup = (userId: string) => Promise<boolean>;
 
-// Tracks which users are Slack workspace admins so sessions can treat them as
-// managers. Permission checks are synchronous, so they read the cache this
-// fills; resolve() populates it before the checks that matter run.
+// Tracks which users are Slack workspace admins so sessions can grant them
+// WORKSPACE_ADMIN_PERMISSIONS. Permission checks are synchronous, so they read
+// the cache this fills; resolve() populates it before the checks that matter
+// run. Admins granted nothing are never looked up.
 export class WorkspaceAdmins {
   private cache = new Map<string, { admin: boolean; fetchedAt: number }>();
   private pending = new Map<string, Promise<boolean>>();
@@ -23,26 +25,33 @@ export class WorkspaceAdmins {
   constructor(
     private lookup: WorkspaceAdminLookup,
     private options: {
-      enabled: boolean;
+      permissions: RolePermissions;
       ttlMs?: number;
       timeoutMs?: number;
       now?: () => number;
     },
   ) {}
 
-  get enabled() {
-    return this.options.enabled;
+  get permissions() {
+    return this.options.permissions;
   }
 
   isAdmin(userId: string) {
-    return this.options.enabled && this.fresh(userId)?.admin === true;
+    return (
+      this.options.permissions !== "none" && this.fresh(userId)?.admin === true
+    );
+  }
+
+  // Whether isAdmin can answer without asking Slack.
+  known(userId: string) {
+    return this.options.permissions === "none" || Boolean(this.fresh(userId));
   }
 
   // Awaiting this before a permission check means an admin's very first action
   // already counts, and that an answer too old to trust is confirmed with Slack
   // rather than extended. A fresh answer keeps every later check synchronous.
   resolve(userId: string) {
-    if (!this.options.enabled) return Promise.resolve(false);
+    if (this.options.permissions === "none") return Promise.resolve(false);
     const cached = this.fresh(userId);
     return cached ? Promise.resolve(cached.admin) : this.fetch(userId);
   }
@@ -71,7 +80,7 @@ export class WorkspaceAdmins {
           { event: "admin_lookup_failed", userId, err: error },
           "Slack workspace admin lookup failed",
         );
-        // A lookup outage must not hand out or extend host powers, so forget
+        // A lookup outage must not hand out or extend any powers, so forget
         // what Slack last said: this check is denied, and the next one asks
         // again rather than trusting the failure either way.
         this.cache.delete(userId);

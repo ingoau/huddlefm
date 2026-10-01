@@ -13,6 +13,7 @@ import { parseLikeValue } from "./coordinator-ui.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
 import { ChannelManagers } from "./channel-managers.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
+import type { RolePermissions } from "./config.ts";
 
 function setup(
   tracks = {} as TrackCatalog,
@@ -1892,17 +1893,17 @@ function volumeUp(userId: string) {
 }
 
 function workspaceAdmins(
-  enabled: boolean,
+  permissions: RolePermissions,
   admins = ["admin"],
   lookups: string[] = [],
 ) {
   return new WorkspaceAdmins(
     async (userId) => (lookups.push(userId), admins.includes(userId)),
-    { enabled },
+    { permissions },
   );
 }
 
-test("treats a workspace admin as a manager when enabled", async () => {
+test("treats a workspace admin as a manager when granted host", async () => {
   const lookups: string[] = [];
   const result = setup(
     undefined,
@@ -1913,7 +1914,7 @@ test("treats a workspace admin as a manager when enabled", async () => {
     undefined,
     undefined,
     undefined,
-    workspaceAdmins(true, ["admin"], lookups),
+    workspaceAdmins("host", ["admin"], lookups),
   );
   await result.coordinator.start();
   await result.coordinator.action(volumeUp("admin"));
@@ -1927,7 +1928,7 @@ test("treats a workspace admin as a manager when enabled", async () => {
   await result.coordinator.endFromSlack();
 });
 
-test("leaves workspace admins alone while the option is off", async () => {
+test("leaves workspace admins alone when granted nothing", async () => {
   const lookups: string[] = [];
   const result = setup(
     undefined,
@@ -1938,7 +1939,7 @@ test("leaves workspace admins alone while the option is off", async () => {
     undefined,
     undefined,
     undefined,
-    workspaceAdmins(false, ["admin"], lookups),
+    workspaceAdmins("none", ["admin"], lookups),
   );
   await result.coordinator.start();
   await result.coordinator.action(volumeUp("admin"));
@@ -1960,7 +1961,7 @@ test("an excluded workspace admin gains nothing", async () => {
     new Set(["admin"]),
     undefined,
     undefined,
-    workspaceAdmins(true, ["admin"]),
+    workspaceAdmins("host", ["admin"]),
   );
   await result.coordinator.start();
   await result.coordinator.action(volumeUp("admin"));
@@ -2016,7 +2017,7 @@ test("a workspace admin holds host powers over settings", async () => {
     undefined,
     undefined,
     undefined,
-    workspaceAdmins(true, ["admin"]),
+    workspaceAdmins("host", ["admin"]),
   );
   await result.coordinator.start();
   await result.coordinator.action({
@@ -2040,8 +2041,12 @@ test("a workspace admin holds host powers over settings", async () => {
 function channelManagerSetup(
   managers = ["channel-manager"],
   excludedUserIds = new Set<string>(),
+  permissions: RolePermissions = "end",
+  admins?: WorkspaceAdmins,
 ) {
   const lookups: string[] = [];
+  // How many modals had opened when each lookup asked Slack.
+  const modalsAtLookup: number[] = [];
   const result = setup(
     undefined,
     undefined,
@@ -2051,20 +2056,24 @@ function channelManagerSetup(
     excludedUserIds,
     undefined,
     undefined,
+    admins,
     undefined,
     undefined,
-    undefined,
-    new ChannelManagers(async (channelId) => {
-      lookups.push(channelId);
-      return managers;
-    }),
+    new ChannelManagers(
+      async (channelId) => {
+        lookups.push(channelId);
+        modalsAtLookup.push(result.modals.length);
+        return managers;
+      },
+      { permissions },
+    ),
   );
   const act = (userId: string, actionId: string) =>
     result.coordinator.action({
       ...interaction(result.coordinator, actionId, result.coordinator.id),
       userId,
     });
-  return { ...result, lookups, act };
+  return { ...result, lookups, modalsAtLookup, act };
 }
 
 function ended(result: { sessions: unknown[] }) {
@@ -2077,7 +2086,10 @@ test("a channel manager outside the huddle can end the session", async () => {
   const result = channelManagerSetup();
   await result.coordinator.start();
   await result.act("channel-manager", "open_settings");
-  expect(JSON.stringify(result.modals.at(-1))).toContain("end_session");
+  expect(JSON.stringify(result.modals.at(-1))).toContain("Loading…");
+  const [viewId, , view] = result.updatedModals.at(-1)!;
+  expect(viewId).toBe("view-1");
+  expect(JSON.stringify(view)).toContain("end_session");
   expect(result.lookups).toEqual(["channel"]);
   await result.act("channel-manager", "end_session");
   expect(ended(result)).toBeTrue();
@@ -2100,7 +2112,8 @@ test("a channel manager gains nothing beyond ending the session", async () => {
   );
   expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
   await result.act("channel-manager", "open_settings");
-  const modal = JSON.stringify(result.modals.at(-1));
+  const modal = JSON.stringify(result.updatedModals.at(-1)![2]);
+  expect(modal).toContain("end_session");
   expect(modal).not.toContain('"volume"');
   expect(modal).not.toContain("permission_preset");
   await result.coordinator.endFromSlack();
@@ -2142,6 +2155,105 @@ test("a channel manager can end the session through the agent", async () => {
     ended: true,
   });
   expect(ended(result)).toBeTrue();
+});
+
+test("a workspace admin outside the huddle can end the session by default", async () => {
+  const result = channelManagerSetup(
+    [],
+    new Set(),
+    "end",
+    workspaceAdmins("end", ["admin"]),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("admin"));
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  await result.act("admin", "open_settings");
+  const modal = JSON.stringify(result.updatedModals.at(-1)![2]);
+  expect(modal).toContain("end_session");
+  expect(modal).not.toContain('"volume"');
+  await result.act("admin", "end_session");
+  expect(ended(result)).toBeTrue();
+});
+
+test("a channel manager granted host powers acts as a manager", async () => {
+  const result = channelManagerSetup(["channel-manager"], new Set(), "host");
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("channel-manager"));
+  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.lookups).toEqual(["channel"]);
+  await result.coordinator.endFromSlack();
+});
+
+test("channel managers granted nothing cannot end the session", async () => {
+  const result = channelManagerSetup(["channel-manager"], new Set(), "none");
+  await result.coordinator.start();
+  await result.act("channel-manager", "end_session");
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(ended(result)).toBeFalse();
+  expect(result.lookups).toEqual([]);
+  await result.coordinator.endFromSlack();
+});
+
+test("someone with two roles gets the higher grant", async () => {
+  const adminLookups: string[] = [];
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    workspaceAdmins("host", ["channel-manager"], adminLookups),
+  );
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("channel-manager"));
+  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(adminLookups).toEqual(["channel-manager"]);
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings shows a loading view while a role lookup asks Slack", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("channel-manager", "open_settings");
+  // The trigger ID is spent before Slack is asked anything.
+  expect(result.modalsAtLookup).toEqual([1]);
+  expect(result.modals).toHaveLength(1);
+  expect(JSON.stringify(result.updatedModals.at(-1)![2])).toContain(
+    "end_session",
+  );
+
+  // Once the answer is cached, Settings opens directly.
+  await result.act("channel-manager", "open_settings");
+  expect(result.modals).toHaveLength(2);
+  expect(JSON.stringify(result.modals.at(-1))).toContain("end_session");
+  expect(result.modalsAtLookup).toEqual([1]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a refusal replaces the loading view instead of leaving it", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("outsider", "open_settings");
+  expect(JSON.stringify(result.updatedModals.at(-1)![2])).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.ephemeral).not.toContain(
+    "Join the huddle before using the player.",
+  );
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings opens directly when no role needs a lookup", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("host", "open_settings");
+  expect(result.lookups).toEqual([]);
+  expect(result.updatedModals).toHaveLength(0);
+  expect(JSON.stringify(result.modals.at(-1))).toContain("save_settings");
+  await result.coordinator.endFromSlack();
 });
 
 test("HuddleFM membership leave does not end active media", async () => {

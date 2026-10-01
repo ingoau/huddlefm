@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { parseIds, parseMediaBackend, parseWholeNumber } from "./config.ts";
+import {
+  parseIds,
+  parseMediaBackend,
+  parseRolePermissions,
+  parseWholeNumber,
+} from "./config.ts";
 
 test("parses comma and whitespace separated IDs", () => {
   expect([...parseIds("C123,C456 C789\nC123")]).toEqual([
@@ -46,4 +51,55 @@ test("an offset may be negative, within its bounds", () => {
   expect(parseWholeNumber("300", 0, -10_000)).toBe(300);
   expect(parseWholeNumber("-20000", 0, -10_000)).toBe(0);
   expect(parseWholeNumber("150000", 0, -10_000, 10_000)).toBe(0);
+});
+
+test("channel managers and workspace admins can end sessions by default", () => {
+  expect(parseRolePermissions({})).toEqual({
+    channelManagers: "end",
+    workspaceAdmins: "end",
+    warnings: [],
+  });
+  expect(
+    parseRolePermissions({
+      CHANNEL_MANAGER_PERMISSIONS: " Host ",
+      WORKSPACE_ADMIN_PERMISSIONS: "none",
+    }),
+  ).toEqual({ channelManagers: "host", workspaceAdmins: "none", warnings: [] });
+});
+
+test("a mistyped role permission falls back to end with a warning", () => {
+  const parsed = parseRolePermissions({
+    CHANNEL_MANAGER_PERMISSIONS: "hots",
+    WORKSPACE_ADMIN_PERMISSIONS: "all",
+  });
+  expect(parsed.channelManagers).toBe("end");
+  expect(parsed.workspaceAdmins).toBe("end");
+  expect(parsed.warnings).toEqual([
+    "CHANNEL_MANAGER_PERMISSIONS must be none, end, or host; using end instead",
+    "WORKSPACE_ADMIN_PERMISSIONS must be none, end, or host; using end instead",
+  ]);
+});
+
+test("WORKSPACE_ADMINS_AS_MANAGERS still grants host until replaced", () => {
+  expect(
+    parseRolePermissions({ WORKSPACE_ADMINS_AS_MANAGERS: "true" }),
+  ).toEqual({
+    channelManagers: "end",
+    workspaceAdmins: "host",
+    warnings: [
+      "WORKSPACE_ADMINS_AS_MANAGERS is deprecated; use WORKSPACE_ADMIN_PERMISSIONS instead",
+    ],
+  });
+  expect(
+    parseRolePermissions({ WORKSPACE_ADMINS_AS_MANAGERS: "false" })
+      .workspaceAdmins,
+  ).toBe("end");
+  const replaced = parseRolePermissions({
+    WORKSPACE_ADMINS_AS_MANAGERS: "true",
+    WORKSPACE_ADMIN_PERMISSIONS: "nope",
+  });
+  expect(replaced.workspaceAdmins).toBe("end");
+  expect(replaced.warnings).toContain(
+    "WORKSPACE_ADMINS_AS_MANAGERS is ignored because WORKSPACE_ADMIN_PERMISSIONS is set",
+  );
 });
