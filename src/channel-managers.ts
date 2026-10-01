@@ -39,6 +39,15 @@ export class ChannelManagers {
     );
   }
 
+  // Whether isManager can answer without asking Slack.
+  known(channelId: string) {
+    return (
+      this.permissions === "none" ||
+      channelId.startsWith("D") ||
+      Boolean(this.fresh(channelId))
+    );
+  }
+
   // A fresh answer keeps every later check synchronous; one too old to trust
   // is confirmed with Slack rather than extended.
   async resolve(channelId: string, userId: string) {

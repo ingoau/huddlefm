@@ -627,7 +627,16 @@ export class Coordinator {
 
   async action(interaction: Interaction) {
     this.scrobbling?.syncAnalyticsUser(interaction.userId);
-    await this.primeRoles(interaction.userId, this.endingAction(interaction));
+    const ending = this.endingAction(interaction);
+    // Settings opens with a trigger ID that expires after three seconds, which
+    // a role lookup can outlast. When one has to ask Slack, a loading view
+    // opens first and Settings replaces it, as updates need no trigger ID.
+    const loading =
+      interaction.actionId === "open_settings" &&
+      this.roleLookups(interaction.userId, ending).length
+        ? await this.openSettingsLoading(interaction)
+        : undefined;
+    await this.primeRoles(interaction.userId, ending);
     this.log.debug(
       {
         event: "action_received",
@@ -655,12 +664,9 @@ export class Coordinator {
         return this.integrationAction(interaction);
       if (
         !this.isParticipantOrManager(interaction.userId) &&
-        !(
-          this.endingAction(interaction) &&
-          this.canEndFromOutside(interaction.userId)
-        )
+        !(ending && this.canEndFromOutside(interaction.userId))
       )
-        return this.rejectNonParticipant(interaction);
+        return this.rejectNonParticipant(interaction, loading);
       if (interaction.type === "view_submission") {
         if (interaction.actionId === "move_queue_track")
           return this.queuePositionSubmission(interaction);
@@ -671,9 +677,10 @@ export class Coordinator {
         interaction.messageTs !== this.uiTs &&
         interaction.actionId !== "toggle_session_scrobbling"
       )
-        return this.notice(
+        return this.settingsNotice(
           interaction.userId,
           "That player is stale; use the newest one.",
+          loading,
         );
       const handlers: Record<string, () => Promise<void> | void> = {
         open_add_to_queue: () => this.addModal(interaction),
@@ -695,7 +702,7 @@ export class Coordinator {
         shuffle_queue: () => this.shuffleQueue(interaction),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
-        open_settings: () => this.settingsModal(interaction),
+        open_settings: () => this.settingsModal(interaction, loading),
         report_playback_problem: () => this.reportPlaybackProblem(interaction),
         end_session: () => this.end(interaction.userId, "ended by host"),
         claim_host: () => this.claimHost(interaction),
@@ -1645,21 +1652,77 @@ export class Coordinator {
   }
 
   // Looks up the roles that could matter to what the user is doing, together
-  // so that one slow lookup does not wait on another. Roles that only end the
-  // session are looked up only for an action that can end it, and only for
-  // users who could not end it anyway.
+  // so that one slow lookup does not wait on another.
   private async primeRoles(userId: string, ending: boolean) {
-    if (this.isExcluded(userId)) return;
+    await Promise.all(
+      this.roleLookups(userId, ending).map((lookup) => lookup()),
+    );
+  }
+
+  // The role lookups that would have to ask Slack before the user's next
+  // permission check. Roles that only end the session matter only for an
+  // action that can end it, and only for users who could not end it anyway.
+  private roleLookups(userId: string, ending: boolean) {
+    if (this.isExcluded(userId)) return [];
     const needed: RolePermissions =
       ending && !this.can(userId, "end-session") ? "end" : "host";
     const matters = (permissions: RolePermissions) =>
       permissions === "host" || (permissions === "end" && needed === "end");
-    const lookups: Promise<boolean>[] = [];
-    if (this.workspaceAdmins && matters(this.workspaceAdmins.permissions))
-      lookups.push(this.workspaceAdmins.resolve(userId));
-    if (this.channelManagers && matters(this.channelManagers.permissions))
-      lookups.push(this.channelManagers.resolve(this.roomId, userId));
-    await Promise.all(lookups);
+    const lookups: (() => Promise<boolean>)[] = [];
+    const admins = this.workspaceAdmins;
+    if (admins && matters(admins.permissions) && !admins.known(userId))
+      lookups.push(() => admins.resolve(userId));
+    const managers = this.channelManagers;
+    if (
+      managers &&
+      matters(managers.permissions) &&
+      !managers.known(this.roomId)
+    )
+      lookups.push(() => managers.resolve(this.roomId, userId));
+    return lookups;
+  }
+
+  // Opens Settings in a loading state, or nothing if Slack refuses, in which
+  // case Settings tries to open normally once the lookup is done.
+  private async openSettingsLoading(interaction: Interaction) {
+    try {
+      const view = await this.slack.modal(
+        interaction.triggerId,
+        this.settingsMessageView("Loading…"),
+      );
+      return view?.id ? { id: view.id, hash: view.hash } : undefined;
+    } catch (error) {
+      this.log.warn(
+        { event: "settings_loading_failed", err: error },
+        "Could not open the Settings loading view",
+      );
+      return undefined;
+    }
+  }
+
+  private settingsMessageView(text: string) {
+    return {
+      type: "modal",
+      title: plain("HuddleFM settings"),
+      close: plain("Close"),
+      blocks: [section(text)],
+    };
+  }
+
+  // Tells the user why Settings did not open: in the loading view when one is
+  // waiting on the answer, so it is not left loading, and in the thread
+  // otherwise.
+  private async settingsNotice(
+    userId: string,
+    text: string,
+    loading?: { id: string; hash?: string },
+  ) {
+    if (!loading) return this.notice(userId, text);
+    await this.slack.updateModal(
+      loading.id,
+      loading.hash,
+      this.settingsMessageView(text),
+    );
   }
 
   // What a user granted only the end permission may do from outside the
@@ -2324,15 +2387,19 @@ export class Coordinator {
     return run;
   }
 
-  private rejectNonParticipant(interaction: Interaction) {
+  private rejectNonParticipant(
+    interaction: Interaction,
+    loading?: { id: string; hash?: string },
+  ) {
     this.audit.record("action.denied", interaction.userId, {
       sessionId: this.id,
       actionId: interaction.actionId,
       reason: "not in huddle",
     });
-    return this.notice(
+    return this.settingsNotice(
       interaction.userId,
       "Join the huddle before using the player.",
+      loading,
     );
   }
 
@@ -4034,21 +4101,32 @@ export class Coordinator {
     );
   }
 
-  private async settingsModal(interaction: Interaction) {
+  private async settingsModal(
+    interaction: Interaction,
+    loading?: { id: string; hash?: string },
+  ) {
     if (!this.canOpenSettings(interaction.userId)) {
       this.audit.record("action.denied", interaction.userId, {
         sessionId: this.id,
         capability: "settings",
       });
-      return this.notice(
+      return this.settingsNotice(
         interaction.userId,
         "You do not have permission to change settings.",
+        loading,
       );
     }
-    await this.slack.modal(
-      interaction.triggerId,
-      this.settingsViewFor(interaction),
-    );
+    if (loading)
+      await this.slack.updateModal(
+        loading.id,
+        loading.hash,
+        this.settingsViewFor(interaction),
+      );
+    else
+      await this.slack.modal(
+        interaction.triggerId,
+        this.settingsViewFor(interaction),
+      );
   }
 
   private settingsViewFor(interaction: Interaction, page?: number) {

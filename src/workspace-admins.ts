@@ -9,9 +9,8 @@ export const adminCacheTtlMs = 600_000;
 
 // Permission checks wait on a lookup, so it needs a deadline of its own: the
 // Slack client has no timeout by default, and a stalled call would otherwise
-// hold up an interaction or an agent command indefinitely. Opening Settings
-// waits on one too, and its trigger ID lasts only three seconds.
-export const adminLookupTimeoutMs = 2_000;
+// hold up an interaction or an agent command indefinitely.
+export const adminLookupTimeoutMs = 5_000;
 
 export type WorkspaceAdminLookup = (userId: string) => Promise<boolean>;
 
@@ -41,6 +40,11 @@ export class WorkspaceAdmins {
     return (
       this.options.permissions !== "none" && this.fresh(userId)?.admin === true
     );
+  }
+
+  // Whether isAdmin can answer without asking Slack.
+  known(userId: string) {
+    return this.options.permissions === "none" || Boolean(this.fresh(userId));
   }
 
   // Awaiting this before a permission check means an admin's very first action

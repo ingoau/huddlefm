@@ -2045,6 +2045,8 @@ function channelManagerSetup(
   admins?: WorkspaceAdmins,
 ) {
   const lookups: string[] = [];
+  // How many modals had opened when each lookup asked Slack.
+  const modalsAtLookup: number[] = [];
   const result = setup(
     undefined,
     undefined,
@@ -2060,6 +2062,7 @@ function channelManagerSetup(
     new ChannelManagers(
       async (channelId) => {
         lookups.push(channelId);
+        modalsAtLookup.push(result.modals.length);
         return managers;
       },
       { permissions },
@@ -2070,7 +2073,7 @@ function channelManagerSetup(
       ...interaction(result.coordinator, actionId, result.coordinator.id),
       userId,
     });
-  return { ...result, lookups, act };
+  return { ...result, lookups, modalsAtLookup, act };
 }
 
 function ended(result: { sessions: unknown[] }) {
@@ -2083,7 +2086,10 @@ test("a channel manager outside the huddle can end the session", async () => {
   const result = channelManagerSetup();
   await result.coordinator.start();
   await result.act("channel-manager", "open_settings");
-  expect(JSON.stringify(result.modals.at(-1))).toContain("end_session");
+  expect(JSON.stringify(result.modals.at(-1))).toContain("Loading…");
+  const [viewId, , view] = result.updatedModals.at(-1)!;
+  expect(viewId).toBe("view-1");
+  expect(JSON.stringify(view)).toContain("end_session");
   expect(result.lookups).toEqual(["channel"]);
   await result.act("channel-manager", "end_session");
   expect(ended(result)).toBeTrue();
@@ -2106,7 +2112,8 @@ test("a channel manager gains nothing beyond ending the session", async () => {
   );
   expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
   await result.act("channel-manager", "open_settings");
-  const modal = JSON.stringify(result.modals.at(-1));
+  const modal = JSON.stringify(result.updatedModals.at(-1)![2]);
+  expect(modal).toContain("end_session");
   expect(modal).not.toContain('"volume"');
   expect(modal).not.toContain("permission_preset");
   await result.coordinator.endFromSlack();
@@ -2164,7 +2171,7 @@ test("a workspace admin outside the huddle can end the session by default", asyn
   );
   expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
   await result.act("admin", "open_settings");
-  const modal = JSON.stringify(result.modals.at(-1));
+  const modal = JSON.stringify(result.updatedModals.at(-1)![2]);
   expect(modal).toContain("end_session");
   expect(modal).not.toContain('"volume"');
   await result.act("admin", "end_session");
@@ -2204,6 +2211,48 @@ test("someone with two roles gets the higher grant", async () => {
   await result.coordinator.action(volumeUp("channel-manager"));
   expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
   expect(adminLookups).toEqual(["channel-manager"]);
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings shows a loading view while a role lookup asks Slack", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("channel-manager", "open_settings");
+  // The trigger ID is spent before Slack is asked anything.
+  expect(result.modalsAtLookup).toEqual([1]);
+  expect(result.modals).toHaveLength(1);
+  expect(JSON.stringify(result.updatedModals.at(-1)![2])).toContain(
+    "end_session",
+  );
+
+  // Once the answer is cached, Settings opens directly.
+  await result.act("channel-manager", "open_settings");
+  expect(result.modals).toHaveLength(2);
+  expect(JSON.stringify(result.modals.at(-1))).toContain("end_session");
+  expect(result.modalsAtLookup).toEqual([1]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a refusal replaces the loading view instead of leaving it", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("outsider", "open_settings");
+  expect(JSON.stringify(result.updatedModals.at(-1)![2])).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.ephemeral).not.toContain(
+    "Join the huddle before using the player.",
+  );
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings opens directly when no role needs a lookup", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("host", "open_settings");
+  expect(result.lookups).toEqual([]);
+  expect(result.updatedModals).toHaveLength(0);
+  expect(JSON.stringify(result.modals.at(-1))).toContain("save_settings");
   await result.coordinator.endFromSlack();
 });
 
