@@ -4869,7 +4869,7 @@ export class Coordinator {
                   value,
                   confirm: confirm(
                     "Switch to the old player?",
-                    "The music will pause for a few seconds while everyone in the Huddle moves to the old player. Then you can tell us what went wrong.",
+                    "The music will pause while it switches to the old player. Then you can tell us what went wrong.",
                     "Switch",
                   ),
                 },
