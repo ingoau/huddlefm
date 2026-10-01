@@ -3,6 +3,7 @@ import {
   SlackHuddleAdapter,
   activeHuddleRoom,
   channelAccess,
+  channelManagerIds,
   huddleHasParticipant,
   normalizeInvitedJoinResponse,
   normalizeJoinResponse,
@@ -375,4 +376,18 @@ test("normalizes channel membership events", () => {
     channelId: "C123",
     userId: "U123",
   });
+});
+
+test("reads channel managers from role assignments", () => {
+  expect(
+    channelManagerIds({
+      ok: true,
+      role_assignments: [
+        { role_id: "Rl0A", users: ["U1", "U2", 3] },
+        { role_id: "Rl01", users: ["U3"] },
+        null,
+      ],
+    }),
+  ).toEqual(["U1", "U2"]);
+  expect(channelManagerIds({ ok: true })).toEqual([]);
 });

@@ -213,6 +213,23 @@ export function channelAccess(channel?: {
   return !channel || channel.is_private ? "decline" : "join";
 }
 
+// Slack's role ID for a channel manager.
+const channelManagerRoleId = "Rl0A";
+
+/** The channel managers in an admin.roles.entity.listAssignments response. */
+export function channelManagerIds(response: Record<string, unknown>) {
+  const assignments = response.role_assignments;
+  if (!Array.isArray(assignments)) return [];
+  return assignments.flatMap((assignment) => {
+    const { role_id: roleId, users } = (assignment ?? {}) as {
+      role_id?: unknown;
+      users?: unknown;
+    };
+    if (roleId !== channelManagerRoleId || !Array.isArray(users)) return [];
+    return users.filter((user): user is string => typeof user === "string");
+  });
+}
+
 // Kick outcomes after which the member can never be removed by retrying.
 const kickSettledErrors = [
   "not_in_channel",
@@ -505,6 +522,16 @@ export class SlackHuddleAdapter {
       { channel: channelId, user: userId },
       kickSettledErrors,
     );
+  }
+
+  // The bot account reads channel managers the way Slack's own channel
+  // details do; the official equivalent needs an Enterprise admin token.
+  async channelManagers(channelId: string) {
+    const result = await this.api("admin.roles.entity.listAssignments", {
+      entity_id: channelId,
+      ...clientFields("fetch-channel-managers"),
+    });
+    return channelManagerIds(result);
   }
 
   async activeHuddleRoom(channelId: string, threadTs: string) {
