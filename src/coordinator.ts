@@ -44,6 +44,7 @@ import {
 import { safeError as message } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
+import type { ChannelManagers } from "./channel-managers.ts";
 import type { WorkspaceAdmins } from "./workspace-admins.ts";
 import {
   actions,
@@ -332,6 +333,7 @@ export class Coordinator {
       /** Starts the move to the browser without waiting for it. */
       start(userId: string, reportId: string): void;
     },
+    private channelManagers?: ChannelManagers,
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
@@ -625,6 +627,8 @@ export class Coordinator {
   async action(interaction: Interaction) {
     this.scrobbling?.syncAnalyticsUser(interaction.userId);
     await this.primeManager(interaction.userId);
+    if (this.endingAction(interaction))
+      await this.primeChannelManager(interaction.userId);
     this.log.debug(
       {
         event: "action_received",
@@ -650,7 +654,13 @@ export class Coordinator {
       }
       if (this.isIntegrationAction(interaction.actionId))
         return this.integrationAction(interaction);
-      if (!this.isParticipantOrManager(interaction.userId))
+      if (
+        !this.isParticipantOrManager(interaction.userId) &&
+        !(
+          this.endingAction(interaction) &&
+          this.isChannelManager(interaction.userId)
+        )
+      )
         return this.rejectNonParticipant(interaction);
       if (interaction.type === "view_submission") {
         if (interaction.actionId === "move_queue_track")
@@ -1375,6 +1385,7 @@ export class Coordinator {
   }
 
   async agentEnd(userId: string, signal?: AbortSignal) {
+    await this.primeChannelManager(userId);
     return this.enqueue(async () => {
       throwIfAborted(signal);
       if (!this.can(userId, "end-session"))
@@ -1591,6 +1602,8 @@ export class Coordinator {
   private can(userId: string, capability: string) {
     if (this.isExcluded(userId)) return false;
     if (this.integrations.get(userId)?.permissions.has(capability)) return true;
+    if (capability === "end-session" && this.isChannelManager(userId))
+      return true;
     return (
       this.isManager(userId) ||
       (this.participants.has(userId) &&
@@ -1612,6 +1625,35 @@ export class Coordinator {
   // hand before the first one runs.
   primeManager(userId: string) {
     return this.workspaceAdmins?.resolve(userId) ?? Promise.resolve(false);
+  }
+
+  // Managers of the channel the Huddle is in can always end its session, even
+  // from outside the Huddle and whatever the permissions say. Exclusion still
+  // wins, so the bot and integration accounts cannot end sessions this way.
+  private isChannelManager(userId: string) {
+    return (
+      !this.isExcluded(userId) &&
+      this.channelManagers?.isManager(this.roomId, userId) === true
+    );
+  }
+
+  // Like primeManager, for channel managers. Only actions that can end the
+  // session need it, and only for users who could not end it anyway.
+  private async primeChannelManager(userId: string) {
+    if (!this.channelManagers || this.can(userId, "end-session")) return;
+    await this.channelManagers.resolve(this.roomId, userId);
+  }
+
+  // What a channel manager outside the Huddle may do: reach Settings and its
+  // End session button. A Settings submission changes only what the user is
+  // otherwise allowed to change.
+  private endingAction(interaction: Interaction) {
+    if (interaction.type === "view_submission")
+      return interaction.actionId !== "move_queue_track";
+    return (
+      interaction.actionId === "open_settings" ||
+      interaction.actionId === "end_session"
+    );
   }
 
   private settingsAdmin(userId: string) {

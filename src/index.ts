@@ -48,6 +48,7 @@ import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
 import { likeWindowMs, RecommendationCatalog } from "./recommendations.ts";
+import { ChannelManagers } from "./channel-managers.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
 
 const resumeTtlMs = 3 * 60_000;
@@ -143,6 +144,9 @@ if (store.needsUsageBackfill())
 const fallbackReports = new FallbackReports();
 fallbackReports.start();
 const slackHuddle = new SlackHuddleAdapter(config);
+const channelManagers = new ChannelManagers((channelId) =>
+  slackHuddle.channelManagers(channelId),
+);
 const mediaBrowsers = new MediaBrowserPool(config.chromePath);
 const runtimes = new Map<string, Runtime>();
 const joiningChannels = new Set<string>();
@@ -913,6 +917,7 @@ async function joinHuddle(
               }),
           }
         : undefined,
+      channelManagers,
     ));
     try {
       if (restored) await coordinator.resume(resumeActorId);

@@ -11,6 +11,7 @@ import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
 import { parseLikeValue } from "./coordinator-ui.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
+import { ChannelManagers } from "./channel-managers.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
 
 function setup(
@@ -36,6 +37,7 @@ function setup(
   workspaceAdmins?: WorkspaceAdmins,
   duckingMode: DuckingMode = "gentle",
   mediaFallback?: ConstructorParameters<typeof Coordinator>[19],
+  channelManagers?: ChannelManagers,
 ) {
   const posted: unknown[] = [];
   const updates: unknown[] = [];
@@ -214,6 +216,7 @@ function setup(
     recommendations,
     workspaceAdmins,
     mediaFallback,
+    channelManagers,
   );
   return {
     coordinator,
@@ -2032,6 +2035,113 @@ test("a workspace admin holds host powers over settings", async () => {
   });
   expect(result.coordinator.hostUserId()).toBe("guest");
   await result.coordinator.endFromSlack();
+});
+
+function channelManagerSetup(
+  managers = ["channel-manager"],
+  excludedUserIds = new Set<string>(),
+) {
+  const lookups: string[] = [];
+  const result = setup(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    excludedUserIds,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new ChannelManagers(async (channelId) => {
+      lookups.push(channelId);
+      return managers;
+    }),
+  );
+  const act = (userId: string, actionId: string) =>
+    result.coordinator.action({
+      ...interaction(result.coordinator, actionId, result.coordinator.id),
+      userId,
+    });
+  return { ...result, lookups, act };
+}
+
+function ended(result: { sessions: unknown[] }) {
+  return result.sessions.some(
+    (value) => (value as { status?: string }).status === "ended",
+  );
+}
+
+test("a channel manager outside the huddle can end the session", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("channel-manager", "open_settings");
+  expect(JSON.stringify(result.modals.at(-1))).toContain("end_session");
+  expect(result.lookups).toEqual(["channel"]);
+  await result.act("channel-manager", "end_session");
+  expect(ended(result)).toBeTrue();
+  expect(result.media).toContainEqual({ type: "leave" });
+});
+
+test("a channel manager in the huddle can end it whatever the permissions", async () => {
+  const result = channelManagerSetup(["guest"]);
+  await result.coordinator.start();
+  await result.act("guest", "end_session");
+  expect(ended(result)).toBeTrue();
+});
+
+test("a channel manager gains nothing beyond ending the session", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.coordinator.action(volumeUp("channel-manager"));
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  await result.act("channel-manager", "open_settings");
+  const modal = JSON.stringify(result.modals.at(-1));
+  expect(modal).not.toContain('"volume"');
+  expect(modal).not.toContain("permission_preset");
+  await result.coordinator.endFromSlack();
+});
+
+test("other users cannot end the session and the host needs no lookup", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  await result.act("guest", "end_session");
+  expect(result.ephemeral).toContain(
+    "You do not have permission to end this session.",
+  );
+  expect(ended(result)).toBeFalse();
+  expect(result.lookups).toEqual(["channel"]);
+  await result.act("host", "end_session");
+  expect(ended(result)).toBeTrue();
+  expect(result.lookups).toEqual(["channel"]);
+});
+
+test("an excluded channel manager cannot end the session", async () => {
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(["channel-manager"]),
+  );
+  await result.coordinator.start();
+  await result.act("channel-manager", "end_session");
+  expect(result.ephemeral).toContain(
+    "Join the huddle before using the player.",
+  );
+  expect(ended(result)).toBeFalse();
+  await result.coordinator.endFromSlack();
+});
+
+test("a channel manager can end the session through the agent", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  expect(await result.coordinator.agentEnd("channel-manager")).toEqual({
+    ok: true,
+    ended: true,
+  });
+  expect(ended(result)).toBeTrue();
 });
 
 test("HuddleFM membership leave does not end active media", async () => {
