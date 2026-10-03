@@ -41,6 +41,11 @@ export const duckingModeLabels: Record<DuckingMode, string> = {
 export const scrobblingModes = ["always", "ask", "disabled"] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
 
+// What a listener lets the Huddle mix draw on: the songs they have added or
+// liked in HuddleFM, and their listening on each scrobbling service.
+export const huddleMixSources = ["added", "lastfm", "listenbrainz"] as const;
+export type HuddleMixSource = (typeof huddleMixSources)[number];
+
 export const autoplayModes = ["off", "related", "huddle"] as const;
 export type AutoplayMode = (typeof autoplayModes)[number];
 
@@ -213,7 +218,10 @@ export type UserScrobbling = {
   listenBrainzUsername?: string;
   listenBrainzToken?: string;
   listenBrainzEnabled: boolean;
+  // Whether the listener takes part in the Huddle mix at all: true while any
+  // of their sources is.
   huddleMixOptIn: boolean;
+  huddleMixSources: HuddleMixSource[];
   mode: ScrobblingMode;
 };
 
@@ -303,6 +311,9 @@ const addedColumns = [
   ["tracks", "fade_out_seconds", "REAL"],
   ["user_scrobbling", "mode", "TEXT NOT NULL DEFAULT 'always'"],
   ["user_scrobbling", "huddle_mix_opt_in", "INTEGER NOT NULL DEFAULT 1"],
+  ["user_scrobbling", "huddle_mix_added", "INTEGER NOT NULL DEFAULT 1"],
+  ["user_scrobbling", "huddle_mix_lastfm", "INTEGER NOT NULL DEFAULT 1"],
+  ["user_scrobbling", "huddle_mix_listenbrainz", "INTEGER NOT NULL DEFAULT 1"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -439,6 +450,9 @@ export class Store {
         listenbrainz_token TEXT,
         listenbrainz_enabled INTEGER NOT NULL DEFAULT 0,
         huddle_mix_opt_in INTEGER NOT NULL DEFAULT 1,
+        huddle_mix_added INTEGER NOT NULL DEFAULT 1,
+        huddle_mix_lastfm INTEGER NOT NULL DEFAULT 1,
+        huddle_mix_listenbrainz INTEGER NOT NULL DEFAULT 1,
         mode TEXT NOT NULL DEFAULT 'always',
         updated_at INTEGER NOT NULL
       );
@@ -1512,8 +1526,17 @@ export class Store {
         lastFmEnabled: false,
         listenBrainzEnabled: false,
         huddleMixOptIn: true,
+        huddleMixSources: [...huddleMixSources],
         mode: "always",
       };
+    // The opt-in column predates the per-source ones, so an older opt-out
+    // still turns every source off.
+    const sources =
+      row.huddle_mix_opt_in === 0
+        ? []
+        : huddleMixSources.filter(
+            (source) => row[`huddle_mix_${source}`] !== 0,
+          );
     return compact({
       lastFmUsername: text(row.lastfm_username),
       lastFmSessionKey: text(row.lastfm_session_key),
@@ -1525,10 +1548,8 @@ export class Store {
       listenBrainzUsername: text(row.listenbrainz_username),
       listenBrainzToken: text(row.listenbrainz_token),
       listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
-      huddleMixOptIn:
-        row.huddle_mix_opt_in === undefined
-          ? true
-          : Boolean(row.huddle_mix_opt_in),
+      huddleMixOptIn: sources.length > 0,
+      huddleMixSources: sources,
       mode: modeOf(scrobblingModes, row.mode) ?? "always",
     });
   }
@@ -1556,7 +1577,20 @@ export class Store {
   }
 
   setHuddleMixOptIn(userId: string, enabled: boolean) {
-    this.updateUserScrobbling(userId, "huddle_mix_opt_in = ?", enabled ? 1 : 0);
+    this.setHuddleMixSources(userId, enabled ? huddleMixSources : []);
+  }
+
+  setHuddleMixSources(userId: string, sources: readonly HuddleMixSource[]) {
+    const on = (source: HuddleMixSource) => (sources.includes(source) ? 1 : 0);
+    this.updateUserScrobbling(
+      userId,
+      `huddle_mix_opt_in = ?, huddle_mix_added = ?, huddle_mix_lastfm = ?,
+      huddle_mix_listenbrainz = ?`,
+      sources.length ? 1 : 0,
+      on("added"),
+      on("lastfm"),
+      on("listenbrainz"),
+    );
   }
 
   setLastFmPending(userId: string, token: string, startedAt: number) {

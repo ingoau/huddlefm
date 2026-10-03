@@ -1791,3 +1791,45 @@ test("a like from a clock that stepped backwards is not worth more than a fresh 
   expect(candidates[0]!.score).toBeCloseTo(3, 5);
   store.close();
 });
+
+test("huddle mix only uses the sources each listener gives it", async () => {
+  const store = new Store(":memory:");
+  addPastTrack(store, "host", "Added Song", "Band", "addedsongxx");
+  store.connectLastFm("host", "last-user", "session-key");
+  const catalog = new RecommendationCatalog(
+    store,
+    {
+      searchSong: async (title: string, artist: string) =>
+        fakeSong(title, artist),
+      upNextTracks: async () => [],
+    },
+    { lastFmApiKey: "key", random: sequence() },
+    lastFmStub({
+      "user.getTopTracks": {
+        toptracks: {
+          track: [
+            {
+              name: "Scrobbled Song",
+              artist: { name: "Other" },
+              playcount: "9",
+            },
+          ],
+        },
+      },
+      "user.getRecentTracks": { recenttracks: { track: [] } },
+    }),
+  );
+  const titles = async () =>
+    (await catalog.autoplayCandidates({ userIds: ["host"] })).map(
+      (candidate) => candidate.metadata.title,
+    );
+
+  store.setHuddleMixSources("host", ["added"]);
+  expect(await titles()).toEqual(["Added Song"]);
+  store.setHuddleMixSources("host", ["lastfm"]);
+  expect(await titles()).toEqual(["Scrobbled Song"]);
+  store.setHuddleMixSources("host", []);
+  expect(catalog.huddleMixOptedIn("host")).toBe(false);
+  expect(await titles()).toEqual([]);
+  store.close();
+});
