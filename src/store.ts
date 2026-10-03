@@ -1618,7 +1618,16 @@ export class Store {
     const row = this.db
       .query("SELECT * FROM user_scrobbling WHERE user_id = ?")
       .get(userId) as Row | null;
-    const saved = { ...savedHuddleMixSources(row ?? {}), ...choices };
+    const previous = savedHuddleMixSources(row ?? {});
+    // A save that changes nothing must not opt out, which would also clear
+    // the choices kept for services that are not connected.
+    if (
+      huddleMixSources.every(
+        (source) => (choices[source] ?? previous[source]) === previous[source],
+      )
+    )
+      return;
+    const saved = { ...previous, ...choices };
     const usable = usableHuddleMixSources({
       lastFmSessionKey: text(row?.lastfm_session_key),
       listenBrainzToken: text(row?.listenbrainz_token),

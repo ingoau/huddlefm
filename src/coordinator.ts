@@ -4758,9 +4758,6 @@ export class Coordinator {
         let newlyEnabled = false;
         const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
         if (mode) this.scrobbling.setMode(interaction.userId, mode);
-        const sources = submittedHuddleMixSources(state.huddle_mix);
-        if (sources)
-          this.scrobbling.setHuddleMixSources(interaction.userId, sources);
         const lastFm = checked(state.lastfm_scrobbling?.enabled);
         if (lastFm !== undefined) {
           newlyEnabled ||= lastFm && !userSettings.lastFmEnabled;
@@ -4779,6 +4776,10 @@ export class Coordinator {
             listenBrainz,
           );
         }
+        // After any service this save connects, so its checkbox counts.
+        const sources = submittedHuddleMixSources(state.huddle_mix);
+        if (sources)
+          this.scrobbling.setHuddleMixSources(interaction.userId, sources);
         const sessionEnabled = this.scrobbling.sessionEnabled(
           this.id,
           interaction.userId,

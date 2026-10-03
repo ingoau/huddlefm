@@ -917,6 +917,18 @@ test("turning off every usable source opts out, even of services connected later
   store.close();
 });
 
+test("a Huddle mix save that changes nothing keeps hidden choices", () => {
+  const store = new Store(":memory:");
+  store.connectLastFm("user", "last-user", "session-key");
+  store.setHuddleMixSources("user", { added: false });
+  store.disconnectLastFm("user");
+  expect(store.getUserScrobbling("user").huddleMixOptIn).toBe(false);
+  store.setHuddleMixSources("user", { added: false });
+  store.connectLastFm("user", "last-user", "session-key");
+  expect(store.getUserScrobbling("user").huddleMixSources).toEqual(["lastfm"]);
+  store.close();
+});
+
 test("an opt-out saved before per-source settings turns every source off", () => {
   const store = new Store(":memory:");
   store.connectLastFm("user", "last-user", "session-key");
