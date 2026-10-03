@@ -1,6 +1,10 @@
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
-import { huddleMixSources, type HuddleMixSource, type Store } from "./store.ts";
+import {
+  usableHuddleMixSources,
+  type HuddleMixSource,
+  type Store,
+} from "./store.ts";
 import {
   isYoutubeVideoId,
   normalizeToken,
@@ -468,9 +472,9 @@ export class RecommendationCatalog {
   // Whether the listener lets the mix use everything their recommendations
   // are built from.
   private mixesEverySource(userId: string) {
-    return (
-      this.store.getUserScrobbling(userId).huddleMixSources.length ===
-      huddleMixSources.length
+    const settings = this.store.getUserScrobbling(userId);
+    return usableHuddleMixSources(settings).every((source) =>
+      settings.huddleMixSources.includes(source),
     );
   }
 

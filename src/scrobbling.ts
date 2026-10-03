@@ -5,6 +5,7 @@ import {
 } from "./analytics.ts";
 import {
   scrobblingModes,
+  usableHuddleMixSources,
   type HuddleMixSource,
   type ScrobblingMode,
   type Store,
@@ -93,6 +94,7 @@ export class ScrobbleDispatcher {
       listenBrainzEnabled: value.listenBrainzEnabled,
       huddleMixOptIn: value.huddleMixOptIn !== false,
       huddleMixSources: value.huddleMixSources,
+      huddleMixUsable: usableHuddleMixSources(value),
       mode: value.mode,
       configured: lastFmConnected || listenBrainzConnected,
       enabledIntegration:
@@ -111,10 +113,13 @@ export class ScrobbleDispatcher {
     this.changed(userId, "mode_changed", "Scrobbling mode changed", { mode });
   }
 
-  setHuddleMixSources(userId: string, sources: readonly HuddleMixSource[]) {
-    this.store.setHuddleMixSources(userId, sources);
+  setHuddleMixSources(
+    userId: string,
+    choices: Partial<Record<HuddleMixSource, boolean>>,
+  ) {
+    this.store.setHuddleMixSources(userId, choices);
     log.info(
-      { event: "huddle_mix_sources_changed", userId, sources },
+      { event: "huddle_mix_sources_changed", userId, choices },
       "Huddle mix sources changed",
     );
   }

@@ -3188,7 +3188,7 @@ test("user settings remove saved scrobbling credentials", async () => {
     lastFmEnabled: false,
     listenBrainzEnabled: false,
     huddleMixOptIn: true,
-    huddleMixSources: ["added", "lastfm", "listenbrainz"],
+    huddleMixSources: ["added"],
     mode: "always",
   });
   await test.coordinator.endFromSlack();
@@ -5736,19 +5736,9 @@ test("user settings persist huddle mix opt-out", async () => {
     "",
     "view_submission",
   );
+  // Without a scrobbler, the one checkbox offered is the whole opt-in.
   save.state = {
     huddle_mix: { "sources:added": { selected_options: [] } },
-  };
-  await test.coordinator.action(save);
-  // Last.fm and ListenBrainz were not offered, so they keep their setting.
-  expect(userStore.getUserScrobbling("host").huddleMixSources).toEqual([
-    "lastfm",
-    "listenbrainz",
-  ]);
-  save.state = {
-    huddle_mix: {
-      "sources:added,lastfm,listenbrainz": { selected_options: [] },
-    },
   };
   await test.coordinator.action(save);
   expect(userStore.getUserScrobbling("host").huddleMixOptIn).toBe(false);
@@ -5760,7 +5750,7 @@ test("user settings offer a Huddle mix source per connected service", async () =
   const userStore = new Store(":memory:");
   const scrobbling = new ScrobbleDispatcher(userStore, {});
   userStore.setListenBrainzToken("host", "token", "listener");
-  userStore.setHuddleMixSources("host", ["added", "lastfm"]);
+  userStore.setHuddleMixSources("host", { listenbrainz: false });
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
@@ -5782,6 +5772,11 @@ test("user settings offer a Huddle mix source per connected service", async () =
     },
   };
   await test.coordinator.action(save);
+  expect(userStore.getUserScrobbling("host").huddleMixSources).toEqual([
+    "listenbrainz",
+  ]);
+  // Last.fm was not offered, so it keeps its choice for when it is connected.
+  userStore.connectLastFm("host", "last-user", "session-key");
   expect(userStore.getUserScrobbling("host").huddleMixSources).toEqual([
     "lastfm",
     "listenbrainz",

@@ -1824,11 +1824,11 @@ test("huddle mix only uses the sources each listener gives it", async () => {
       (candidate) => candidate.metadata.title,
     );
 
-  store.setHuddleMixSources("host", ["added"]);
+  store.setHuddleMixSources("host", { lastfm: false });
   expect(await titles()).toEqual(["Added Song"]);
-  store.setHuddleMixSources("host", ["lastfm"]);
+  store.setHuddleMixSources("host", { added: false, lastfm: true });
   expect(await titles()).toEqual(["Scrobbled Song"]);
-  store.setHuddleMixSources("host", []);
+  store.setHuddleMixSources("host", { lastfm: false });
   expect(catalog.huddleMixOptedIn("host")).toBe(false);
   expect(await titles()).toEqual([]);
   store.close();

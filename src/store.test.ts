@@ -737,7 +737,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     lastFmEnabled: false,
     listenBrainzEnabled: false,
     huddleMixOptIn: true,
-    huddleMixSources: ["added", "lastfm", "listenbrainz"],
+    huddleMixSources: ["added"],
     mode: "always",
   });
   store.setLastFmPending("user", "pending", 10);
@@ -762,7 +762,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     lastFmEnabled: true,
     listenBrainzEnabled: false,
     huddleMixOptIn: true,
-    huddleMixSources: ["added", "lastfm", "listenbrainz"],
+    huddleMixSources: ["added", "lastfm"],
     mode: "always",
   });
   const track = {
@@ -883,17 +883,33 @@ test("persists huddle mix opt-in per Slack user", () => {
 
 test("persists which sources each listener gives the Huddle mix", () => {
   const store = new Store(":memory:");
-  expect(store.getUserScrobbling("user").huddleMixSources).toEqual([
-    "added",
-    "lastfm",
-    "listenbrainz",
-  ]);
-  store.setHuddleMixSources("user", ["listenbrainz"]);
+  // Only connected services are usable.
+  expect(store.getUserScrobbling("user").huddleMixSources).toEqual(["added"]);
+  store.setListenBrainzToken("user", "token", "listener");
+  store.setHuddleMixSources("user", { added: false });
   expect(store.getUserScrobbling("user")).toMatchObject({
     huddleMixOptIn: true,
     huddleMixSources: ["listenbrainz"],
   });
-  store.setHuddleMixSources("user", []);
+  // Last.fm keeps its choice until it is connected.
+  store.setHuddleMixSources("user", { lastfm: false });
+  store.connectLastFm("user", "last-user", "session-key");
+  expect(store.getUserScrobbling("user").huddleMixSources).toEqual([
+    "listenbrainz",
+  ]);
+  store.setHuddleMixSources("user", { listenbrainz: false });
+  expect(store.getUserScrobbling("user")).toMatchObject({
+    huddleMixOptIn: false,
+    huddleMixSources: [],
+  });
+  store.close();
+});
+
+test("turning off every usable source opts out, even of services connected later", () => {
+  const store = new Store(":memory:");
+  store.setHuddleMixSources("user", { added: false });
+  expect(store.getUserScrobbling("user").huddleMixOptIn).toBe(false);
+  store.connectLastFm("user", "last-user", "session-key");
   expect(store.getUserScrobbling("user")).toMatchObject({
     huddleMixOptIn: false,
     huddleMixSources: [],
@@ -903,7 +919,7 @@ test("persists which sources each listener gives the Huddle mix", () => {
 
 test("an opt-out saved before per-source settings turns every source off", () => {
   const store = new Store(":memory:");
-  store.setHuddleMixSources("user", ["added", "lastfm", "listenbrainz"]);
+  store.connectLastFm("user", "last-user", "session-key");
   store.db.run("UPDATE user_scrobbling SET huddle_mix_opt_in = 0");
   expect(store.getUserScrobbling("user")).toMatchObject({
     huddleMixOptIn: false,

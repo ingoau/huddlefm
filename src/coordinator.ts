@@ -135,9 +135,9 @@ const huddleMixSourceLabels: Record<HuddleMixSource, string> = {
 };
 
 // The settings modal's Huddle mix checkboxes name the sources they offer in
-// their action ID. A source the modal left out, such as a service the user
-// has not connected, keeps its saved setting, and a refreshed modal that
-// offers a different set starts from the saved ticks rather than Slack
+// their action ID. Only those sources are saved, so a service the user had
+// not connected keeps its choice for when they do, and a refreshed modal
+// that offers a different set starts from the saved ticks rather than Slack
 // carrying over the old ones.
 const huddleMixActionPrefix = "sources:";
 
@@ -159,11 +159,10 @@ function huddleMixSourceInput(
   };
 }
 
-// The Huddle mix sources a settings submission asks for, or undefined when
-// the checkboxes were not part of it.
+// The choice a settings submission makes for each Huddle mix source it
+// offered, or undefined when the checkboxes were not part of it.
 function submittedHuddleMixSources(
   block: Record<string, InputState> | undefined,
-  saved: readonly HuddleMixSource[],
 ) {
   const [actionId, state] =
     Object.entries(block ?? {}).find(([actionId]) =>
@@ -176,9 +175,11 @@ function submittedHuddleMixSources(
   const ticked = new Set(
     state.selected_options?.map((option) => option.value) ?? [],
   );
-  return huddleMixSources.filter((source) =>
-    offered.has(source) ? ticked.has(source) : saved.includes(source),
-  );
+  return Object.fromEntries(
+    huddleMixSources
+      .filter((source) => offered.has(source))
+      .map((source) => [source, ticked.has(source)]),
+  ) as Partial<Record<HuddleMixSource, boolean>>;
 }
 
 // Whether a single-option checkbox block is ticked, or undefined when the
@@ -4235,7 +4236,8 @@ export class Coordinator {
       listenBrainzConnected: false,
       listenBrainzEnabled: false,
       huddleMixOptIn: true,
-      huddleMixSources: [...huddleMixSources],
+      huddleMixSources: ["added" as const],
+      huddleMixUsable: ["added" as const],
       mode: "always" as const,
       configured: false,
       enabledIntegration: false,
@@ -4396,12 +4398,7 @@ export class Coordinator {
         "huddle_mix",
         "Include in Huddle mix",
         huddleMixSourceInput(
-          huddleMixSources.filter(
-            (source) =>
-              source === "added" ||
-              (source === "lastfm" && settings.lastFmConnected) ||
-              (source === "listenbrainz" && settings.listenBrainzConnected),
-          ),
+          settings.huddleMixUsable,
           settings.huddleMixSources,
         ),
         {
@@ -4761,10 +4758,7 @@ export class Coordinator {
         let newlyEnabled = false;
         const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
         if (mode) this.scrobbling.setMode(interaction.userId, mode);
-        const sources = submittedHuddleMixSources(
-          state.huddle_mix,
-          userSettings.huddleMixSources,
-        );
+        const sources = submittedHuddleMixSources(state.huddle_mix);
         if (sources)
           this.scrobbling.setHuddleMixSources(interaction.userId, sources);
         const lastFm = checked(state.lastfm_scrobbling?.enabled);
