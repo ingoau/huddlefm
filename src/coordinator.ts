@@ -3052,6 +3052,15 @@ export class Coordinator {
       );
       return this.enqueue(async () => {
         if (!this.dropFailed(entry, error)) return false;
+        // Someone kept this pick while it was still preparing, so it is
+        // their song now and they hear why it went.
+        if (!entry.automatic) {
+          this.notifyTrack("queue.removed", entry, { reason: "failed" });
+          await this.notice(
+            entry.requesterId,
+            `Could not prepare ${entry.title}: ${message(error)}`,
+          );
+        }
         if (!this.current) await this.startNext();
         else await this.render();
         return false;
@@ -3698,7 +3707,7 @@ export class Coordinator {
       ...auditTrack(entry),
       reason: "autoplay_kept",
     });
-    this.notifyTrack("queue.added", entry);
+    this.notifyTrack("queue.added", entry, { reason: "autoplay_kept" });
     this.store.incrementUsage("added");
     void this.recommendations?.refreshUser(interaction.userId);
     this.queueChanged(interaction);
