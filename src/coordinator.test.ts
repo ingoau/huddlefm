@@ -548,6 +548,92 @@ const queueDialog = (coordinator: Coordinator, userId: string) =>
     ),
   );
 
+test("adds the queued autoplay pick to the queue for the user", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(
+    result.coordinator,
+    "current",
+    queued("playing", { status: "playing" }),
+  );
+  Reflect.set(result.coordinator, "queue", [
+    queued("pick", { requesterId: "bot", automatic: true, discovery: true }),
+  ]);
+  expect(queueDialog(result.coordinator, "host")).toContain("Add to queue");
+  expect(queueDialog(result.coordinator, "host")).not.toContain("Move to…");
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "queue_keep_autoplay", "pick"),
+    viewId: "view-1",
+    viewHash: "hash-1",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id }),
+  });
+
+  const [entry] = Reflect.get(result.coordinator, "queue") as {
+    automatic?: boolean;
+    requesterId: string;
+    discovery?: boolean;
+  }[];
+  expect(entry).toMatchObject({ automatic: false, requesterId: "host" });
+  expect(entry?.discovery).toBeUndefined();
+  expect(queueDialog(result.coordinator, "host")).toContain("Added by <@host>");
+  expect(queueDialog(result.coordinator, "host")).not.toContain("Add to queue");
+  expect(queueDialog(result.coordinator, "host")).toContain("Move to…");
+  expect(result.usage).toContain("added");
+  expect(
+    result.audit.some(
+      (value) =>
+        (value as unknown[])[0] === "track.added" &&
+        JSON.stringify(value).includes("autoplay_kept"),
+    ),
+  ).toBe(true);
+  await result.coordinator.endFromSlack();
+});
+
+test("tells the user when an autoplay pick they kept fails to prepare", async () => {
+  let fail = (_error: Error) => {};
+  const tracks = {
+    prepare: () =>
+      new Promise<string>((_resolve, reject) => {
+        fail = reject;
+      }),
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  Reflect.set(
+    result.coordinator,
+    "current",
+    queued("playing", { status: "playing" }),
+  );
+  const pick = queued("pick", {
+    requesterId: "bot",
+    automatic: true,
+    status: "preparing",
+  });
+  Reflect.set(result.coordinator, "queue", [pick]);
+  const preparing = (
+    Reflect.get(result.coordinator, "prepareAutoplay") as (
+      entry: unknown,
+      controller: AbortController,
+    ) => Promise<boolean>
+  ).call(result.coordinator, pick, new AbortController());
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "queue_keep_autoplay", "pick"),
+    viewId: "view-1",
+    viewHash: "hash-1",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id }),
+  });
+  fail(new Error("Video unavailable"));
+
+  expect(await preparing).toBe(false);
+  expect(queueIds(result.coordinator)).toEqual([]);
+  expect(result.ephemeral).toContain(
+    "Could not prepare PICK: Video unavailable",
+  );
+  await result.coordinator.endFromSlack();
+});
+
 test("shuffles the pending queue and leaves the playing track alone", async () => {
   const result = setup();
   await result.coordinator.start();
