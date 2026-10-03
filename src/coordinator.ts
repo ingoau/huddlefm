@@ -755,6 +755,7 @@ export class Coordinator {
         queue_move_down: () => this.reorder(interaction, 1),
         queue_play_next: () => this.playNext(interaction),
         queue_move_to_position: () => this.queuePositionModal(interaction),
+        queue_keep_autoplay: () => this.keepAutoplay(interaction),
         shuffle_queue: () => this.shuffleQueue(interaction),
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
@@ -3671,6 +3672,39 @@ export class Coordinator {
     await this.moveEntry(interaction.userId, index, 0, true, interaction);
   }
 
+  // Turns the queued autoplay pick into a song the user asked for, so it
+  // stays put when someone else queues a song and counts as theirs.
+  private async keepAutoplay(interaction: Interaction) {
+    if (!this.validQueueView(interaction))
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
+    if (!(await this.require(interaction, "add"))) return;
+    const entry = this.queue.find(
+      (track) => track.id === interaction.value && track.automatic,
+    );
+    if (!entry) return this.queueChanged(interaction);
+    entry.automatic = false;
+    entry.requesterId = interaction.userId;
+    delete entry.discovery;
+    delete entry.listenerIds;
+    this.store.setTrack(entry.id, {
+      automatic: false,
+      requesterId: interaction.userId,
+    });
+    this.audit.record("track.added", interaction.userId, {
+      sessionId: this.id,
+      ...auditTrack(entry),
+      reason: "autoplay_kept",
+    });
+    this.notifyTrack("queue.added", entry);
+    this.store.incrementUsage("added");
+    void this.recommendations?.refreshUser(interaction.userId);
+    this.queueChanged(interaction);
+    await this.render();
+  }
+
   private async moveEntry(
     userId: string,
     from: number,
@@ -4072,7 +4106,13 @@ export class Coordinator {
                   button("queue_move_down", plain("Down"), { value }),
                 ),
                 ...when(
-                  manages,
+                  track.automatic && this.can(userId, "add"),
+                  button("queue_keep_autoplay", plain("Add to queue"), {
+                    value,
+                  }),
+                ),
+                ...when(
+                  manages && !track.automatic,
                   button("queue_move_to_position", plain("Move to…"), {
                     value,
                   }),

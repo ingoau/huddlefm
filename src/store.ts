@@ -297,6 +297,8 @@ const trackColumns = {
   outroSeconds: "outro_seconds",
   fadeInSeconds: "fade_in_seconds",
   fadeOutSeconds: "fade_out_seconds",
+  requesterId: "requester_id",
+  automatic: "automatic",
 };
 
 const addedColumns = [
@@ -1524,6 +1526,8 @@ export class Store {
       outroSeconds?: number;
       fadeInSeconds?: number;
       fadeOutSeconds?: number;
+      requesterId?: string;
+      automatic?: boolean;
     },
   ) {
     const { sql, values } = assignments(trackColumns, fields);

@@ -548,6 +548,48 @@ const queueDialog = (coordinator: Coordinator, userId: string) =>
     ),
   );
 
+test("adds the queued autoplay pick to the queue for the user", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(
+    result.coordinator,
+    "current",
+    queued("playing", { status: "playing" }),
+  );
+  Reflect.set(result.coordinator, "queue", [
+    queued("pick", { requesterId: "bot", automatic: true, discovery: true }),
+  ]);
+  expect(queueDialog(result.coordinator, "host")).toContain("Add to queue");
+  expect(queueDialog(result.coordinator, "host")).not.toContain("Move to…");
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "queue_keep_autoplay", "pick"),
+    viewId: "view-1",
+    viewHash: "hash-1",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id }),
+  });
+
+  const [entry] = Reflect.get(result.coordinator, "queue") as {
+    automatic?: boolean;
+    requesterId: string;
+    discovery?: boolean;
+  }[];
+  expect(entry).toMatchObject({ automatic: false, requesterId: "host" });
+  expect(entry?.discovery).toBeUndefined();
+  expect(queueDialog(result.coordinator, "host")).toContain("Added by <@host>");
+  expect(queueDialog(result.coordinator, "host")).not.toContain("Add to queue");
+  expect(queueDialog(result.coordinator, "host")).toContain("Move to…");
+  expect(result.usage).toContain("added");
+  expect(
+    result.audit.some(
+      (value) =>
+        (value as unknown[])[0] === "track.added" &&
+        JSON.stringify(value).includes("autoplay_kept"),
+    ),
+  ).toBe(true);
+  await result.coordinator.endFromSlack();
+});
+
 test("shuffles the pending queue and leaves the playing track alone", async () => {
   const result = setup();
   await result.coordinator.start();
