@@ -1,6 +1,10 @@
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
-import type { Store } from "./store.ts";
+import {
+  usableHuddleMixSources,
+  type HuddleMixSource,
+  type Store,
+} from "./store.ts";
 import {
   isYoutubeVideoId,
   normalizeToken,
@@ -147,8 +151,22 @@ type TasteArtist = { name: string; score: number };
 type TasteProfile = {
   contributions: TasteContribution[];
   known: Set<string>;
+  // The known set split by where it came from, so the Huddle mix can leave
+  // out the sources a listener has not given it.
+  knownFrom: Record<HuddleMixSource, Set<string>>;
   artists: TasteArtist[];
   listenBrainz: ListenBrainzRecommendation[];
+};
+
+// The part of a listener's taste the Huddle mix may use.
+type MixTaste = Pick<TasteProfile, "contributions" | "known">;
+
+// Which Huddle mix source each kind of taste contribution belongs to.
+const mixSourceOf: Record<string, HuddleMixSource> = {
+  huddlefm: "added",
+  liked: "added",
+  lastfm: "lastfm",
+  listenbrainz: "listenbrainz",
 };
 
 // ListenBrainz says whether the listener has already heard a recommended
@@ -434,6 +452,32 @@ export class RecommendationCatalog {
     return this.store.getUserScrobbling(userId).huddleMixOptIn !== false;
   }
 
+  // A listener's taste, narrowed to the sources they let the mix use.
+  private mixTaste(userId: string, profile: TasteProfile): MixTaste {
+    const sources = new Set(
+      this.store.getUserScrobbling(userId).huddleMixSources,
+    );
+    const known = new Set<string>();
+    for (const source of sources)
+      for (const key of profile.knownFrom[source]) known.add(key);
+    return {
+      contributions: profile.contributions.filter((track) => {
+        const source = mixSourceOf[track.source];
+        return source !== undefined && sources.has(source);
+      }),
+      known,
+    };
+  }
+
+  // Whether the listener lets the mix use everything their recommendations
+  // are built from.
+  private mixesEverySource(userId: string) {
+    const settings = this.store.getUserScrobbling(userId);
+    return usableHuddleMixSources(settings).every((source) =>
+      settings.huddleMixSources.includes(source),
+    );
+  }
+
   prefetchUsers(userIds: Iterable<string>) {
     for (const userId of userIds) void this.prefetchUser(userId);
   }
@@ -554,7 +598,7 @@ export class RecommendationCatalog {
       this.huddleMixOptedIn(userId),
     );
     const { nowPlaying } = options;
-    const [profiles, similar, similarArtists, related] = await Promise.all([
+    const [tastes, similar, similarArtists, related] = await Promise.all([
       Promise.all(listeners.map((userId) => this.userTaste(userId))),
       nowPlaying ? this.similarTracks(nowPlaying.title, nowPlaying.artist) : [],
       nowPlaying ? this.similarArtistTracks(nowPlaying.artist, 1) : [],
@@ -562,7 +606,10 @@ export class RecommendationCatalog {
         ? this.tracks.upNextTracks(nowPlaying.sourceId).catch(() => [])
         : [],
     ]);
-    const knownBy = new Map<string, TasteProfile>();
+    const profiles = tastes.map((taste, index) =>
+      this.mixTaste(listeners[index]!, taste),
+    );
+    const knownBy = new Map<string, MixTaste>();
     listeners.forEach((userId, index) => knownBy.set(userId, profiles[index]!));
     const known = new Set<string>();
     for (const profile of profiles)
@@ -581,21 +628,25 @@ export class RecommendationCatalog {
         ),
       );
     // On a discovery turn, each listener's already-resolved Discover pool is
-    // the most personal source there is, and costs nothing to use.
+    // the most personal source there is, and costs nothing to use. It is
+    // seeded from all of their taste, so it is only used for listeners who
+    // let the mix use every source.
     const poolDiscoveries = options.discover
-      ? listeners.flatMap((userId) => {
-          const pool = this.pools.get(userId)?.value.discover ?? [];
-          const best = pool[0]?.score || 1;
-          return pool.map((track) => ({
-            ...contributionFromMetadata(
-              track.metadata,
-              userId,
-              "discover",
-              (mixPoolDiscoveryWeight * track.score) / best,
-            ),
-            listened: false,
-          }));
-        })
+      ? listeners
+          .filter((userId) => this.mixesEverySource(userId))
+          .flatMap((userId) => {
+            const pool = this.pools.get(userId)?.value.discover ?? [];
+            const best = pool[0]?.score || 1;
+            return pool.map((track) => ({
+              ...contributionFromMetadata(
+                track.metadata,
+                userId,
+                "discover",
+                (mixPoolDiscoveryWeight * track.score) / best,
+              ),
+              listened: false,
+            }));
+          })
       : [];
     const ranked = applySkipPenalties(
       mergeTaste([
@@ -841,11 +892,17 @@ export class RecommendationCatalog {
       ...lastFm.contributions,
       ...listenBrainz.contributions,
     ];
-    const known = new Set([
-      ...contributions.map(keyOf),
-      ...lastFm.known,
-      ...listenBrainz.known,
-    ]);
+    const knownFrom = {
+      added: new Set([...added, ...liked].map(keyOf)),
+      lastfm: new Set([...lastFm.contributions.map(keyOf), ...lastFm.known]),
+      listenbrainz: new Set([
+        ...listenBrainz.contributions.map(keyOf),
+        ...listenBrainz.known,
+      ]),
+    };
+    const known = new Set(
+      Object.values(knownFrom).flatMap((keys) => [...keys]),
+    );
     const artists = new Map<string, TasteArtist>();
     const addArtist = (name: string, score: number) => {
       const key = normalizeToken(name);
@@ -868,6 +925,7 @@ export class RecommendationCatalog {
     return {
       contributions,
       known,
+      knownFrom,
       artists: [...artists.values()].sort((a, b) => b.score - a.score),
       listenBrainz: listenBrainz.listenBrainz,
     };
@@ -1469,7 +1527,17 @@ function lastFmNotFound(error: unknown) {
 }
 
 function emptyProfile(): TasteProfile {
-  return { contributions: [], known: new Set(), artists: [], listenBrainz: [] };
+  return {
+    contributions: [],
+    known: new Set(),
+    knownFrom: {
+      added: new Set(),
+      lastfm: new Set(),
+      listenbrainz: new Set(),
+    },
+    artists: [],
+    listenBrainz: [],
+  };
 }
 
 function emptyPool(): UserPool {

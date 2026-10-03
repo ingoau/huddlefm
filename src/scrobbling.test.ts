@@ -58,6 +58,8 @@ test("disconnects saved scrobbling credentials", () => {
     listenBrainzUsername: undefined,
     listenBrainzEnabled: false,
     huddleMixOptIn: true,
+    huddleMixSources: ["added"],
+    huddleMixUsable: ["added"],
     mode: "always",
     configured: false,
     enabledIntegration: false,

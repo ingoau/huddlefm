@@ -2619,7 +2619,8 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(modal).toContain('"block_id":"loop"');
   expect(modal).toContain('"value":"track"');
   expect(modal).toContain('"value":"queue"');
-  expect(modal).toContain("Include my listening in Huddle mix");
+  expect(modal).toContain("Include in Huddle mix");
+  expect(modal).toContain('"action_id":"sources:added"');
   expect(modal).toContain(
     '"block_id":"transition","label":{"type":"plain_text","text":"Transitions"}',
   );
@@ -3187,6 +3188,7 @@ test("user settings remove saved scrobbling credentials", async () => {
     lastFmEnabled: false,
     listenBrainzEnabled: false,
     huddleMixOptIn: true,
+    huddleMixSources: ["added"],
     mode: "always",
   });
   await test.coordinator.endFromSlack();
@@ -5734,11 +5736,51 @@ test("user settings persist huddle mix opt-out", async () => {
     "",
     "view_submission",
   );
+  // Without a scrobbler, the one checkbox offered is the whole opt-in.
   save.state = {
-    huddle_mix: { enabled: { selected_options: [] } },
+    huddle_mix: { "sources:added": { selected_options: [] } },
   };
   await test.coordinator.action(save);
   expect(userStore.getUserScrobbling("host").huddleMixOptIn).toBe(false);
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("user settings offer a Huddle mix source per connected service", async () => {
+  const userStore = new Store(":memory:");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  userStore.setListenBrainzToken("host", "token", "listener");
+  userStore.setHuddleMixSources("host", { listenbrainz: false });
+  const test = setup(undefined, undefined, undefined, scrobbling);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const modal = JSON.stringify(test.modals.at(-1));
+  expect(modal).toContain('"action_id":"sources:added,listenbrainz"');
+  expect(modal).toContain("My ListenBrainz listening");
+  expect(modal).not.toContain("My Last.fm listening");
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    huddle_mix: {
+      "sources:added,listenbrainz": {
+        selected_options: [{ value: "listenbrainz" }],
+      },
+    },
+  };
+  await test.coordinator.action(save);
+  expect(userStore.getUserScrobbling("host").huddleMixSources).toEqual([
+    "listenbrainz",
+  ]);
+  // Last.fm was not offered, so it keeps its choice for when it is connected.
+  userStore.connectLastFm("host", "last-user", "session-key");
+  expect(userStore.getUserScrobbling("host").huddleMixSources).toEqual([
+    "lastfm",
+    "listenbrainz",
+  ]);
   await test.coordinator.endFromSlack();
   userStore.close();
 });

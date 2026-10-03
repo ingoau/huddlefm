@@ -41,6 +41,24 @@ export const duckingModeLabels: Record<DuckingMode, string> = {
 export const scrobblingModes = ["always", "ask", "disabled"] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
 
+// What a listener lets the Huddle mix draw on: the songs they have added or
+// liked in HuddleFM, and their listening on each scrobbling service.
+export const huddleMixSources = ["added", "lastfm", "listenbrainz"] as const;
+export type HuddleMixSource = (typeof huddleMixSources)[number];
+
+// The sources a listener could give the Huddle mix right now: their HuddleFM
+// history, and each scrobbling service they have connected.
+export function usableHuddleMixSources(
+  settings: Pick<UserScrobbling, "lastFmSessionKey" | "listenBrainzToken">,
+): HuddleMixSource[] {
+  return huddleMixSources.filter(
+    (source) =>
+      source === "added" ||
+      (source === "lastfm" && Boolean(settings.lastFmSessionKey)) ||
+      (source === "listenbrainz" && Boolean(settings.listenBrainzToken)),
+  );
+}
+
 export const autoplayModes = ["off", "related", "huddle"] as const;
 export type AutoplayMode = (typeof autoplayModes)[number];
 
@@ -213,7 +231,12 @@ export type UserScrobbling = {
   listenBrainzUsername?: string;
   listenBrainzToken?: string;
   listenBrainzEnabled: boolean;
+  // Whether the listener takes part in the Huddle mix at all: true while any
+  // of their sources is.
   huddleMixOptIn: boolean;
+  // The usable sources the listener gives the mix. A service they have not
+  // connected is never listed, whatever its saved choice.
+  huddleMixSources: HuddleMixSource[];
   mode: ScrobblingMode;
 };
 
@@ -303,6 +326,9 @@ const addedColumns = [
   ["tracks", "fade_out_seconds", "REAL"],
   ["user_scrobbling", "mode", "TEXT NOT NULL DEFAULT 'always'"],
   ["user_scrobbling", "huddle_mix_opt_in", "INTEGER NOT NULL DEFAULT 1"],
+  ["user_scrobbling", "huddle_mix_added", "INTEGER NOT NULL DEFAULT 1"],
+  ["user_scrobbling", "huddle_mix_lastfm", "INTEGER NOT NULL DEFAULT 1"],
+  ["user_scrobbling", "huddle_mix_listenbrainz", "INTEGER NOT NULL DEFAULT 1"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -327,6 +353,18 @@ function compact<T extends object>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, item]) => item !== undefined),
   ) as T;
+}
+
+// The listener's saved choice for each Huddle mix source, connected or not.
+// The opt-in column predates the per-source ones, so an older opt-out still
+// turns every source off.
+function savedHuddleMixSources(row: Row) {
+  return Object.fromEntries(
+    huddleMixSources.map((source) => [
+      source,
+      row.huddle_mix_opt_in !== 0 && row[`huddle_mix_${source}`] !== 0,
+    ]),
+  ) as Record<HuddleMixSource, boolean>;
 }
 
 function slots(values: readonly unknown[]) {
@@ -439,6 +477,9 @@ export class Store {
         listenbrainz_token TEXT,
         listenbrainz_enabled INTEGER NOT NULL DEFAULT 0,
         huddle_mix_opt_in INTEGER NOT NULL DEFAULT 1,
+        huddle_mix_added INTEGER NOT NULL DEFAULT 1,
+        huddle_mix_lastfm INTEGER NOT NULL DEFAULT 1,
+        huddle_mix_listenbrainz INTEGER NOT NULL DEFAULT 1,
         mode TEXT NOT NULL DEFAULT 'always',
         updated_at INTEGER NOT NULL
       );
@@ -1512,8 +1553,14 @@ export class Store {
         lastFmEnabled: false,
         listenBrainzEnabled: false,
         huddleMixOptIn: true,
+        huddleMixSources: ["added"],
         mode: "always",
       };
+    const saved = savedHuddleMixSources(row);
+    const sources = usableHuddleMixSources({
+      lastFmSessionKey: text(row.lastfm_session_key),
+      listenBrainzToken: text(row.listenbrainz_token),
+    }).filter((source) => saved[source]);
     return compact({
       lastFmUsername: text(row.lastfm_username),
       lastFmSessionKey: text(row.lastfm_session_key),
@@ -1525,10 +1572,8 @@ export class Store {
       listenBrainzUsername: text(row.listenbrainz_username),
       listenBrainzToken: text(row.listenbrainz_token),
       listenBrainzEnabled: Boolean(row.listenbrainz_enabled),
-      huddleMixOptIn:
-        row.huddle_mix_opt_in === undefined
-          ? true
-          : Boolean(row.huddle_mix_opt_in),
+      huddleMixOptIn: sources.length > 0,
+      huddleMixSources: sources,
       mode: modeOf(scrobblingModes, row.mode) ?? "always",
     });
   }
@@ -1556,7 +1601,48 @@ export class Store {
   }
 
   setHuddleMixOptIn(userId: string, enabled: boolean) {
-    this.updateUserScrobbling(userId, "huddle_mix_opt_in = ?", enabled ? 1 : 0);
+    this.setHuddleMixSources(
+      userId,
+      Object.fromEntries(huddleMixSources.map((source) => [source, enabled])),
+    );
+  }
+
+  // Saves the listener's choice for each source given; the others keep
+  // theirs, so a service they have not connected yet keeps its choice for
+  // when they do. Turning off every usable source opts them out entirely,
+  // and a service connected later then starts off too.
+  setHuddleMixSources(
+    userId: string,
+    choices: Partial<Record<HuddleMixSource, boolean>>,
+  ) {
+    const row = this.db
+      .query("SELECT * FROM user_scrobbling WHERE user_id = ?")
+      .get(userId) as Row | null;
+    const previous = savedHuddleMixSources(row ?? {});
+    // A save that changes nothing must not opt out, which would also clear
+    // the choices kept for services that are not connected.
+    if (
+      huddleMixSources.every(
+        (source) => (choices[source] ?? previous[source]) === previous[source],
+      )
+    )
+      return;
+    const saved = { ...previous, ...choices };
+    const usable = usableHuddleMixSources({
+      lastFmSessionKey: text(row?.lastfm_session_key),
+      listenBrainzToken: text(row?.listenbrainz_token),
+    });
+    const optedIn = usable.some((source) => saved[source]);
+    const on = (source: HuddleMixSource) => (optedIn && saved[source] ? 1 : 0);
+    this.updateUserScrobbling(
+      userId,
+      `huddle_mix_opt_in = ?, huddle_mix_added = ?, huddle_mix_lastfm = ?,
+      huddle_mix_listenbrainz = ?`,
+      optedIn ? 1 : 0,
+      on("added"),
+      on("lastfm"),
+      on("listenbrainz"),
+    );
   }
 
   setLastFmPending(userId: string, token: string, startedAt: number) {
