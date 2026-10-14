@@ -3571,6 +3571,7 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
         sourceId: id,
         title: id,
         artist: "Radio",
+        duration: 180,
       };
     },
     prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
@@ -3647,6 +3648,7 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
       discovery: false,
       autoplaySources: ["related"],
       playedSeconds: 42,
+      duration: 180,
     }),
   ]);
   expect(resolved).toEqual([ids.c, ids.d, ids.e]);
