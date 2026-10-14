@@ -123,6 +123,9 @@ export type AutoplayCandidate = {
   discovery: boolean;
   // Listeners whose taste put this track forward.
   listenerIds: string[];
+  // Where the track came from: a listener's service, their likes, their
+  // Discover pool, or what follows on from the song playing.
+  sources: string[];
   metadata: TrackMetadata;
 };
 
@@ -703,6 +706,7 @@ export class RecommendationCatalog {
         seedCount: Math.max(1, played.length),
         discovery: isDiscovery(track),
         listenerIds: creditsOf(track),
+        sources: track.sources,
         metadata,
       };
     };

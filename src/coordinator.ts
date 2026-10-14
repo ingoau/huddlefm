@@ -105,7 +105,9 @@ type Entry = TrackMetadata & {
   requesterId: string;
   automatic?: boolean;
   // Autoplay provenance; not persisted.
+  autoplayMode?: AutoplayMode;
   discovery?: boolean;
+  autoplaySources?: string[];
   listenerIds?: string[];
   counted?: boolean;
   status: string;
@@ -2346,7 +2348,6 @@ export class Coordinator {
     this.audit.record("track.liked", interaction.userId, {
       sessionId: this.id,
       ...auditTrack(entry),
-      ...discovery,
     });
     this.log.info(
       {
@@ -2743,10 +2744,13 @@ export class Coordinator {
     playSomethingBy?: string,
   ): Promise<boolean> {
     const startedAt = Date.now();
+    // Settings can change the mode while a pick resolves; log the one that
+    // found it.
+    const mode = this.autoplayMode;
     this.log.debug(
       {
         event: "autoplay_recommendation_started",
-        mode: this.autoplayMode,
+        mode,
         seeds: seeds.length,
       },
       "Finding autoplay recommendation",
@@ -2780,16 +2784,22 @@ export class Coordinator {
           score: number;
           discovery?: boolean;
           listenerIds?: string[];
+          sources?: string[];
           metadata?: TrackMetadata;
         }
       >();
-      if (this.autoplayMode === "related") {
+      if (mode === "related") {
         const recommendations = await Promise.all(
           seeds.map((seed) => this.tracks.upNextIds(seed).catch(() => [])),
         );
         for (const ids of recommendations)
           [...new Set(ids)].forEach((id, rank) => {
-            const candidate = ranked.get(id) ?? { id, seedCount: 0, score: 0 };
+            const candidate = ranked.get(id) ?? {
+              id,
+              seedCount: 0,
+              score: 0,
+              sources: ["related"],
+            };
             candidate.seedCount++;
             candidate.score += 1 / (rank + 1);
             ranked.set(id, candidate);
@@ -2838,6 +2848,7 @@ export class Coordinator {
             score: -index,
             discovery: extra.discovery,
             listenerIds: extra.listenerIds,
+            sources: extra.sources,
             metadata: extra.metadata,
           });
         });
@@ -2853,6 +2864,7 @@ export class Coordinator {
         seeds,
         generation,
         startedAt,
+        mode,
       );
       if (added !== undefined) return added;
       if (playSomethingBy && this.canAddAutoplay(context, generation)) {
@@ -2868,7 +2880,13 @@ export class Coordinator {
           new Map(
             popular.map((metadata) => [
               metadata.sourceId,
-              { id: metadata.sourceId, seedCount: 0, score: 0, metadata },
+              {
+                id: metadata.sourceId,
+                seedCount: 0,
+                score: 0,
+                sources: ["popular"],
+                metadata,
+              },
             ]),
           ),
           excluded,
@@ -2876,6 +2894,7 @@ export class Coordinator {
           seeds,
           generation,
           startedAt,
+          mode,
         );
         if (played !== undefined) return played;
       }
@@ -2913,6 +2932,7 @@ export class Coordinator {
         score: number;
         discovery?: boolean;
         listenerIds?: string[];
+        sources?: string[];
         metadata?: TrackMetadata;
       }
     >,
@@ -2921,11 +2941,13 @@ export class Coordinator {
     seeds: string[],
     generation: number,
     startedAt: number,
+    mode: AutoplayMode,
   ): Promise<boolean | undefined> {
     for (const id of ids) {
       if (excluded.has(id)) continue;
       const discovery = ranked.get(id)?.discovery ?? false;
       const listenerIds = ranked.get(id)?.listenerIds ?? [];
+      const autoplaySources = ranked.get(id)?.sources;
       let metadata = ranked.get(id)?.metadata;
       if (!metadata) {
         try {
@@ -2950,7 +2972,9 @@ export class Coordinator {
           id: crypto.randomUUID(),
           requesterId: this.botUserId,
           automatic: true,
+          autoplayMode: mode,
           discovery,
+          autoplaySources,
           listenerIds,
           status: "preparing",
         };
@@ -2965,7 +2989,6 @@ export class Coordinator {
         this.audit.record("track.autoplay_added", undefined, {
           sessionId: this.id,
           seedSourceIds: seeds,
-          autoplayMode: this.autoplayMode,
           ...auditTrack(entry),
         });
         this.notifyTrack("queue.added", entry, { automatic: true });
@@ -3435,7 +3458,14 @@ export class Coordinator {
           ...(finished.artwork ? { artwork: finished.artwork } : {}),
           id: crypto.randomUUID(),
           requesterId: finished.requesterId,
-          ...(finished.automatic ? { automatic: true } : {}),
+          ...(finished.automatic
+            ? defined({
+                automatic: true,
+                autoplayMode: finished.autoplayMode,
+                discovery: finished.discovery,
+                autoplaySources: finished.autoplaySources,
+              })
+            : {}),
           status: "ready",
           filePath: finished.filePath,
           ...transition,
@@ -3475,6 +3505,8 @@ export class Coordinator {
     this.audit.record("track.skipped", userId, {
       sessionId: this.id,
       ...auditTrack(skipped),
+      playedSeconds: Math.round(this.playbackSeconds),
+      duration: skipped.duration,
     });
     this.notifyTrack("track.skipped", skipped);
     this.store.incrementUsage("next");
@@ -3696,7 +3728,9 @@ export class Coordinator {
     if (!entry) return this.queueChanged(interaction);
     entry.automatic = false;
     entry.requesterId = interaction.userId;
+    delete entry.autoplayMode;
     delete entry.discovery;
+    delete entry.autoplaySources;
     delete entry.listenerIds;
     this.store.setTrack(entry.id, {
       automatic: false,

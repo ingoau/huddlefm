@@ -2921,6 +2921,35 @@ test("queue loop rotates finished tracks to the end", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("queue loop keeps how a looped autoplay pick was made", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "loopMode", "queue");
+  Reflect.set(result.coordinator, "current", {
+    ...playingTrack(),
+    autoplayMode: "huddle",
+    autoplaySources: ["lastfm"],
+  });
+  await result.coordinator.mediaEvent("track_ended", { entryId: "playing" });
+  await until(() =>
+    result.audit.some((value) => (value as unknown[])[0] === "track.started"),
+  );
+  expect(
+    result.audit.find((value) => (value as unknown[])[0] === "track.started"),
+  ).toEqual([
+    "track.started",
+    undefined,
+    expect.objectContaining({
+      sourceId: "likedlikedl",
+      origin: "autoplay",
+      autoplayMode: "huddle",
+      discovery: true,
+      autoplaySources: ["lastfm"],
+    }),
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
 test("queue loop keeps the shared media file until the last copy goes", async () => {
   const directory = `${tmpdir()}/huddlefm-loop-${crypto.randomUUID()}`;
   await mkdir(directory, { recursive: true });
@@ -3542,6 +3571,7 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
         sourceId: id,
         title: id,
         artist: "Radio",
+        duration: 180,
       };
     },
     prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
@@ -3587,6 +3617,15 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
     }[]
   )[0];
   expect(queued?.sourceId).toBe(ids.d);
+  const playing = (
+    result.media.filter(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }[]
+  ).at(-1)!;
+  result.coordinator.mediaEvent("playback_position", {
+    entryId: playing.entryId,
+    seconds: 42.4,
+  });
   await result.coordinator.action(
     interaction(result.coordinator, "next_track"),
   );
@@ -3596,6 +3635,22 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
         (value) => (value as unknown[])[0] === "track.autoplay_added",
       ).length === 3,
   );
+  // A skip says how the pick was made and how far into it the room got.
+  expect(
+    result.audit.find((value) => (value as unknown[])[0] === "track.skipped"),
+  ).toEqual([
+    "track.skipped",
+    "host",
+    expect.objectContaining({
+      sourceId: ids.c,
+      origin: "autoplay",
+      autoplayMode: "related",
+      discovery: false,
+      autoplaySources: ["related"],
+      playedSeconds: 42,
+      duration: 180,
+    }),
+  ]);
   expect(resolved).toEqual([ids.c, ids.d, ids.e]);
   expect(
     Reflect.get(result.coordinator, "history").map(
