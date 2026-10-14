@@ -2744,10 +2744,13 @@ export class Coordinator {
     playSomethingBy?: string,
   ): Promise<boolean> {
     const startedAt = Date.now();
+    // Settings can change the mode while a pick resolves; log the one that
+    // found it.
+    const mode = this.autoplayMode;
     this.log.debug(
       {
         event: "autoplay_recommendation_started",
-        mode: this.autoplayMode,
+        mode,
         seeds: seeds.length,
       },
       "Finding autoplay recommendation",
@@ -2785,7 +2788,7 @@ export class Coordinator {
           metadata?: TrackMetadata;
         }
       >();
-      if (this.autoplayMode === "related") {
+      if (mode === "related") {
         const recommendations = await Promise.all(
           seeds.map((seed) => this.tracks.upNextIds(seed).catch(() => [])),
         );
@@ -2861,6 +2864,7 @@ export class Coordinator {
         seeds,
         generation,
         startedAt,
+        mode,
       );
       if (added !== undefined) return added;
       if (playSomethingBy && this.canAddAutoplay(context, generation)) {
@@ -2890,6 +2894,7 @@ export class Coordinator {
           seeds,
           generation,
           startedAt,
+          mode,
         );
         if (played !== undefined) return played;
       }
@@ -2936,6 +2941,7 @@ export class Coordinator {
     seeds: string[],
     generation: number,
     startedAt: number,
+    mode: AutoplayMode,
   ): Promise<boolean | undefined> {
     for (const id of ids) {
       if (excluded.has(id)) continue;
@@ -2966,7 +2972,7 @@ export class Coordinator {
           id: crypto.randomUUID(),
           requesterId: this.botUserId,
           automatic: true,
-          autoplayMode: this.autoplayMode,
+          autoplayMode: mode,
           discovery,
           autoplaySources,
           listenerIds,
@@ -3452,7 +3458,14 @@ export class Coordinator {
           ...(finished.artwork ? { artwork: finished.artwork } : {}),
           id: crypto.randomUUID(),
           requesterId: finished.requesterId,
-          ...(finished.automatic ? { automatic: true } : {}),
+          ...(finished.automatic
+            ? defined({
+                automatic: true,
+                autoplayMode: finished.autoplayMode,
+                discovery: finished.discovery,
+                autoplaySources: finished.autoplaySources,
+              })
+            : {}),
           status: "ready",
           filePath: finished.filePath,
           ...transition,

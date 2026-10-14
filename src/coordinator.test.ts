@@ -2921,6 +2921,35 @@ test("queue loop rotates finished tracks to the end", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("queue loop keeps how a looped autoplay pick was made", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "loopMode", "queue");
+  Reflect.set(result.coordinator, "current", {
+    ...playingTrack(),
+    autoplayMode: "huddle",
+    autoplaySources: ["lastfm"],
+  });
+  await result.coordinator.mediaEvent("track_ended", { entryId: "playing" });
+  await until(() =>
+    result.audit.some((value) => (value as unknown[])[0] === "track.started"),
+  );
+  expect(
+    result.audit.find((value) => (value as unknown[])[0] === "track.started"),
+  ).toEqual([
+    "track.started",
+    undefined,
+    expect.objectContaining({
+      sourceId: "likedlikedl",
+      origin: "autoplay",
+      autoplayMode: "huddle",
+      discovery: true,
+      autoplaySources: ["lastfm"],
+    }),
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
 test("queue loop keeps the shared media file until the last copy goes", async () => {
   const directory = `${tmpdir()}/huddlefm-loop-${crypto.randomUUID()}`;
   await mkdir(directory, { recursive: true });
