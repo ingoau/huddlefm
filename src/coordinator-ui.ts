@@ -20,6 +20,9 @@ export function auditTrack(track: {
   artist: string;
   requesterId: string;
   automatic?: boolean;
+  autoplayMode?: string;
+  discovery?: boolean;
+  autoplaySources?: string[];
 }) {
   return {
     trackId: track.id,
@@ -28,6 +31,13 @@ export function auditTrack(track: {
     artist: track.artist,
     requesterId: track.requesterId,
     origin: track.automatic ? "autoplay" : "manual",
+    // How an autoplay pick was made, so its skips can be told apart by mode
+    // and lane. Unknown for a pick restored after a restart.
+    ...(track.automatic && {
+      autoplayMode: track.autoplayMode,
+      discovery: track.discovery,
+      autoplaySources: track.autoplaySources,
+    }),
   };
 }
 

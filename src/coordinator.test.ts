@@ -3587,6 +3587,15 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
     }[]
   )[0];
   expect(queued?.sourceId).toBe(ids.d);
+  const playing = (
+    result.media.filter(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }[]
+  ).at(-1)!;
+  result.coordinator.mediaEvent("playback_position", {
+    entryId: playing.entryId,
+    seconds: 42.4,
+  });
   await result.coordinator.action(
     interaction(result.coordinator, "next_track"),
   );
@@ -3596,6 +3605,21 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
         (value) => (value as unknown[])[0] === "track.autoplay_added",
       ).length === 3,
   );
+  // A skip says how the pick was made and how far into it the room got.
+  expect(
+    result.audit.find((value) => (value as unknown[])[0] === "track.skipped"),
+  ).toEqual([
+    "track.skipped",
+    "host",
+    expect.objectContaining({
+      sourceId: ids.c,
+      origin: "autoplay",
+      autoplayMode: "related",
+      discovery: false,
+      autoplaySources: ["related"],
+      playedSeconds: 42,
+    }),
+  ]);
   expect(resolved).toEqual([ids.c, ids.d, ids.e]);
   expect(
     Reflect.get(result.coordinator, "history").map(

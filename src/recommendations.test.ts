@@ -187,8 +187,9 @@ test("huddle mix treats YouTube up-next as a light nudge", async () => {
     artist: "Band",
   });
   expect(
-    candidates.some((track) => track.metadata.title === "Up Next Only"),
-  ).toBe(true);
+    candidates.find((track) => track.metadata.title === "Up Next Only")
+      ?.sources,
+  ).toEqual(["related"]);
   store.close();
 });
 
