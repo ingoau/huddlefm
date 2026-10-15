@@ -140,6 +140,7 @@ function setup(
       },
       setEndMessage: () => {},
       sessionSaves: () => [],
+      channelDefaults: () => undefined,
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
       },
@@ -2130,6 +2131,7 @@ function channelManagerSetup(
   excludedUserIds = new Set<string>(),
   permissions: RolePermissions = "end",
   admins?: WorkspaceAdmins,
+  store?: Store,
 ) {
   const lookups: string[] = [];
   // How many modals had opened when each lookup asked Slack.
@@ -2139,7 +2141,7 @@ function channelManagerSetup(
     undefined,
     undefined,
     undefined,
-    undefined,
+    store,
     excludedUserIds,
     undefined,
     undefined,
@@ -2181,6 +2183,296 @@ test("a channel manager outside the huddle can end the session", async () => {
   await result.act("channel-manager", "end_session");
   expect(ended(result)).toBeTrue();
   expect(result.media).toContainEqual({ type: "leave" });
+});
+
+function settingsButtons(view: unknown) {
+  const blocks = (
+    view as {
+      blocks: { block_id?: string; elements?: { action_id: string }[] }[];
+    }
+  ).blocks;
+  return (
+    blocks
+      .find((block) => block.block_id === "session_actions")
+      ?.elements?.map((element) => element.action_id) ?? []
+  );
+}
+
+// Presses a Settings button with the modal's state and metadata.
+function pressInSettings(
+  result: ReturnType<typeof channelManagerSetup>,
+  userId: string,
+  actionId: string,
+  state: Parameters<Coordinator["action"]>[0]["state"] = {},
+  hostId = "host",
+) {
+  return result.coordinator.action({
+    ...interaction(result.coordinator, actionId, result.coordinator.id),
+    userId,
+    messageTs: "",
+    viewId: "view-1",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id, hostId }),
+    state,
+  });
+}
+
+test("the configured manager can save and clear the channel's defaults", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("manager", "open_settings");
+  // Left of End session; Clear appears only once there is something saved.
+  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "save_channel_defaults",
+    "open_end_session",
+  ]);
+
+  await pressInSettings(result, "manager", "save_channel_defaults", {
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+    anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
+  });
+  expect(result.ephemeral).toContain(
+    "Saved. New sessions in this channel will start with these settings.",
+  );
+  // What the form showed was saved; the session waits for Settings to save.
+  expect(store.channelDefaults("channel")).toEqual({
+    volume: 0.6,
+    autoplay: "huddle",
+    loopMode: "off",
+    displayMode: "default",
+    transitionMode: "none",
+    duckingMode: "gentle",
+    anchorEnabled: true,
+    permissions: ["add", "remove-own"],
+  });
+  expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "save_channel_defaults",
+    "clear_channel_defaults",
+    "open_end_session",
+  ]);
+
+  await pressInSettings(result, "manager", "clear_channel_defaults");
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  expect(result.ephemeral).toContain(
+    "Cleared. New sessions in this channel will start with the usual settings.",
+  );
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "save_channel_defaults",
+    "open_end_session",
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("saving the channel's defaults from stale Settings is refused", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await pressInSettings(
+    result,
+    "manager",
+    "save_channel_defaults",
+    {},
+    "guest",
+  );
+  expect(result.ephemeral).toContain("Settings are stale; reopen them.");
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("only channel managers can save the channel's defaults", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await pressInSettings(result, "host", "save_channel_defaults");
+  expect(result.ephemeral).toContain(
+    "Only channel managers can change defaults for this channel.",
+  );
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("a channel manager who sees no settings cannot save them as defaults", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["guest"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "open_end_session",
+  ]);
+  await pressInSettings(result, "guest", "save_channel_defaults", {
+    permissions: { selected: { selected_options: [{ value: "clear" }] } },
+  });
+  expect(result.ephemeral).toContain(
+    "Only channel managers can change defaults for this channel.",
+  );
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("a channel manager saves only the settings they can see", async () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults(
+    "channel",
+    { permissions: ["add", "volume"] },
+    "manager",
+  );
+  const result = channelManagerSetup(
+    ["guest"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "save_channel_defaults",
+    "clear_channel_defaults",
+    "open_end_session",
+  ]);
+  // The permissions are not in the guest's form, so a forged value is ignored.
+  await pressInSettings(result, "guest", "save_channel_defaults", {
+    volume: { percent: { value: "25" } },
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+    permissions: { selected: { selected_options: [{ value: "clear" }] } },
+  });
+  expect(store.channelDefaults("channel")).toEqual({
+    volume: 0.25,
+    permissions: ["add", "volume"],
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings in a direct message offers no channel defaults", async () => {
+  const result = channelManagerSetup();
+  Object.assign(result.coordinator.room, { sourceChannelId: "D123" });
+  await result.coordinator.start();
+  await result.act("manager", "open_settings");
+  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "open_end_session",
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("channel managers granted nothing are not offered the channel's defaults", async () => {
+  const result = channelManagerSetup(["host"], new Set(), "none");
+  await result.coordinator.start();
+  await result.act("host", "open_settings");
+  expect(result.lookups).toEqual([]);
+  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "open_end_session",
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a restored session keeps its own settings over the channel's defaults", async () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults(
+    "channel",
+    { volume: 0.35, autoplay: "related", permissions: ["add", "skip"] },
+    "manager",
+  );
+  const restored: SavedSession = {
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    uiTs: "player",
+    revision: 2,
+    creatorId: "creator",
+    hostId: "host",
+    state: "paused",
+    volume: 0.4,
+    autoplay: "off",
+    loopMode: "off",
+    transitionMode: "none",
+    displayMode: "lyrics",
+    anchorEnabled: false,
+    playbackSeconds: 0,
+    listenedSeconds: 0,
+    resumeUntil: 180_000,
+    permissions: ["add"],
+    tracks: [],
+  };
+  const result = setup(undefined, undefined, restored, undefined, store);
+  const coordinator = result.coordinator;
+  expect(Reflect.get(coordinator, "volume")).toBe(0.4);
+  expect(Reflect.get(coordinator, "autoplayMode")).toBe("off");
+  expect([...Reflect.get(coordinator, "allowed")]).toEqual(["add"]);
+  expect(Reflect.get(coordinator, "channelDefaultsApplied")).toBeFalse();
+});
+
+test("a new session starts with its channel's saved defaults", async () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults(
+    "channel",
+    {
+      volume: 0.35,
+      autoplay: "related",
+      displayMode: "lyrics",
+      transitionMode: "gapless",
+      duckingMode: "strong",
+      permissions: ["add", "skip"],
+    },
+    "channel-manager",
+  );
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  expect(result.media).toEqual(
+    expect.arrayContaining([
+      { type: "volume", value: 0.35 },
+      { type: "display_mode", mode: "lyrics" },
+      { type: "transition_mode", mode: "gapless" },
+      { type: "ducking_mode", mode: "strong" },
+    ]),
+  );
+  const row = store.db
+    .query("SELECT volume, autoplay, display_mode FROM sessions WHERE id = ?")
+    .get(result.coordinator.id);
+  expect(row).toEqual({
+    volume: 0.35,
+    autoplay: "related",
+    display_mode: "lyrics",
+  });
+  const allowed = store.db
+    .query(
+      "SELECT capability FROM permissions WHERE session_id = ? AND allowed = 1 ORDER BY capability",
+    )
+    .all(result.coordinator.id);
+  expect(allowed).toEqual([{ capability: "add" }, { capability: "skip" }]);
+  await result.coordinator.endFromSlack();
 });
 
 test("a channel manager in the huddle can end it whatever the permissions", async () => {
@@ -2336,10 +2628,21 @@ test("a refusal replaces the loading view instead of leaving it", async () => {
 test("Settings opens directly when no role needs a lookup", async () => {
   const result = channelManagerSetup();
   await result.coordinator.start();
-  await result.act("host", "open_settings");
+  // The configured manager holds every role without asking Slack.
+  await result.act("manager", "open_settings");
   expect(result.lookups).toEqual([]);
   expect(result.updatedModals).toHaveLength(0);
   expect(JSON.stringify(result.modals.at(-1))).toContain("save_settings");
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings asks who manages the channel when the user could save its defaults", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  // The host can already end the session, but sees settings a channel
+  // manager could save.
+  await result.act("host", "open_settings");
+  expect(result.lookups).toEqual(["channel"]);
   await result.coordinator.endFromSlack();
 });
 
@@ -6343,7 +6646,7 @@ test("the like button sits with the volume controls, and only while playing", as
     player.indexOf('"block_id":"seek_'),
   );
   expect(volume).toContain('"action_id":"like_track"');
-  expect(volume).toContain("\ud83d\udc96");
+  expect(volume).toContain(":ms-sparkling-heart:");
   await result.coordinator.endFromSlack();
 });
 
@@ -6378,6 +6681,130 @@ test("liking a song records it, answers only the listener, and leaves the card a
   expect(posted[1]).toBe("host");
   expect(posted[2]).toBe("This will be recommended to you more");
   expect(JSON.stringify(posted[4])).toContain('"action_id":"unlike_track"');
+  await test.coordinator.endFromSlack();
+});
+
+test("the save button sits with the seek controls and DMs a song.link link", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    ...playingTrack(),
+    canonicalUrl: "https://www.youtube.com/watch?v=likedlikedl",
+  });
+  const player = JSON.stringify(
+    (Reflect.get(test.coordinator, "blocks") as () => unknown).call(
+      test.coordinator,
+    ),
+  );
+  const seek = player.slice(player.indexOf('"block_id":"seek_'));
+  expect(seek).toContain('"action_id":"save_track"');
+  expect(seek).toContain(":ms-floppy-disk:");
+  const renders = test.updates.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  expect(test.updates).toHaveLength(renders);
+  const sent = test.dms.at(-1)!;
+  expect(sent[0]).toBe("host");
+  expect(sent[1]).toBe(
+    "<https://song.link/https://www.youtube.com/watch?v=likedlikedl|Worth Hearing Again — Band>",
+  );
+  const audited = test.audit.at(-1) as [
+    string,
+    string,
+    Record<string, unknown>,
+  ];
+  expect(audited[0]).toBe("track.saved");
+  expect(audited[1]).toBe("host");
+  expect(audited[2]).toMatchObject({
+    title: "Worth Hearing Again",
+    artist: "Band",
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a song from another source links the source itself", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    ...playingTrack(),
+    canonicalUrl: "https://example.com/a|b?x=<1>&y=2",
+    title: "Tom & <Jerry>",
+    artist: "A > B",
+  });
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  // The URL parser has already encoded < and >, the | is encoded so it cannot
+  // end the target, and the rest is escaped for mrkdwn.
+  expect(test.dms.at(-1)?.[1]).toBe(
+    "<https://example.com/a%7Cb?x=%3C1%3E&amp;y=2|Tom &amp; &lt;Jerry&gt; — A &gt; B>",
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a Navidrome share keeps its token out of the DM", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    ...playingTrack(),
+    canonicalUrl: "https://music.example.com/share/s/secret-token",
+    sourceId: "navidrome:share:hash",
+  });
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  const sent = test.dms.at(-1)!;
+  expect(sent[1]).toBe("Worth Hearing Again — Band");
+  expect(JSON.stringify(sent)).not.toContain("secret-token");
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a song that has moved into history still sends it", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "history", [playingTrack()]);
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  expect(test.dms.at(-1)?.[1]).toBe(
+    "<https://example.com/likedlikedl|Worth Hearing Again — Band>",
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("a save that cannot be sent tells the listener", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", playingTrack());
+  Reflect.get(test.coordinator, "slack").dm = async () => {
+    throw new Error("channel_not_found");
+  };
+  const audited = test.audit.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  expect(test.ephemeral.at(-1)).toBe(
+    "Couldn't send you that song. Try again in a moment.",
+  );
+  expect(test.audit).toHaveLength(audited);
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a song nobody remembers tells the listener", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const dms = test.dms.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "gone"),
+  );
+  expect(test.dms).toHaveLength(dms);
+  expect(test.ephemeral.at(-1)).toBe("That song has already finished.");
   await test.coordinator.endFromSlack();
 });
 
