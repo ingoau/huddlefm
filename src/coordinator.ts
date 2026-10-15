@@ -221,6 +221,33 @@ function throwIfAborted(signal?: AbortSignal) {
 // so it says what the like is for rather than announcing it to the room.
 const likedNotice = "This will be recommended to you more";
 
+// Hosts song.link can match to other streaming services. Of the sources the
+// bot plays, that is YouTube and SoundCloud.
+const songLinkHosts = new Set([
+  "youtube.com",
+  "www.youtube.com",
+  "m.youtube.com",
+  "music.youtube.com",
+  "youtu.be",
+  "soundcloud.com",
+  "www.soundcloud.com",
+  "m.soundcloud.com",
+]);
+
+/**
+ * Where a saved song points: a song.link page when song.link can match the
+ * source, otherwise the source itself. A Navidrome share's URL is a bearer
+ * token for its audio, so it gets no link at all.
+ */
+function savedLink(entry: { sourceId: string; canonicalUrl: string }) {
+  if (entry.sourceId.startsWith("navidrome:")) return undefined;
+  const url = URL.parse(entry.canonicalUrl);
+  if (url?.protocol !== "https:" && url?.protocol !== "http:") return undefined;
+  return songLinkHosts.has(url.hostname)
+    ? `https://song.link/${url.href}`
+    : url.href;
+}
+
 const autoplayDescriptions: Record<AutoplayMode, string> = {
   off: "Do not queue recommendations",
   related: "Continue from songs requested in this huddle",
@@ -753,6 +780,7 @@ export class Coordinator {
         volume_down: () => this.changeVolume(interaction, -0.05),
         volume_up: () => this.changeVolume(interaction, 0.05),
         like_track: () => this.like(interaction),
+        save_track: () => this.save(interaction),
         queue_move_up: () => this.reorder(interaction, -1),
         queue_move_down: () => this.reorder(interaction, 1),
         queue_play_next: () => this.playNext(interaction),
@@ -2390,6 +2418,51 @@ export class Coordinator {
           "Could not post like notice",
         ),
       );
+  }
+
+  // DMs the listener a link to the song, so they can find it again on
+  // whichever service they use. Like the like button, it refers to the song
+  // that was playing when they pressed it.
+  private async save(interaction: Interaction) {
+    const entry = this.likeable(interaction.value);
+    if (!entry)
+      return this.notice(interaction.userId, "That song has already finished.");
+    const userId = interaction.userId;
+    const label = `${escape(entry.title)} — ${escape(entry.artist)}`;
+    const link = savedLink(entry);
+    // A | in the target would end it early, so it is percent-encoded.
+    const text = link
+      ? `<${escape(link).replaceAll("|", "%7C")}|${label}>`
+      : label;
+    // Sending changes nothing in the session, so it does not hold up the
+    // actions queued behind it.
+    void this.slack.dm(userId, text, { blocks: [section(text)] }).then(
+      () => {
+        this.audit.record("track.saved", userId, {
+          sessionId: this.id,
+          ...auditTrack(entry),
+        });
+        this.log.info(
+          {
+            event: "track_saved",
+            entryId: entry.id,
+            sourceId: entry.sourceId,
+            userId,
+          },
+          "Track link sent",
+        );
+      },
+      (error) => {
+        this.log.warn(
+          { event: "save_dm_failed", userId, err: error },
+          "Could not send saved track",
+        );
+        return this.notice(
+          userId,
+          "Couldn't send you that song. Try again in a moment.",
+        ).catch(() => {});
+      },
+    );
   }
 
   // The song a like button refers to. It is only ever rendered for whatever is
@@ -5130,6 +5203,10 @@ export class Coordinator {
                 actions(`seek_${id}`, [
                   button("seek_back", icon(":ms-rewind:"), { value }),
                   button("seek_forward", icon(":ms-fast-forward:"), { value }),
+                  // Carries the entry for the same reason the like button does.
+                  button("save_track", icon(":ms-floppy-disk:"), {
+                    value: current.id,
+                  }),
                 ]),
               ]
             : when(

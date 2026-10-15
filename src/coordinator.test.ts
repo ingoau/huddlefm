@@ -6380,6 +6380,130 @@ test("liking a song records it, answers only the listener, and leaves the card a
   await test.coordinator.endFromSlack();
 });
 
+test("the save button sits with the seek controls and DMs a song.link link", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    ...playingTrack(),
+    canonicalUrl: "https://www.youtube.com/watch?v=likedlikedl",
+  });
+  const player = JSON.stringify(
+    (Reflect.get(test.coordinator, "blocks") as () => unknown).call(
+      test.coordinator,
+    ),
+  );
+  const seek = player.slice(player.indexOf('"block_id":"seek_'));
+  expect(seek).toContain('"action_id":"save_track"');
+  expect(seek).toContain(":ms-floppy-disk:");
+  const renders = test.updates.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  expect(test.updates).toHaveLength(renders);
+  const sent = test.dms.at(-1)!;
+  expect(sent[0]).toBe("host");
+  expect(sent[1]).toBe(
+    "<https://song.link/https://www.youtube.com/watch?v=likedlikedl|Worth Hearing Again — Band>",
+  );
+  const audited = test.audit.at(-1) as [
+    string,
+    string,
+    Record<string, unknown>,
+  ];
+  expect(audited[0]).toBe("track.saved");
+  expect(audited[1]).toBe("host");
+  expect(audited[2]).toMatchObject({
+    title: "Worth Hearing Again",
+    artist: "Band",
+  });
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a song from another source links the source itself", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    ...playingTrack(),
+    canonicalUrl: "https://example.com/a|b?x=<1>&y=2",
+    title: "Tom & <Jerry>",
+    artist: "A > B",
+  });
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  // The URL parser has already encoded < and >, the | is encoded so it cannot
+  // end the target, and the rest is escaped for mrkdwn.
+  expect(test.dms.at(-1)?.[1]).toBe(
+    "<https://example.com/a%7Cb?x=%3C1%3E&amp;y=2|Tom &amp; &lt;Jerry&gt; — A &gt; B>",
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a Navidrome share keeps its token out of the DM", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    ...playingTrack(),
+    canonicalUrl: "https://music.example.com/share/s/secret-token",
+    sourceId: "navidrome:share:hash",
+  });
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  const sent = test.dms.at(-1)!;
+  expect(sent[1]).toBe("Worth Hearing Again — Band");
+  expect(JSON.stringify(sent)).not.toContain("secret-token");
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a song that has moved into history still sends it", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "history", [playingTrack()]);
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  expect(test.dms.at(-1)?.[1]).toBe(
+    "<https://example.com/likedlikedl|Worth Hearing Again — Band>",
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("a save that cannot be sent tells the listener", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", playingTrack());
+  Reflect.get(test.coordinator, "slack").dm = async () => {
+    throw new Error("channel_not_found");
+  };
+  const audited = test.audit.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  expect(test.ephemeral.at(-1)).toBe(
+    "Couldn't send you that song. Try again in a moment.",
+  );
+  expect(test.audit).toHaveLength(audited);
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a song nobody remembers tells the listener", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const dms = test.dms.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "gone"),
+  );
+  expect(test.dms).toHaveLength(dms);
+  expect(test.ephemeral.at(-1)).toBe("That song has already finished.");
+  await test.coordinator.endFromSlack();
+});
+
 test("the undo button is not the player's to handle", async () => {
   const test = setup();
   await test.coordinator.start();
