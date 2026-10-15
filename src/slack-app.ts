@@ -153,6 +153,7 @@ export class SlackAppAdapter {
   private socket?: WebSocket;
   private web: WebClient;
   private names = new Map<string, Promise<string>>();
+  private publicChannels = new Map<string, Promise<boolean>>();
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
   private stopHeartbeat?: () => void;
@@ -318,6 +319,36 @@ export class SlackAppAdapter {
       ...(hash ? { hash } : {}),
       view: view as never,
     });
+  }
+
+  /**
+   * Whether anyone in the workspace could see the channel. Direct messages,
+   * group DMs, private channels, and channels Slack will not describe all
+   * count as private.
+   */
+  isPublicChannel(channelId: string) {
+    const cached = this.publicChannels.get(channelId);
+    if (cached) return cached;
+    const known = this.web.conversations
+      .info({ channel: channelId })
+      .then(({ channel }) =>
+        Boolean(
+          channel?.is_channel &&
+          !channel.is_private &&
+          !channel.is_im &&
+          !channel.is_mpim,
+        ),
+      )
+      .catch((error) => {
+        log.warn(
+          { event: "channel_lookup_failed", channelId, err: error },
+          "Slack channel lookup failed",
+        );
+        this.publicChannels.delete(channelId);
+        return false;
+      });
+    this.publicChannels.set(channelId, known);
+    return known;
   }
 
   userName(userId: string) {

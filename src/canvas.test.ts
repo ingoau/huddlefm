@@ -100,6 +100,7 @@ test("lists active sessions with what each is playing", () => {
         track: { title: "Tune", artist: "Band" },
       },
       { channelId: "C789", listeners: 1, state: "ready" },
+      { private: true, listeners: 3 },
     ],
     sections: ["active-sessions"],
     updatedAt: 0,
@@ -110,6 +111,7 @@ test("lists active sessions with what each is playing", () => {
       "- ![](#C123) · 2 listeners · Playing **Song \\(Live\\)** — Artist",
       "- ![](#C456) · 1 listener · Paused **Tune** — Band",
       "- ![](#C789) · 1 listener · Nothing playing",
+      "- A private Huddle · 3 listeners",
       "",
       "_Updated 1970-01-01T00:00:00.000Z_",
     ].join("\n"),
@@ -128,4 +130,16 @@ test("accepts active and now playing as section aliases", () => {
   expect(parseCanvasSections("active, now playing")).toEqual([
     "active-sessions",
   ]);
+});
+
+test("keeps track names on one line and free of strikethrough", () => {
+  const markdown = canvasMarkdown(
+    {
+      ...stats,
+      topTracks: [{ title: "Line one\n- ~~two~~", artist: "Artist", count: 1 }],
+    },
+    [],
+    { sections: ["top-tracks"], updatedAt: 0 },
+  );
+  expect(markdown).toContain("1. **Line one - \\~\\~two\\~\\~** — Artist");
 });

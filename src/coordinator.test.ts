@@ -7493,3 +7493,24 @@ test("a session that cannot be saved still ends", async () => {
   );
   store.close();
 });
+
+test("describes itself for the canvas until it ends, and reports membership changes", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  expect(result.coordinator.canvasSession()).toEqual({
+    channelId: "channel",
+    listeners: 2,
+    state: "ready",
+    track: undefined,
+  });
+  const changes = result.sessionChanges.length;
+  result.coordinator.memberJoined("listener");
+  expect(result.sessionChanges).toHaveLength(changes + 1);
+  result.coordinator.memberJoined("listener");
+  expect(result.sessionChanges).toHaveLength(changes + 1);
+  expect(result.coordinator.canvasSession()?.listeners).toBe(3);
+  await result.coordinator.memberLeft("listener");
+  expect(result.sessionChanges).toHaveLength(changes + 2);
+  await result.coordinator.endFromSlack();
+  expect(result.coordinator.canvasSession()).toBeUndefined();
+});
