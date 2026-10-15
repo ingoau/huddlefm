@@ -108,9 +108,11 @@ export class Analytics {
       typeof properties.sessionId === "string"
         ? String(properties.sessionId)
         : undefined;
+    // A song whose adder took their name off it has an empty requester.
     const requesterId =
       properties.origin !== "autoplay" &&
-      typeof properties.requesterId === "string"
+      typeof properties.requesterId === "string" &&
+      properties.requesterId
         ? properties.requesterId
         : undefined;
     delete properties.sessionId;
