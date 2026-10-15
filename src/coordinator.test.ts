@@ -6342,7 +6342,7 @@ test("the like button sits with the volume controls, and only while playing", as
     player.indexOf('"block_id":"seek_'),
   );
   expect(volume).toContain('"action_id":"like_track"');
-  expect(volume).toContain("\ud83d\udc96");
+  expect(volume).toContain(":ms-sparkling-heart:");
   await result.coordinator.endFromSlack();
 });
 
