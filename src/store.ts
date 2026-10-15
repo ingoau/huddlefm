@@ -1,6 +1,7 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import type { TrackMetadata } from "./tracks.ts";
 
 export const capabilities = [
   "add",
@@ -445,6 +446,119 @@ function savedTrack(track: Row) {
   } satisfies SavedTrack);
 }
 
+// A saved song. Who asked for it is left out: loading credits whoever loads.
+export type SessionSaveTrack = TrackMetadata;
+
+// Whoever a saved queue belongs to: a channel, for anyone in its Huddles, or
+// one user's account.
+export type SessionSaveOwner = { type: "channel" | "user"; id: string };
+
+// The settings a saved session brings back. Permissions are left out: they
+// belong to whoever runs the session that loads it.
+export type SessionSaveSettings = {
+  volume?: number;
+  autoplayMode?: AutoplayMode;
+  loopMode?: LoopMode;
+  transitionMode?: TransitionMode;
+  duckingMode?: DuckingMode;
+  displayMode?: DisplayMode;
+  anchorEnabled?: boolean;
+};
+
+export type SessionSave = {
+  id: string;
+  owner: SessionSaveOwner;
+  name: string;
+  savedBy: string;
+  savedAt: number;
+  tracks: SessionSaveTrack[];
+  settings: SessionSaveSettings;
+};
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+// Keeps only the settings that still name a valid value, so a save from an
+// older version loads what it can.
+function parseSessionSaveSettings(value: unknown): SessionSaveSettings {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<
+    string,
+    unknown
+  >;
+  const volume =
+    typeof raw.volume === "number" &&
+    Number.isFinite(raw.volume) &&
+    raw.volume >= 0 &&
+    raw.volume <= 1
+      ? raw.volume
+      : undefined;
+  const settings: SessionSaveSettings = {
+    volume,
+    autoplayMode: modeOf(autoplayModes, raw.autoplayMode),
+    loopMode: modeOf(loopModes, raw.loopMode),
+    transitionMode: modeOf(transitionModes, raw.transitionMode),
+    duckingMode: modeOf(duckingModes, raw.duckingMode),
+    displayMode: modeOf(displayModes, raw.displayMode),
+    anchorEnabled:
+      typeof raw.anchorEnabled === "boolean" ? raw.anchorEnabled : undefined,
+  };
+  return Object.fromEntries(
+    Object.entries(settings).filter(([, entry]) => entry !== undefined),
+  ) as SessionSaveSettings;
+}
+
+// How many sessions one channel or account keeps; saving past it drops the
+// oldest.
+export const sessionSaveLimit = 25;
+export const sessionSaveNameLength = 50;
+
+// A saved song as stored, or nothing when it lacks what playing it needs.
+// Optional details of the wrong type are dropped rather than the song.
+function sessionSaveTrack(value: unknown): SessionSaveTrack | undefined {
+  if (!value || typeof value !== "object") return;
+  const track = value as Record<string, unknown>;
+  const text = (key: string) =>
+    typeof track[key] === "string" ? track[key] : undefined;
+  const [sourceInput, canonicalUrl, sourceId, title, artist] = [
+    "sourceInput",
+    "canonicalUrl",
+    "sourceId",
+    "title",
+    "artist",
+  ].map(text);
+  if (
+    sourceInput === undefined ||
+    canonicalUrl === undefined ||
+    sourceId === undefined ||
+    title === undefined ||
+    artist === undefined
+  )
+    return;
+  const album = text("album");
+  const artwork = text("artwork");
+  const duration =
+    typeof track.duration === "number" &&
+    Number.isFinite(track.duration) &&
+    track.duration >= 0
+      ? track.duration
+      : undefined;
+  return {
+    sourceInput,
+    canonicalUrl,
+    sourceId,
+    title,
+    artist,
+    ...(album === undefined ? {} : { album }),
+    ...(duration === undefined ? {} : { duration }),
+    ...(artwork === undefined ? {} : { artwork }),
+  };
+}
+
 export class Store {
   db: Database;
 
@@ -625,6 +739,23 @@ export class Store {
         updated_by TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      -- Sessions kept when they ended, their queue and settings but never
+      -- their permissions, for a later session to pick back up: saved to the
+      -- Huddle's channel, where anyone there can load them, or to the account
+      -- of whoever saved them. Saving under a name the owner already uses
+      -- replaces that save.
+      CREATE TABLE IF NOT EXISTS session_saves (
+        id TEXT PRIMARY KEY,
+        owner_type TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        saved_by TEXT NOT NULL,
+        tracks TEXT NOT NULL,
+        settings TEXT NOT NULL,
+        saved_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS session_saves_owner_name
+        ON session_saves(owner_type, owner_id, name COLLATE NOCASE);
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
       CREATE INDEX IF NOT EXISTS tracks_session_status
@@ -888,6 +1019,96 @@ export class Store {
         WHERE id = ?`,
       )
       .run(timestamp, text, JSON.stringify(blocks), Date.now(), sessionId);
+  }
+
+  /** Saves a session for its owner, replacing one they saved under that name. */
+  addSessionSave(
+    owner: SessionSaveOwner,
+    name: string,
+    userId: string,
+    tracks: SessionSaveTrack[],
+    settings: SessionSaveSettings,
+  ) {
+    const id = crypto.randomUUID();
+    this.db.transaction(() => {
+      this.db
+        .query(
+          `DELETE FROM session_saves
+          WHERE owner_type = ? AND owner_id = ? AND name = ? COLLATE NOCASE`,
+        )
+        .run(owner.type, owner.id, name);
+      this.db
+        .query(
+          `INSERT INTO session_saves
+          (id, owner_type, owner_id, name, saved_by, tracks, settings, saved_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          owner.type,
+          owner.id,
+          name,
+          userId,
+          JSON.stringify(tracks),
+          JSON.stringify(settings),
+          Date.now(),
+        );
+      // Keeps each owner's list short enough to pick from.
+      this.db
+        .query(
+          `DELETE FROM session_saves WHERE owner_type = ? AND owner_id = ?
+          AND id NOT IN (SELECT id FROM session_saves
+            WHERE owner_type = ? AND owner_id = ?
+            ORDER BY saved_at DESC LIMIT ?)`,
+        )
+        .run(owner.type, owner.id, owner.type, owner.id, sessionSaveLimit);
+    })();
+    return id;
+  }
+
+  /** The sessions saved to any of `owners`, newest first. */
+  sessionSaves(owners: SessionSaveOwner[]): SessionSave[] {
+    if (!owners.length) return [];
+    const rows = this.db
+      .query(
+        `SELECT id, owner_type, owner_id, name, saved_by, tracks, settings,
+        saved_at FROM session_saves WHERE ${owners
+          .map(() => "(owner_type = ? AND owner_id = ?)")
+          .join(" OR ")}
+        ORDER BY saved_at DESC`,
+      )
+      .all(...owners.flatMap((owner) => [owner.type, owner.id])) as {
+      id: string;
+      owner_type: string;
+      owner_id: string;
+      name: string;
+      saved_by: string;
+      tracks: string;
+      settings: string;
+      saved_at: number;
+    }[];
+    return rows.flatMap((row) => {
+      if (row.owner_type !== "channel" && row.owner_type !== "user") return [];
+      const parsed = parseJson(row.tracks);
+      const tracks = Array.isArray(parsed)
+        ? parsed.flatMap((value) => sessionSaveTrack(value) ?? [])
+        : [];
+      return [
+        {
+          id: row.id,
+          owner: { type: row.owner_type, id: row.owner_id },
+          name: row.name,
+          savedBy: row.saved_by,
+          savedAt: row.saved_at,
+          tracks,
+          settings: parseSessionSaveSettings(parseJson(row.settings)),
+        },
+      ];
+    });
+  }
+
+  deleteSessionSave(id: string) {
+    this.db.query("DELETE FROM session_saves WHERE id = ?").run(id);
   }
 
   activateSession(sessionId: string, status: string) {

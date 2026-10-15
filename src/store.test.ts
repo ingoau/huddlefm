@@ -1167,6 +1167,93 @@ test("remembers that a session fell back to browser media", () => {
   store.close();
 });
 
+test("keeps saved sessions per owner, replacing one saved under the same name", () => {
+  const store = new Store(":memory:");
+  const track = {
+    sourceInput: "a",
+    canonicalUrl: "a",
+    sourceId: "a",
+    title: "A",
+    artist: "Artist",
+  };
+  const channel = { type: "channel", id: "C1" } as const;
+  const user = { type: "user", id: "U1" } as const;
+  store.addSessionSave(channel, "Friday", "host", [track], {
+    volume: 0.4,
+    loopMode: "queue",
+  });
+  store.addSessionSave(user, "Mine", "U1", [], { autoplayMode: "huddle" });
+  store.addSessionSave(channel, "friday", "guest", [track, track], {});
+
+  const saves = store.sessionSaves([channel]);
+  expect(saves).toHaveLength(1);
+  expect(saves[0]).toMatchObject({
+    name: "friday",
+    savedBy: "guest",
+    owner: channel,
+  });
+  expect(saves[0]!.tracks).toHaveLength(2);
+  expect(store.sessionSaves([user])[0]).toMatchObject({
+    name: "Mine",
+    tracks: [],
+    settings: { autoplayMode: "huddle" },
+  });
+  expect(store.sessionSaves([{ type: "user", id: "U2" }])).toEqual([]);
+  expect(store.sessionSaves([{ type: "user", id: "U2" }, user])).toHaveLength(
+    1,
+  );
+
+  store.deleteSessionSave(saves[0]!.id);
+  expect(store.sessionSaves([channel])).toEqual([]);
+  store.close();
+});
+
+test("drops a saved session's invalid settings and caps each owner's saves", () => {
+  const store = new Store(":memory:");
+  const owner = { type: "channel", id: "C1" } as const;
+  store.addSessionSave(owner, "Odd", "host", [], {});
+  store.db
+    .query("UPDATE session_saves SET settings = ?")
+    .run(
+      JSON.stringify({ volume: 4, loopMode: "forever", displayMode: "off" }),
+    );
+  expect(store.sessionSaves([owner])[0]!.settings).toEqual({
+    displayMode: "off",
+  });
+  for (let index = 0; index < 30; index++)
+    store.addSessionSave(owner, `Save ${index}`, "host", [], {});
+  expect(store.sessionSaves([owner])).toHaveLength(25);
+  store.close();
+});
+
+test("drops a saved song's details of the wrong type, and songs without a source", () => {
+  const store = new Store(":memory:");
+  const owner = { type: "user", id: "U1" } as const;
+  store.addSessionSave(owner, "Odd", "U1", [], {});
+  const track = {
+    sourceInput: "a",
+    canonicalUrl: "a",
+    sourceId: "a",
+    title: "A",
+    artist: "Artist",
+  };
+  store.db
+    .query("UPDATE session_saves SET tracks = ?")
+    .run(
+      JSON.stringify([
+        { ...track, album: 4, duration: "long", artwork: null },
+        { ...track, album: "Album", duration: 180, artwork: "https://art" },
+        { ...track, sourceId: undefined },
+        "a",
+      ]),
+    );
+  expect(store.sessionSaves([owner])[0]!.tracks).toEqual([
+    track,
+    { ...track, album: "Album", duration: 180, artwork: "https://art" },
+  ]);
+  store.close();
+});
+
 test("channel defaults keep only settings that are still valid", () => {
   const store = new Store(":memory:");
   expect(store.channelDefaults("C1")).toBeUndefined();

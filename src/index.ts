@@ -13,7 +13,7 @@ import { FallbackReports } from "./fallback-reports.ts";
 import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
 import { loadConfig, type MediaBackend } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
-import { parseLikeValue } from "./coordinator-ui.ts";
+import { parseLikeValue, settingsMessageView } from "./coordinator-ui.ts";
 import { redactSecrets, safeError } from "./error-message.ts";
 import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
@@ -1171,6 +1171,39 @@ async function cleanupEndedSession(sessionId: string) {
 // message Slack keeps showing long after the Huddle it was made in has ended.
 // Only the person who pressed the button is ever shown it, and it only ever
 // touches their own likes, so there is nobody else to check it against.
+// The end dialog can be submitted after its session has already ended and
+// gone, as when everyone left meanwhile. Settings under it is told so, and
+// that nothing was saved if the user asked to save.
+async function endedBeforeConfirming(interaction: Interaction) {
+  if (
+    interaction.type !== "view_submission" ||
+    interaction.actionId !== "end_session_confirm" ||
+    !interaction.previousViewId
+  )
+    return;
+  const choice = interaction.state.save_to?.choice?.selected_option?.value;
+  await slackApp
+    .updateModal(
+      interaction.previousViewId,
+      undefined,
+      settingsMessageView(
+        choice && choice !== "none"
+          ? "The session had already ended, so it was not saved."
+          : "The session has already ended.",
+      ),
+    )
+    .catch((error) =>
+      log.warn(
+        {
+          event: "ended_settings_update_failed",
+          userId: interaction.userId,
+          err: error,
+        },
+        "Could not update Settings for a session that already ended",
+      ),
+    );
+}
+
 async function undoLike(interaction: Interaction) {
   const like = parseLikeValue(interaction.value);
   const removed =
@@ -1714,7 +1747,8 @@ slackApp.onAction = (interaction) =>
       ? undoLike(interaction)
       : interaction.actionId === playbackReportCallbackId
         ? recordPlaybackReport(interaction)
-        : coordinatorFor(interaction)?.action(interaction);
+        : (coordinatorFor(interaction)?.action(interaction) ??
+          endedBeforeConfirming(interaction));
 await slackApp.start();
 // Huddle member events ride the private realtime gateway, which drops them
 // whenever its socket cycles, so periodically and after every reconnect the
