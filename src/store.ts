@@ -188,6 +188,24 @@ export type SkipRecord = {
   skippedAt: number;
 };
 
+/** What Your data shows of one kind of song a user is kept with. */
+export type UserSongs = {
+  count: number;
+  recent: { title: string; artist: string }[];
+};
+
+export type UserData = {
+  added: UserSongs;
+  plays: UserSongs;
+  likes: UserSongs;
+  skips: UserSongs;
+  scrobbles: number;
+  saves: SessionSave[];
+  channelSaves: SessionSave[];
+};
+
+const userDataRecentLimit = 5;
+
 export type LikeRecord = {
   userId: string;
   title: string;
@@ -1783,6 +1801,149 @@ export class Store {
       .run(likesBefore);
   }
 
+  /** What is kept about one user, for them to see in Your data. */
+  userData(userId: string, recent = userDataRecentLimit): UserData {
+    const count = (sql: string) =>
+      (this.db.query(sql).get(userId) as { count: number }).count;
+    const songs = (sql: string) =>
+      this.db.query(sql).all(userId, recent) as {
+        title: string;
+        artist: string;
+      }[];
+    const saves = this.sessionSaves([{ type: "user", id: userId }]);
+    const channelSaves = (
+      this.db
+        .query(
+          `SELECT owner_id FROM session_saves
+          WHERE owner_type = 'channel' AND saved_by = ?`,
+        )
+        .all(userId) as { owner_id: string }[]
+    ).map((row) => row.owner_id);
+    const channelIds = [...new Set(channelSaves)];
+    return {
+      added: {
+        count: count(
+          "SELECT COUNT(*) AS count FROM tracks WHERE requester_id = ? AND automatic = 0",
+        ),
+        recent: this.recentTracks(userId, recent).map(({ title, artist }) => ({
+          title,
+          artist,
+        })),
+      },
+      plays: {
+        count: count(
+          "SELECT COUNT(*) AS count FROM track_plays WHERE user_id = ?",
+        ),
+        recent: songs(
+          `SELECT title, artist FROM track_plays WHERE user_id = ?
+          ORDER BY played_at DESC, rowid DESC LIMIT ?`,
+        ),
+      },
+      likes: {
+        count: count(
+          "SELECT COUNT(*) AS count FROM track_likes WHERE user_id = ?",
+        ),
+        recent: songs(
+          `SELECT title, artist FROM track_likes WHERE user_id = ?
+          ORDER BY liked_at DESC, rowid DESC LIMIT ?`,
+        ),
+      },
+      skips: {
+        count: count(
+          "SELECT COUNT(*) AS count FROM autoplay_skips WHERE user_id = ?",
+        ),
+        recent: songs(
+          `SELECT title, artist FROM autoplay_skips WHERE user_id = ?
+          ORDER BY skipped_at DESC, rowid DESC LIMIT ?`,
+        ),
+      },
+      scrobbles: count(
+        "SELECT COUNT(*) AS count FROM scrobbles WHERE user_id = ?",
+      ),
+      saves,
+      channelSaves: channelIds.flatMap((id) =>
+        this.sessionSaves([{ type: "channel", id }]).filter(
+          (save) => save.savedBy === userId,
+        ),
+      ),
+    };
+  }
+
+  /**
+   * Takes the user's name off the songs they added that have finished,
+   * leaving the songs for the play counts. Songs still queued or playing in
+   * a live session, or one that can still be restored, keep it, as that
+   * session still shows who added them. Ending a session leaves its songs'
+   * status as it was, so a song left queued in one that ended lets go too.
+   */
+  forgetAddedTracks(userId: string) {
+    return this.db
+      .query(
+        `UPDATE tracks SET requester_id = '' WHERE requester_id = ?
+        AND (status IN ('played', 'failed') OR session_id NOT IN (
+          SELECT id FROM sessions
+          WHERE status != 'ended' OR resume_until IS NOT NULL
+        ))`,
+      )
+      .run(userId).changes;
+  }
+
+  deleteUserPlays(userId: string) {
+    return this.db
+      .query("DELETE FROM track_plays WHERE user_id = ?")
+      .run(userId).changes;
+  }
+
+  deleteUserLikes(userId: string) {
+    return this.db
+      .query("DELETE FROM track_likes WHERE user_id = ?")
+      .run(userId).changes;
+  }
+
+  deleteUserSkips(userId: string) {
+    return this.db
+      .query("DELETE FROM autoplay_skips WHERE user_id = ?")
+      .run(userId).changes;
+  }
+
+  deleteUserScrobbles(userId: string) {
+    return this.db.query("DELETE FROM scrobbles WHERE user_id = ?").run(userId)
+      .changes;
+  }
+
+  /**
+   * Everything kept about the user that is theirs alone: what they added,
+   * heard, liked and skipped, their scrobbles, the sessions saved to their
+   * account, and their accounts and choices. Sessions they saved to a
+   * channel belong to the channel, and stay, as does an opt-out of the
+   * Huddle mix.
+   */
+  forgetUser(userId: string) {
+    // Forgetting a user must not opt them back into the Huddle mix.
+    const before = this.getUserScrobbling(userId);
+    const mixesAdded =
+      before.huddleMixOptIn && before.huddleMixSources.includes("added");
+    this.db.transaction(() => {
+      this.forgetAddedTracks(userId);
+      this.deleteUserPlays(userId);
+      this.deleteUserLikes(userId);
+      this.deleteUserSkips(userId);
+      this.deleteUserScrobbles(userId);
+      this.db
+        .query(
+          "DELETE FROM session_saves WHERE owner_type = 'user' AND owner_id = ?",
+        )
+        .run(userId);
+      this.db
+        .query("DELETE FROM session_scrobbling WHERE user_id = ?")
+        .run(userId);
+      this.db
+        .query("DELETE FROM user_scrobbling WHERE user_id = ?")
+        .run(userId);
+      if (!mixesAdded) this.setHuddleMixSources(userId, { added: false });
+    })();
+  }
+
   setTrack(
     id: string,
     fields: {
@@ -1823,6 +1984,20 @@ export class Store {
       return undefined;
     }
     return parseChannelDefaults(saved);
+  }
+
+  // Who last saved the channel's defaults, and when.
+  channelDefaultsSaved(
+    channelId: string,
+  ): { savedBy: string; savedAt: number } | undefined {
+    const row = this.db
+      .query(
+        "SELECT updated_by, updated_at FROM channel_defaults WHERE channel_id = ?",
+      )
+      .get(channelId) as { updated_by: string; updated_at: number } | null;
+    return row
+      ? { savedBy: row.updated_by, savedAt: row.updated_at }
+      : undefined;
   }
 
   setChannelDefaults(

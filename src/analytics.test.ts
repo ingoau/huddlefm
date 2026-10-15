@@ -110,3 +110,19 @@ test("sanitizes and deduplicates exceptions", () => {
     error: { message: "request failed token=[redacted]" },
   });
 });
+
+test("attributes a song whose adder took their name off it to the installation", () => {
+  const fake = fakeClient();
+  const analytics = new Analytics(fake.client, "installation");
+  analytics.audit("track.started", undefined, {
+    requesterId: "",
+    origin: "manual",
+  });
+  expect(fake.events).toEqual([
+    {
+      distinctId: "installation",
+      event: "track.started",
+      properties: { origin: "manual" },
+    },
+  ]);
+});

@@ -12,23 +12,18 @@ import {
   capabilities,
   displayModes,
   duckingModes,
-  duckingModeLabels,
-  huddleMixSources,
   permissionPresets,
   recentTrackLimit,
   scrobblingModes,
   Store,
   transitionModes,
   autoplayModes,
-  autoplayModeLabels,
   parseAutoplayMode,
   loopModes,
-  loopModeLabels,
   type AutoplayMode,
   type ChannelDefaults,
   type DisplayMode,
   type DuckingMode,
-  type HuddleMixSource,
   type LoopMode,
   sessionSaveNameLength,
   type SavedSession,
@@ -70,8 +65,6 @@ import {
   icon,
   input,
   likeValue,
-  modeSelect,
-  permissionLabels,
   plain,
   safeAuditError,
   section,
@@ -89,10 +82,8 @@ import {
   integrationGrantTimeoutMs,
   integrationReply,
   integrationRequestBlocks,
-  integrationSettingsBlocks,
   parseIntegrationActionValue,
   parseIntegrationSettingsPage,
-  slackModalBlockLimit,
   sessionMatchesChannel,
   wrapIntegrationResult,
   type IntegrationCommand,
@@ -100,10 +91,47 @@ import {
 import { RecommendationCatalog } from "./recommendations.ts";
 import { playbackReportView } from "./playback-report.ts";
 import {
+  checked,
+  defaultUserSettings,
+  dialogMetadata,
+  mergeForm,
+  parseSettingsMetadata,
+  listenBrainzTokenView,
+  selected,
+  settingsTabActionPrefix,
+  settingsTabFromAction,
+  settingsTabs,
+  settingsView,
+  submittedHuddleMixSources,
+  submittedScrobbleServices,
+  withoutUserForm,
+  yourDataView,
+  type FormState,
+  type SettingsTab,
+} from "./settings-view.ts";
+import {
   changedSettings,
   settingsChanges,
   type Settings,
 } from "./settings-diff.ts";
+
+// What Your data calls each kind of record it deletes.
+const deletedNouns = {
+  added: ["song", "songs"],
+  plays: ["play", "plays"],
+  likes: ["like", "likes"],
+  skips: ["skip", "skips"],
+  scrobbles: ["scrobble", "scrobbles"],
+} as const;
+
+// What redrawing Settings may change about it.
+type SettingsChange = {
+  tab?: SettingsTab;
+  integrationPage?: number;
+  notice?: string;
+  revision?: number;
+  draft?: FormState;
+};
 
 const endRestoreMs = 2 * 60_000;
 const searchDebounceMs = 300;
@@ -127,87 +155,18 @@ type Entry = TrackMetadata & {
   fadeOutSeconds?: number;
 };
 
-type InputState = Interaction["state"][string][string];
-
-// The option a select block holds, when it is one of `modes`.
-function selected<Mode extends string>(
-  state: InputState | undefined,
-  modes: readonly Mode[],
-) {
-  const value = state?.selected_option?.value as Mode | undefined;
-  return value && modes.includes(value) ? value : undefined;
-}
-
-const huddleMixSourceLabels: Record<HuddleMixSource, string> = {
-  added: "Songs I've added or liked",
-  lastfm: "My Last.fm listening",
-  listenbrainz: "My ListenBrainz listening",
-};
-
-// The settings modal's Huddle mix checkboxes name the sources they offer in
-// their action ID. Only those sources are saved, so a service the user had
-// not connected keeps its choice for when they do, and a refreshed modal
-// that offers a different set starts from the saved ticks rather than Slack
-// carrying over the old ones.
-const huddleMixActionPrefix = "sources:";
-
-function huddleMixSourceInput(
-  offered: readonly HuddleMixSource[],
-  chosen: readonly HuddleMixSource[],
-) {
-  const option = (source: HuddleMixSource) => ({
-    text: plain(huddleMixSourceLabels[source]),
-    value: source,
-  });
-  return {
-    type: "checkboxes",
-    action_id: `${huddleMixActionPrefix}${offered.join(",")}`,
-    options: offered.map(option),
-    initial_options: offered
-      .filter((source) => chosen.includes(source))
-      .map(option),
-  };
-}
-
-// The choice a settings submission makes for each Huddle mix source it
-// offered, or undefined when the checkboxes were not part of it.
-function submittedHuddleMixSources(
-  block: Record<string, InputState> | undefined,
-) {
-  const [actionId, state] =
-    Object.entries(block ?? {}).find(([actionId]) =>
-      actionId.startsWith(huddleMixActionPrefix),
-    ) ?? [];
-  if (!actionId || !state) return undefined;
-  const offered = new Set(
-    actionId.slice(huddleMixActionPrefix.length).split(","),
-  );
-  const ticked = new Set(
-    state.selected_options?.map((option) => option.value) ?? [],
-  );
-  return Object.fromEntries(
-    huddleMixSources
-      .filter((source) => offered.has(source))
-      .map((source) => [source, ticked.has(source)]),
-  ) as Partial<Record<HuddleMixSource, boolean>>;
-}
-
-// The actions that need to know whether the user manages the channel.
-const channelDefaultsActions = new Set([
+// The actions that need to know whether the user manages the channel: those
+// that show or change the Channel tab of Settings, and loading a save, which
+// a channel manager may delete as they load it. Opening the load dialog is
+// not one: its trigger ID would expire while Slack is asked.
+const channelRoleActions = new Set([
   "open_settings",
   "save_channel_defaults",
   "clear_channel_defaults",
+  "delete_channel_save",
+  "load_session_save",
+  ...settingsTabs.map((tab) => `${settingsTabActionPrefix}${tab}`),
 ]);
-
-// Whether a single-option checkbox block is ticked, or undefined when the
-// block was not part of the submission.
-function checked(state: InputState | undefined) {
-  if (!state) return undefined;
-  return (
-    state.selected_options?.some((option) => option.value === "enabled") ??
-    false
-  );
-}
 
 // The object without its undefined fields, for spreading into records that
 // distinguish an absent field from an unset one.
@@ -262,22 +221,6 @@ function savedLink(entry: { sourceId: string; canonicalUrl: string }) {
     ? `https://song.link/${url.href}`
     : url.href;
 }
-
-const autoplayDescriptions: Record<AutoplayMode, string> = {
-  off: "Do not queue recommendations",
-  related: "Continue from songs requested in this huddle",
-  huddle: "Mix what people in this huddle listen to",
-};
-const loopDescriptions: Record<LoopMode, string> = {
-  off: "Do not repeat",
-  track: "Restart the current song when it ends",
-  queue: "Move finished songs back to the end of the queue",
-};
-const duckingDescriptions: Record<DuckingMode, string> = {
-  off: "Keep playing at full volume",
-  gentle: "Dip the music under the conversation",
-  strong: "Drop the music well back while people talk",
-};
 
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
@@ -773,7 +716,7 @@ export class Coordinator {
     await this.primeRoles(
       interaction.userId,
       ending,
-      channelDefaultsActions.has(interaction.actionId),
+      channelRoleActions.has(interaction.actionId),
     );
     this.log.debug(
       {
@@ -815,6 +758,8 @@ export class Coordinator {
           return this.queuePositionSubmission(interaction);
         if (interaction.actionId === "end_session_confirm")
           return this.endSubmission(interaction);
+        if (interaction.actionId === "listenbrainz_token")
+          return this.listenBrainzTokenSubmission(interaction);
         return this.settingsSubmission(interaction);
       }
       if (
@@ -863,8 +808,28 @@ export class Coordinator {
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
+        open_listenbrainz_token: () => this.listenBrainzTokenModal(interaction),
+        open_your_data: () => this.openYourData(interaction),
+        delete_own_save: () => this.deleteYourData(interaction, "own_save"),
+        delete_my_channel_save: () =>
+          this.deleteYourData(interaction, "channel_save"),
+        delete_data_added: () => this.deleteYourData(interaction, "added"),
+        delete_data_plays: () => this.deleteYourData(interaction, "plays"),
+        delete_data_likes: () => this.deleteYourData(interaction, "likes"),
+        delete_data_skips: () => this.deleteYourData(interaction, "skips"),
+        delete_data_scrobbles: () =>
+          this.deleteYourData(interaction, "scrobbles"),
+        delete_all_data: () => this.deleteYourData(interaction, "all"),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
+        delete_channel_save: () => this.deleteChannelSave(interaction),
+        apply_permission_preset: () => this.applyPermissionPreset(interaction),
+        ...Object.fromEntries(
+          settingsTabs.map((tab) => [
+            `${settingsTabActionPrefix}${tab}`,
+            () => this.switchSettingsTab(interaction),
+          ]),
+        ),
         integration_grants_prev: () => this.integrationGrantsPage(interaction),
         integration_grants_next: () => this.integrationGrantsPage(interaction),
       };
@@ -1842,10 +1807,11 @@ export class Coordinator {
   // The role lookups that would have to ask Slack before the user's next
   // permission check. Roles that only end the session matter only for an
   // action that can end it, and only for users who could not end it anyway.
-  // Channel managers also save the channel's defaults from Settings, so
-  // opening it or saving them asks whenever channel managers are granted
-  // anything and the user can see settings to save. A workspace admin lookup
-  // still pending could grant them that, so it asks then too.
+  // Channel managers also save the channel's defaults and delete its saved
+  // sessions from Settings, so its Channel tab asks whenever channel managers
+  // are granted anything and the user can see settings to save or the
+  // channel has saves to delete. A workspace admin lookup still pending could
+  // grant them that, so it asks then too.
   private roleLookups(
     userId: string,
     ending: boolean,
@@ -1866,7 +1832,10 @@ export class Coordinator {
       managers?.permissions !== "none" &&
       !this.roomId.startsWith("D") &&
       userId !== this.config.managerUserId &&
-      (lookups.length > 0 || this.savableDefaults(userId).length > 0);
+      (lookups.length > 0 ||
+        this.savableDefaults(userId).length > 0 ||
+        this.store.sessionSaves([{ type: "channel", id: this.roomId }]).length >
+          0);
     if (
       managers &&
       (matters(managers.permissions) || savesDefaults) &&
@@ -1918,6 +1887,8 @@ export class Coordinator {
       return interaction.actionId !== "move_queue_track";
     return (
       interaction.actionId === "open_settings" ||
+      Boolean(settingsTabFromAction(interaction.actionId)) ||
+      interaction.actionId === "delete_channel_save" ||
       interaction.actionId === "end_session" ||
       interaction.actionId === "open_end_session" ||
       interaction.actionId === "save_channel_defaults" ||
@@ -3418,7 +3389,7 @@ export class Coordinator {
     void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
       captureAnalytics(lyrics ? "lyrics.available" : "lyrics.unavailable", {
-        distinctId: next.automatic ? undefined : next.requesterId,
+        distinctId: next.automatic ? undefined : next.requesterId || undefined,
         sessionId: this.id,
         properties: {
           trackId: next.id,
@@ -3469,11 +3440,14 @@ export class Coordinator {
   }
 
   private async playMessage(entry: Entry) {
+    // A listener can take their name off the songs they added.
     const requesterLabel = entry.automatic
       ? "Autoplay recommendation"
       : entry.requesterId === this.botUserId
         ? undefined
-        : `Added by ${await this.slack.userName(entry.requesterId)}`;
+        : entry.requesterId
+          ? `Added by ${await this.slack.userName(entry.requesterId)}`
+          : "Added by a listener";
     const localArtwork =
       entry.filePath &&
       (await Bun.file(embeddedArtworkPath(entry.filePath)).exists())
@@ -4476,27 +4450,80 @@ export class Coordinator {
       );
   }
 
-  private settingsViewFor(interaction: Interaction, page?: number) {
-    return this.settingsView(
-      interaction.userId,
-      page ?? this.integrationSettingsPage(interaction),
-    );
+  // The Settings an interaction came from: its tab, page and unsaved edits,
+  // with the inputs on screen laid over the edits from other tabs. A dialog
+  // opened over Settings carries Settings' own, so it can redraw it.
+  private settingsContext(interaction: Interaction) {
+    const parent = parseMetadata(interaction.metadata).settings;
+    if (parent) return parseSettingsMetadata(parent);
+    const metadata = parseSettingsMetadata(interaction.metadata);
+    return {
+      ...metadata,
+      draft: mergeForm(metadata.draft, interaction.state),
+    };
+  }
+
+  private settingsViewFor(
+    interaction: Interaction,
+    change: SettingsChange = {},
+  ) {
+    const context = this.settingsContext(interaction);
+    return this.settingsView(interaction.userId, {
+      ...context,
+      ...defined(change),
+    });
   }
 
   // Redraws the settings modal an interaction came from.
-  private updateSettings(interaction: Interaction, page?: number) {
+  private updateSettings(
+    interaction: Interaction,
+    change: SettingsChange = {},
+  ) {
     return this.slack.updateModal(
       interaction.viewId!,
       interaction.viewHash,
-      this.settingsViewFor(interaction, page),
+      this.settingsViewFor(interaction, change),
     );
   }
 
-  private integrationSettingsPage(interaction: Interaction) {
-    const page = parseMetadata(interaction.metadata).integrationPage;
-    return typeof page === "number" && Number.isInteger(page) && page > 0
-      ? page
-      : 0;
+  private async switchSettingsTab(interaction: Interaction) {
+    const tab = settingsTabFromAction(interaction.actionId);
+    if (!tab || !interaction.viewId) return;
+    if (!this.canOpenSettings(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "You do not have permission to change settings.",
+      );
+    await this.updateSettings(interaction, { tab });
+  }
+
+  // Picking a preset ticks its permissions in the form; saving applies them.
+  private async applyPermissionPreset(interaction: Interaction) {
+    if (!interaction.viewId) return;
+    if (!this.settingsAdmin(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "Only the host can change permissions.",
+      );
+    const preset = interaction.value;
+    if (!Object.hasOwn(permissionPresets, preset)) return;
+    const context = this.settingsContext(interaction);
+    const allowed = new Set<string>(
+      permissionPresets[preset as keyof typeof permissionPresets],
+    );
+    await this.updateSettings(interaction, {
+      revision: context.revision + 1,
+      draft: {
+        ...context.draft,
+        permissions: {
+          selected: {
+            selected_options: capabilities
+              .filter((capability) => allowed.has(capability))
+              .map((value) => ({ value })),
+          },
+        },
+      },
+    });
   }
 
   private async integrationGrantsPage(interaction: Interaction) {
@@ -4507,334 +4534,119 @@ export class Coordinator {
       );
     const parsed = parseIntegrationSettingsPage(interaction.value);
     if (!parsed || parsed.sessionId !== this.id) return;
-    if (interaction.viewId) await this.updateSettings(interaction, parsed.page);
+    if (interaction.viewId)
+      await this.updateSettings(interaction, {
+        integrationPage: parsed.page,
+      });
   }
 
-  private settingsView(userId: string, integrationPage = 0) {
-    const settings = this.scrobbling?.settings(userId, this.id) ?? {
-      lastFmAvailable: false,
-      lastFmConnected: false,
-      lastFmEnabled: false,
-      listenBrainzConnected: false,
-      listenBrainzEnabled: false,
-      huddleMixOptIn: true,
-      huddleMixSources: ["added" as const],
-      huddleMixUsable: ["added" as const],
-      mode: "always" as const,
-      configured: false,
-      enabledIntegration: false,
-      sessionEnabled: false,
-    };
-    const admin = this.settingsAdmin(userId);
-    const value = this.id;
-    const savesDefaults = this.canSaveChannelDefaults(userId);
-    const sessionBlocks = [
-      { type: "header", text: plain("Session") },
-      ...when(
-        this.can(userId, "volume"),
-        input("volume", "Volume (%)", {
-          type: "plain_text_input",
-          action_id: "percent",
-          initial_value: String(Math.round(this.volume * 10_000) / 100),
-        }),
-      ),
-      ...when(
-        this.can(userId, "configure-settings"),
-        input(
-          "display",
-          "Display mode",
-          modeSelect(displayModes, this.displayMode, capitalize),
-        ),
-        input(
-          "autoplay",
-          "Autoplay",
-          modeSelect(
-            autoplayModes,
-            this.autoplayMode,
-            (mode) => autoplayModeLabels[mode],
-            autoplayDescriptions,
-          ),
-          {
-            optional: true,
-            hint: "Play recommendations when the queue is empty",
-          },
-        ),
-        input(
-          "loop",
-          "Loop",
-          modeSelect(
-            loopModes,
-            this.loopMode,
-            (mode) => loopModeLabels[mode],
-            loopDescriptions,
-          ),
-          {
-            optional: true,
-            hint: "Repeat the current track or cycle the queue",
-          },
-        ),
-        input(
-          "transition",
-          "Transitions",
-          modeSelect(transitionModes, this.transitionMode, (mode) =>
-            mode === "none"
-              ? "Disabled"
-              : mode === "adaptive"
-                ? "Adaptive crossfade"
-                : capitalize(mode),
-          ),
-        ),
-        input(
-          "ducking",
-          "Auto-duck",
-          modeSelect(
-            duckingModes,
-            this.duckingMode,
-            (mode) => duckingModeLabels[mode],
-            duckingDescriptions,
-          ),
-          { hint: "Lower the music while someone is speaking" },
-        ),
-        input(
-          "anchor",
-          "Thread position",
-          toggle(
-            "enabled",
-            "Keep player at bottom of thread",
-            this.anchorEnabled,
-          ),
-          { optional: true },
-        ),
-      ),
-      ...when(
-        savesDefaults || this.can(userId, "end-session"),
-        actions("session_actions", [
-          ...when(
-            savesDefaults,
-            button(
-              "save_channel_defaults",
-              plain("Save as defaults for this channel"),
-              {
-                value,
-                confirm: confirm(
-                  "Save channel defaults?",
-                  "New sessions in this channel will start with the settings shown here.",
-                  "Save",
-                ),
-              },
-            ),
-          ),
-          ...when(
-            savesDefaults && Boolean(this.store.channelDefaults(this.roomId)),
-            button("clear_channel_defaults", plain("Clear channel defaults"), {
-              value,
-              confirm: confirm(
-                "Clear channel defaults?",
-                "New sessions in this channel will start with the usual settings.",
-                "Clear",
-              ),
-            }),
-          ),
-          ...when(
-            this.can(userId, "end-session"),
-            // Ending asks in a dialog of its own rather than a confirmation,
-            // which cannot carry the choice to save the session.
-            button("open_end_session", plain("End session"), {
-              style: "danger",
-              value,
-            }),
-          ),
-        ]),
-      ),
-      ...when(
-        admin,
-        { type: "header", text: plain("Permissions") },
-        input(
-          "host",
-          "Transfer host",
-          {
-            type: "users_select",
-            action_id: "user",
-            ...(this.hostId ? { initial_user: this.hostId } : {}),
-          },
-          { optional: true },
-        ),
-        input(
-          "permission_preset",
-          "Apply permission preset",
-          {
-            type: "static_select",
-            action_id: "selected",
-            placeholder: plain("Choose a preset"),
-            options: (
-              [
-                ["default", "Default"],
-                ["host-only", "Host only"],
-                ["collaborative", "Collaborative"],
-                ["communism", "Communism"],
-              ] satisfies [string, string][]
-            ).map(([value, label]) => ({ text: plain(label), value })),
-          },
-          {
-            optional: true,
-            hint: "Saving overwrites the custom permissions below.",
-          },
-        ),
-        input(
-          "permissions",
-          "Everyone else may",
-          {
-            type: "checkboxes",
-            action_id: "selected",
-            options: capabilities.map((value) => ({
-              text: plain(permissionLabels[value]),
-              value,
-            })),
-            initial_options: capabilities
-              .filter((value) => this.allowed.has(value))
-              .map((value) => ({
-                text: plain(permissionLabels[value]),
-                value,
-              })),
-          },
-          { optional: true },
-        ),
-      ),
-    ];
-    const userBlocks = [
-      { type: "header", text: plain("User settings") },
-      input(
-        "huddle_mix",
-        "Include in Huddle mix",
-        huddleMixSourceInput(
-          settings.huddleMixUsable,
-          settings.huddleMixSources,
-        ),
-        {
-          optional: true,
-          hint: "Only used while you're in the huddle, and never shown as yours. Untick everything to opt out of the mix.",
-        },
-      ),
-      ...when(
-        settings.configured,
-        input(
-          "scrobbling_mode",
-          "Scrobbling mode",
-          modeSelect(scrobblingModes, settings.mode, (mode) =>
-            mode === "ask" ? "Ask every time" : capitalize(mode),
-          ),
-          { hint: "Sets the default for each Huddle" },
-        ),
-        actions("session_scrobbling", [
-          button(
-            "toggle_session_scrobbling",
-            plain(
-              `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
-            ),
-            { value },
-          ),
-        ]),
-      ),
-      section(
-        settings.lastFmConnected
-          ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
-          : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
-      ),
-      ...(settings.lastFmConnected
-        ? [
-            input(
-              "lastfm_scrobbling",
-              "Last.fm scrobbling",
-              toggle("enabled", "Enabled", settings.lastFmEnabled),
-              { optional: true },
-            ),
-            actions("lastfm_actions", [
-              button("disconnect_lastfm", plain("Disconnect"), {
-                style: "danger",
-                value,
-                confirm: confirm(
-                  "Disconnect Last.fm?",
-                  "This removes your saved Last.fm login.",
-                  "Disconnect",
-                ),
-              }),
-            ]),
-          ]
-        : when(
-            settings.lastFmAvailable,
-            actions("lastfm_actions", [
-              button("connect_lastfm", plain("Log in to Last.fm"), { value }),
-            ]),
-          )),
-      input(
-        "listenbrainz_scrobbling",
-        "ListenBrainz scrobbling",
-        toggle("enabled", "Enabled", settings.listenBrainzEnabled),
-        {
-          optional: true,
-          hint: settings.listenBrainzConnected
-            ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
-            : "Uses your ListenBrainz user token",
-        },
-      ),
-      input(
-        "listenbrainz_token",
-        "ListenBrainz API key / user token",
-        {
-          type: "plain_text_input",
-          action_id: "value",
-          placeholder: plain(
-            settings.listenBrainzConnected ? "Saved" : "Paste token",
-          ),
-        },
-        {
-          optional: true,
-          hint: settings.listenBrainzConnected
-            ? "Leave blank to keep the saved token"
-            : "Find it in ListenBrainz settings",
-        },
-      ),
-      ...when(
-        settings.listenBrainzConnected,
-        actions("listenbrainz_actions", [
-          button("disconnect_listenbrainz", plain("Remove token"), {
-            style: "danger",
-            value,
-            confirm: confirm(
-              "Remove ListenBrainz token?",
-              "This disables ListenBrainz scrobbling and removes your saved token.",
-              "Remove",
-            ),
-          }),
-        ]),
-      ),
-    ];
-    const integrationBlocks = admin
-      ? integrationSettingsBlocks({
-          sessionId: this.id,
-          grants: [...this.integrations.entries()].map(([userId, grant]) => ({
-            userId,
-            requestId: grant.requestId,
-            permissions: [...grant.permissions],
-          })),
-          maxBlocks:
-            slackModalBlockLimit - sessionBlocks.length - userBlocks.length,
-          page: integrationPage,
-        })
-      : [];
-    return {
-      type: "modal",
-      callback_id: "save_settings",
-      private_metadata: JSON.stringify({
-        sessionId: this.id,
-        hostId: this.hostId,
-        integrationPage,
+  // Settings opened afresh has no metadata of its own, and keeps the host it
+  // opened under after that, so a submission made across a change of host is
+  // still caught as stale.
+  private settingsView(
+    userId: string,
+    context: SettingsChange & { hostId?: string } = {},
+  ) {
+    const saveDefaults = this.canSaveChannelDefaults(userId);
+    const saved = saveDefaults
+      ? this.store.channelDefaultsSaved(this.roomId)
+      : undefined;
+    return settingsView({
+      sessionId: this.id,
+      // An empty host is Settings opened while there was none.
+      hostId:
+        context.hostId === undefined
+          ? this.hostId
+          : context.hostId || undefined,
+      ...defined({
+        tab: context.tab,
+        draft: context.draft,
+        notice: context.notice,
+        revision: context.revision,
       }),
-      title: plain("HuddleFM settings"),
-      submit: plain("Save"),
-      close: plain("Cancel"),
-      blocks: [...sessionBlocks, ...integrationBlocks, ...userBlocks],
+      integrationPage: context.integrationPage ?? 0,
+      access: {
+        volume: this.can(userId, "volume"),
+        configure: this.can(userId, "configure-settings"),
+        admin: this.settingsAdmin(userId),
+        endSession: this.can(userId, "end-session"),
+        saveDefaults,
+      },
+      session: {
+        hostId: this.hostId,
+        volume: this.volume,
+        displayMode: this.displayMode,
+        autoplayMode: this.autoplayMode,
+        loopMode: this.loopMode,
+        transitionMode: this.transitionMode,
+        duckingMode: this.duckingMode,
+        anchorEnabled: this.anchorEnabled,
+        allowed: this.allowed,
+      },
+      user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
+      yourData: this.isParticipantOrManager(userId),
+      channel: {
+        ...(saved && this.store.channelDefaults(this.roomId)
+          ? { defaults: saved }
+          : {}),
+        saves: this.store
+          .sessionSaves([{ type: "channel", id: this.roomId }])
+          .filter((save) => this.canDeleteSave(userId, save))
+          .map((save) => ({
+            id: save.id,
+            name: save.name,
+            savedBy: save.savedBy,
+            savedAt: save.savedAt,
+            songs: save.tracks.length,
+          })),
+      },
+      integrations: [...this.integrations.entries()].map(([userId, grant]) => ({
+        userId,
+        requestId: grant.requestId,
+        permissions: [...grant.permissions],
+      })),
+    });
+  }
+
+  // Settings' metadata as of this interaction, for a dialog opened over it to
+  // carry and redraw it with when it is done.
+  private settingsMetadata(interaction: Interaction) {
+    const context = this.settingsContext(interaction);
+    return {
+      sessionId: this.id,
+      hostId: context.hostId ?? this.hostId ?? "",
+      ...defined({ tab: context.tab }),
+      integrationPage: context.integrationPage,
+      revision: context.revision,
+      draft: context.draft,
     };
+  }
+
+  // Deletes a session saved to this channel, from the Channel tab.
+  private async deleteChannelSave(interaction: Interaction) {
+    const { userId } = interaction;
+    const save = this.store
+      .sessionSaves([{ type: "channel", id: this.roomId }])
+      .find((save) => save.id === interaction.value);
+    if (!save)
+      await this.notice(userId, "That saved session is no longer available.");
+    else if (!this.canDeleteSave(userId, save))
+      return this.notice(
+        userId,
+        "Only whoever saved it or a channel manager can delete that saved session.",
+      );
+    else {
+      this.store.deleteSessionSave(save.id);
+      this.audit.record("session.save_deleted", userId, {
+        sessionId: this.id,
+        ownerType: save.owner.type,
+        ownerId: save.owner.id,
+        saveId: save.id,
+        name: save.name,
+        songs: save.tracks.length,
+      });
+    }
+    if (interaction.viewId) await this.updateSettings(interaction);
   }
 
   private async lastFmModal(interaction: Interaction) {
@@ -4844,7 +4656,10 @@ export class Coordinator {
       await this.slack.pushModal(interaction.triggerId, {
         type: "modal",
         callback_id: "lastfm_login",
-        private_metadata: JSON.stringify({ sessionId: this.id }),
+        private_metadata: dialogMetadata(
+          this.id,
+          this.settingsMetadata(interaction),
+        ),
         title: plain("Connect Last.fm"),
         close: plain("Cancel"),
         blocks: [
@@ -4910,6 +4725,182 @@ export class Coordinator {
         `Last.fm login is not complete: ${message(error)}`,
       );
     }
+  }
+
+  // Your data keeps the metadata of Settings under it, to redraw it after a
+  // deletion changes what it shows.
+  private yourDataView(
+    userId: string,
+    settings: ReturnType<Coordinator["settingsMetadata"]>,
+    notice?: string,
+  ) {
+    const data = this.store.userData(userId);
+    const save = (save: SessionSave) => ({
+      id: save.id,
+      name: save.name,
+      savedBy: save.savedBy,
+      savedAt: save.savedAt,
+      songs: save.tracks.length,
+    });
+    return yourDataView({
+      sessionId: this.id,
+      settings,
+      ...defined({ notice }),
+      added: data.added,
+      plays: data.plays,
+      likes: data.likes,
+      skips: data.skips,
+      scrobbles: data.scrobbles,
+      saves: data.saves.map(save),
+      channelSaves: data.channelSaves.map((item) => ({
+        ...save(item),
+        channelId: item.owner.id,
+      })),
+    });
+  }
+
+  private async openYourData(interaction: Interaction) {
+    if (!interaction.triggerId) return;
+    await this.slack.pushModal(
+      interaction.triggerId,
+      this.yourDataView(interaction.userId, this.settingsMetadata(interaction)),
+    );
+  }
+
+  // Deletes one kind of what is kept about the user, or all of it, from Your
+  // data. Only ever the user's own: each kind is looked up by their ID. The
+  // audit log records that it happened, never what was deleted.
+  private async deleteYourData(
+    interaction: Interaction,
+    kind:
+      | "own_save"
+      | "channel_save"
+      | "added"
+      | "plays"
+      | "likes"
+      | "skips"
+      | "scrobbles"
+      | "all",
+  ) {
+    const { userId } = interaction;
+    let count = 0;
+    let notice: string;
+    if (kind === "own_save" || kind === "channel_save") {
+      const data = this.store.userData(userId);
+      const save = (kind === "own_save" ? data.saves : data.channelSaves).find(
+        (save) => save.id === interaction.value,
+      );
+      if (save) {
+        this.store.deleteSessionSave(save.id);
+        count = 1;
+        notice = `Deleted “${escape(save.name)}”.`;
+      } else notice = "That saved session is no longer there.";
+    } else if (kind === "all") {
+      this.store.forgetUser(userId);
+      notice =
+        "Deleted everything kept about you, apart from sessions you saved to channels.";
+    } else {
+      count =
+        kind === "added"
+          ? this.store.forgetAddedTracks(userId)
+          : kind === "plays"
+            ? this.store.deleteUserPlays(userId)
+            : kind === "likes"
+              ? this.store.deleteUserLikes(userId)
+              : kind === "skips"
+                ? this.store.deleteUserSkips(userId)
+                : this.store.deleteUserScrobbles(userId);
+      const [one, many] = deletedNouns[kind];
+      notice =
+        kind === "added"
+          ? `Your name is off ${songCount(count)} you added.`
+          : `Deleted ${count} ${count === 1 ? one : many}.`;
+    }
+    this.audit.record("data.deleted", userId, {
+      sessionId: this.id,
+      kind,
+      ...(kind === "all" ? {} : { count }),
+    });
+    if (kind !== "own_save" && kind !== "channel_save")
+      void this.recommendations?.refreshUser(userId);
+    if (kind === "all") this.scrobbling?.syncAnalyticsUser(userId);
+    // Settings under it would otherwise save back what was just deleted.
+    const settings = this.settingsMetadata(interaction);
+    if (kind === "all") settings.draft = withoutUserForm(settings.draft);
+    if (interaction.viewId)
+      await this.slack.updateModal(
+        interaction.viewId,
+        interaction.viewHash,
+        this.yourDataView(userId, settings, notice),
+      );
+    if (interaction.previousViewId)
+      await this.slack.updateModal(
+        interaction.previousViewId,
+        undefined,
+        this.settingsView(userId, settings),
+      );
+  }
+
+  private async listenBrainzTokenModal(interaction: Interaction) {
+    if (!this.scrobbling || !interaction.triggerId) return;
+    await this.slack.pushModal(
+      interaction.triggerId,
+      listenBrainzTokenView(this.id, this.settingsMetadata(interaction)),
+    );
+  }
+
+  // The token form closes when submitted, so Settings under it says how
+  // checking the token went.
+  private async listenBrainzTokenSubmission(interaction: Interaction) {
+    if (!this.scrobbling) return;
+    const token = interaction.state.listenbrainz_token?.value?.value?.trim();
+    if (!token) return;
+    let notice: string;
+    try {
+      const previous = this.scrobblingSnapshot(interaction.userId);
+      const wasEnabled = this.scrobbling.settings(
+        interaction.userId,
+      ).listenBrainzEnabled;
+      const username = await this.scrobbling.setListenBrainz(
+        interaction.userId,
+        token,
+        true,
+      );
+      notice = `ListenBrainz connected${username ? ` as ${escape(username)}` : ""}.`;
+      const changes = settingsChanges(
+        previous,
+        this.scrobblingSnapshot(interaction.userId),
+      );
+      this.audit.record("settings.changed", interaction.userId, {
+        sessionId: this.id,
+        source: "listenbrainz_token",
+        changed: changedSettings(changes),
+        changes,
+      });
+      this.store.incrementUsage("settings");
+      if (
+        !wasEnabled &&
+        this.scrobbling.sessionEnabled(this.id, interaction.userId)
+      )
+        this.playbackScrobbling?.settingsEnabled(interaction.userId);
+    } catch (error) {
+      this.log.warn(
+        {
+          event: "listenbrainz_connect_failed",
+          userId: interaction.userId,
+          err: error,
+        },
+        "Could not connect ListenBrainz",
+      );
+      notice = `ListenBrainz was not connected: ${escape(truncate(message(error), 500))}`;
+    }
+    if (interaction.previousViewId)
+      await this.slack.updateModal(
+        interaction.previousViewId,
+        undefined,
+        this.settingsViewFor(interaction, { notice }),
+      );
+    else await this.notice(interaction.userId, notice);
   }
 
   private async disconnectLastFm(interaction: Interaction) {
@@ -5001,17 +4992,17 @@ export class Coordinator {
     };
     if (
       metadata.sessionId !== this.id ||
-      metadata.hostId !== this.hostId ||
+      (metadata.hostId || undefined) !== this.hostId ||
       !this.canOpenSettings(interaction.userId)
     )
       return this.notice(
         interaction.userId,
         "Settings are stale; reopen them.",
       );
+    // Edits made on other tabs count as much as those on screen.
+    const state = this.settingsContext(interaction).draft;
     const admin = this.settingsAdmin(interaction.userId);
-    const nextHost = admin
-      ? interaction.state.host?.user?.selected_user
-      : undefined;
+    const nextHost = admin ? state.host?.user?.selected_user : undefined;
     if (nextHost === this.botUserId)
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
@@ -5021,7 +5012,7 @@ export class Coordinator {
       );
     const previous = this.settingsSnapshot();
     const previousScrobbling = this.scrobblingSnapshot(interaction.userId);
-    const value = interaction.state.volume?.percent?.value?.trim();
+    const value = state.volume?.percent?.selected_option?.value?.trim();
     if (value !== undefined && this.can(interaction.userId, "volume")) {
       const percent = Number(value);
       if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
@@ -5033,7 +5024,6 @@ export class Coordinator {
       this.sendMedia({ type: "volume", value: this.volume });
       this.store.setSession(this.id, { volume: this.volume });
     }
-    const { state } = interaction;
     if (this.can(interaction.userId, "configure-settings"))
       await this.applySettings({
         displayMode: selected(state.display?.mode, displayModes),
@@ -5043,17 +5033,11 @@ export class Coordinator {
         duckingMode: selected(state.ducking?.mode, duckingModes),
         anchorEnabled: checked(state.anchor?.enabled),
       });
-    const preset = admin
-      ? state.permission_preset?.selected?.selected_option?.value
-      : undefined;
+    // A preset only fills in the checkboxes, so they are all that is saved.
     const chosen = admin
       ? state.permissions?.selected?.selected_options
       : undefined;
-    if (preset)
-      this.setPermissions(
-        permissionPresets[preset as keyof typeof permissionPresets],
-      );
-    else if (chosen)
+    if (chosen)
       this.setPermissions(
         chosen.map((option) => option.value).filter(Boolean) as string[],
       );
@@ -5067,25 +5051,39 @@ export class Coordinator {
         let newlyEnabled = false;
         const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
         if (mode) this.scrobbling.setMode(interaction.userId, mode);
-        const lastFm = checked(state.lastfm_scrobbling?.enabled);
-        if (lastFm !== undefined) {
-          newlyEnabled ||= lastFm && !userSettings.lastFmEnabled;
-          this.scrobbling.setLastFmEnabled(interaction.userId, lastFm);
+        const services = submittedScrobbleServices(state.scrobble_to);
+        // A draft can hold a choice for a service disconnected since, which
+        // there is nothing left to apply to.
+        if (services?.lastfm !== undefined && userSettings.lastFmConnected) {
+          newlyEnabled ||= services.lastfm && !userSettings.lastFmEnabled;
+          this.scrobbling.setLastFmEnabled(interaction.userId, services.lastfm);
         }
-        const listenBrainz = checked(state.listenbrainz_scrobbling?.enabled);
-        const listenBrainzToken =
-          state.listenbrainz_token?.value?.value?.trim();
-        if (listenBrainz !== undefined) {
+        if (
+          services?.listenbrainz !== undefined &&
+          userSettings.listenBrainzConnected
+        ) {
           newlyEnabled ||=
-            listenBrainz &&
-            (!userSettings.listenBrainzEnabled || Boolean(listenBrainzToken));
+            services.listenbrainz && !userSettings.listenBrainzEnabled;
           await this.scrobbling.setListenBrainz(
             interaction.userId,
-            listenBrainzToken || undefined,
-            listenBrainz,
+            undefined,
+            services.listenbrainz,
           );
         }
-        // After any service this save connects, so its checkbox counts.
+        // The mode is the default for new Huddles, so a change to it leaves
+        // this session as the form showed it.
+        const session = checked(state.session_scrobbling?.enabled);
+        if (
+          session !== undefined &&
+          userSettings.configured &&
+          (session !== userSettings.sessionEnabled ||
+            (mode !== undefined && mode !== userSettings.mode))
+        )
+          this.scrobbling.setSessionEnabled(
+            this.id,
+            interaction.userId,
+            session,
+          );
         const sources = submittedHuddleMixSources(state.huddle_mix);
         if (sources)
           this.scrobbling.setHuddleMixSources(interaction.userId, sources);
@@ -5191,19 +5189,19 @@ export class Coordinator {
   }
 
   // Saves the session settings shown in Settings, including edits not yet
-  // saved, as what new sessions in this channel start with. Only the settings
+  // saved on any of its tabs, as what new sessions in this channel start with. Only the settings
   // the user can see are saved; the rest keep what was saved before, or the
   // usual default. The session itself is left alone until Settings is saved.
   private async saveChannelDefaults(interaction: Interaction) {
     if (!(await this.channelDefaultsAllowed(interaction))) return;
     const fields = this.savableDefaults(interaction.userId);
-    const { state } = interaction;
+    const state = this.settingsContext(interaction).draft;
     const defaults: ChannelDefaults = {
       ...this.store.channelDefaults(this.roomId),
     };
     if (fields.includes("volume")) {
       let volume = this.volume;
-      const percentText = state.volume?.percent?.value?.trim();
+      const percentText = state.volume?.percent?.selected_option?.value?.trim();
       if (percentText !== undefined) {
         const percent = Number(percentText);
         if (
@@ -5236,15 +5234,10 @@ export class Coordinator {
         checked(state.anchor?.enabled) ?? this.anchorEnabled;
     }
     if (fields.includes("permissions")) {
-      const preset = state.permission_preset?.selected?.selected_option?.value;
       const chosen = state.permissions?.selected?.selected_options
         ?.map((option) => option.value)
         .filter((value): value is string => Boolean(value));
-      const allowed = new Set<string>(
-        preset && preset in permissionPresets
-          ? permissionPresets[preset as keyof typeof permissionPresets]
-          : (chosen ?? this.allowed),
-      );
+      const allowed = new Set<string>(chosen ?? this.allowed);
       defaults.permissions = capabilities.filter((capability) =>
         allowed.has(capability),
       );
@@ -5287,7 +5280,10 @@ export class Coordinator {
       return false;
     }
     const metadata = parseMetadata(interaction.metadata);
-    if (metadata.sessionId !== this.id || metadata.hostId !== this.hostId) {
+    if (
+      metadata.sessionId !== this.id ||
+      (metadata.hostId || undefined) !== this.hostId
+    ) {
       await this.notice(interaction.userId, "Settings are stale; reopen them.");
       return false;
     }
@@ -5442,10 +5438,23 @@ export class Coordinator {
 
   // Who may delete a save: its owner's, and for a channel's, whoever saved
   // it or can end sessions here.
+  // A channel's saves are deleted by whoever saved them, anyone who can end
+  // the session, and the channel's managers.
   private canDeleteSave(userId: string, save: SessionSave) {
+    if (this.isExcluded(userId)) return false;
     return save.owner.type === "user"
       ? save.owner.id === userId
-      : save.savedBy === userId || this.can(userId, "end-session");
+      : save.savedBy === userId ||
+          this.can(userId, "end-session") ||
+          (save.owner.id === this.roomId && this.isChannelManager(userId));
+  }
+
+  private isChannelManager(userId: string) {
+    return (
+      !this.isExcluded(userId) &&
+      (userId === this.config.managerUserId ||
+        this.channelManagers?.isManager(this.roomId, userId) === true)
+    );
   }
 
   // Ending asks in a dialog over Settings, where the user can save the queue
@@ -5699,7 +5708,7 @@ export class Coordinator {
           ? ""
           : mayDelete
             ? " It was kept, since not all of its songs fit."
-            : " It was kept: only whoever saved it, or someone who can end the session, can delete it.";
+            : " It was kept: only whoever saved it, a channel manager, or someone who can end the session can delete it.";
       const note =
         skipped.length || kept
           ? `Loaded “${escape(save.name)}”${skipped.length ? `, but ${skipped.join(", and ")}` : ""}.${kept}`
@@ -6217,8 +6226,9 @@ export class Coordinator {
     const [topArtist, topSongs] = [...artists].sort(
       (a, b) => b[1].length - a[1].length,
     )[0]!;
+    // Songs whose adder took their name off them count for nobody.
     const requesters = Map.groupBy(
-      songs.filter((song) => !song.automatic),
+      songs.filter((song) => !song.automatic && song.requesterId),
       (song) => song.requesterId,
     );
     const topRequester = [...requesters].sort(
@@ -6253,7 +6263,7 @@ export class Coordinator {
           "*Songs*",
           songs.map(
             (song, index) =>
-              `${index + 1}. *${escape(song.title)}* — ${escape(song.artist)}${song.automatic ? " · Autoplay" : ` · <@${song.requesterId}>`}`,
+              `${index + 1}. *${escape(song.title)}* — ${escape(song.artist)}${song.automatic ? " · Autoplay" : song.requesterId ? ` · <@${song.requesterId}>` : ""}`,
           ),
         ),
       ],

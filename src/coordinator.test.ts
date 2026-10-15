@@ -9,7 +9,7 @@ import { Store, type DuckingMode, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
-import { parseLikeValue } from "./coordinator-ui.ts";
+import { addedBy, parseLikeValue } from "./coordinator-ui.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
 import { ChannelManagers } from "./channel-managers.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
@@ -141,6 +141,7 @@ function setup(
       setEndMessage: () => {},
       sessionSaves: () => [],
       channelDefaults: () => undefined,
+      channelDefaultsSaved: () => undefined,
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
       },
@@ -2185,7 +2186,7 @@ test("a channel manager outside the huddle can end the session", async () => {
   expect(result.media).toContainEqual({ type: "leave" });
 });
 
-function settingsButtons(view: unknown) {
+function blockButtons(view: unknown, blockId: string) {
   const blocks = (
     view as {
       blocks: { block_id?: string; elements?: { action_id: string }[] }[];
@@ -2193,27 +2194,63 @@ function settingsButtons(view: unknown) {
   ).blocks;
   return (
     blocks
-      .find((block) => block.block_id === "session_actions")
+      .find((block) => block.block_id === blockId)
       ?.elements?.map((element) => element.action_id) ?? []
   );
 }
 
+// The buttons under the session's settings.
+const settingsButtons = (view: unknown) =>
+  blockButtons(view, "session_actions");
+// The Channel tab's buttons for the channel's defaults.
+const channelButtons = (view: unknown) =>
+  blockButtons(view, "channel_defaults_actions");
+// The tabs a Settings view offers.
+const settingsTabsOf = (view: unknown) =>
+  blockButtons(view, "settings_tabs").map((id) =>
+    id.replace("settings_tab_", ""),
+  );
+
 // Presses a Settings button with the modal's state and metadata.
 function pressInSettings(
-  result: ReturnType<typeof channelManagerSetup>,
+  result: Pick<ReturnType<typeof setup>, "coordinator">,
   userId: string,
   actionId: string,
   state: Parameters<Coordinator["action"]>[0]["state"] = {},
   hostId = "host",
+  metadata: Record<string, unknown> = {},
+  value: string = result.coordinator.id,
 ) {
   return result.coordinator.action({
-    ...interaction(result.coordinator, actionId, result.coordinator.id),
+    ...interaction(result.coordinator, actionId, value),
     userId,
     messageTs: "",
     viewId: "view-1",
-    metadata: JSON.stringify({ sessionId: result.coordinator.id, hostId }),
+    metadata: JSON.stringify({
+      sessionId: result.coordinator.id,
+      hostId,
+      ...metadata,
+    }),
     state,
   });
+}
+
+// Switches open Settings to a tab and returns what it then shows.
+async function settingsTab(
+  result: Pick<ReturnType<typeof setup>, "coordinator" | "updatedModals">,
+  userId: string,
+  tab: string,
+  metadata: Record<string, unknown> = {},
+) {
+  await pressInSettings(
+    result,
+    userId,
+    `settings_tab_${tab}`,
+    {},
+    "host",
+    metadata,
+  );
+  return result.updatedModals.at(-1)![2];
 }
 
 test("the configured manager can save and clear the channel's defaults", async () => {
@@ -2227,16 +2264,26 @@ test("the configured manager can save and clear the channel's defaults", async (
   );
   await result.coordinator.start();
   await result.act("manager", "open_settings");
-  // Left of End session; Clear appears only once there is something saved.
-  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
-    "save_channel_defaults",
-    "open_end_session",
-  ]);
+  const opened = (result.modals.at(-1) as unknown[])[1];
+  expect(settingsTabsOf(opened)).toEqual(["you", "session", "channel", "host"]);
+  expect(settingsButtons(opened)).toEqual(["open_end_session"]);
+  // Clear appears only once there is something saved.
+  const channel = await settingsTab(result, "manager", "channel");
+  expect(channelButtons(channel)).toEqual(["save_channel_defaults"]);
+  expect(JSON.stringify(channel)).toContain("None saved.");
 
-  await pressInSettings(result, "manager", "save_channel_defaults", {
-    autoplay: { mode: { selected_option: { value: "huddle" } } },
-    anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
-  });
+  // An edit on the Session tab, kept while the Channel tab is shown, counts.
+  await pressInSettings(
+    result,
+    "manager",
+    "save_channel_defaults",
+    { anchor: { enabled: { selected_options: [{ value: "enabled" }] } } },
+    "host",
+    {
+      tab: "channel",
+      draft: { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+    },
+  );
   expect(result.ephemeral).toContain(
     "Saved. New sessions in this channel will start with these settings.",
   );
@@ -2252,20 +2299,27 @@ test("the configured manager can save and clear the channel's defaults", async (
     permissions: ["add", "remove-own"],
   });
   expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+  const saved = result.updatedModals.at(-1)![2];
+  expect(channelButtons(saved)).toEqual([
     "save_channel_defaults",
     "clear_channel_defaults",
-    "open_end_session",
   ]);
+  expect(JSON.stringify(saved)).toContain("Saved by <@manager>");
 
-  await pressInSettings(result, "manager", "clear_channel_defaults");
+  await pressInSettings(
+    result,
+    "manager",
+    "clear_channel_defaults",
+    {},
+    "host",
+    { tab: "channel" },
+  );
   expect(store.channelDefaults("channel")).toBeUndefined();
   expect(result.ephemeral).toContain(
     "Cleared. New sessions in this channel will start with the usual settings.",
   );
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+  expect(channelButtons(result.updatedModals.at(-1)![2])).toEqual([
     "save_channel_defaults",
-    "open_end_session",
   ]);
   await result.coordinator.endFromSlack();
 });
@@ -2321,8 +2375,9 @@ test("a channel manager who sees no settings cannot save them as defaults", asyn
   );
   await result.coordinator.start();
   await result.act("guest", "open_settings");
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
-    "open_end_session",
+  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([
+    "you",
+    "session",
   ]);
   await pressInSettings(result, "guest", "save_channel_defaults", {
     permissions: { selected: { selected_options: [{ value: "clear" }] } },
@@ -2350,14 +2405,17 @@ test("a channel manager saves only the settings they can see", async () => {
   );
   await result.coordinator.start();
   await result.act("guest", "open_settings");
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
-    "save_channel_defaults",
-    "clear_channel_defaults",
-    "open_end_session",
+  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([
+    "you",
+    "session",
+    "channel",
   ]);
+  expect(channelButtons(await settingsTab(result, "guest", "channel"))).toEqual(
+    ["save_channel_defaults", "clear_channel_defaults"],
+  );
   // The permissions are not in the guest's form, so a forged value is ignored.
   await pressInSettings(result, "guest", "save_channel_defaults", {
-    volume: { percent: { value: "25" } },
+    volume: { percent: { selected_option: { value: "25" } } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
     permissions: { selected: { selected_options: [{ value: "clear" }] } },
   });
@@ -2373,8 +2431,10 @@ test("Settings in a direct message offers no channel defaults", async () => {
   Object.assign(result.coordinator.room, { sourceChannelId: "D123" });
   await result.coordinator.start();
   await result.act("manager", "open_settings");
-  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
-    "open_end_session",
+  expect(settingsTabsOf((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "you",
+    "session",
+    "host",
   ]);
   await result.coordinator.endFromSlack();
 });
@@ -2384,9 +2444,160 @@ test("channel managers granted nothing are not offered the channel's defaults", 
   await result.coordinator.start();
   await result.act("host", "open_settings");
   expect(result.lookups).toEqual([]);
-  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
-    "open_end_session",
+  expect(settingsTabsOf((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "you",
+    "session",
+    "host",
   ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a channel manager deletes the channel's saved sessions from Settings", async () => {
+  const store = new Store(":memory:");
+  const channel = { type: "channel", id: "channel" } as const;
+  const hosts = store.addSessionSave(channel, "Host's", "host", [], {});
+  const guests = store.addSessionSave(channel, "Guest's", "guest", [], {});
+  const result = channelManagerSetup(
+    ["guest"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  expect(result.lookups).toEqual(["channel"]);
+  const tab = JSON.stringify(await settingsTab(result, "guest", "channel"));
+  expect(tab).toContain(`"block_id":"channel_save_${hosts}"`);
+  expect(tab).toContain(`"block_id":"channel_save_${guests}"`);
+
+  await pressInSettings(
+    result,
+    "guest",
+    "delete_channel_save",
+    {},
+    "host",
+    { tab: "channel" },
+    hosts,
+  );
+  expect(store.sessionSaves([channel]).map((save) => save.id)).toEqual([
+    guests,
+  ]);
+  const after = JSON.stringify(result.updatedModals.at(-1)![2]);
+  expect(after).not.toContain(`channel_save_${hosts}`);
+  expect(after).toContain(`channel_save_${guests}`);
+  expect(result.audit).toContainEqual([
+    "session.save_deleted",
+    "guest",
+    expect.objectContaining({
+      saveId: hosts,
+      name: "Host's",
+      ownerType: "channel",
+    }),
+  ]);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("others delete only the channel saves they made", async () => {
+  const store = new Store(":memory:");
+  const channel = { type: "channel", id: "channel" } as const;
+  const hosts = store.addSessionSave(channel, "Host's", "host", [], {});
+  const guests = store.addSessionSave(channel, "Guest's", "guest", [], {});
+  const result = channelManagerSetup(
+    ["someone-else"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  const tab = JSON.stringify(await settingsTab(result, "guest", "channel"));
+  expect(tab).not.toContain(`channel_save_${hosts}`);
+  expect(tab).toContain(`channel_save_${guests}`);
+  expect(tab).not.toContain("channel_defaults_actions");
+
+  await pressInSettings(
+    result,
+    "guest",
+    "delete_channel_save",
+    {},
+    "host",
+    { tab: "channel" },
+    hosts,
+  );
+  expect(result.ephemeral.at(-1)).toBe(
+    "Only whoever saved it or a channel manager can delete that saved session.",
+  );
+  await pressInSettings(
+    result,
+    "guest",
+    "delete_channel_save",
+    {},
+    "host",
+    { tab: "channel" },
+    guests,
+  );
+  expect(store.sessionSaves([channel]).map((save) => save.id)).toEqual([hosts]);
+  // With nothing left on it, the Channel tab goes and Settings falls back.
+  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([]);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("edits on one Settings tab are kept across tabs and saved together", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings"),
+  );
+  // Leaving the Session tab with an unsaved change.
+  await pressInSettings(
+    result,
+    "host",
+    "settings_tab_host",
+    { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+    "host",
+    { tab: "session" },
+  );
+  const host = result.updatedModals.at(-1)![2] as {
+    private_metadata: string;
+    blocks: { block_id?: string }[];
+  };
+  expect(host.blocks.map((block) => block.block_id)).toContain("permissions");
+  expect(JSON.parse(host.private_metadata)).toMatchObject({
+    tab: "host",
+    draft: { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+  });
+  // Coming back shows it again.
+  await pressInSettings(
+    result,
+    "host",
+    "settings_tab_session",
+    {},
+    "host",
+    JSON.parse(host.private_metadata),
+  );
+  const session = result.updatedModals.at(-1)![2] as {
+    blocks: { block_id?: string; element?: Record<string, any> }[];
+  };
+  expect(
+    session.blocks.find((block) => block.block_id === "autoplay")!.element!
+      .initial_option.value,
+  ).toBe("huddle");
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "save_settings", "", "view_submission"),
+    metadata: host.private_metadata,
+    state: {
+      permissions: { selected: { selected_options: [{ value: "skip" }] } },
+    },
+  });
+  expect(Reflect.get(result.coordinator, "autoplayMode")).toBe("huddle");
+  expect([
+    ...(Reflect.get(result.coordinator, "allowed") as Set<string>),
+  ]).toEqual(["skip"]);
   await result.coordinator.endFromSlack();
 });
 
@@ -2954,7 +3165,7 @@ test("host transfers ownership and global permissions atomically", async () => {
       hostId: "host",
     }),
     state: {
-      volume: { percent: { value: "37.25" } },
+      volume: { percent: { selected_option: { value: "37.25" } } },
       host: { user: { selected_user: "guest" } },
       display: { mode: { selected_option: { value: "off" } } },
       permissions: {
@@ -3001,7 +3212,12 @@ test("autoplay defaults off and host settings persist both toggle states", async
   await result.coordinator.action(
     interaction(result.coordinator, "open_settings"),
   );
-  const modal = JSON.stringify(result.modals.at(-1));
+  // Settings opens on the session's tab; the others follow it here.
+  const modal = JSON.stringify([
+    result.modals.at(-1),
+    await settingsTab(result, "host", "you"),
+    await settingsTab(result, "host", "host"),
+  ]);
   expect(modal).toContain('"block_id":"autoplay"');
   expect(modal).toContain('"value":"related"');
   expect(modal).toContain('"value":"huddle"');
@@ -3021,7 +3237,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(modal).toContain('"value":"adaptive"');
   expect(modal).toContain('"initial_options":[]');
   const positions = [
-    '"text":"Session"',
+    '"block_id":"settings_tabs"',
     '"block_id":"volume"',
     '"block_id":"display"',
     '"block_id":"autoplay"',
@@ -3029,8 +3245,8 @@ test("autoplay defaults off and host settings persist both toggle states", async
     '"block_id":"transition"',
     '"block_id":"anchor"',
     '"block_id":"session_actions"',
-    '"text":"Permissions"',
     '"block_id":"host"',
+    '"text":"Permissions"',
     '"block_id":"permission_preset"',
     '"block_id":"permissions"',
   ].map((value) => modal.indexOf(value));
@@ -3052,7 +3268,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -3066,7 +3282,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     "view_submission",
   );
   disable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "off" } } },
   };
   await result.coordinator.action(disable);
@@ -3411,7 +3627,7 @@ test("delegated users only see and save settings they can configure", async () =
   );
   save.userId = "guest";
   save.state = {
-    volume: { percent: { value: "25" } },
+    volume: { percent: { selected_option: { value: "25" } } },
     display: { mode: { selected_option: { value: "lyrics" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
@@ -3434,12 +3650,11 @@ test("all participants can open user settings and end-session permission adds th
   const open = interaction(test.coordinator, "open_settings");
   open.userId = "guest";
   await test.coordinator.action(open);
+  // Their own settings are all a guest can change, so there are no tabs.
   expect(JSON.stringify(test.modals.at(-1))).toContain(
-    '"text":"User settings"',
+    '"block_id":"huddle_mix"',
   );
-  expect(JSON.stringify(test.modals.at(-1))).not.toContain(
-    '"block_id":"session_actions"',
-  );
+  expect(settingsTabsOf((test.modals.at(-1) as unknown[])[1])).toEqual([]);
 
   const grant = interaction(
     test.coordinator,
@@ -3453,6 +3668,10 @@ test("all participants can open user settings and end-session permission adds th
   await test.coordinator.action(grant);
   await test.coordinator.action(open);
   const modal = JSON.stringify(test.modals.at(-1));
+  expect(settingsTabsOf((test.modals.at(-1) as unknown[])[1])).toEqual([
+    "you",
+    "session",
+  ]);
   expect(modal).toContain('"block_id":"session_actions"');
   expect(modal).toContain('"text":"End session"');
   expect(modal).not.toContain('"block_id":"volume"');
@@ -3481,14 +3700,18 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const settings = JSON.stringify(test.modals.at(-1));
+  const settings = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(settings).toContain('"action_id":"connect_lastfm"');
   expect(settings).not.toContain('"block_id":"scrobbling_mode"');
   expect(settings).not.toContain('"action_id":"toggle_session_scrobbling"');
 
   const connect = interaction(test.coordinator, "connect_lastfm");
   connect.messageTs = "";
-  connect.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  connect.metadata = JSON.stringify({
+    sessionId: test.coordinator.id,
+    hostId: "host",
+    tab: "you",
+  });
   await test.coordinator.action(connect);
   const login = JSON.stringify(test.pushedModals.at(-1));
   expect(login).toContain(
@@ -3498,7 +3721,10 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
 
   const finish = interaction(test.coordinator, "continue_lastfm");
   finish.messageTs = "";
-  finish.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  // The login dialog carries Settings' own metadata, to redraw it on its tab.
+  finish.metadata = (
+    test.pushedModals.at(-1) as [unknown, { private_metadata: string }]
+  )[1].private_metadata;
   Object.assign(finish, {
     viewId: "view",
     viewHash: "hash",
@@ -3512,12 +3738,12 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
       lastFmEnabled: true,
     }),
   );
-  expect(test.updatedModals).toHaveLength(2);
-  expect(test.updatedModals[1]?.[0]).toBe("settings-view");
-  expect(JSON.stringify(test.updatedModals[1]?.[2])).toContain(
+  expect(test.updatedModals).toHaveLength(3);
+  expect(test.updatedModals[2]?.[0]).toBe("settings-view");
+  expect(JSON.stringify(test.updatedModals[2]?.[2])).toContain(
     '"action_id":"disconnect_lastfm"',
   );
-  expect(JSON.stringify(test.updatedModals[1]?.[2])).toContain(
+  expect(JSON.stringify(test.updatedModals[2]?.[2])).toContain(
     '"block_id":"scrobbling_mode"',
   );
   await test.coordinator.endFromSlack();
@@ -3557,11 +3783,14 @@ test("ask mode prompts configured users and the shared session toggle overrides 
     true,
   );
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const modal = JSON.stringify(test.modals.at(-1));
+  const modal = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(modal).toContain('"block_id":"scrobbling_mode"');
   for (const mode of ["always", "ask", "disabled"])
     expect(modal).toContain(`"value":"${mode}"`);
-  expect(modal).toContain("Disable scrobbling for this session");
+  // The prompt's answer shows as this session's choice.
+  expect(modal).toContain(
+    '"block_id":"session_scrobbling","optional":true,"label":{"type":"plain_text","text":"This session"},"element":{"type":"checkboxes","action_id":"enabled","options":[{"text":{"type":"plain_text","text":"Scrobble what I listen to here"},"value":"enabled"}],"initial_options":[{',
+  );
 
   const save = interaction(
     test.coordinator,
@@ -3592,7 +3821,7 @@ test("user settings remove saved scrobbling credentials", async () => {
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const modal = JSON.stringify(test.modals.at(-1));
+  const modal = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(modal).toContain('"action_id":"disconnect_lastfm"');
   expect(modal).toContain('"action_id":"disconnect_listenbrainz"');
 
@@ -3610,6 +3839,151 @@ test("user settings remove saved scrobbling credentials", async () => {
     huddleMixSources: ["added"],
     mode: "always",
   });
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("the You tab saves where and whether a user scrobbles", async () => {
+  const userStore = new Store(":memory:");
+  userStore.connectLastFm("host", "last-user", "session-key");
+  userStore.setListenBrainzToken("host", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("host", true);
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const you = JSON.stringify(await settingsTab(test, "host", "you"));
+  expect(you).toContain('"action_id":"services:lastfm,listenbrainz"');
+  expect(you).toContain("Connected as last-user");
+  expect(you).toContain("Connected as lb-user");
+  // Last.fm is connected, though no longer configured, so it can be removed.
+  expect(you).toContain('"action_id":"disconnect_lastfm"');
+  expect(you).toContain('"action_id":"disconnect_listenbrainz"');
+  expect(you).not.toContain("listenbrainz_token");
+
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    scrobble_to: {
+      "services:lastfm,listenbrainz": {
+        selected_options: [{ value: "listenbrainz" }],
+      },
+    },
+    scrobbling_mode: { mode: { selected_option: { value: "disabled" } } },
+    session_scrobbling: {
+      enabled: { selected_options: [{ value: "enabled" }] },
+    },
+  };
+  await test.coordinator.action(save);
+  expect(userStore.getUserScrobbling("host")).toMatchObject({
+    lastFmEnabled: false,
+    listenBrainzEnabled: true,
+    mode: "disabled",
+  });
+  // A new default leaves this session scrobbling, as the form showed.
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    true,
+  );
+
+  save.state = { session_scrobbling: { enabled: { selected_options: [] } } };
+  await test.coordinator.action(save);
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    false,
+  );
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("a ListenBrainz token is added in a form of its own over Settings", async () => {
+  const userStore = new Store(":memory:");
+  const tokens: string[] = [];
+  const scrobbling = new ScrobbleDispatcher(userStore, {}, (async (
+    _input,
+    init,
+  ) => {
+    const token = String(
+      (init?.headers as Record<string, string>).authorization,
+    ).replace("Token ", "");
+    tokens.push(token);
+    return Response.json(
+      token === "good"
+        ? { valid: true, user_name: "lb-user" }
+        : { valid: false },
+    );
+  }) as typeof fetch);
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const you = JSON.stringify(await settingsTab(test, "host", "you"));
+  expect(you).toContain('"action_id":"open_listenbrainz_token"');
+  // Last.fm has no app key here, so it is not offered at all.
+  expect(you).not.toContain("lastfm_account");
+
+  await pressInSettings(
+    test,
+    "host",
+    "open_listenbrainz_token",
+    { huddle_mix: { "sources:added": { selected_options: [] } } },
+    "host",
+    { tab: "you" },
+  );
+  const form = test.pushedModals.at(-1) as [
+    string,
+    { callback_id: string; private_metadata: string },
+  ];
+  expect(form[1].callback_id).toBe("listenbrainz_token");
+  // Settings' tab and unsaved edits ride along, to redraw it with.
+  expect(JSON.parse(form[1].private_metadata)).toMatchObject({
+    sessionId: test.coordinator.id,
+    settings: {
+      tab: "you",
+      draft: { huddle_mix: { "sources:added": { selected_options: [] } } },
+    },
+  });
+
+  const submit = (token: string) =>
+    test.coordinator.action({
+      ...interaction(
+        test.coordinator,
+        "listenbrainz_token",
+        "",
+        "view_submission",
+      ),
+      metadata: form[1].private_metadata,
+      previousViewId: "settings-view",
+      state: { listenbrainz_token: { value: { value: ` ${token} ` } } },
+    });
+  await submit("bad");
+  expect(userStore.getUserScrobbling("host").listenBrainzToken).toBeUndefined();
+  let settings = test.updatedModals.at(-1)!;
+  expect(settings[0]).toBe("settings-view");
+  expect(JSON.stringify(settings[2])).toContain(
+    "ListenBrainz was not connected: That ListenBrainz user token is invalid",
+  );
+
+  await submit("good");
+  expect(tokens).toEqual(["bad", "good"]);
+  expect(userStore.getUserScrobbling("host")).toMatchObject({
+    listenBrainzToken: "good",
+    listenBrainzUsername: "lb-user",
+    listenBrainzEnabled: true,
+  });
+  settings = test.updatedModals.at(-1)!;
+  const body = JSON.stringify(settings[2]);
+  expect(body).toContain("ListenBrainz connected as lb-user.");
+  expect(body).toContain('"action_id":"disconnect_listenbrainz"');
+  // Still on the You tab, with the unsaved edit kept.
+  expect(
+    JSON.parse((settings[2] as { private_metadata: string }).private_metadata),
+  ).toMatchObject({
+    tab: "you",
+    draft: { huddle_mix: { "sources:added": { selected_options: [] } } },
+  });
+  expect(body).not.toContain("good");
   await test.coordinator.endFromSlack();
   userStore.close();
 });
@@ -3634,7 +4008,7 @@ test("display mode defaults to album art and persists dropdown changes", async (
     "view_submission",
   );
   save.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     display: { mode: { selected_option: { value: "lyrics" } } },
   };
   await test.coordinator.action(save);
@@ -3686,7 +4060,7 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -3758,7 +4132,7 @@ test("autoplay favors recommendations shared by recent manual tracks", async () 
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -3814,7 +4188,7 @@ test("skipping a manual track plays the queued autoplay recommendation", async (
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -3892,7 +4266,7 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4016,7 +4390,7 @@ test("a late-prepared autoplay track still queues the following recommendation",
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4084,7 +4458,7 @@ test("player shows autoplay search while the next song is being chosen", async (
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4126,7 +4500,7 @@ test("failed recommendation lookup leaves the session running", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4172,7 +4546,7 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4198,24 +4572,40 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
 test("collaborative preset grants everything except destructive permissions", async () => {
   const test = setup();
   await test.coordinator.start();
+  await pressInSettings(
+    test,
+    "host",
+    "apply_permission_preset",
+    { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+    "host",
+    { tab: "host" },
+    "collaborative",
+  );
+  // Picking the preset ticks its permissions and saves nothing yet.
+  expect(test.permissions).toEqual([]);
+  const view = test.updatedModals.at(-1)![2] as {
+    private_metadata: string;
+    blocks: { block_id?: string; element?: Record<string, any> }[];
+  };
+  const ticked = view.blocks
+    .find((block) => block.block_id === "permissions.1")!
+    .element!.initial_options.map((option: { value: string }) => option.value);
+  expect(ticked).toContain("manage-queue");
+  expect(ticked).not.toContain("clear");
+  expect(
+    view.blocks.find((block) => block.block_id === "permission_preset.1"),
+  ).toBeDefined();
+
+  // Saving submits what the checkboxes show, under their new block ID.
   await test.coordinator.action({
-    type: "view_submission",
-    userId: "host",
-    actionId: "save_settings",
-    value: "",
-    channelId: "channel",
-    messageTs: "",
-    triggerId: "",
-    metadata: JSON.stringify({
-      sessionId: test.coordinator.id,
-      hostId: "host",
-    }),
+    ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+    metadata: view.private_metadata,
     state: {
-      volume: { percent: { value: "60" } },
-      permission_preset: {
-        selected: { selected_option: { value: "collaborative" } },
+      "permissions.1": {
+        selected: {
+          selected_options: ticked.map((value: string) => ({ value })),
+        },
       },
-      permissions: { selected: { selected_options: [] } },
     },
   });
   expect(test.permissions).toContainEqual({
@@ -4238,6 +4628,25 @@ test("collaborative preset grants everything except destructive permissions", as
     capability: "end-session",
     allowed: false,
   });
+  // The edit made before picking the preset was kept too.
+  expect(Reflect.get(test.coordinator, "autoplayMode")).toBe("huddle");
+  await test.coordinator.endFromSlack();
+});
+
+test("only the host can fill in a permission preset", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await pressInSettings(
+    test,
+    "guest",
+    "apply_permission_preset",
+    {},
+    "host",
+    { tab: "host" },
+    "communism",
+  );
+  expect(test.updatedModals).toEqual([]);
+  expect(test.ephemeral.at(-1)).toBe("Only the host can change permissions.");
   await test.coordinator.endFromSlack();
 });
 
@@ -4274,7 +4683,7 @@ test("thread anchoring is disabled by default and can be enabled", async () => {
   )[1].blocks.find((block) => block.block_id === "anchor");
   expect(initialAnchor?.element.initial_options).toEqual([]);
   await action("view_submission", {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
   });
   expect(test.posted).toHaveLength(2);
@@ -5050,7 +5459,7 @@ test("host can revoke integration access from settings", async () => {
   );
 
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const hostSettings = JSON.stringify(test.modals.at(-1));
+  const hostSettings = JSON.stringify(await settingsTab(test, "host", "host"));
   expect(hostSettings).toContain('"block_id":"integrations"');
   expect(hostSettings).toContain("<@Ubot> has control of this session.");
   expect(hostSettings).toContain("Pause or resume");
@@ -5058,7 +5467,10 @@ test("host can revoke integration access from settings", async () => {
 
   const revoke = interaction(test.coordinator, "integration_revoke", granted);
   revoke.messageTs = "";
-  revoke.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  revoke.metadata = JSON.stringify({
+    sessionId: test.coordinator.id,
+    tab: "host",
+  });
   Object.assign(revoke, { viewId: "settings-view", viewHash: "hash" });
   await test.coordinator.action(revoke);
   expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
@@ -5095,7 +5507,10 @@ test("settings paginates integration grants within the modal block limit", async
   );
   Reflect.set(test.coordinator, "integrations", integrations);
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const first = test.modals.at(-1) as [string, { blocks: unknown[] }];
+  const first = ["", await settingsTab(test, "host", "host")] as [
+    string,
+    { blocks: unknown[] },
+  ];
   expect(first[1].blocks.length).toBeLessThanOrEqual(100);
   const firstBody = JSON.stringify(first);
   expect(firstBody).toContain("<@Ubot0> has control of this session.");
@@ -5121,6 +5536,7 @@ test("settings paginates integration grants within the modal block limit", async
   next.metadata = JSON.stringify({
     sessionId: test.coordinator.id,
     hostId: "host",
+    tab: "host",
     integrationPage: 0,
   });
   Object.assign(next, { viewId: "settings-view", viewHash: "hash" });
@@ -5280,7 +5696,7 @@ test("huddle mix autoplay uses compiled past additions when YouTube up next is e
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
   };
   await result.coordinator.action(enable);
@@ -5769,7 +6185,7 @@ async function enableHuddleMix(coordinator: Coordinator) {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
   };
   await coordinator.action(enable);
@@ -6199,7 +6615,7 @@ test("user settings offer a Huddle mix source per connected service", async () =
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const modal = JSON.stringify(test.modals.at(-1));
+  const modal = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(modal).toContain('"action_id":"sources:added,listenbrainz"');
   expect(modal).toContain("My ListenBrainz listening");
   expect(modal).not.toContain("My Last.fm listening");
@@ -6237,13 +6653,19 @@ test("settings selects offer an initial option Slack can match", async () => {
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const view = (test.modals.at(-1) as unknown[])[1] as {
+  type View = {
     blocks: { block_id?: string; element?: Record<string, unknown> }[];
   };
-  const selects = view.blocks.filter(
-    (block) => block.element?.type === "static_select",
-  );
+  const views = [
+    (test.modals.at(-1) as unknown[])[1],
+    await settingsTab(test, "host", "host"),
+    await settingsTab(test, "host", "you"),
+  ] as View[];
+  const selects = views
+    .flatMap((view) => view.blocks)
+    .filter((block) => block.element?.type === "static_select");
   expect(selects.map((block) => block.block_id)).toEqual([
+    "volume",
     "display",
     "autoplay",
     "loop",
@@ -6898,7 +7320,7 @@ test("saving settings audits the list of settings that changed", async () => {
     "view_submission",
   );
   save.state = {
-    volume: { percent: { value: "80" } },
+    volume: { percent: { selected_option: { value: "80" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
     loop: { mode: { selected_option: { value: "off" } } },
   };
@@ -7325,7 +7747,7 @@ test("only whoever saved a channel save, or can end the session, deletes it", as
     loadSave(result.coordinator, "guest", hosts, true),
   );
   expect(result.ephemeral.at(-1)).toContain(
-    "It was kept: only whoever saved it, or someone who can end the session, can delete it.",
+    "It was kept: only whoever saved it, a channel manager, or someone who can end the session can delete it.",
   );
   await result.coordinator.action(
     loadSave(result.coordinator, "guest", guests, true),
@@ -7513,4 +7935,202 @@ test("describes itself for the canvas until it ends, and reports membership chan
   expect(result.sessionChanges).toHaveLength(changes + 2);
   await result.coordinator.endFromSlack();
   expect(result.coordinator.canvasSession()).toBeUndefined();
+});
+
+test("Your data shows what is kept about a user and deletes only theirs", async () => {
+  const store = new Store(":memory:");
+  const result = setup(undefined, undefined, undefined, undefined, store);
+  await result.coordinator.start();
+  for (const userId of ["host", "guest"]) {
+    store.recordTrackPlay({
+      sessionId: result.coordinator.id,
+      userId,
+      title: "Heard <it>",
+      artist: "Artist",
+    });
+    store.likeTrack({ userId, title: "Liked", artist: "Artist" });
+  }
+  const mine = store.addSessionSave(
+    { type: "user", id: "host" },
+    "Mine",
+    "host",
+    [],
+    {},
+  );
+  const theirs = store.addSessionSave(
+    { type: "user", id: "guest" },
+    "Theirs",
+    "guest",
+    [],
+    {},
+  );
+
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings"),
+  );
+  const you = JSON.stringify(await settingsTab(result, "host", "you"));
+  expect(you).toContain('"action_id":"open_your_data"');
+  await pressInSettings(result, "host", "open_your_data", {}, "host", {
+    tab: "you",
+  });
+  const data = JSON.stringify(result.pushedModals.at(-1));
+  expect(data).toContain("*Songs you heard* · 1\\nHeard &lt;it&gt; — Artist");
+  expect(data).toContain(`"block_id":"delete_own_save_${mine}"`);
+  expect(data).not.toContain(theirs);
+  expect(data).toContain("never deleted");
+
+  // Your data carries Settings' metadata, to redraw it under it.
+  const dataMetadata = (
+    result.pushedModals.at(-1) as [unknown, { private_metadata: string }]
+  )[1].private_metadata;
+  expect(JSON.parse(dataMetadata)).toMatchObject({
+    sessionId: result.coordinator.id,
+    settings: { tab: "you" },
+  });
+  const press = (actionId: string, value = result.coordinator.id) =>
+    result.coordinator.action({
+      ...interaction(result.coordinator, actionId, value),
+      messageTs: "",
+      viewId: "data-view",
+      viewHash: "hash",
+      previousViewId: "settings-view",
+      metadata: dataMetadata,
+    });
+  await press("delete_data_plays");
+  expect(store.userData("host").plays.count).toBe(0);
+  expect(store.userData("guest").plays.count).toBe(1);
+  const [viewId, , view] = result.updatedModals.at(-2)!;
+  expect(viewId).toBe("data-view");
+  expect(result.updatedModals.at(-1)![0]).toBe("settings-view");
+  expect(JSON.stringify(view)).toContain("Deleted 1 play.");
+  expect(result.audit).toContainEqual([
+    "data.deleted",
+    "host",
+    { sessionId: result.coordinator.id, kind: "plays", count: 1 },
+  ]);
+
+  // Someone else's save cannot be deleted by naming it.
+  await press("delete_own_save", theirs);
+  expect(JSON.stringify(result.updatedModals.at(-2))).toContain(
+    "That saved session is no longer there.",
+  );
+  expect(store.sessionSaves([{ type: "user", id: "guest" }])).toHaveLength(1);
+  await press("delete_own_save", mine);
+  expect(store.sessionSaves([{ type: "user", id: "host" }])).toEqual([]);
+
+  // A You tab edit made before deleting everything is let go with it, so
+  // saving Settings afterwards cannot write it back.
+  const withEdit = JSON.parse(dataMetadata);
+  withEdit.settings.draft = {
+    huddle_mix: { "sources:added": { selected_options: [] } },
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+  };
+  await result.coordinator.action({
+    ...interaction(
+      result.coordinator,
+      "delete_all_data",
+      result.coordinator.id,
+    ),
+    messageTs: "",
+    viewId: "data-view",
+    viewHash: "hash",
+    previousViewId: "settings-view",
+    metadata: JSON.stringify(withEdit),
+  });
+  const redrawn = result.updatedModals.at(-1)!;
+  expect(redrawn[0]).toBe("settings-view");
+  expect(
+    JSON.parse((redrawn[2] as { private_metadata: string }).private_metadata)
+      .draft,
+  ).toEqual({ autoplay: { mode: { selected_option: { value: "huddle" } } } });
+  expect(store.userData("host").likes.count).toBe(0);
+  expect(store.userData("guest").likes.count).toBe(1);
+  expect(result.audit).toContainEqual([
+    "data.deleted",
+    "host",
+    { sessionId: result.coordinator.id, kind: "all" },
+  ]);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("a song whose adder took their name off it is shown without one", () => {
+  expect(addedBy({ requesterId: "" })).toBe("Added by a listener");
+  expect(addedBy({ requesterId: "U1" })).toBe("Added by <@U1>");
+});
+
+test("a Scrobble to choice for a service disconnected since does not stop a save", async () => {
+  const userStore = new Store(":memory:");
+  userStore.connectLastFm("host", "last-user", "session-key");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  // Disconnecting redraws Settings with the ticked box kept in its draft.
+  userStore.disconnectLastFm("host");
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+    metadata: JSON.stringify({
+      sessionId: test.coordinator.id,
+      hostId: "host",
+      draft: {
+        scrobble_to: {
+          "services:lastfm": { selected_options: [{ value: "lastfm" }] },
+        },
+      },
+    }),
+    state: { huddle_mix: { "sources:added": { selected_options: [] } } },
+  });
+  expect(test.ephemeral).toEqual([]);
+  expect(userStore.getUserScrobbling("host")).toMatchObject({
+    lastFmEnabled: false,
+    huddleMixOptIn: false,
+  });
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("Settings opened with no host is stale once someone becomes host", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "hostId", undefined);
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "open_settings"),
+    userId: "guest",
+  });
+  const metadata = (
+    test.modals.at(-1) as [unknown, { private_metadata: string }]
+  )[1].private_metadata;
+  expect(JSON.parse(metadata).hostId).toBe("");
+  Reflect.set(test.coordinator, "hostId", "host");
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+    userId: "guest",
+    metadata,
+  });
+  expect(test.ephemeral.at(-1)).toBe("Settings are stale; reopen them.");
+  await test.coordinator.endFromSlack();
+});
+
+test("songs whose adder took their name off them name nobody", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const anonymous = queued("a", { requesterId: "", status: "played" });
+  const play = await Reflect.get(result.coordinator, "playMessage").call(
+    result.coordinator,
+    anonymous,
+  );
+  expect(play.requesterLabel).toBe("Added by a listener");
+  Reflect.set(result.coordinator, "history", [
+    anonymous,
+    queued("b", { requesterId: "guest", status: "played" }),
+  ]);
+  const recap = JSON.stringify(
+    Reflect.get(result.coordinator, "recapBlocks").call(
+      result.coordinator,
+      "Ended",
+    ),
+  );
+  expect(recap).not.toContain("<@>");
+  expect(recap).toContain("*Most frequent requester:* <@guest>");
+  await result.coordinator.endFromSlack();
 });

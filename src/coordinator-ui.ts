@@ -226,9 +226,11 @@ export function artworkIcon(track?: { artwork?: string; title: string }) {
 }
 
 export function addedBy(track: { automatic?: boolean; requesterId: string }) {
-  return track.automatic
-    ? "Autoplay recommendation"
-    : `Added by <@${track.requesterId}>`;
+  // A listener can take their name off the songs they added.
+  if (track.automatic) return "Autoplay recommendation";
+  return track.requesterId
+    ? `Added by <@${track.requesterId}>`
+    : "Added by a listener";
 }
 
 export function confirm(title: string, text: string, confirmText: string) {
