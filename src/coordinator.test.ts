@@ -141,6 +141,7 @@ function setup(
       setEndMessage: () => {},
       sessionSaves: () => [],
       channelDefaults: () => undefined,
+      channelDefaultsSaved: () => undefined,
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
       },
@@ -2185,7 +2186,7 @@ test("a channel manager outside the huddle can end the session", async () => {
   expect(result.media).toContainEqual({ type: "leave" });
 });
 
-function settingsButtons(view: unknown) {
+function blockButtons(view: unknown, blockId: string) {
   const blocks = (
     view as {
       blocks: { block_id?: string; elements?: { action_id: string }[] }[];
@@ -2193,27 +2194,63 @@ function settingsButtons(view: unknown) {
   ).blocks;
   return (
     blocks
-      .find((block) => block.block_id === "session_actions")
+      .find((block) => block.block_id === blockId)
       ?.elements?.map((element) => element.action_id) ?? []
   );
 }
 
+// The buttons under the session's settings.
+const settingsButtons = (view: unknown) =>
+  blockButtons(view, "session_actions");
+// The Channel tab's buttons for the channel's defaults.
+const channelButtons = (view: unknown) =>
+  blockButtons(view, "channel_defaults_actions");
+// The tabs a Settings view offers.
+const settingsTabsOf = (view: unknown) =>
+  blockButtons(view, "settings_tabs").map((id) =>
+    id.replace("settings_tab_", ""),
+  );
+
 // Presses a Settings button with the modal's state and metadata.
 function pressInSettings(
-  result: ReturnType<typeof channelManagerSetup>,
+  result: Pick<ReturnType<typeof setup>, "coordinator">,
   userId: string,
   actionId: string,
   state: Parameters<Coordinator["action"]>[0]["state"] = {},
   hostId = "host",
+  metadata: Record<string, unknown> = {},
+  value: string = result.coordinator.id,
 ) {
   return result.coordinator.action({
-    ...interaction(result.coordinator, actionId, result.coordinator.id),
+    ...interaction(result.coordinator, actionId, value),
     userId,
     messageTs: "",
     viewId: "view-1",
-    metadata: JSON.stringify({ sessionId: result.coordinator.id, hostId }),
+    metadata: JSON.stringify({
+      sessionId: result.coordinator.id,
+      hostId,
+      ...metadata,
+    }),
     state,
   });
+}
+
+// Switches open Settings to a tab and returns what it then shows.
+async function settingsTab(
+  result: Pick<ReturnType<typeof setup>, "coordinator" | "updatedModals">,
+  userId: string,
+  tab: string,
+  metadata: Record<string, unknown> = {},
+) {
+  await pressInSettings(
+    result,
+    userId,
+    `settings_tab_${tab}`,
+    {},
+    "host",
+    metadata,
+  );
+  return result.updatedModals.at(-1)![2];
 }
 
 test("the configured manager can save and clear the channel's defaults", async () => {
@@ -2227,16 +2264,26 @@ test("the configured manager can save and clear the channel's defaults", async (
   );
   await result.coordinator.start();
   await result.act("manager", "open_settings");
-  // Left of End session; Clear appears only once there is something saved.
-  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
-    "save_channel_defaults",
-    "open_end_session",
-  ]);
+  const opened = (result.modals.at(-1) as unknown[])[1];
+  expect(settingsTabsOf(opened)).toEqual(["you", "session", "channel", "host"]);
+  expect(settingsButtons(opened)).toEqual(["open_end_session"]);
+  // Clear appears only once there is something saved.
+  const channel = await settingsTab(result, "manager", "channel");
+  expect(channelButtons(channel)).toEqual(["save_channel_defaults"]);
+  expect(JSON.stringify(channel)).toContain("None saved.");
 
-  await pressInSettings(result, "manager", "save_channel_defaults", {
-    autoplay: { mode: { selected_option: { value: "huddle" } } },
-    anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
-  });
+  // An edit on the Session tab, kept while the Channel tab is shown, counts.
+  await pressInSettings(
+    result,
+    "manager",
+    "save_channel_defaults",
+    { anchor: { enabled: { selected_options: [{ value: "enabled" }] } } },
+    "host",
+    {
+      tab: "channel",
+      draft: { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+    },
+  );
   expect(result.ephemeral).toContain(
     "Saved. New sessions in this channel will start with these settings.",
   );
@@ -2252,20 +2299,27 @@ test("the configured manager can save and clear the channel's defaults", async (
     permissions: ["add", "remove-own"],
   });
   expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+  const saved = result.updatedModals.at(-1)![2];
+  expect(channelButtons(saved)).toEqual([
     "save_channel_defaults",
     "clear_channel_defaults",
-    "open_end_session",
   ]);
+  expect(JSON.stringify(saved)).toContain("Saved by <@manager>");
 
-  await pressInSettings(result, "manager", "clear_channel_defaults");
+  await pressInSettings(
+    result,
+    "manager",
+    "clear_channel_defaults",
+    {},
+    "host",
+    { tab: "channel" },
+  );
   expect(store.channelDefaults("channel")).toBeUndefined();
   expect(result.ephemeral).toContain(
     "Cleared. New sessions in this channel will start with the usual settings.",
   );
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+  expect(channelButtons(result.updatedModals.at(-1)![2])).toEqual([
     "save_channel_defaults",
-    "open_end_session",
   ]);
   await result.coordinator.endFromSlack();
 });
@@ -2321,8 +2375,9 @@ test("a channel manager who sees no settings cannot save them as defaults", asyn
   );
   await result.coordinator.start();
   await result.act("guest", "open_settings");
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
-    "open_end_session",
+  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([
+    "you",
+    "session",
   ]);
   await pressInSettings(result, "guest", "save_channel_defaults", {
     permissions: { selected: { selected_options: [{ value: "clear" }] } },
@@ -2350,11 +2405,14 @@ test("a channel manager saves only the settings they can see", async () => {
   );
   await result.coordinator.start();
   await result.act("guest", "open_settings");
-  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
-    "save_channel_defaults",
-    "clear_channel_defaults",
-    "open_end_session",
+  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([
+    "you",
+    "session",
+    "channel",
   ]);
+  expect(channelButtons(await settingsTab(result, "guest", "channel"))).toEqual(
+    ["save_channel_defaults", "clear_channel_defaults"],
+  );
   // The permissions are not in the guest's form, so a forged value is ignored.
   await pressInSettings(result, "guest", "save_channel_defaults", {
     volume: { percent: { value: "25" } },
@@ -2373,8 +2431,10 @@ test("Settings in a direct message offers no channel defaults", async () => {
   Object.assign(result.coordinator.room, { sourceChannelId: "D123" });
   await result.coordinator.start();
   await result.act("manager", "open_settings");
-  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
-    "open_end_session",
+  expect(settingsTabsOf((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "you",
+    "session",
+    "host",
   ]);
   await result.coordinator.endFromSlack();
 });
@@ -2384,9 +2444,160 @@ test("channel managers granted nothing are not offered the channel's defaults", 
   await result.coordinator.start();
   await result.act("host", "open_settings");
   expect(result.lookups).toEqual([]);
-  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
-    "open_end_session",
+  expect(settingsTabsOf((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "you",
+    "session",
+    "host",
   ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a channel manager deletes the channel's saved sessions from Settings", async () => {
+  const store = new Store(":memory:");
+  const channel = { type: "channel", id: "channel" } as const;
+  const hosts = store.addSessionSave(channel, "Host's", "host", [], {});
+  const guests = store.addSessionSave(channel, "Guest's", "guest", [], {});
+  const result = channelManagerSetup(
+    ["guest"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  expect(result.lookups).toEqual(["channel"]);
+  const tab = JSON.stringify(await settingsTab(result, "guest", "channel"));
+  expect(tab).toContain(`"block_id":"channel_save_${hosts}"`);
+  expect(tab).toContain(`"block_id":"channel_save_${guests}"`);
+
+  await pressInSettings(
+    result,
+    "guest",
+    "delete_channel_save",
+    {},
+    "host",
+    { tab: "channel" },
+    hosts,
+  );
+  expect(store.sessionSaves([channel]).map((save) => save.id)).toEqual([
+    guests,
+  ]);
+  const after = JSON.stringify(result.updatedModals.at(-1)![2]);
+  expect(after).not.toContain(`channel_save_${hosts}`);
+  expect(after).toContain(`channel_save_${guests}`);
+  expect(result.audit).toContainEqual([
+    "session.save_deleted",
+    "guest",
+    expect.objectContaining({
+      saveId: hosts,
+      name: "Host's",
+      ownerType: "channel",
+    }),
+  ]);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("others delete only the channel saves they made", async () => {
+  const store = new Store(":memory:");
+  const channel = { type: "channel", id: "channel" } as const;
+  const hosts = store.addSessionSave(channel, "Host's", "host", [], {});
+  const guests = store.addSessionSave(channel, "Guest's", "guest", [], {});
+  const result = channelManagerSetup(
+    ["someone-else"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  const tab = JSON.stringify(await settingsTab(result, "guest", "channel"));
+  expect(tab).not.toContain(`channel_save_${hosts}`);
+  expect(tab).toContain(`channel_save_${guests}`);
+  expect(tab).not.toContain("channel_defaults_actions");
+
+  await pressInSettings(
+    result,
+    "guest",
+    "delete_channel_save",
+    {},
+    "host",
+    { tab: "channel" },
+    hosts,
+  );
+  expect(result.ephemeral.at(-1)).toBe(
+    "Only whoever saved it or a channel manager can delete that saved session.",
+  );
+  await pressInSettings(
+    result,
+    "guest",
+    "delete_channel_save",
+    {},
+    "host",
+    { tab: "channel" },
+    guests,
+  );
+  expect(store.sessionSaves([channel]).map((save) => save.id)).toEqual([hosts]);
+  // With nothing left on it, the Channel tab goes and Settings falls back.
+  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([]);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("edits on one Settings tab are kept across tabs and saved together", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings"),
+  );
+  // Leaving the Session tab with an unsaved change.
+  await pressInSettings(
+    result,
+    "host",
+    "settings_tab_host",
+    { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+    "host",
+    { tab: "session" },
+  );
+  const host = result.updatedModals.at(-1)![2] as {
+    private_metadata: string;
+    blocks: { block_id?: string }[];
+  };
+  expect(host.blocks.map((block) => block.block_id)).toContain("permissions");
+  expect(JSON.parse(host.private_metadata)).toMatchObject({
+    tab: "host",
+    draft: { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+  });
+  // Coming back shows it again.
+  await pressInSettings(
+    result,
+    "host",
+    "settings_tab_session",
+    {},
+    "host",
+    JSON.parse(host.private_metadata),
+  );
+  const session = result.updatedModals.at(-1)![2] as {
+    blocks: { block_id?: string; element?: Record<string, any> }[];
+  };
+  expect(
+    session.blocks.find((block) => block.block_id === "autoplay")!.element!
+      .initial_option.value,
+  ).toBe("huddle");
+
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "save_settings", "", "view_submission"),
+    metadata: host.private_metadata,
+    state: {
+      permissions: { selected: { selected_options: [{ value: "skip" }] } },
+    },
+  });
+  expect(Reflect.get(result.coordinator, "autoplayMode")).toBe("huddle");
+  expect([
+    ...(Reflect.get(result.coordinator, "allowed") as Set<string>),
+  ]).toEqual(["skip"]);
   await result.coordinator.endFromSlack();
 });
 
@@ -3001,7 +3212,12 @@ test("autoplay defaults off and host settings persist both toggle states", async
   await result.coordinator.action(
     interaction(result.coordinator, "open_settings"),
   );
-  const modal = JSON.stringify(result.modals.at(-1));
+  // Settings opens on the session's tab; the others follow it here.
+  const modal = JSON.stringify([
+    result.modals.at(-1),
+    await settingsTab(result, "host", "you"),
+    await settingsTab(result, "host", "host"),
+  ]);
   expect(modal).toContain('"block_id":"autoplay"');
   expect(modal).toContain('"value":"related"');
   expect(modal).toContain('"value":"huddle"');
@@ -3021,7 +3237,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(modal).toContain('"value":"adaptive"');
   expect(modal).toContain('"initial_options":[]');
   const positions = [
-    '"text":"Session"',
+    '"block_id":"settings_tabs"',
     '"block_id":"volume"',
     '"block_id":"display"',
     '"block_id":"autoplay"',
@@ -3029,8 +3245,8 @@ test("autoplay defaults off and host settings persist both toggle states", async
     '"block_id":"transition"',
     '"block_id":"anchor"',
     '"block_id":"session_actions"',
-    '"text":"Permissions"',
     '"block_id":"host"',
+    '"text":"Permissions"',
     '"block_id":"permission_preset"',
     '"block_id":"permissions"',
   ].map((value) => modal.indexOf(value));
@@ -3434,12 +3650,11 @@ test("all participants can open user settings and end-session permission adds th
   const open = interaction(test.coordinator, "open_settings");
   open.userId = "guest";
   await test.coordinator.action(open);
+  // Their own settings are all a guest can change, so there are no tabs.
   expect(JSON.stringify(test.modals.at(-1))).toContain(
-    '"text":"User settings"',
+    '"block_id":"huddle_mix"',
   );
-  expect(JSON.stringify(test.modals.at(-1))).not.toContain(
-    '"block_id":"session_actions"',
-  );
+  expect(settingsTabsOf((test.modals.at(-1) as unknown[])[1])).toEqual([]);
 
   const grant = interaction(
     test.coordinator,
@@ -3453,6 +3668,10 @@ test("all participants can open user settings and end-session permission adds th
   await test.coordinator.action(grant);
   await test.coordinator.action(open);
   const modal = JSON.stringify(test.modals.at(-1));
+  expect(settingsTabsOf((test.modals.at(-1) as unknown[])[1])).toEqual([
+    "you",
+    "session",
+  ]);
   expect(modal).toContain('"block_id":"session_actions"');
   expect(modal).toContain('"text":"End session"');
   expect(modal).not.toContain('"block_id":"volume"');
@@ -3481,14 +3700,18 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const settings = JSON.stringify(test.modals.at(-1));
+  const settings = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(settings).toContain('"action_id":"connect_lastfm"');
   expect(settings).not.toContain('"block_id":"scrobbling_mode"');
   expect(settings).not.toContain('"action_id":"toggle_session_scrobbling"');
 
   const connect = interaction(test.coordinator, "connect_lastfm");
   connect.messageTs = "";
-  connect.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  connect.metadata = JSON.stringify({
+    sessionId: test.coordinator.id,
+    hostId: "host",
+    tab: "you",
+  });
   await test.coordinator.action(connect);
   const login = JSON.stringify(test.pushedModals.at(-1));
   expect(login).toContain(
@@ -3498,7 +3721,10 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
 
   const finish = interaction(test.coordinator, "continue_lastfm");
   finish.messageTs = "";
-  finish.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  // The login dialog carries Settings' own metadata, to redraw it on its tab.
+  finish.metadata = (
+    test.pushedModals.at(-1) as [unknown, { private_metadata: string }]
+  )[1].private_metadata;
   Object.assign(finish, {
     viewId: "view",
     viewHash: "hash",
@@ -3512,12 +3738,12 @@ test("Last.fm login uses the desktop authorization dialog and saves the user con
       lastFmEnabled: true,
     }),
   );
-  expect(test.updatedModals).toHaveLength(2);
-  expect(test.updatedModals[1]?.[0]).toBe("settings-view");
-  expect(JSON.stringify(test.updatedModals[1]?.[2])).toContain(
+  expect(test.updatedModals).toHaveLength(3);
+  expect(test.updatedModals[2]?.[0]).toBe("settings-view");
+  expect(JSON.stringify(test.updatedModals[2]?.[2])).toContain(
     '"action_id":"disconnect_lastfm"',
   );
-  expect(JSON.stringify(test.updatedModals[1]?.[2])).toContain(
+  expect(JSON.stringify(test.updatedModals[2]?.[2])).toContain(
     '"block_id":"scrobbling_mode"',
   );
   await test.coordinator.endFromSlack();
@@ -3557,7 +3783,7 @@ test("ask mode prompts configured users and the shared session toggle overrides 
     true,
   );
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const modal = JSON.stringify(test.modals.at(-1));
+  const modal = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(modal).toContain('"block_id":"scrobbling_mode"');
   for (const mode of ["always", "ask", "disabled"])
     expect(modal).toContain(`"value":"${mode}"`);
@@ -3592,7 +3818,7 @@ test("user settings remove saved scrobbling credentials", async () => {
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const modal = JSON.stringify(test.modals.at(-1));
+  const modal = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(modal).toContain('"action_id":"disconnect_lastfm"');
   expect(modal).toContain('"action_id":"disconnect_listenbrainz"');
 
@@ -5050,7 +5276,7 @@ test("host can revoke integration access from settings", async () => {
   );
 
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const hostSettings = JSON.stringify(test.modals.at(-1));
+  const hostSettings = JSON.stringify(await settingsTab(test, "host", "host"));
   expect(hostSettings).toContain('"block_id":"integrations"');
   expect(hostSettings).toContain("<@Ubot> has control of this session.");
   expect(hostSettings).toContain("Pause or resume");
@@ -5058,7 +5284,10 @@ test("host can revoke integration access from settings", async () => {
 
   const revoke = interaction(test.coordinator, "integration_revoke", granted);
   revoke.messageTs = "";
-  revoke.metadata = JSON.stringify({ sessionId: test.coordinator.id });
+  revoke.metadata = JSON.stringify({
+    sessionId: test.coordinator.id,
+    tab: "host",
+  });
   Object.assign(revoke, { viewId: "settings-view", viewHash: "hash" });
   await test.coordinator.action(revoke);
   expect(JSON.parse(String(test.dms.at(-1)?.[1]))).toMatchObject({
@@ -5095,7 +5324,10 @@ test("settings paginates integration grants within the modal block limit", async
   );
   Reflect.set(test.coordinator, "integrations", integrations);
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const first = test.modals.at(-1) as [string, { blocks: unknown[] }];
+  const first = ["", await settingsTab(test, "host", "host")] as [
+    string,
+    { blocks: unknown[] },
+  ];
   expect(first[1].blocks.length).toBeLessThanOrEqual(100);
   const firstBody = JSON.stringify(first);
   expect(firstBody).toContain("<@Ubot0> has control of this session.");
@@ -5121,6 +5353,7 @@ test("settings paginates integration grants within the modal block limit", async
   next.metadata = JSON.stringify({
     sessionId: test.coordinator.id,
     hostId: "host",
+    tab: "host",
     integrationPage: 0,
   });
   Object.assign(next, { viewId: "settings-view", viewHash: "hash" });
@@ -6199,7 +6432,7 @@ test("user settings offer a Huddle mix source per connected service", async () =
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const modal = JSON.stringify(test.modals.at(-1));
+  const modal = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(modal).toContain('"action_id":"sources:added,listenbrainz"');
   expect(modal).toContain("My ListenBrainz listening");
   expect(modal).not.toContain("My Last.fm listening");
@@ -6237,12 +6470,17 @@ test("settings selects offer an initial option Slack can match", async () => {
   const test = setup(undefined, undefined, undefined, scrobbling);
   await test.coordinator.start();
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
-  const view = (test.modals.at(-1) as unknown[])[1] as {
+  type View = {
     blocks: { block_id?: string; element?: Record<string, unknown> }[];
   };
-  const selects = view.blocks.filter(
-    (block) => block.element?.type === "static_select",
-  );
+  const views = [
+    (test.modals.at(-1) as unknown[])[1],
+    await settingsTab(test, "host", "host"),
+    await settingsTab(test, "host", "you"),
+  ] as View[];
+  const selects = views
+    .flatMap((view) => view.blocks)
+    .filter((block) => block.element?.type === "static_select");
   expect(selects.map((block) => block.block_id)).toEqual([
     "display",
     "autoplay",
@@ -7325,7 +7563,7 @@ test("only whoever saved a channel save, or can end the session, deletes it", as
     loadSave(result.coordinator, "guest", hosts, true),
   );
   expect(result.ephemeral.at(-1)).toContain(
-    "It was kept: only whoever saved it, or someone who can end the session, can delete it.",
+    "It was kept: only whoever saved it, a channel manager, or someone who can end the session can delete it.",
   );
   await result.coordinator.action(
     loadSave(result.coordinator, "guest", guests, true),

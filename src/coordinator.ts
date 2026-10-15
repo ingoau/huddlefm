@@ -12,7 +12,6 @@ import {
   capabilities,
   displayModes,
   duckingModes,
-  huddleMixSources,
   permissionPresets,
   recentTrackLimit,
   scrobblingModes,
@@ -25,7 +24,6 @@ import {
   type ChannelDefaults,
   type DisplayMode,
   type DuckingMode,
-  type HuddleMixSource,
   type LoopMode,
   sessionSaveNameLength,
   type SavedSession,
@@ -93,9 +91,18 @@ import {
 import { RecommendationCatalog } from "./recommendations.ts";
 import { playbackReportView } from "./playback-report.ts";
 import {
+  checked,
   defaultUserSettings,
-  huddleMixActionPrefix,
+  mergeForm,
+  parseSettingsMetadata,
+  selected,
+  settingsTabActionPrefix,
+  settingsTabFromAction,
+  settingsTabs,
   settingsView,
+  submittedHuddleMixSources,
+  type FormState,
+  type SettingsTab,
 } from "./settings-view.ts";
 import {
   changedSettings,
@@ -125,56 +132,15 @@ type Entry = TrackMetadata & {
   fadeOutSeconds?: number;
 };
 
-type InputState = Interaction["state"][string][string];
-
-// The option a select block holds, when it is one of `modes`.
-function selected<Mode extends string>(
-  state: InputState | undefined,
-  modes: readonly Mode[],
-) {
-  const value = state?.selected_option?.value as Mode | undefined;
-  return value && modes.includes(value) ? value : undefined;
-}
-
-// The choice a settings submission makes for each Huddle mix source it
-// offered, or undefined when the checkboxes were not part of it.
-function submittedHuddleMixSources(
-  block: Record<string, InputState> | undefined,
-) {
-  const [actionId, state] =
-    Object.entries(block ?? {}).find(([actionId]) =>
-      actionId.startsWith(huddleMixActionPrefix),
-    ) ?? [];
-  if (!actionId || !state) return undefined;
-  const offered = new Set(
-    actionId.slice(huddleMixActionPrefix.length).split(","),
-  );
-  const ticked = new Set(
-    state.selected_options?.map((option) => option.value) ?? [],
-  );
-  return Object.fromEntries(
-    huddleMixSources
-      .filter((source) => offered.has(source))
-      .map((source) => [source, ticked.has(source)]),
-  ) as Partial<Record<HuddleMixSource, boolean>>;
-}
-
-// The actions that need to know whether the user manages the channel.
-const channelDefaultsActions = new Set([
+// The actions that need to know whether the user manages the channel: those
+// that show or change the Channel tab of Settings.
+const channelRoleActions = new Set([
   "open_settings",
   "save_channel_defaults",
   "clear_channel_defaults",
+  "delete_channel_save",
+  ...settingsTabs.map((tab) => `${settingsTabActionPrefix}${tab}`),
 ]);
-
-// Whether a single-option checkbox block is ticked, or undefined when the
-// block was not part of the submission.
-function checked(state: InputState | undefined) {
-  if (!state) return undefined;
-  return (
-    state.selected_options?.some((option) => option.value === "enabled") ??
-    false
-  );
-}
 
 // The object without its undefined fields, for spreading into records that
 // distinguish an absent field from an unset one.
@@ -724,7 +690,7 @@ export class Coordinator {
     await this.primeRoles(
       interaction.userId,
       ending,
-      channelDefaultsActions.has(interaction.actionId),
+      channelRoleActions.has(interaction.actionId),
     );
     this.log.debug(
       {
@@ -816,6 +782,13 @@ export class Coordinator {
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
+        delete_channel_save: () => this.deleteChannelSave(interaction),
+        ...Object.fromEntries(
+          settingsTabs.map((tab) => [
+            `${settingsTabActionPrefix}${tab}`,
+            () => this.switchSettingsTab(interaction),
+          ]),
+        ),
         integration_grants_prev: () => this.integrationGrantsPage(interaction),
         integration_grants_next: () => this.integrationGrantsPage(interaction),
       };
@@ -1793,10 +1766,11 @@ export class Coordinator {
   // The role lookups that would have to ask Slack before the user's next
   // permission check. Roles that only end the session matter only for an
   // action that can end it, and only for users who could not end it anyway.
-  // Channel managers also save the channel's defaults from Settings, so
-  // opening it or saving them asks whenever channel managers are granted
-  // anything and the user can see settings to save. A workspace admin lookup
-  // still pending could grant them that, so it asks then too.
+  // Channel managers also save the channel's defaults and delete its saved
+  // sessions from Settings, so its Channel tab asks whenever channel managers
+  // are granted anything and the user can see settings to save or the
+  // channel has saves to delete. A workspace admin lookup still pending could
+  // grant them that, so it asks then too.
   private roleLookups(
     userId: string,
     ending: boolean,
@@ -1817,7 +1791,10 @@ export class Coordinator {
       managers?.permissions !== "none" &&
       !this.roomId.startsWith("D") &&
       userId !== this.config.managerUserId &&
-      (lookups.length > 0 || this.savableDefaults(userId).length > 0);
+      (lookups.length > 0 ||
+        this.savableDefaults(userId).length > 0 ||
+        this.store.sessionSaves([{ type: "channel", id: this.roomId }]).length >
+          0);
     if (
       managers &&
       (matters(managers.permissions) || savesDefaults) &&
@@ -1869,6 +1846,8 @@ export class Coordinator {
       return interaction.actionId !== "move_queue_track";
     return (
       interaction.actionId === "open_settings" ||
+      Boolean(settingsTabFromAction(interaction.actionId)) ||
+      interaction.actionId === "delete_channel_save" ||
       interaction.actionId === "end_session" ||
       interaction.actionId === "open_end_session" ||
       interaction.actionId === "save_channel_defaults" ||
@@ -4427,27 +4406,51 @@ export class Coordinator {
       );
   }
 
-  private settingsViewFor(interaction: Interaction, page?: number) {
-    return this.settingsView(
-      interaction.userId,
-      page ?? this.integrationSettingsPage(interaction),
-    );
+  // The Settings an interaction came from: its tab, page and unsaved edits,
+  // with the inputs on screen laid over the edits from other tabs. A dialog
+  // opened over Settings carries Settings' own, so it can redraw it.
+  private settingsContext(interaction: Interaction) {
+    const parent = parseMetadata(interaction.metadata).settings;
+    if (parent) return parseSettingsMetadata(parent);
+    const metadata = parseSettingsMetadata(interaction.metadata);
+    return {
+      ...metadata,
+      draft: mergeForm(metadata.draft, interaction.state),
+    };
+  }
+
+  private settingsViewFor(
+    interaction: Interaction,
+    change: { tab?: SettingsTab; integrationPage?: number } = {},
+  ) {
+    const context = this.settingsContext(interaction);
+    return this.settingsView(interaction.userId, {
+      ...context,
+      ...defined(change),
+    });
   }
 
   // Redraws the settings modal an interaction came from.
-  private updateSettings(interaction: Interaction, page?: number) {
+  private updateSettings(
+    interaction: Interaction,
+    change: { tab?: SettingsTab; integrationPage?: number } = {},
+  ) {
     return this.slack.updateModal(
       interaction.viewId!,
       interaction.viewHash,
-      this.settingsViewFor(interaction, page),
+      this.settingsViewFor(interaction, change),
     );
   }
 
-  private integrationSettingsPage(interaction: Interaction) {
-    const page = parseMetadata(interaction.metadata).integrationPage;
-    return typeof page === "number" && Number.isInteger(page) && page > 0
-      ? page
-      : 0;
+  private async switchSettingsTab(interaction: Interaction) {
+    const tab = settingsTabFromAction(interaction.actionId);
+    if (!tab || !interaction.viewId) return;
+    if (!this.canOpenSettings(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "You do not have permission to change settings.",
+      );
+    await this.updateSettings(interaction, { tab });
   }
 
   private async integrationGrantsPage(interaction: Interaction) {
@@ -4458,25 +4461,42 @@ export class Coordinator {
       );
     const parsed = parseIntegrationSettingsPage(interaction.value);
     if (!parsed || parsed.sessionId !== this.id) return;
-    if (interaction.viewId) await this.updateSettings(interaction, parsed.page);
+    if (interaction.viewId)
+      await this.updateSettings(interaction, {
+        integrationPage: parsed.page,
+      });
   }
 
-  private settingsView(userId: string, integrationPage = 0) {
+  // Settings opened afresh has no metadata of its own, and keeps the host it
+  // opened under after that, so a submission made across a change of host is
+  // still caught as stale.
+  private settingsView(
+    userId: string,
+    context: {
+      hostId?: string;
+      tab?: SettingsTab;
+      integrationPage?: number;
+      draft?: FormState;
+    } = {},
+  ) {
     const saveDefaults = this.canSaveChannelDefaults(userId);
+    const saved = saveDefaults
+      ? this.store.channelDefaultsSaved(this.roomId)
+      : undefined;
     return settingsView({
       sessionId: this.id,
-      hostId: this.hostId,
-      integrationPage,
+      hostId: context.hostId ?? this.hostId,
+      ...defined({ tab: context.tab, draft: context.draft }),
+      integrationPage: context.integrationPage ?? 0,
       access: {
         volume: this.can(userId, "volume"),
         configure: this.can(userId, "configure-settings"),
         admin: this.settingsAdmin(userId),
         endSession: this.can(userId, "end-session"),
         saveDefaults,
-        hasChannelDefaults:
-          saveDefaults && Boolean(this.store.channelDefaults(this.roomId)),
       },
       session: {
+        hostId: this.hostId,
         volume: this.volume,
         displayMode: this.displayMode,
         autoplayMode: this.autoplayMode,
@@ -4487,12 +4507,67 @@ export class Coordinator {
         allowed: this.allowed,
       },
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
+      channel: {
+        ...(saved && this.store.channelDefaults(this.roomId)
+          ? { defaults: saved }
+          : {}),
+        saves: this.store
+          .sessionSaves([{ type: "channel", id: this.roomId }])
+          .filter((save) => this.canDeleteSave(userId, save))
+          .map((save) => ({
+            id: save.id,
+            name: save.name,
+            savedBy: save.savedBy,
+            savedAt: save.savedAt,
+            songs: save.tracks.length,
+          })),
+      },
       integrations: [...this.integrations.entries()].map(([userId, grant]) => ({
         userId,
         requestId: grant.requestId,
         permissions: [...grant.permissions],
       })),
     });
+  }
+
+  // Settings' metadata as of this interaction, for a dialog opened over it to
+  // carry and redraw it with when it is done.
+  private settingsMetadata(interaction: Interaction) {
+    const context = this.settingsContext(interaction);
+    return {
+      sessionId: this.id,
+      hostId: context.hostId ?? this.hostId,
+      ...defined({ tab: context.tab }),
+      integrationPage: context.integrationPage,
+      draft: context.draft,
+    };
+  }
+
+  // Deletes a session saved to this channel, from the Channel tab.
+  private async deleteChannelSave(interaction: Interaction) {
+    const { userId } = interaction;
+    const save = this.store
+      .sessionSaves([{ type: "channel", id: this.roomId }])
+      .find((save) => save.id === interaction.value);
+    if (!save)
+      await this.notice(userId, "That saved session is no longer available.");
+    else if (!this.canDeleteSave(userId, save))
+      return this.notice(
+        userId,
+        "Only whoever saved it or a channel manager can delete that saved session.",
+      );
+    else {
+      this.store.deleteSessionSave(save.id);
+      this.audit.record("session.save_deleted", userId, {
+        sessionId: this.id,
+        ownerType: save.owner.type,
+        ownerId: save.owner.id,
+        saveId: save.id,
+        name: save.name,
+        songs: save.tracks.length,
+      });
+    }
+    if (interaction.viewId) await this.updateSettings(interaction);
   }
 
   private async lastFmModal(interaction: Interaction) {
@@ -4502,7 +4577,10 @@ export class Coordinator {
       await this.slack.pushModal(interaction.triggerId, {
         type: "modal",
         callback_id: "lastfm_login",
-        private_metadata: JSON.stringify({ sessionId: this.id }),
+        private_metadata: JSON.stringify({
+          sessionId: this.id,
+          settings: this.settingsMetadata(interaction),
+        }),
         title: plain("Connect Last.fm"),
         close: plain("Cancel"),
         blocks: [
@@ -4666,10 +4744,10 @@ export class Coordinator {
         interaction.userId,
         "Settings are stale; reopen them.",
       );
+    // Edits made on other tabs count as much as those on screen.
+    const state = this.settingsContext(interaction).draft;
     const admin = this.settingsAdmin(interaction.userId);
-    const nextHost = admin
-      ? interaction.state.host?.user?.selected_user
-      : undefined;
+    const nextHost = admin ? state.host?.user?.selected_user : undefined;
     if (nextHost === this.botUserId)
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
@@ -4679,7 +4757,7 @@ export class Coordinator {
       );
     const previous = this.settingsSnapshot();
     const previousScrobbling = this.scrobblingSnapshot(interaction.userId);
-    const value = interaction.state.volume?.percent?.value?.trim();
+    const value = state.volume?.percent?.value?.trim();
     if (value !== undefined && this.can(interaction.userId, "volume")) {
       const percent = Number(value);
       if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
@@ -4691,7 +4769,6 @@ export class Coordinator {
       this.sendMedia({ type: "volume", value: this.volume });
       this.store.setSession(this.id, { volume: this.volume });
     }
-    const { state } = interaction;
     if (this.can(interaction.userId, "configure-settings"))
       await this.applySettings({
         displayMode: selected(state.display?.mode, displayModes),
@@ -4731,8 +4808,9 @@ export class Coordinator {
           this.scrobbling.setLastFmEnabled(interaction.userId, lastFm);
         }
         const listenBrainz = checked(state.listenbrainz_scrobbling?.enabled);
+        // The token is never kept in a draft, so only one on screen counts.
         const listenBrainzToken =
-          state.listenbrainz_token?.value?.value?.trim();
+          interaction.state.listenbrainz_token?.value?.value?.trim();
         if (listenBrainz !== undefined) {
           newlyEnabled ||=
             listenBrainz &&
@@ -4849,13 +4927,13 @@ export class Coordinator {
   }
 
   // Saves the session settings shown in Settings, including edits not yet
-  // saved, as what new sessions in this channel start with. Only the settings
+  // saved on any of its tabs, as what new sessions in this channel start with. Only the settings
   // the user can see are saved; the rest keep what was saved before, or the
   // usual default. The session itself is left alone until Settings is saved.
   private async saveChannelDefaults(interaction: Interaction) {
     if (!(await this.channelDefaultsAllowed(interaction))) return;
     const fields = this.savableDefaults(interaction.userId);
-    const { state } = interaction;
+    const state = this.settingsContext(interaction).draft;
     const defaults: ChannelDefaults = {
       ...this.store.channelDefaults(this.roomId),
     };
@@ -5100,10 +5178,23 @@ export class Coordinator {
 
   // Who may delete a save: its owner's, and for a channel's, whoever saved
   // it or can end sessions here.
+  // A channel's saves are deleted by whoever saved them, anyone who can end
+  // the session, and the channel's managers.
   private canDeleteSave(userId: string, save: SessionSave) {
+    if (this.isExcluded(userId)) return false;
     return save.owner.type === "user"
       ? save.owner.id === userId
-      : save.savedBy === userId || this.can(userId, "end-session");
+      : save.savedBy === userId ||
+          this.can(userId, "end-session") ||
+          (save.owner.id === this.roomId && this.isChannelManager(userId));
+  }
+
+  private isChannelManager(userId: string) {
+    return (
+      !this.isExcluded(userId) &&
+      (userId === this.config.managerUserId ||
+        this.channelManagers?.isManager(this.roomId, userId) === true)
+    );
   }
 
   // Ending asks in a dialog over Settings, where the user can save the queue
@@ -5357,7 +5448,7 @@ export class Coordinator {
           ? ""
           : mayDelete
             ? " It was kept, since not all of its songs fit."
-            : " It was kept: only whoever saved it, or someone who can end the session, can delete it.";
+            : " It was kept: only whoever saved it, a channel manager, or someone who can end the session can delete it.";
       const note =
         skipped.length || kept
           ? `Loaded “${escape(save.name)}”${skipped.length ? `, but ${skipped.join(", and ")}` : ""}.${kept}`

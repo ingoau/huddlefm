@@ -1289,6 +1289,20 @@ test("channel defaults keep only settings that are still valid", () => {
   expect(store.channelDefaults("C1")).toBeUndefined();
 });
 
+test("remembers who saved a channel's defaults", () => {
+  const store = new Store(":memory:");
+  expect(store.channelDefaultsSaved("C1")).toBeUndefined();
+  const before = Date.now();
+  store.setChannelDefaults("C1", { volume: 0.4 }, "U1");
+  store.setChannelDefaults("C1", { volume: 0.5 }, "U2");
+  const saved = store.channelDefaultsSaved("C1")!;
+  expect(saved.savedBy).toBe("U2");
+  expect(saved.savedAt).toBeGreaterThanOrEqual(before);
+  store.clearChannelDefaults("C1");
+  expect(store.channelDefaultsSaved("C1")).toBeUndefined();
+  store.close();
+});
+
 test("clears a channel's defaults", () => {
   const store = new Store(":memory:");
   store.setChannelDefaults("C1", { volume: 0.4 }, "U1");

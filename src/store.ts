@@ -1825,6 +1825,20 @@ export class Store {
     return parseChannelDefaults(saved);
   }
 
+  // Who last saved the channel's defaults, and when.
+  channelDefaultsSaved(
+    channelId: string,
+  ): { savedBy: string; savedAt: number } | undefined {
+    const row = this.db
+      .query(
+        "SELECT updated_by, updated_at FROM channel_defaults WHERE channel_id = ?",
+      )
+      .get(channelId) as { updated_by: string; updated_at: number } | null;
+    return row
+      ? { savedBy: row.updated_by, savedAt: row.updated_at }
+      : undefined;
+  }
+
   setChannelDefaults(
     channelId: string,
     defaults: ChannelDefaults,
