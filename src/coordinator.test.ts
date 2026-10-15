@@ -139,6 +139,8 @@ function setup(
         sessions.push({ status: "ended", args });
       },
       setEndMessage: () => {},
+      hasSessionSaves: () => false,
+      sessionSaves: () => [],
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
       },
@@ -6657,4 +6659,168 @@ test("a replacement media backend picks the song up where it was", async () => {
     title: "Worth Hearing Again",
   });
   await result.coordinator.endFromSlack();
+});
+
+function sessionSaveSetup(store: Store) {
+  return setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    store,
+  );
+}
+
+const submission = (
+  coordinator: Coordinator,
+  actionId: string,
+  userId: string,
+  state: Record<string, unknown>,
+) => ({
+  ...interaction(coordinator, actionId, "", "view_submission"),
+  userId,
+  previousViewId: "settings-view",
+  state: state as ReturnType<typeof interaction>["state"],
+});
+
+test("ending can save the session for the next one in the channel to load", async () => {
+  const store = new Store(":memory:");
+  const first = sessionSaveSetup(store);
+  await first.coordinator.start();
+  Reflect.set(first.coordinator, "current", queued("a", { status: "playing" }));
+  Reflect.set(first.coordinator, "queue", [
+    queued("b", { requesterId: "guest" }),
+    queued("auto", { automatic: true }),
+  ]);
+  Reflect.set(first.coordinator, "volume", 0.3);
+  Reflect.set(first.coordinator, "loopMode", "queue");
+  Reflect.set(first.coordinator, "allowed", new Set(["add", "skip"]));
+
+  await first.coordinator.action(
+    interaction(first.coordinator, "open_end_session"),
+  );
+  const dialog = JSON.stringify(first.pushedModals.at(-1));
+  expect(dialog).toContain("end_session_confirm");
+  expect(dialog).toContain("Save to this channel");
+  expect(dialog).toContain("Save to my account");
+  expect(dialog).toContain("A and 1 more");
+
+  await first.coordinator.action(
+    submission(first.coordinator, "end_session_confirm", "host", {
+      save_to: { choice: { selected_option: { value: "channel" } } },
+      save_name: { value: { value: "  Friday  " } },
+    }),
+  );
+  expect(Reflect.get(first.coordinator, "state")).toBe("ended");
+  expect(JSON.stringify(first.updatedModals.at(-1))).toContain("“Friday”");
+  const [saved] = store.sessionSaves([{ type: "channel", id: "channel" }]);
+  expect(saved).toMatchObject({ name: "Friday", savedBy: "host" });
+  expect(
+    saved!.tracks.map((track) => [track.sourceId, track.requesterId]),
+  ).toEqual([
+    ["a", "host"],
+    ["b", "guest"],
+  ]);
+  expect(saved!.settings).toMatchObject({ volume: 0.3, loopMode: "queue" });
+  expect(saved!.settings).not.toHaveProperty("permissions");
+
+  const second = sessionSaveSetup(store);
+  await second.coordinator.start();
+  expect(JSON.stringify(second.posted[0])).toContain("open_load_session");
+  await second.coordinator.action(
+    interaction(second.coordinator, "open_load_session"),
+  );
+  const picker = JSON.stringify(second.modals.at(-1));
+  expect(picker).toContain("load_session_save");
+  expect(picker).toContain("Friday · 2 songs");
+
+  await second.coordinator.action(
+    submission(second.coordinator, "load_session_save", "host", {
+      save: { selection: { selected_option: { value: saved!.id } } },
+      forget: { enabled: { selected_options: [{ value: "enabled" }] } },
+    }),
+  );
+  await until(() => Boolean(Reflect.get(second.coordinator, "current")));
+  const loaded = [
+    Reflect.get(second.coordinator, "current"),
+    ...(Reflect.get(second.coordinator, "queue") as unknown[]),
+  ] as { sourceId: string; requesterId: string }[];
+  expect(loaded.map((entry) => [entry.sourceId, entry.requesterId])).toEqual([
+    ["a", "host"],
+    ["b", "guest"],
+  ]);
+  expect(Reflect.get(second.coordinator, "volume")).toBe(0.3);
+  expect(Reflect.get(second.coordinator, "loopMode")).toBe("queue");
+  // Permissions are the new session's own.
+  expect([
+    ...(Reflect.get(second.coordinator, "allowed") as Set<string>),
+  ]).toEqual(["add", "remove-own"]);
+  expect(store.sessionSaves([{ type: "channel", id: "channel" }])).toEqual([]);
+  await second.coordinator.endFromSlack();
+  store.close();
+});
+
+test("a session saved to an account is offered only to its owner", async () => {
+  const store = new Store(":memory:");
+  const first = sessionSaveSetup(store);
+  await first.coordinator.start();
+  Reflect.set(first.coordinator, "queue", [queued("a")]);
+  Reflect.set(first.coordinator, "allowed", new Set(["end-session"]));
+  await first.coordinator.action(
+    submission(first.coordinator, "end_session_confirm", "guest", {
+      save_to: { choice: { selected_option: { value: "user" } } },
+    }),
+  );
+  expect(Reflect.get(first.coordinator, "state")).toBe("ended");
+  expect(store.sessionSaves([{ type: "user", id: "guest" }])[0]).toMatchObject({
+    name: "A",
+  });
+
+  const second = sessionSaveSetup(store);
+  await second.coordinator.start();
+  // The guest is in the Huddle, so the player offers to load a save.
+  expect(JSON.stringify(second.posted[0])).toContain("open_load_session");
+  await second.coordinator.action(
+    interaction(second.coordinator, "open_load_session"),
+  );
+  expect(second.ephemeral.at(-1)).toBe("There are no saved sessions to load.");
+  await second.coordinator.action({
+    ...interaction(second.coordinator, "open_load_session"),
+    userId: "guest",
+  });
+  expect(JSON.stringify(second.modals.at(-1))).toContain("Your account");
+
+  // Nor can the host load it by naming its id.
+  const [save] = store.sessionSaves([{ type: "user", id: "guest" }]);
+  await second.coordinator.action(
+    submission(second.coordinator, "load_session_save", "host", {
+      save: { selection: { selected_option: { value: save!.id } } },
+    }),
+  );
+  expect(second.ephemeral.at(-1)).toBe(
+    "That saved session is no longer available.",
+  );
+  expect(Reflect.get(second.coordinator, "queue")).toEqual([]);
+  await second.coordinator.endFromSlack();
+  store.close();
+});
+
+test("ending without choosing to save keeps nothing", async () => {
+  const store = new Store(":memory:");
+  const result = sessionSaveSetup(store);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [queued("a")]);
+  await result.coordinator.action(
+    submission(result.coordinator, "end_session_confirm", "host", {
+      save_to: { choice: { selected_option: { value: "none" } } },
+    }),
+  );
+  expect(Reflect.get(result.coordinator, "state")).toBe("ended");
+  expect(
+    store.hasSessionSaves([{ type: "channel", id: "channel" }]),
+  ).toBeFalse();
+  store.close();
 });

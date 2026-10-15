@@ -29,7 +29,11 @@ import {
   type DuckingMode,
   type HuddleMixSource,
   type LoopMode,
+  sessionSaveNameLength,
   type SavedSession,
+  type SessionSaveOwner,
+  type SessionSaveSettings,
+  type SessionSaveTrack,
   type TransitionMode,
 } from "./store.ts";
 import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
@@ -298,6 +302,9 @@ export class Coordinator {
   private autoplayCredits: string[][] = [];
   private autoplayPending = false;
   private autoplayRejected: string[] = [];
+  // The channel a session saved "to this channel" belongs to: the Huddle's,
+  // which stays put when the controls move to a companion channel.
+  private readonly saveChannelId: string;
   private autoplayRejectedArtists: string[] = [];
   private anchorEnabled = false;
   private revision = 0;
@@ -408,6 +415,7 @@ export class Coordinator {
           (id) => id !== botUserId && !this.isExcluded(id),
         )
       : requestedHost;
+    this.saveChannelId = room.sourceChannelId ?? room.uiChannelId;
     this.volume = restored?.volume ?? config.initialVolume;
     this.duckingMode = restored?.duckingMode ?? config.duckingMode;
     if (!this.isExcluded(hostId)) this.participants.add(hostId);
@@ -728,6 +736,10 @@ export class Coordinator {
       if (interaction.type === "view_submission") {
         if (interaction.actionId === "move_queue_track")
           return this.queuePositionSubmission(interaction);
+        if (interaction.actionId === "end_session_confirm")
+          return this.endSubmission(interaction);
+        if (interaction.actionId === "load_session_save")
+          return this.loadSubmission(interaction);
         return this.settingsSubmission(interaction);
       }
       if (
@@ -747,6 +759,7 @@ export class Coordinator {
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
         play_something: () => this.playSomething(interaction),
+        open_load_session: () => this.loadModal(interaction),
         next_track: () => this.next(interaction, currentId),
         seek_back: () => this.seek(interaction, -10),
         seek_forward: () => this.seek(interaction, 10),
@@ -764,6 +777,7 @@ export class Coordinator {
         open_settings: () => this.settingsModal(interaction, loading),
         report_playback_problem: () => this.reportPlaybackProblem(interaction),
         end_session: () => this.end(interaction.userId, "ended by host"),
+        open_end_session: () => this.endModal(interaction),
         claim_host: () => this.claimHost(interaction),
         connect_lastfm: () => this.lastFmModal(interaction),
         continue_lastfm: () => this.continueLastFm(interaction),
@@ -1792,7 +1806,8 @@ export class Coordinator {
       return interaction.actionId !== "move_queue_track";
     return (
       interaction.actionId === "open_settings" ||
-      interaction.actionId === "end_session"
+      interaction.actionId === "end_session" ||
+      interaction.actionId === "open_end_session"
     );
   }
 
@@ -2547,13 +2562,17 @@ export class Coordinator {
   }
 
   // Puts requested tracks on the queue, recorded and announced, and hands
-  // back each with the controller that cancels its preparation.
-  private stageEntries(userId: string, items: TrackMetadata[]) {
+  // back each with the controller that cancels its preparation. A track that
+  // names its requester keeps them; the rest are credited to `userId`.
+  private stageEntries(
+    userId: string,
+    items: (TrackMetadata & { requesterId?: string })[],
+  ) {
     return items.map((metadata) => {
       const entry: Entry = {
         ...metadata,
         id: crypto.randomUUID(),
-        requesterId: userId,
+        requesterId: metadata.requesterId ?? userId,
         status: "preparing",
       };
       const controller = new AbortController();
@@ -4409,14 +4428,11 @@ export class Coordinator {
       ...when(
         this.can(userId, "end-session"),
         actions("session_actions", [
-          button("end_session", plain("End session"), {
+          // Ending asks in a dialog of its own rather than a confirmation,
+          // which cannot carry the choice to save the session.
+          button("open_end_session", plain("End session"), {
             style: "danger",
             value,
-            confirm: confirm(
-              "End playback?",
-              "This stops playback and ends the session.",
-              "End",
-            ),
           }),
         ]),
       ),
@@ -5017,6 +5033,315 @@ export class Coordinator {
       );
   }
 
+  // The songs a saved session keeps: the one playing and those still to
+  // come. Autoplay picks are left out, since the next session picks its own.
+  private savableQueue(): SessionSaveTrack[] {
+    return [this.current, ...this.queue].flatMap((entry) =>
+      entry && !entry.automatic
+        ? [
+            {
+              sourceInput: entry.sourceInput,
+              canonicalUrl: entry.canonicalUrl,
+              sourceId: entry.sourceId,
+              title: entry.title,
+              artist: entry.artist,
+              ...defined({
+                album: entry.album,
+                duration: entry.duration,
+                artwork: entry.artwork,
+              }),
+              requesterId: entry.requesterId,
+            },
+          ]
+        : [],
+    );
+  }
+
+  private savableSettings(): SessionSaveSettings {
+    return {
+      volume: this.volume,
+      autoplayMode: this.autoplayMode,
+      loopMode: this.loopMode,
+      transitionMode: this.transitionMode,
+      duckingMode: this.duckingMode,
+      displayMode: this.displayMode,
+      anchorEnabled: this.anchorEnabled,
+    };
+  }
+
+  // Whose saves this Huddle can load: the channel's, and those of everyone in
+  // it. Each user is offered only their own.
+  private saveOwners(userIds = [...this.participants]): SessionSaveOwner[] {
+    return [
+      { type: "channel", id: this.saveChannelId },
+      ...userIds
+        .filter((id) => id !== this.botUserId)
+        .map((id) => ({ type: "user" as const, id })),
+    ];
+  }
+
+  private defaultSaveName() {
+    const [first, ...rest] = this.savableQueue();
+    if (!first) return "Saved session";
+    const name = rest.length
+      ? `${first.title} and ${rest.length} more`
+      : first.title;
+    return name.slice(0, sessionSaveNameLength);
+  }
+
+  private saveSession(userId: string, owner: SessionSaveOwner, name: string) {
+    const tracks = this.savableQueue();
+    this.store.addSessionSave(
+      owner,
+      name,
+      userId,
+      tracks,
+      this.savableSettings(),
+    );
+    this.audit.record("session.saved", userId, {
+      sessionId: this.id,
+      ownerType: owner.type,
+      tracks: tracks.length,
+    });
+    this.log.info(
+      {
+        event: "session_saved",
+        userId,
+        ownerType: owner.type,
+        tracks: tracks.length,
+      },
+      "Session saved for later",
+    );
+  }
+
+  // Ending asks in a dialog over Settings, where the user can save the queue
+  // and settings for a later session: to this channel or to their account.
+  private async endModal(interaction: Interaction) {
+    if (!interaction.triggerId) return;
+    if (!this.can(interaction.userId, "end-session"))
+      return this.end(interaction.userId, "ended by host");
+    const tracks = this.savableQueue().length;
+    const option = (value: string, text: string) => ({
+      text: plain(text),
+      value,
+    });
+    const dontSave = option("none", "Don't save");
+    await this.slack.pushModal(interaction.triggerId, {
+      type: "modal",
+      callback_id: "end_session_confirm",
+      private_metadata: JSON.stringify({ sessionId: this.id }),
+      title: plain("End session?"),
+      submit: plain("End"),
+      close: plain("Cancel"),
+      blocks: [
+        section("This stops playback and ends the session."),
+        input(
+          "save_to",
+          "Save for next time",
+          {
+            type: "radio_buttons",
+            action_id: "choice",
+            options: [
+              dontSave,
+              option("channel", "Save to this channel"),
+              option("user", "Save to my account"),
+            ],
+            initial_option: dontSave,
+          },
+          {
+            hint: `Saves the queue (${songCount(tracks)}) and settings, not permissions. Anyone here can load a channel save; only you can load one in your account.`,
+          },
+        ),
+        input(
+          "save_name",
+          "Name",
+          {
+            type: "plain_text_input",
+            action_id: "value",
+            max_length: sessionSaveNameLength,
+            placeholder: plain(this.defaultSaveName()),
+          },
+          {
+            optional: true,
+            hint: "Saving under a name you have used before replaces that save.",
+          },
+        ),
+      ],
+    });
+  }
+
+  private async endSubmission(interaction: Interaction) {
+    if (parseMetadata(interaction.metadata).sessionId !== this.id) return;
+    const choice =
+      interaction.state.save_to?.choice?.selected_option?.value ?? "none";
+    const name =
+      interaction.state.save_name?.value?.value
+        ?.trim()
+        .slice(0, sessionSaveNameLength) || this.defaultSaveName();
+    const owner: SessionSaveOwner | undefined =
+      choice === "channel"
+        ? { type: "channel", id: this.saveChannelId }
+        : choice === "user"
+          ? { type: "user", id: interaction.userId }
+          : undefined;
+    await this.end(
+      interaction.userId,
+      "ended by host",
+      owner ? { save: { owner, name } } : {},
+    );
+    // Settings stays open under the dialog; say why its controls are gone.
+    if (this.state === "ended" && interaction.previousViewId)
+      await this.slack
+        .updateModal(
+          interaction.previousViewId,
+          undefined,
+          this.settingsMessageView(
+            owner
+              ? `The session has ended and was saved as “${name}”.`
+              : "The session has ended.",
+          ),
+        )
+        .catch((error) =>
+          this.log.warn(
+            { event: "ended_settings_update_failed", err: error },
+            "Could not update Settings after ending the session",
+          ),
+        );
+  }
+
+  // The idle player's other button: pick a saved session, from this channel
+  // or the user's own account, to load.
+  private async loadModal(interaction: Interaction) {
+    if (!interaction.triggerId) return;
+    const saves = this.store.sessionSaves(
+      this.saveOwners([interaction.userId]),
+    );
+    if (!saves.length) {
+      await this.render();
+      return this.notice(
+        interaction.userId,
+        "There are no saved sessions to load.",
+      );
+    }
+    const option = (save: (typeof saves)[number]) => ({
+      text: plain(
+        `${save.name} · ${songCount(save.tracks.length)}`.slice(0, 75),
+      ),
+      value: save.id,
+    });
+    const groups = (
+      [
+        ["This channel", saves.filter((save) => save.owner.type === "channel")],
+        ["Your account", saves.filter((save) => save.owner.type === "user")],
+      ] as const
+    ).filter(([, group]) => group.length);
+    await this.slack.modal(interaction.triggerId, {
+      type: "modal",
+      callback_id: "load_session_save",
+      private_metadata: JSON.stringify({ sessionId: this.id }),
+      title: plain("Load saved session"),
+      submit: plain("Load"),
+      close: plain("Cancel"),
+      blocks: [
+        input(
+          "save",
+          "Saved session",
+          {
+            type: "static_select",
+            action_id: "selection",
+            option_groups: groups.map(([label, group]) => ({
+              label: plain(label),
+              options: group.slice(0, 100).map(option),
+            })),
+            initial_option: option(saves[0]!),
+          },
+          { hint: "Adds its queue and applies its settings." },
+        ),
+        input(
+          "forget",
+          "After loading",
+          toggle("enabled", "Delete this save", false),
+          { optional: true },
+        ),
+      ],
+    });
+  }
+
+  // Queues a saved session's songs, crediting whoever first asked for each,
+  // and applies the settings this user may change.
+  private async loadSubmission(interaction: Interaction) {
+    if (parseMetadata(interaction.metadata).sessionId !== this.id) return;
+    const id = interaction.state.save?.selection?.selected_option?.value;
+    const save = this.store
+      .sessionSaves(this.saveOwners([interaction.userId]))
+      .find((save) => save.id === id);
+    if (!save)
+      return this.notice(
+        interaction.userId,
+        "That saved session is no longer available.",
+      );
+    const { tracks, settings } = save;
+    if (
+      tracks.length &&
+      !(await this.require(interaction, tracks.length > 1 ? "add-bulk" : "add"))
+    )
+      return;
+    const fit = tracks.length
+      ? this.fitBatchToQueue(tracks)
+      : { items: [], omitted: 0 };
+    if ("error" in fit) return this.notice(interaction.userId, fit.error);
+    const previous = this.settingsSnapshot();
+    const canVolume = this.can(interaction.userId, "volume");
+    const canConfigure = this.can(interaction.userId, "configure-settings");
+    if (canVolume && settings.volume !== undefined) {
+      this.volume = settings.volume;
+      this.sendMedia({ type: "volume", value: this.volume });
+      this.store.setSession(this.id, { volume: this.volume });
+    }
+    if (canConfigure)
+      await this.applySettings({
+        displayMode: settings.displayMode,
+        autoplayMode: settings.autoplayMode,
+        loopMode: settings.loopMode,
+        transitionMode: settings.transitionMode,
+        duckingMode: settings.duckingMode,
+        anchorEnabled: settings.anchorEnabled,
+      });
+    if (fit.items.length) await this.removeQueuedAutoplay();
+    const pending = this.stageEntries(interaction.userId, fit.items);
+    if (checked(interaction.state.forget?.enabled))
+      this.store.deleteSessionSave(save.id);
+    const current = this.settingsSnapshot();
+    const changes = settingsChanges(previous, current);
+    this.audit.record("session.save_loaded", interaction.userId, {
+      sessionId: this.id,
+      ownerType: save.owner.type,
+      savedBy: save.savedBy,
+      savedAt: save.savedAt,
+      tracks: pending.length,
+      changed: changedSettings(changes),
+    });
+    if (!previous.anchorEnabled && this.anchorEnabled) await this.reanchor();
+    else await this.render();
+    if (pending.length) this.queueChanged();
+    const skipped = [
+      fit.omitted ? `${songCount(fit.omitted)} did not fit in the queue` : "",
+      !canVolume || !canConfigure
+        ? "you don't have permission to change some of its settings"
+        : "",
+    ].filter(Boolean);
+    if (skipped.length)
+      await this.notice(
+        interaction.userId,
+        `Loaded “${save.name}”, but ${skipped.join(", and ")}.`,
+      );
+    // Preparing waits on the action queue this runs in, so it is left to
+    // finish on its own.
+    for (const { entry, controller } of pending)
+      void this.prepareManual(entry, controller);
+    this.scheduleAutoplay();
+  }
+
   private async claimHost(interaction: Interaction) {
     if (interaction.value !== this.id || interaction.messageTs !== this.uiTs)
       return this.notice(interaction.userId, "That takeover request is stale.");
@@ -5137,6 +5462,12 @@ export class Coordinator {
                     style: "primary",
                     value,
                   }),
+                  ...when(
+                    this.store.hasSessionSaves(this.saveOwners()),
+                    button("open_load_session", plain("Load saved session"), {
+                      value,
+                    }),
+                  ),
                 ]),
               )),
           context(
@@ -5375,7 +5706,11 @@ export class Coordinator {
       clearTimeout(timer);
   }
 
-  private async end(userId: string | undefined, reason: string) {
+  private async end(
+    userId: string | undefined,
+    reason: string,
+    options: { save?: { owner: SessionSaveOwner; name: string } } = {},
+  ) {
     if (this.state === "ended") return;
     if (userId && !this.can(userId, "end-session")) {
       this.audit.record("action.denied", userId, {
@@ -5387,6 +5722,8 @@ export class Coordinator {
         "You do not have permission to end this session.",
       );
     }
+    if (userId && options.save)
+      this.saveSession(userId, options.save.owner, options.save.name);
     const state = this.state;
     const startedAt = Date.now();
     this.log.info(
