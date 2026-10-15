@@ -12,7 +12,6 @@ import {
   capabilities,
   displayModes,
   duckingModes,
-  duckingModeLabels,
   huddleMixSources,
   permissionPresets,
   recentTrackLimit,
@@ -20,10 +19,8 @@ import {
   Store,
   transitionModes,
   autoplayModes,
-  autoplayModeLabels,
   parseAutoplayMode,
   loopModes,
-  loopModeLabels,
   type AutoplayMode,
   type ChannelDefaults,
   type DisplayMode,
@@ -70,8 +67,6 @@ import {
   icon,
   input,
   likeValue,
-  modeSelect,
-  permissionLabels,
   plain,
   safeAuditError,
   section,
@@ -89,16 +84,19 @@ import {
   integrationGrantTimeoutMs,
   integrationReply,
   integrationRequestBlocks,
-  integrationSettingsBlocks,
   parseIntegrationActionValue,
   parseIntegrationSettingsPage,
-  slackModalBlockLimit,
   sessionMatchesChannel,
   wrapIntegrationResult,
   type IntegrationCommand,
 } from "./integration.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
 import { playbackReportView } from "./playback-report.ts";
+import {
+  defaultUserSettings,
+  huddleMixActionPrefix,
+  settingsView,
+} from "./settings-view.ts";
 import {
   changedSettings,
   settingsChanges,
@@ -136,37 +134,6 @@ function selected<Mode extends string>(
 ) {
   const value = state?.selected_option?.value as Mode | undefined;
   return value && modes.includes(value) ? value : undefined;
-}
-
-const huddleMixSourceLabels: Record<HuddleMixSource, string> = {
-  added: "Songs I've added or liked",
-  lastfm: "My Last.fm listening",
-  listenbrainz: "My ListenBrainz listening",
-};
-
-// The settings modal's Huddle mix checkboxes name the sources they offer in
-// their action ID. Only those sources are saved, so a service the user had
-// not connected keeps its choice for when they do, and a refreshed modal
-// that offers a different set starts from the saved ticks rather than Slack
-// carrying over the old ones.
-const huddleMixActionPrefix = "sources:";
-
-function huddleMixSourceInput(
-  offered: readonly HuddleMixSource[],
-  chosen: readonly HuddleMixSource[],
-) {
-  const option = (source: HuddleMixSource) => ({
-    text: plain(huddleMixSourceLabels[source]),
-    value: source,
-  });
-  return {
-    type: "checkboxes",
-    action_id: `${huddleMixActionPrefix}${offered.join(",")}`,
-    options: offered.map(option),
-    initial_options: offered
-      .filter((source) => chosen.includes(source))
-      .map(option),
-  };
 }
 
 // The choice a settings submission makes for each Huddle mix source it
@@ -262,22 +229,6 @@ function savedLink(entry: { sourceId: string; canonicalUrl: string }) {
     ? `https://song.link/${url.href}`
     : url.href;
 }
-
-const autoplayDescriptions: Record<AutoplayMode, string> = {
-  off: "Do not queue recommendations",
-  related: "Continue from songs requested in this huddle",
-  huddle: "Mix what people in this huddle listen to",
-};
-const loopDescriptions: Record<LoopMode, string> = {
-  off: "Do not repeat",
-  track: "Restart the current song when it ends",
-  queue: "Move finished songs back to the end of the queue",
-};
-const duckingDescriptions: Record<DuckingMode, string> = {
-  off: "Keep playing at full volume",
-  gentle: "Dip the music under the conversation",
-  strong: "Drop the music well back while people talk",
-};
 
 const autoplayDiscoveryEvery = 4;
 const autoplayDiscoveryMaxInterval = 16;
@@ -4511,330 +4462,37 @@ export class Coordinator {
   }
 
   private settingsView(userId: string, integrationPage = 0) {
-    const settings = this.scrobbling?.settings(userId, this.id) ?? {
-      lastFmAvailable: false,
-      lastFmConnected: false,
-      lastFmEnabled: false,
-      listenBrainzConnected: false,
-      listenBrainzEnabled: false,
-      huddleMixOptIn: true,
-      huddleMixSources: ["added" as const],
-      huddleMixUsable: ["added" as const],
-      mode: "always" as const,
-      configured: false,
-      enabledIntegration: false,
-      sessionEnabled: false,
-    };
-    const admin = this.settingsAdmin(userId);
-    const value = this.id;
-    const savesDefaults = this.canSaveChannelDefaults(userId);
-    const sessionBlocks = [
-      { type: "header", text: plain("Session") },
-      ...when(
-        this.can(userId, "volume"),
-        input("volume", "Volume (%)", {
-          type: "plain_text_input",
-          action_id: "percent",
-          initial_value: String(Math.round(this.volume * 10_000) / 100),
-        }),
-      ),
-      ...when(
-        this.can(userId, "configure-settings"),
-        input(
-          "display",
-          "Display mode",
-          modeSelect(displayModes, this.displayMode, capitalize),
-        ),
-        input(
-          "autoplay",
-          "Autoplay",
-          modeSelect(
-            autoplayModes,
-            this.autoplayMode,
-            (mode) => autoplayModeLabels[mode],
-            autoplayDescriptions,
-          ),
-          {
-            optional: true,
-            hint: "Play recommendations when the queue is empty",
-          },
-        ),
-        input(
-          "loop",
-          "Loop",
-          modeSelect(
-            loopModes,
-            this.loopMode,
-            (mode) => loopModeLabels[mode],
-            loopDescriptions,
-          ),
-          {
-            optional: true,
-            hint: "Repeat the current track or cycle the queue",
-          },
-        ),
-        input(
-          "transition",
-          "Transitions",
-          modeSelect(transitionModes, this.transitionMode, (mode) =>
-            mode === "none"
-              ? "Disabled"
-              : mode === "adaptive"
-                ? "Adaptive crossfade"
-                : capitalize(mode),
-          ),
-        ),
-        input(
-          "ducking",
-          "Auto-duck",
-          modeSelect(
-            duckingModes,
-            this.duckingMode,
-            (mode) => duckingModeLabels[mode],
-            duckingDescriptions,
-          ),
-          { hint: "Lower the music while someone is speaking" },
-        ),
-        input(
-          "anchor",
-          "Thread position",
-          toggle(
-            "enabled",
-            "Keep player at bottom of thread",
-            this.anchorEnabled,
-          ),
-          { optional: true },
-        ),
-      ),
-      ...when(
-        savesDefaults || this.can(userId, "end-session"),
-        actions("session_actions", [
-          ...when(
-            savesDefaults,
-            button(
-              "save_channel_defaults",
-              plain("Save as defaults for this channel"),
-              {
-                value,
-                confirm: confirm(
-                  "Save channel defaults?",
-                  "New sessions in this channel will start with the settings shown here.",
-                  "Save",
-                ),
-              },
-            ),
-          ),
-          ...when(
-            savesDefaults && Boolean(this.store.channelDefaults(this.roomId)),
-            button("clear_channel_defaults", plain("Clear channel defaults"), {
-              value,
-              confirm: confirm(
-                "Clear channel defaults?",
-                "New sessions in this channel will start with the usual settings.",
-                "Clear",
-              ),
-            }),
-          ),
-          ...when(
-            this.can(userId, "end-session"),
-            // Ending asks in a dialog of its own rather than a confirmation,
-            // which cannot carry the choice to save the session.
-            button("open_end_session", plain("End session"), {
-              style: "danger",
-              value,
-            }),
-          ),
-        ]),
-      ),
-      ...when(
-        admin,
-        { type: "header", text: plain("Permissions") },
-        input(
-          "host",
-          "Transfer host",
-          {
-            type: "users_select",
-            action_id: "user",
-            ...(this.hostId ? { initial_user: this.hostId } : {}),
-          },
-          { optional: true },
-        ),
-        input(
-          "permission_preset",
-          "Apply permission preset",
-          {
-            type: "static_select",
-            action_id: "selected",
-            placeholder: plain("Choose a preset"),
-            options: (
-              [
-                ["default", "Default"],
-                ["host-only", "Host only"],
-                ["collaborative", "Collaborative"],
-                ["communism", "Communism"],
-              ] satisfies [string, string][]
-            ).map(([value, label]) => ({ text: plain(label), value })),
-          },
-          {
-            optional: true,
-            hint: "Saving overwrites the custom permissions below.",
-          },
-        ),
-        input(
-          "permissions",
-          "Everyone else may",
-          {
-            type: "checkboxes",
-            action_id: "selected",
-            options: capabilities.map((value) => ({
-              text: plain(permissionLabels[value]),
-              value,
-            })),
-            initial_options: capabilities
-              .filter((value) => this.allowed.has(value))
-              .map((value) => ({
-                text: plain(permissionLabels[value]),
-                value,
-              })),
-          },
-          { optional: true },
-        ),
-      ),
-    ];
-    const userBlocks = [
-      { type: "header", text: plain("User settings") },
-      input(
-        "huddle_mix",
-        "Include in Huddle mix",
-        huddleMixSourceInput(
-          settings.huddleMixUsable,
-          settings.huddleMixSources,
-        ),
-        {
-          optional: true,
-          hint: "Only used while you're in the huddle, and never shown as yours. Untick everything to opt out of the mix.",
-        },
-      ),
-      ...when(
-        settings.configured,
-        input(
-          "scrobbling_mode",
-          "Scrobbling mode",
-          modeSelect(scrobblingModes, settings.mode, (mode) =>
-            mode === "ask" ? "Ask every time" : capitalize(mode),
-          ),
-          { hint: "Sets the default for each Huddle" },
-        ),
-        actions("session_scrobbling", [
-          button(
-            "toggle_session_scrobbling",
-            plain(
-              `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
-            ),
-            { value },
-          ),
-        ]),
-      ),
-      section(
-        settings.lastFmConnected
-          ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
-          : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
-      ),
-      ...(settings.lastFmConnected
-        ? [
-            input(
-              "lastfm_scrobbling",
-              "Last.fm scrobbling",
-              toggle("enabled", "Enabled", settings.lastFmEnabled),
-              { optional: true },
-            ),
-            actions("lastfm_actions", [
-              button("disconnect_lastfm", plain("Disconnect"), {
-                style: "danger",
-                value,
-                confirm: confirm(
-                  "Disconnect Last.fm?",
-                  "This removes your saved Last.fm login.",
-                  "Disconnect",
-                ),
-              }),
-            ]),
-          ]
-        : when(
-            settings.lastFmAvailable,
-            actions("lastfm_actions", [
-              button("connect_lastfm", plain("Log in to Last.fm"), { value }),
-            ]),
-          )),
-      input(
-        "listenbrainz_scrobbling",
-        "ListenBrainz scrobbling",
-        toggle("enabled", "Enabled", settings.listenBrainzEnabled),
-        {
-          optional: true,
-          hint: settings.listenBrainzConnected
-            ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
-            : "Uses your ListenBrainz user token",
-        },
-      ),
-      input(
-        "listenbrainz_token",
-        "ListenBrainz API key / user token",
-        {
-          type: "plain_text_input",
-          action_id: "value",
-          placeholder: plain(
-            settings.listenBrainzConnected ? "Saved" : "Paste token",
-          ),
-        },
-        {
-          optional: true,
-          hint: settings.listenBrainzConnected
-            ? "Leave blank to keep the saved token"
-            : "Find it in ListenBrainz settings",
-        },
-      ),
-      ...when(
-        settings.listenBrainzConnected,
-        actions("listenbrainz_actions", [
-          button("disconnect_listenbrainz", plain("Remove token"), {
-            style: "danger",
-            value,
-            confirm: confirm(
-              "Remove ListenBrainz token?",
-              "This disables ListenBrainz scrobbling and removes your saved token.",
-              "Remove",
-            ),
-          }),
-        ]),
-      ),
-    ];
-    const integrationBlocks = admin
-      ? integrationSettingsBlocks({
-          sessionId: this.id,
-          grants: [...this.integrations.entries()].map(([userId, grant]) => ({
-            userId,
-            requestId: grant.requestId,
-            permissions: [...grant.permissions],
-          })),
-          maxBlocks:
-            slackModalBlockLimit - sessionBlocks.length - userBlocks.length,
-          page: integrationPage,
-        })
-      : [];
-    return {
-      type: "modal",
-      callback_id: "save_settings",
-      private_metadata: JSON.stringify({
-        sessionId: this.id,
-        hostId: this.hostId,
-        integrationPage,
-      }),
-      title: plain("HuddleFM settings"),
-      submit: plain("Save"),
-      close: plain("Cancel"),
-      blocks: [...sessionBlocks, ...integrationBlocks, ...userBlocks],
-    };
+    const saveDefaults = this.canSaveChannelDefaults(userId);
+    return settingsView({
+      sessionId: this.id,
+      hostId: this.hostId,
+      integrationPage,
+      access: {
+        volume: this.can(userId, "volume"),
+        configure: this.can(userId, "configure-settings"),
+        admin: this.settingsAdmin(userId),
+        endSession: this.can(userId, "end-session"),
+        saveDefaults,
+        hasChannelDefaults:
+          saveDefaults && Boolean(this.store.channelDefaults(this.roomId)),
+      },
+      session: {
+        volume: this.volume,
+        displayMode: this.displayMode,
+        autoplayMode: this.autoplayMode,
+        loopMode: this.loopMode,
+        transitionMode: this.transitionMode,
+        duckingMode: this.duckingMode,
+        anchorEnabled: this.anchorEnabled,
+        allowed: this.allowed,
+      },
+      user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
+      integrations: [...this.integrations.entries()].map(([userId, grant]) => ({
+        userId,
+        requestId: grant.requestId,
+        permissions: [...grant.permissions],
+      })),
+    });
   }
 
   private async lastFmModal(interaction: Interaction) {
