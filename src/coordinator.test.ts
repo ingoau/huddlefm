@@ -7979,19 +7979,29 @@ test("Your data shows what is kept about a user and deletes only theirs", async 
   expect(data).not.toContain(theirs);
   expect(data).toContain("never deleted");
 
+  // Your data carries Settings' metadata, to redraw it under it.
+  const dataMetadata = (
+    result.pushedModals.at(-1) as [unknown, { private_metadata: string }]
+  )[1].private_metadata;
+  expect(JSON.parse(dataMetadata)).toMatchObject({
+    sessionId: result.coordinator.id,
+    settings: { tab: "you" },
+  });
   const press = (actionId: string, value = result.coordinator.id) =>
     result.coordinator.action({
       ...interaction(result.coordinator, actionId, value),
       messageTs: "",
       viewId: "data-view",
       viewHash: "hash",
-      metadata: JSON.stringify({ sessionId: result.coordinator.id }),
+      previousViewId: "settings-view",
+      metadata: dataMetadata,
     });
   await press("delete_data_plays");
   expect(store.userData("host").plays.count).toBe(0);
   expect(store.userData("guest").plays.count).toBe(1);
-  const [viewId, , view] = result.updatedModals.at(-1)!;
+  const [viewId, , view] = result.updatedModals.at(-2)!;
   expect(viewId).toBe("data-view");
+  expect(result.updatedModals.at(-1)![0]).toBe("settings-view");
   expect(JSON.stringify(view)).toContain("Deleted 1 play.");
   expect(result.audit).toContainEqual([
     "data.deleted",
@@ -8001,14 +8011,38 @@ test("Your data shows what is kept about a user and deletes only theirs", async 
 
   // Someone else's save cannot be deleted by naming it.
   await press("delete_own_save", theirs);
-  expect(JSON.stringify(result.updatedModals.at(-1))).toContain(
+  expect(JSON.stringify(result.updatedModals.at(-2))).toContain(
     "That saved session is no longer there.",
   );
   expect(store.sessionSaves([{ type: "user", id: "guest" }])).toHaveLength(1);
   await press("delete_own_save", mine);
   expect(store.sessionSaves([{ type: "user", id: "host" }])).toEqual([]);
 
-  await press("delete_all_data");
+  // A You tab edit made before deleting everything is let go with it, so
+  // saving Settings afterwards cannot write it back.
+  const withEdit = JSON.parse(dataMetadata);
+  withEdit.settings.draft = {
+    huddle_mix: { "sources:added": { selected_options: [] } },
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+  };
+  await result.coordinator.action({
+    ...interaction(
+      result.coordinator,
+      "delete_all_data",
+      result.coordinator.id,
+    ),
+    messageTs: "",
+    viewId: "data-view",
+    viewHash: "hash",
+    previousViewId: "settings-view",
+    metadata: JSON.stringify(withEdit),
+  });
+  const redrawn = result.updatedModals.at(-1)!;
+  expect(redrawn[0]).toBe("settings-view");
+  expect(
+    JSON.parse((redrawn[2] as { private_metadata: string }).private_metadata)
+      .draft,
+  ).toEqual({ autoplay: { mode: { selected_option: { value: "huddle" } } } });
   expect(store.userData("host").likes.count).toBe(0);
   expect(store.userData("guest").likes.count).toBe(1);
   expect(result.audit).toContainEqual([
@@ -8023,4 +8057,56 @@ test("Your data shows what is kept about a user and deletes only theirs", async 
 test("a song whose adder took their name off it is shown without one", () => {
   expect(addedBy({ requesterId: "" })).toBe("Added by a listener");
   expect(addedBy({ requesterId: "U1" })).toBe("Added by <@U1>");
+});
+
+test("a Scrobble to choice for a service disconnected since does not stop a save", async () => {
+  const userStore = new Store(":memory:");
+  userStore.connectLastFm("host", "last-user", "session-key");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  // Disconnecting redraws Settings with the ticked box kept in its draft.
+  userStore.disconnectLastFm("host");
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+    metadata: JSON.stringify({
+      sessionId: test.coordinator.id,
+      hostId: "host",
+      draft: {
+        scrobble_to: {
+          "services:lastfm": { selected_options: [{ value: "lastfm" }] },
+        },
+      },
+    }),
+    state: { huddle_mix: { "sources:added": { selected_options: [] } } },
+  });
+  expect(test.ephemeral).toEqual([]);
+  expect(userStore.getUserScrobbling("host")).toMatchObject({
+    lastFmEnabled: false,
+    huddleMixOptIn: false,
+  });
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("Settings opened with no host is stale once someone becomes host", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "hostId", undefined);
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "open_settings"),
+    userId: "guest",
+  });
+  const metadata = (
+    test.modals.at(-1) as [unknown, { private_metadata: string }]
+  )[1].private_metadata;
+  expect(JSON.parse(metadata).hostId).toBe("");
+  Reflect.set(test.coordinator, "hostId", "host");
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+    userId: "guest",
+    metadata,
+  });
+  expect(test.ephemeral.at(-1)).toBe("Settings are stale; reopen them.");
+  await test.coordinator.endFromSlack();
 });

@@ -253,6 +253,33 @@ export function parseSettingsMetadata(metadata: unknown): SettingsMetadata {
   };
 }
 
+// The You tab's inputs, which no longer hold once the user's data is deleted.
+const userFormBlocks = [
+  "huddle_mix",
+  "session_scrobbling",
+  "scrobbling_mode",
+  "scrobble_to",
+];
+
+/**
+ * The metadata of a dialog opened over Settings, carrying Settings' own to
+ * redraw it with. A draft that would not fit is let go.
+ */
+export function dialogMetadata(sessionId: string, settings: unknown) {
+  const metadata = JSON.stringify({ sessionId, settings });
+  if (metadata.length <= metadataLimit || !isRecord(settings)) return metadata;
+  return JSON.stringify({ sessionId, settings: { ...settings, draft: {} } });
+}
+
+/** The draft without the You tab's edits. */
+export function withoutUserForm(draft: FormState): FormState {
+  return Object.fromEntries(
+    Object.entries(draft).filter(
+      ([blockId]) => !userFormBlocks.includes(blockId),
+    ),
+  );
+}
+
 /** The draft with the inputs on screen, which are newer, laid over it. */
 export function mergeForm(draft: FormState, state: FormState): FormState {
   return { ...draft, ...compactForm(state) };
@@ -410,7 +437,9 @@ export function settingsView(options: SettingsViewOptions) {
   const metadata = (draft: FormState) =>
     JSON.stringify({
       sessionId: options.sessionId,
-      hostId: options.hostId,
+      // Kept even when there is no host, so a host set while Settings is
+      // open still makes it stale.
+      hostId: options.hostId ?? "",
       tab,
       integrationPage: options.integrationPage,
       revision: options.revision ?? 0,
@@ -593,7 +622,7 @@ function channelBlocks(options: SettingsViewOptions) {
         value: save.id,
         confirm: confirm(
           "Delete saved session?",
-          `Nobody in this channel will be able to load *${escape(save.name)}* any more.`,
+          "Nobody in this channel will be able to load it any more.",
           "Delete",
         ),
       }),
@@ -832,11 +861,11 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
 }
 
 /** The form a ListenBrainz token is pasted into, over Settings. */
-export function listenBrainzTokenView(settingsMetadata: unknown) {
+export function listenBrainzTokenView(sessionId: string, settings: unknown) {
   return {
     type: "modal",
     callback_id: "listenbrainz_token",
-    private_metadata: JSON.stringify(settingsMetadata),
+    private_metadata: dialogMetadata(sessionId, settings),
     title: plain("Connect ListenBrainz"),
     submit: plain("Connect"),
     close: plain("Cancel"),
@@ -883,6 +912,8 @@ const yourDataChannelSaveLimit = 40;
 
 export type YourDataOptions = {
   sessionId: string;
+  // The metadata of Settings under Your data, kept to redraw it.
+  settings?: unknown;
   notice?: string;
   added: { count: number; recent: { title: string; artist: string }[] };
   plays: YourDataOptions["added"];
@@ -952,13 +983,13 @@ export function yourDataView(options: YourDataOptions) {
   return {
     type: "modal",
     callback_id: "your_data",
-    private_metadata: JSON.stringify({ sessionId: options.sessionId }),
+    private_metadata: dialogMetadata(options.sessionId, options.settings),
     title: plain("Your data"),
     close: plain("Done"),
     blocks: [
       context(
         "data_about",
-        "This is what HuddleFM keeps about you. Deleting takes effect straight away. HuddleFM's audit log of who did what is kept, and is never deleted.",
+        "These are the saved sessions, songs and scrobbles HuddleFM keeps about you. Deleting takes effect straight away. HuddleFM also keeps which sessions you were in and hosted, to run them, and an audit log of who did what, which is never deleted.",
       ),
       ...when(options.notice, context("data_notice", options.notice ?? "")),
       { type: "header", text: plain("Saved sessions") },

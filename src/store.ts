@@ -1915,9 +1915,14 @@ export class Store {
    * Everything kept about the user that is theirs alone: what they added,
    * heard, liked and skipped, their scrobbles, the sessions saved to their
    * account, and their accounts and choices. Sessions they saved to a
-   * channel belong to the channel, and stay.
+   * channel belong to the channel, and stay, as does an opt-out of the
+   * Huddle mix.
    */
   forgetUser(userId: string) {
+    // Forgetting a user must not opt them back into the Huddle mix.
+    const before = this.getUserScrobbling(userId);
+    const mixesAdded =
+      before.huddleMixOptIn && before.huddleMixSources.includes("added");
     this.db.transaction(() => {
       this.forgetAddedTracks(userId);
       this.deleteUserPlays(userId);
@@ -1935,6 +1940,7 @@ export class Store {
       this.db
         .query("DELETE FROM user_scrobbling WHERE user_id = ?")
         .run(userId);
+      if (!mixesAdded) this.setHuddleMixSources(userId, { added: false });
     })();
   }
 

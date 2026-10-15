@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   compactForm,
   defaultUserSettings,
+  dialogMetadata,
   mergeForm,
   parseSettingsMetadata,
   settingsView,
@@ -324,4 +325,20 @@ test("Your data stays within Slack's block limit however much was saved", () => 
       (block) => (block as { block_id?: string }).block_id === "data_plays",
     ),
   ).not.toHaveProperty("accessory");
+});
+
+test("a dialog over Settings lets go of a draft too large to carry", () => {
+  const settings = {
+    tab: "you",
+    draft: { padding: { value: { value: "x".repeat(3000) } } },
+  };
+  const metadata = dialogMetadata("session", settings);
+  expect(metadata.length).toBeLessThanOrEqual(3000);
+  expect(JSON.parse(metadata)).toEqual({
+    sessionId: "session",
+    settings: { tab: "you", draft: {} },
+  });
+  expect(
+    JSON.parse(dialogMetadata("session", { tab: "you", draft: {} })),
+  ).toEqual({ sessionId: "session", settings: { tab: "you", draft: {} } });
 });

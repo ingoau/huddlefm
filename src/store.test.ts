@@ -1453,3 +1453,20 @@ test("songs left queued in a session that ended let go of who added them", () =>
   expect(store.userData("U1").added.count).toBe(2);
   store.close();
 });
+
+test("forgetting a user keeps them out of the Huddle mix if they opted out", () => {
+  const store = new Store(":memory:");
+  store.setHuddleMixSources("U1", { added: false });
+  store.likeTrack({ userId: "U1", title: "Liked", artist: "Artist" });
+  store.forgetUser("U1");
+  expect(store.getUserScrobbling("U1")).toMatchObject({
+    huddleMixOptIn: false,
+    huddleMixSources: [],
+  });
+  // Someone who was in the mix stays in it, with nothing kept about them.
+  store.likeTrack({ userId: "U2", title: "Liked", artist: "Artist" });
+  store.forgetUser("U2");
+  expect(store.getUserScrobbling("U2").huddleMixOptIn).toBe(true);
+  expect(store.userData("U2").likes.count).toBe(0);
+  store.close();
+});

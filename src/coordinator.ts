@@ -93,6 +93,7 @@ import { playbackReportView } from "./playback-report.ts";
 import {
   checked,
   defaultUserSettings,
+  dialogMetadata,
   mergeForm,
   parseSettingsMetadata,
   listenBrainzTokenView,
@@ -103,6 +104,7 @@ import {
   settingsView,
   submittedHuddleMixSources,
   submittedScrobbleServices,
+  withoutUserForm,
   yourDataView,
   type FormState,
   type SettingsTab,
@@ -154,12 +156,15 @@ type Entry = TrackMetadata & {
 };
 
 // The actions that need to know whether the user manages the channel: those
-// that show or change the Channel tab of Settings.
+// that show or change the Channel tab of Settings, and loading a save, which
+// a channel manager may delete as they load it.
 const channelRoleActions = new Set([
   "open_settings",
   "save_channel_defaults",
   "clear_channel_defaults",
   "delete_channel_save",
+  "open_load_session",
+  "load_session_save",
   ...settingsTabs.map((tab) => `${settingsTabActionPrefix}${tab}`),
 ]);
 
@@ -4545,7 +4550,11 @@ export class Coordinator {
       : undefined;
     return settingsView({
       sessionId: this.id,
-      hostId: context.hostId ?? this.hostId,
+      // An empty host is Settings opened while there was none.
+      hostId:
+        context.hostId === undefined
+          ? this.hostId
+          : context.hostId || undefined,
       ...defined({
         tab: context.tab,
         draft: context.draft,
@@ -4602,7 +4611,7 @@ export class Coordinator {
     const context = this.settingsContext(interaction);
     return {
       sessionId: this.id,
-      hostId: context.hostId ?? this.hostId,
+      hostId: context.hostId ?? this.hostId ?? "",
       ...defined({ tab: context.tab }),
       integrationPage: context.integrationPage,
       revision: context.revision,
@@ -4644,10 +4653,10 @@ export class Coordinator {
       await this.slack.pushModal(interaction.triggerId, {
         type: "modal",
         callback_id: "lastfm_login",
-        private_metadata: JSON.stringify({
-          sessionId: this.id,
-          settings: this.settingsMetadata(interaction),
-        }),
+        private_metadata: dialogMetadata(
+          this.id,
+          this.settingsMetadata(interaction),
+        ),
         title: plain("Connect Last.fm"),
         close: plain("Cancel"),
         blocks: [
@@ -4715,7 +4724,13 @@ export class Coordinator {
     }
   }
 
-  private yourDataView(userId: string, notice?: string) {
+  // Your data keeps the metadata of Settings under it, to redraw it after a
+  // deletion changes what it shows.
+  private yourDataView(
+    userId: string,
+    settings: ReturnType<Coordinator["settingsMetadata"]>,
+    notice?: string,
+  ) {
     const data = this.store.userData(userId);
     const save = (save: SessionSave) => ({
       id: save.id,
@@ -4726,6 +4741,7 @@ export class Coordinator {
     });
     return yourDataView({
       sessionId: this.id,
+      settings,
       ...defined({ notice }),
       added: data.added,
       plays: data.plays,
@@ -4744,7 +4760,7 @@ export class Coordinator {
     if (!interaction.triggerId) return;
     await this.slack.pushModal(
       interaction.triggerId,
-      this.yourDataView(interaction.userId),
+      this.yourDataView(interaction.userId, this.settingsMetadata(interaction)),
     );
   }
 
@@ -4805,11 +4821,20 @@ export class Coordinator {
     if (kind !== "own_save" && kind !== "channel_save")
       void this.recommendations?.refreshUser(userId);
     if (kind === "all") this.scrobbling?.syncAnalyticsUser(userId);
+    // Settings under it would otherwise save back what was just deleted.
+    const settings = this.settingsMetadata(interaction);
+    if (kind === "all") settings.draft = withoutUserForm(settings.draft);
     if (interaction.viewId)
       await this.slack.updateModal(
         interaction.viewId,
         interaction.viewHash,
-        this.yourDataView(userId, notice),
+        this.yourDataView(userId, settings, notice),
+      );
+    if (interaction.previousViewId)
+      await this.slack.updateModal(
+        interaction.previousViewId,
+        undefined,
+        this.settingsView(userId, settings),
       );
   }
 
@@ -4817,10 +4842,7 @@ export class Coordinator {
     if (!this.scrobbling || !interaction.triggerId) return;
     await this.slack.pushModal(
       interaction.triggerId,
-      listenBrainzTokenView({
-        sessionId: this.id,
-        settings: this.settingsMetadata(interaction),
-      }),
+      listenBrainzTokenView(this.id, this.settingsMetadata(interaction)),
     );
   }
 
@@ -4832,6 +4854,7 @@ export class Coordinator {
     if (!token) return;
     let notice: string;
     try {
+      const previous = this.scrobblingSnapshot(interaction.userId);
       const wasEnabled = this.scrobbling.settings(
         interaction.userId,
       ).listenBrainzEnabled;
@@ -4841,6 +4864,17 @@ export class Coordinator {
         true,
       );
       notice = `ListenBrainz connected${username ? ` as ${escape(username)}` : ""}.`;
+      const changes = settingsChanges(
+        previous,
+        this.scrobblingSnapshot(interaction.userId),
+      );
+      this.audit.record("settings.changed", interaction.userId, {
+        sessionId: this.id,
+        source: "listenbrainz_token",
+        changed: changedSettings(changes),
+        changes,
+      });
+      this.store.incrementUsage("settings");
       if (
         !wasEnabled &&
         this.scrobbling.sessionEnabled(this.id, interaction.userId)
@@ -4955,7 +4989,7 @@ export class Coordinator {
     };
     if (
       metadata.sessionId !== this.id ||
-      metadata.hostId !== this.hostId ||
+      (metadata.hostId || undefined) !== this.hostId ||
       !this.canOpenSettings(interaction.userId)
     )
       return this.notice(
@@ -5015,11 +5049,16 @@ export class Coordinator {
         const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
         if (mode) this.scrobbling.setMode(interaction.userId, mode);
         const services = submittedScrobbleServices(state.scrobble_to);
-        if (services?.lastfm !== undefined) {
+        // A draft can hold a choice for a service disconnected since, which
+        // there is nothing left to apply to.
+        if (services?.lastfm !== undefined && userSettings.lastFmConnected) {
           newlyEnabled ||= services.lastfm && !userSettings.lastFmEnabled;
           this.scrobbling.setLastFmEnabled(interaction.userId, services.lastfm);
         }
-        if (services?.listenbrainz !== undefined) {
+        if (
+          services?.listenbrainz !== undefined &&
+          userSettings.listenBrainzConnected
+        ) {
           newlyEnabled ||=
             services.listenbrainz && !userSettings.listenBrainzEnabled;
           await this.scrobbling.setListenBrainz(
@@ -5238,7 +5277,10 @@ export class Coordinator {
       return false;
     }
     const metadata = parseMetadata(interaction.metadata);
-    if (metadata.sessionId !== this.id || metadata.hostId !== this.hostId) {
+    if (
+      metadata.sessionId !== this.id ||
+      (metadata.hostId || undefined) !== this.hostId
+    ) {
       await this.notice(interaction.userId, "Settings are stale; reopen them.");
       return false;
     }
