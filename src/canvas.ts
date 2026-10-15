@@ -3,6 +3,7 @@ import type { CanvasStats } from "./store.ts";
 
 export const canvasSections = [
   "summary",
+  "active-sessions",
   "top-artists",
   "top-tracks",
   "top-channels",
@@ -12,8 +13,18 @@ export const canvasSections = [
 
 export type CanvasSection = (typeof canvasSections)[number];
 
+/** A Huddle HuddleFM is in right now, as the canvas lists it. */
+export type ActiveCanvasSession = {
+  channelId: string;
+  listeners: number;
+  state: string;
+  track?: { title: string; artist: string };
+};
+
 const sectionAliases = new Map<string, CanvasSection>([
   ["top-songs", "top-tracks"],
+  ["active", "active-sessions"],
+  ["now-playing", "active-sessions"],
 ]);
 
 /**
@@ -49,10 +60,12 @@ export function canvasMarkdown(
   stats: CanvasStats,
   controls: { label: string; count: number }[],
   {
+    active = [],
     integrations = [],
     sections = canvasSections,
     updatedAt = Date.now(),
   }: {
+    active?: ActiveCanvasSession[];
     integrations?: { id: string; name: string }[];
     sections?: readonly CanvasSection[];
     updatedAt?: number;
@@ -84,6 +97,17 @@ export function canvasMarkdown(
       `| Average songs per session | ${stats.sessions.count ? (stats.tracks.count / stats.sessions.count).toFixed(1) : "0"} |`,
       `| Unique artists | ${stats.tracks.artists} |`,
       `| Requested / autoplay | ${requested} / ${stats.tracks.autoplay} |`,
+    ],
+    "active-sessions": () => [
+      "## Active sessions",
+      active
+        .map(({ channelId, listeners, state, track }) => {
+          const playing = track
+            ? `${state === "paused" ? "Paused" : "Playing"} **${escapeMarkdown(track.title)}** — ${escapeMarkdown(track.artist)}`
+            : "Nothing playing";
+          return `- ![](#${channelId}) · ${plural(listeners, "listener")} · ${playing}`;
+        })
+        .join("\n") || "No Huddles right now.",
     ],
     "top-artists": () => [
       "## Top artists",

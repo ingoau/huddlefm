@@ -1593,6 +1593,21 @@ export class Coordinator {
     return [...this.participants];
   }
 
+  /** This session as the stats canvas lists it; undefined once it has ended. */
+  canvasSession() {
+    if (this.inactive()) return;
+    return {
+      channelId: this.roomId,
+      listeners: [...this.participants].filter((id) => id !== this.botUserId)
+        .length,
+      state: this.state,
+      track: this.current && {
+        title: this.current.title,
+        artist: this.current.artist,
+      },
+    };
+  }
+
   hasParticipant(userId: string) {
     return this.participants.has(userId);
   }
@@ -1614,7 +1629,10 @@ export class Coordinator {
 
   memberJoined(userId: string) {
     if (this.isExcluded(userId)) return;
-    if (!this.participants.has(userId)) this.participantsRevision++;
+    if (!this.participants.has(userId)) {
+      this.participantsRevision++;
+      this.sessionChanged();
+    }
     this.participants.add(userId);
     this.playbackScrobbling?.memberJoined(userId);
     void this.promptScrobbling(userId);
@@ -1628,7 +1646,10 @@ export class Coordinator {
 
   memberLeft(userId: string) {
     if (this.isExcluded(userId)) return;
-    if (this.participants.delete(userId)) this.participantsRevision++;
+    if (this.participants.delete(userId)) {
+      this.participantsRevision++;
+      this.sessionChanged();
+    }
     this.playbackScrobbling?.memberLeft(userId);
     if (this.state === "suspended" || userId === this.botUserId) return;
     const changed =
@@ -3348,6 +3369,7 @@ export class Coordinator {
       this.sendMedia({ type: "stop" });
       this.notifyIntegrations("playback.ready", { state: "ready" });
       await this.render();
+      this.sessionChanged();
       this.log.info({ event: "queue_idle" }, "No playable track in queue");
       return this.refreshIdle();
     }
@@ -3377,6 +3399,7 @@ export class Coordinator {
     });
     this.notifyTrack("track.started", next);
     this.notifyIntegrations("playback.playing", { state: "playing" });
+    this.sessionChanged();
     this.log.info(
       {
         event: "track_started",
@@ -3776,6 +3799,7 @@ export class Coordinator {
     });
     this.store.incrementUsage(paused ? "paused" : "resumed");
     this.notifyIntegrations(event, { state: next });
+    this.sessionChanged();
     await this.render();
     this.refreshIdle();
   }

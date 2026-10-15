@@ -186,6 +186,9 @@ function updateCanvas() {
       slackApp.updateCanvas(
         canvasId,
         canvasMarkdown(store.canvasStats(), store.usageStats(), {
+          active: activeCoordinators().flatMap(
+            (coordinator) => coordinator.canvasSession() ?? [],
+          ),
           integrations,
           sections: config.canvasSections,
         }),
