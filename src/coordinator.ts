@@ -189,6 +189,7 @@ function submittedHuddleMixSources(
 const channelDefaultsActions = new Set([
   "open_settings",
   "save_channel_defaults",
+  "clear_channel_defaults",
 ]);
 
 // Whether a single-option checkbox block is ticked, or undefined when the
@@ -810,6 +811,7 @@ export class Coordinator {
         report_playback_problem: () => this.reportPlaybackProblem(interaction),
         end_session: () => this.end(interaction.userId, "ended by host"),
         save_channel_defaults: () => this.saveChannelDefaults(interaction),
+        clear_channel_defaults: () => this.clearChannelDefaults(interaction),
         claim_host: () => this.claimHost(interaction),
         connect_lastfm: () => this.lastFmModal(interaction),
         continue_lastfm: () => this.continueLastFm(interaction),
@@ -1775,7 +1777,8 @@ export class Coordinator {
   // action that can end it, and only for users who could not end it anyway.
   // Channel managers also save the channel's defaults from Settings, so
   // opening it or saving them asks whenever channel managers are granted
-  // anything.
+  // anything and the user can see settings to save. A workspace admin lookup
+  // still pending could grant them that, so it asks then too.
   private roleLookups(
     userId: string,
     ending: boolean,
@@ -1791,10 +1794,15 @@ export class Coordinator {
     if (admins && matters(admins.permissions) && !admins.known(userId))
       lookups.push(() => admins.resolve(userId));
     const managers = this.channelManagers;
+    const savesDefaults =
+      channelDefaults &&
+      managers?.permissions !== "none" &&
+      !this.roomId.startsWith("D") &&
+      userId !== this.config.managerUserId &&
+      (lookups.length > 0 || this.savableDefaults(userId).length > 0);
     if (
       managers &&
-      (matters(managers.permissions) ||
-        (channelDefaults && managers.permissions !== "none")) &&
+      (matters(managers.permissions) || savesDefaults) &&
       !managers.known(this.roomId)
     )
       lookups.push(() => managers.resolve(this.roomId, userId));
@@ -1853,14 +1861,27 @@ export class Coordinator {
     return (
       interaction.actionId === "open_settings" ||
       interaction.actionId === "end_session" ||
-      interaction.actionId === "save_channel_defaults"
+      interaction.actionId === "save_channel_defaults" ||
+      interaction.actionId === "clear_channel_defaults"
     );
   }
 
+  // The session settings the user can see in Settings, which are the only
+  // ones they may save as the channel's defaults.
+  private savableDefaults(userId: string) {
+    const fields: ("volume" | "settings" | "permissions")[] = [];
+    if (this.can(userId, "volume")) fields.push("volume");
+    if (this.can(userId, "configure-settings")) fields.push("settings");
+    if (this.settingsAdmin(userId)) fields.push("permissions");
+    return fields;
+  }
+
   // Channel managers, and the configured manager, decide what every session
-  // in a channel starts with. A direct message has no channel to save for.
+  // in a channel starts with, from the settings they can see. A direct
+  // message has no channel to save for.
   private canSaveChannelDefaults(userId: string) {
     if (this.isExcluded(userId) || this.roomId.startsWith("D")) return false;
+    if (!this.savableDefaults(userId).length) return false;
     return (
       userId === this.config.managerUserId ||
       this.channelManagers?.isManager(this.roomId, userId) === true
@@ -4399,6 +4420,7 @@ export class Coordinator {
     };
     const admin = this.settingsAdmin(userId);
     const value = this.id;
+    const savesDefaults = this.canSaveChannelDefaults(userId);
     const sessionBlocks = [
       { type: "header", text: plain("Session") },
       ...when(
@@ -4478,10 +4500,10 @@ export class Coordinator {
         ),
       ),
       ...when(
-        this.canSaveChannelDefaults(userId) || this.can(userId, "end-session"),
+        savesDefaults || this.can(userId, "end-session"),
         actions("session_actions", [
           ...when(
-            this.canSaveChannelDefaults(userId),
+            savesDefaults,
             button(
               "save_channel_defaults",
               plain("Save as defaults for this channel"),
@@ -4494,6 +4516,17 @@ export class Coordinator {
                 ),
               },
             ),
+          ),
+          ...when(
+            savesDefaults && Boolean(this.store.channelDefaults(this.roomId)),
+            button("clear_channel_defaults", plain("Clear channel defaults"), {
+              value,
+              confirm: confirm(
+                "Clear channel defaults?",
+                "New sessions in this channel will start with the usual settings.",
+                "Clear",
+              ),
+            }),
           ),
           ...when(
             this.can(userId, "end-session"),
@@ -5054,66 +5087,107 @@ export class Coordinator {
   }
 
   // Saves the session settings shown in Settings, including edits not yet
-  // saved, as what new sessions in this channel start with. Settings the user
-  // cannot see there keep the session's current value. The session itself is
-  // left alone until Settings is saved.
+  // saved, as what new sessions in this channel start with. Only the settings
+  // the user can see are saved; the rest keep what was saved before, or the
+  // usual default. The session itself is left alone until Settings is saved.
   private async saveChannelDefaults(interaction: Interaction) {
-    if (!this.canSaveChannelDefaults(interaction.userId))
-      return this.notice(
-        interaction.userId,
-        "Only channel managers can save defaults for this channel.",
-      );
+    if (!(await this.channelDefaultsAllowed(interaction))) return;
+    const fields = this.savableDefaults(interaction.userId);
     const { state } = interaction;
-    let volume = this.volume;
-    const percentText = state.volume?.percent?.value?.trim();
-    if (percentText !== undefined) {
-      const percent = Number(percentText);
-      if (
-        !percentText ||
-        !Number.isFinite(percent) ||
-        percent < 0 ||
-        percent > 100
-      )
-        return this.notice(
-          interaction.userId,
-          "Volume must be between 0 and 100.",
-        );
-      volume = Math.round(percent * 100) / 10_000;
-    }
-    const preset = state.permission_preset?.selected?.selected_option?.value;
-    const chosen = state.permissions?.selected?.selected_options
-      ?.map((option) => option.value)
-      .filter((value): value is string => Boolean(value));
-    const permissions: Iterable<string> =
-      preset && preset in permissionPresets
-        ? permissionPresets[preset as keyof typeof permissionPresets]
-        : (chosen ?? this.allowed);
-    const allowed = new Set(permissions);
     const defaults: ChannelDefaults = {
-      volume,
-      autoplay:
-        selected(state.autoplay?.mode, autoplayModes) ?? this.autoplayMode,
-      loopMode: selected(state.loop?.mode, loopModes) ?? this.loopMode,
-      displayMode:
-        selected(state.display?.mode, displayModes) ?? this.displayMode,
-      transitionMode:
-        selected(state.transition?.mode, transitionModes) ??
-        this.transitionMode,
-      duckingMode:
-        selected(state.ducking?.mode, duckingModes) ?? this.duckingMode,
-      anchorEnabled: checked(state.anchor?.enabled) ?? this.anchorEnabled,
-      permissions: capabilities.filter((capability) => allowed.has(capability)),
+      ...this.store.channelDefaults(this.roomId),
     };
+    if (fields.includes("volume")) {
+      let volume = this.volume;
+      const percentText = state.volume?.percent?.value?.trim();
+      if (percentText !== undefined) {
+        const percent = Number(percentText);
+        if (
+          !percentText ||
+          !Number.isFinite(percent) ||
+          percent < 0 ||
+          percent > 100
+        )
+          return this.notice(
+            interaction.userId,
+            "Volume must be between 0 and 100.",
+          );
+        volume = Math.round(percent * 100) / 10_000;
+      }
+      defaults.volume = volume;
+    }
+    if (fields.includes("settings")) {
+      defaults.autoplay =
+        selected(state.autoplay?.mode, autoplayModes) ?? this.autoplayMode;
+      defaults.loopMode =
+        selected(state.loop?.mode, loopModes) ?? this.loopMode;
+      defaults.displayMode =
+        selected(state.display?.mode, displayModes) ?? this.displayMode;
+      defaults.transitionMode =
+        selected(state.transition?.mode, transitionModes) ??
+        this.transitionMode;
+      defaults.duckingMode =
+        selected(state.ducking?.mode, duckingModes) ?? this.duckingMode;
+      defaults.anchorEnabled =
+        checked(state.anchor?.enabled) ?? this.anchorEnabled;
+    }
+    if (fields.includes("permissions")) {
+      const preset = state.permission_preset?.selected?.selected_option?.value;
+      const chosen = state.permissions?.selected?.selected_options
+        ?.map((option) => option.value)
+        .filter((value): value is string => Boolean(value));
+      const allowed = new Set<string>(
+        preset && preset in permissionPresets
+          ? permissionPresets[preset as keyof typeof permissionPresets]
+          : (chosen ?? this.allowed),
+      );
+      defaults.permissions = capabilities.filter((capability) =>
+        allowed.has(capability),
+      );
+    }
     this.store.setChannelDefaults(this.roomId, defaults, interaction.userId);
     this.audit.record("channel_defaults.saved", interaction.userId, {
       sessionId: this.id,
       channelId: this.roomId,
       ...defaults,
     });
+    if (interaction.viewId) await this.updateSettings(interaction);
     await this.notice(
       interaction.userId,
       "Saved. New sessions in this channel will start with these settings.",
     );
+  }
+
+  private async clearChannelDefaults(interaction: Interaction) {
+    if (!(await this.channelDefaultsAllowed(interaction))) return;
+    this.store.clearChannelDefaults(this.roomId);
+    this.audit.record("channel_defaults.cleared", interaction.userId, {
+      sessionId: this.id,
+      channelId: this.roomId,
+    });
+    if (interaction.viewId) await this.updateSettings(interaction);
+    await this.notice(
+      interaction.userId,
+      "Cleared. New sessions in this channel will start with the usual settings.",
+    );
+  }
+
+  // Saving or clearing the channel's defaults checks again what Settings
+  // offered, as the user's roles or the host may have changed since it opened.
+  private async channelDefaultsAllowed(interaction: Interaction) {
+    if (!this.canSaveChannelDefaults(interaction.userId)) {
+      await this.notice(
+        interaction.userId,
+        "Only channel managers can change defaults for this channel.",
+      );
+      return false;
+    }
+    const metadata = parseMetadata(interaction.metadata);
+    if (metadata.sessionId !== this.id || metadata.hostId !== this.hostId) {
+      await this.notice(interaction.userId, "Settings are stale; reopen them.");
+      return false;
+    }
+    return true;
   }
 
   private setPermissions(allowed: Iterable<string>) {

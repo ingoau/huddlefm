@@ -1201,3 +1201,13 @@ test("channel defaults keep only settings that are still valid", () => {
     .run("C1");
   expect(store.channelDefaults("C1")).toBeUndefined();
 });
+
+test("clears a channel's defaults", () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults("C1", { volume: 0.4 }, "U1");
+  store.setChannelDefaults("C2", { volume: 0.5 }, "U1");
+  store.clearChannelDefaults("C1");
+  expect(store.channelDefaults("C1")).toBeUndefined();
+  expect(store.channelDefaults("C2")).toEqual({ volume: 0.5 });
+  store.close();
+});

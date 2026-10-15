@@ -1619,6 +1619,12 @@ export class Store {
       .run(channelId, JSON.stringify(defaults), userId, Date.now());
   }
 
+  clearChannelDefaults(channelId: string) {
+    this.db
+      .query("DELETE FROM channel_defaults WHERE channel_id = ?")
+      .run(channelId);
+  }
+
   setPermission(sessionId: string, capability: string, allowed: boolean) {
     this.db
       .query(
