@@ -9,7 +9,7 @@ import { Store, type DuckingMode, type SavedSession } from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
-import { parseLikeValue } from "./coordinator-ui.ts";
+import { addedBy, parseLikeValue } from "./coordinator-ui.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
 import { ChannelManagers } from "./channel-managers.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
@@ -7935,4 +7935,92 @@ test("describes itself for the canvas until it ends, and reports membership chan
   expect(result.sessionChanges).toHaveLength(changes + 2);
   await result.coordinator.endFromSlack();
   expect(result.coordinator.canvasSession()).toBeUndefined();
+});
+
+test("Your data shows what is kept about a user and deletes only theirs", async () => {
+  const store = new Store(":memory:");
+  const result = setup(undefined, undefined, undefined, undefined, store);
+  await result.coordinator.start();
+  for (const userId of ["host", "guest"]) {
+    store.recordTrackPlay({
+      sessionId: result.coordinator.id,
+      userId,
+      title: "Heard <it>",
+      artist: "Artist",
+    });
+    store.likeTrack({ userId, title: "Liked", artist: "Artist" });
+  }
+  const mine = store.addSessionSave(
+    { type: "user", id: "host" },
+    "Mine",
+    "host",
+    [],
+    {},
+  );
+  const theirs = store.addSessionSave(
+    { type: "user", id: "guest" },
+    "Theirs",
+    "guest",
+    [],
+    {},
+  );
+
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings"),
+  );
+  const you = JSON.stringify(await settingsTab(result, "host", "you"));
+  expect(you).toContain('"action_id":"open_your_data"');
+  await pressInSettings(result, "host", "open_your_data", {}, "host", {
+    tab: "you",
+  });
+  const data = JSON.stringify(result.pushedModals.at(-1));
+  expect(data).toContain("*Songs you heard* · 1\\nHeard &lt;it&gt; — Artist");
+  expect(data).toContain(`"block_id":"delete_own_save_${mine}"`);
+  expect(data).not.toContain(theirs);
+  expect(data).toContain("never deleted");
+
+  const press = (actionId: string, value = result.coordinator.id) =>
+    result.coordinator.action({
+      ...interaction(result.coordinator, actionId, value),
+      messageTs: "",
+      viewId: "data-view",
+      viewHash: "hash",
+      metadata: JSON.stringify({ sessionId: result.coordinator.id }),
+    });
+  await press("delete_data_plays");
+  expect(store.userData("host").plays.count).toBe(0);
+  expect(store.userData("guest").plays.count).toBe(1);
+  const [viewId, , view] = result.updatedModals.at(-1)!;
+  expect(viewId).toBe("data-view");
+  expect(JSON.stringify(view)).toContain("Deleted 1 play.");
+  expect(result.audit).toContainEqual([
+    "data.deleted",
+    "host",
+    { sessionId: result.coordinator.id, kind: "plays", count: 1 },
+  ]);
+
+  // Someone else's save cannot be deleted by naming it.
+  await press("delete_own_save", theirs);
+  expect(JSON.stringify(result.updatedModals.at(-1))).toContain(
+    "That saved session is no longer there.",
+  );
+  expect(store.sessionSaves([{ type: "user", id: "guest" }])).toHaveLength(1);
+  await press("delete_own_save", mine);
+  expect(store.sessionSaves([{ type: "user", id: "host" }])).toEqual([]);
+
+  await press("delete_all_data");
+  expect(store.userData("host").likes.count).toBe(0);
+  expect(store.userData("guest").likes.count).toBe(1);
+  expect(result.audit).toContainEqual([
+    "data.deleted",
+    "host",
+    { sessionId: result.coordinator.id, kind: "all" },
+  ]);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("a song whose adder took their name off it is shown without one", () => {
+  expect(addedBy({ requesterId: "" })).toBe("Added by a listener");
+  expect(addedBy({ requesterId: "U1" })).toBe("Added by <@U1>");
 });

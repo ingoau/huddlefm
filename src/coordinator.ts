@@ -103,6 +103,7 @@ import {
   settingsView,
   submittedHuddleMixSources,
   submittedScrobbleServices,
+  yourDataView,
   type FormState,
   type SettingsTab,
 } from "./settings-view.ts";
@@ -111,6 +112,15 @@ import {
   settingsChanges,
   type Settings,
 } from "./settings-diff.ts";
+
+// What Your data calls each kind of record it deletes.
+const deletedNouns = {
+  added: ["song", "songs"],
+  plays: ["play", "plays"],
+  likes: ["like", "likes"],
+  skips: ["skip", "skips"],
+  scrobbles: ["scrobble", "scrobbles"],
+} as const;
 
 // What redrawing Settings may change about it.
 type SettingsChange = {
@@ -794,6 +804,17 @@ export class Coordinator {
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
         open_listenbrainz_token: () => this.listenBrainzTokenModal(interaction),
+        open_your_data: () => this.openYourData(interaction),
+        delete_own_save: () => this.deleteYourData(interaction, "own_save"),
+        delete_my_channel_save: () =>
+          this.deleteYourData(interaction, "channel_save"),
+        delete_data_added: () => this.deleteYourData(interaction, "added"),
+        delete_data_plays: () => this.deleteYourData(interaction, "plays"),
+        delete_data_likes: () => this.deleteYourData(interaction, "likes"),
+        delete_data_skips: () => this.deleteYourData(interaction, "skips"),
+        delete_data_scrobbles: () =>
+          this.deleteYourData(interaction, "scrobbles"),
+        delete_all_data: () => this.deleteYourData(interaction, "all"),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
         delete_channel_save: () => this.deleteChannelSave(interaction),
@@ -4551,6 +4572,7 @@ export class Coordinator {
         allowed: this.allowed,
       },
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
+      yourData: this.isParticipantOrManager(userId),
       channel: {
         ...(saved && this.store.channelDefaults(this.roomId)
           ? { defaults: saved }
@@ -4691,6 +4713,104 @@ export class Coordinator {
         `Last.fm login is not complete: ${message(error)}`,
       );
     }
+  }
+
+  private yourDataView(userId: string, notice?: string) {
+    const data = this.store.userData(userId);
+    const save = (save: SessionSave) => ({
+      id: save.id,
+      name: save.name,
+      savedBy: save.savedBy,
+      savedAt: save.savedAt,
+      songs: save.tracks.length,
+    });
+    return yourDataView({
+      sessionId: this.id,
+      ...defined({ notice }),
+      added: data.added,
+      plays: data.plays,
+      likes: data.likes,
+      skips: data.skips,
+      scrobbles: data.scrobbles,
+      saves: data.saves.map(save),
+      channelSaves: data.channelSaves.map((item) => ({
+        ...save(item),
+        channelId: item.owner.id,
+      })),
+    });
+  }
+
+  private async openYourData(interaction: Interaction) {
+    if (!interaction.triggerId) return;
+    await this.slack.pushModal(
+      interaction.triggerId,
+      this.yourDataView(interaction.userId),
+    );
+  }
+
+  // Deletes one kind of what is kept about the user, or all of it, from Your
+  // data. Only ever the user's own: each kind is looked up by their ID. The
+  // audit log records that it happened, never what was deleted.
+  private async deleteYourData(
+    interaction: Interaction,
+    kind:
+      | "own_save"
+      | "channel_save"
+      | "added"
+      | "plays"
+      | "likes"
+      | "skips"
+      | "scrobbles"
+      | "all",
+  ) {
+    const { userId } = interaction;
+    let count = 0;
+    let notice: string;
+    if (kind === "own_save" || kind === "channel_save") {
+      const data = this.store.userData(userId);
+      const save = (kind === "own_save" ? data.saves : data.channelSaves).find(
+        (save) => save.id === interaction.value,
+      );
+      if (save) {
+        this.store.deleteSessionSave(save.id);
+        count = 1;
+        notice = `Deleted “${escape(save.name)}”.`;
+      } else notice = "That saved session is no longer there.";
+    } else if (kind === "all") {
+      this.store.forgetUser(userId);
+      notice =
+        "Deleted everything kept about you, apart from sessions you saved to channels.";
+    } else {
+      count =
+        kind === "added"
+          ? this.store.forgetAddedTracks(userId)
+          : kind === "plays"
+            ? this.store.deleteUserPlays(userId)
+            : kind === "likes"
+              ? this.store.deleteUserLikes(userId)
+              : kind === "skips"
+                ? this.store.deleteUserSkips(userId)
+                : this.store.deleteUserScrobbles(userId);
+      const [one, many] = deletedNouns[kind];
+      notice =
+        kind === "added"
+          ? `Your name is off ${songCount(count)} you added.`
+          : `Deleted ${count} ${count === 1 ? one : many}.`;
+    }
+    this.audit.record("data.deleted", userId, {
+      sessionId: this.id,
+      kind,
+      ...(kind === "all" ? {} : { count }),
+    });
+    if (kind !== "own_save" && kind !== "channel_save")
+      void this.recommendations?.refreshUser(userId);
+    if (kind === "all") this.scrobbling?.syncAnalyticsUser(userId);
+    if (interaction.viewId)
+      await this.slack.updateModal(
+        interaction.viewId,
+        interaction.viewHash,
+        this.yourDataView(userId, notice),
+      );
   }
 
   private async listenBrainzTokenModal(interaction: Interaction) {

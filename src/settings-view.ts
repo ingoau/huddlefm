@@ -308,6 +308,8 @@ export type SettingsViewOptions = {
   draft?: FormState;
   // A word on what just happened, shown once above the tab.
   notice?: string;
+  // Whether the viewer can open Your data from here.
+  yourData?: boolean;
   // What the viewer may change.
   access: {
     volume: boolean;
@@ -813,6 +815,19 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
           })
         : button("open_listenbrainz_token", plain("Add token"), { value }),
     },
+    ...when(
+      options.yourData,
+      { type: "header", text: plain("Your data") },
+      {
+        type: "section",
+        block_id: "your_data",
+        text: {
+          type: "mrkdwn",
+          text: "See and delete the songs and saved sessions HuddleFM keeps about you.",
+        },
+        accessory: button("open_your_data", plain("Manage"), { value }),
+      },
+    ),
   ];
 }
 
@@ -834,6 +849,178 @@ export function listenBrainzTokenView(settingsMetadata: unknown) {
         action_id: "value",
         placeholder: plain("Paste token"),
       }),
+    ],
+  };
+}
+
+/** A kind of song a user is kept with, as Your data lists and deletes it. */
+export const userSongKinds = ["added", "plays", "likes", "skips"] as const;
+export type UserSongKind = (typeof userSongKinds)[number];
+const userSongLabels: Record<UserSongKind, { title: string; effect: string }> =
+  {
+    added: {
+      title: "Songs you added",
+      effect:
+        "Your name comes off the songs you added that have finished, and the Huddle mix stops drawing on them. Songs still queued or playing keep it.",
+    },
+    plays: {
+      title: "Songs you heard",
+      effect: "The Huddle mix forgets what you have listened to.",
+    },
+    likes: {
+      title: "Songs you liked",
+      effect: "Autoplay forgets the songs you asked for more of.",
+    },
+    skips: {
+      title: "Autoplay picks you skipped",
+      effect: "Autoplay forgets what you skipped.",
+    },
+  };
+
+// Your data lists this many of the channel saves a user made, at most, so
+// the modal stays within Slack's block limit.
+const yourDataChannelSaveLimit = 40;
+
+export type YourDataOptions = {
+  sessionId: string;
+  notice?: string;
+  added: { count: number; recent: { title: string; artist: string }[] };
+  plays: YourDataOptions["added"];
+  likes: YourDataOptions["added"];
+  skips: YourDataOptions["added"];
+  scrobbles: number;
+  saves: ChannelSaveView[];
+  // Sessions the user saved to a channel, with the channel they are in.
+  channelSaves: (ChannelSaveView & { channelId: string })[];
+};
+
+/** What HuddleFM keeps about the user, each kind with a way to delete it. */
+export function yourDataView(options: YourDataOptions) {
+  const deleteButton = (
+    actionId: string,
+    value: string,
+    title: string,
+    text: string,
+  ) =>
+    button(actionId, plain("Delete"), {
+      style: "danger",
+      value,
+      confirm: confirm(title, text, "Delete"),
+    });
+  const saveBlock = (
+    save: ChannelSaveView,
+    actionId: string,
+    where: string,
+    effect: string,
+  ) => ({
+    type: "section",
+    block_id: `${actionId}_${save.id}`,
+    text: {
+      type: "mrkdwn",
+      text: `*${escape(save.name)}*${where}\n${songCount(save.songs)} · saved ${slackDate(save.savedAt)}`,
+    },
+    accessory: deleteButton(actionId, save.id, "Delete saved session?", effect),
+  });
+  const channelSaves = options.channelSaves.slice(0, yourDataChannelSaveLimit);
+  const hidden = options.channelSaves.length - channelSaves.length;
+  const songs = (kind: UserSongKind) => {
+    const { count, recent } = options[kind];
+    const label = userSongLabels[kind];
+    const lines = recent.map(
+      (song) => `${escape(song.title)} — ${escape(song.artist)}`,
+    );
+    const more = count > recent.length ? "\n…" : "";
+    return {
+      type: "section",
+      block_id: `data_${kind}`,
+      text: {
+        type: "mrkdwn",
+        text: `*${label.title}* · ${count}${lines.length ? `\n${lines.join("\n")}${more}` : ""}`,
+      },
+      ...(count
+        ? {
+            accessory: deleteButton(
+              `delete_data_${kind}`,
+              options.sessionId,
+              `Delete ${label.title.toLowerCase()}?`,
+              label.effect,
+            ),
+          }
+        : {}),
+    };
+  };
+  return {
+    type: "modal",
+    callback_id: "your_data",
+    private_metadata: JSON.stringify({ sessionId: options.sessionId }),
+    title: plain("Your data"),
+    close: plain("Done"),
+    blocks: [
+      context(
+        "data_about",
+        "This is what HuddleFM keeps about you. Deleting takes effect straight away. HuddleFM's audit log of who did what is kept, and is never deleted.",
+      ),
+      ...when(options.notice, context("data_notice", options.notice ?? "")),
+      { type: "header", text: plain("Saved sessions") },
+      ...options.saves.map((save) =>
+        saveBlock(
+          save,
+          "delete_own_save",
+          "",
+          "You will not be able to load it again.",
+        ),
+      ),
+      ...channelSaves.map((save) =>
+        saveBlock(
+          save,
+          "delete_my_channel_save",
+          ` in <#${save.channelId}>`,
+          "Nobody in the channel will be able to load it again.",
+        ),
+      ),
+      ...when(
+        hidden > 0,
+        context(
+          "data_saves_more",
+          `And ${hidden} more saved to channels, which you can delete from Settings there.`,
+        ),
+      ),
+      ...when(
+        !options.saves.length && !options.channelSaves.length,
+        context("data_saves_none", "None."),
+      ),
+      { type: "header", text: plain("Listening") },
+      ...userSongKinds.map(songs),
+      {
+        type: "section",
+        block_id: "data_scrobbles",
+        text: {
+          type: "mrkdwn",
+          text: `*Scrobbles* · ${options.scrobbles}\nListens waiting for, or already sent to, Last.fm and ListenBrainz.`,
+        },
+        ...(options.scrobbles
+          ? {
+              accessory: deleteButton(
+                "delete_data_scrobbles",
+                options.sessionId,
+                "Delete scrobbles?",
+                "Listens not yet sent to Last.fm or ListenBrainz will not be sent. Those already sent stay with them.",
+              ),
+            }
+          : {}),
+      },
+      { type: "divider" },
+      actions("data_everything", [
+        button("delete_all_data", plain("Delete everything"), {
+          style: "danger",
+          value: options.sessionId,
+          confirm: confirm(
+            "Delete everything?",
+            "This deletes your saved sessions and listening history above, disconnects Last.fm and ListenBrainz, and resets your choices. Sessions you saved to channels belong to them, so they stay unless you delete them yourself.",
+            "Delete everything",
+          ),
+        }),
+      ]),
     ],
   };
 }

@@ -6,6 +6,7 @@ import {
   parseSettingsMetadata,
   settingsView,
   visibleSettingsTabs,
+  yourDataView,
   type SettingsViewOptions,
 } from "./settings-view.ts";
 
@@ -291,4 +292,36 @@ test("a preset's refill gives the permission inputs new block IDs", () => {
   ).toEqual({
     permissions: { selected: { selected_options: [{ value: "pause" }] } },
   });
+});
+
+test("Your data stays within Slack's block limit however much was saved", () => {
+  const save = (index: number) => ({
+    id: `s${index}`,
+    name: `Save ${index}`,
+    savedBy: "U1",
+    savedAt: 0,
+    songs: 1,
+  });
+  const songs = { count: 0, recent: [] };
+  const view = yourDataView({
+    sessionId: "session",
+    added: songs,
+    plays: songs,
+    likes: songs,
+    skips: songs,
+    scrobbles: 0,
+    saves: Array.from({ length: 25 }, (_, index) => save(index)),
+    channelSaves: Array.from({ length: 60 }, (_, index) => ({
+      ...save(100 + index),
+      channelId: "C1",
+    })),
+  });
+  expect(view.blocks.length).toBeLessThanOrEqual(100);
+  expect(JSON.stringify(view)).toContain("And 20 more saved to channels");
+  // Nothing to delete has no Delete button.
+  expect(
+    view.blocks.find(
+      (block) => (block as { block_id?: string }).block_id === "data_plays",
+    ),
+  ).not.toHaveProperty("accessory");
 });

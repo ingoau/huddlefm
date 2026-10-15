@@ -1312,3 +1312,105 @@ test("clears a channel's defaults", () => {
   expect(store.channelDefaults("C2")).toEqual({ volume: 0.5 });
   store.close();
 });
+
+test("Your data counts what is kept about a user and forgets it on request", () => {
+  const store = new Store(":memory:");
+  createSession(store);
+  const track = (id: string, requesterId: string, status: string) =>
+    store.addTrack({
+      id,
+      sessionId: "session",
+      requesterId,
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id.toUpperCase(),
+      artist: "Artist",
+      status,
+    });
+  track("old", "U1", "played");
+  track("broken", "U1", "failed");
+  track("now", "U1", "playing");
+  track("theirs", "U2", "played");
+  for (const userId of ["U1", "U2"]) {
+    store.recordTrackPlay({
+      sessionId: "session",
+      userId,
+      title: "Heard",
+      artist: "Artist",
+    });
+    store.likeTrack({ userId, title: "Liked", artist: "Artist" });
+    store.recordAutoplaySkip({
+      sessionId: "session",
+      userId,
+      title: "Skipped",
+      artist: "Artist",
+      weight: 1,
+    });
+    store.queueScrobble("session", "old", userId, "lastfm", 1, {});
+  }
+  const mine = store.addSessionSave(
+    { type: "user", id: "U1" },
+    "Mine",
+    "U1",
+    [],
+    {},
+  );
+  store.addSessionSave({ type: "user", id: "U2" }, "Theirs", "U2", [], {});
+  const channel = store.addSessionSave(
+    { type: "channel", id: "C1" },
+    "Shared",
+    "U1",
+    [],
+    {},
+  );
+  store.connectLastFm("U1", "last-user", "key");
+  store.connectLastFm("U2", "other", "key");
+
+  const data = store.userData("U1");
+  expect(data.added.count).toBe(3);
+  expect(data.added.recent.map((song) => song.title)).toEqual([
+    "NOW",
+    "BROKEN",
+    "OLD",
+  ]);
+  expect(data.plays).toEqual({
+    count: 1,
+    recent: [{ title: "Heard", artist: "Artist" }],
+  });
+  expect(data.likes.count).toBe(1);
+  expect(data.skips.count).toBe(1);
+  expect(data.scrobbles).toBe(1);
+  expect(data.saves.map((save) => save.id)).toEqual([mine]);
+  expect(data.channelSaves.map((save) => save.id)).toEqual([channel]);
+
+  // Songs still playing keep who added them; finished ones let go.
+  expect(store.forgetAddedTracks("U1")).toBe(2);
+  expect(store.userData("U1").added.count).toBe(1);
+
+  store.forgetUser("U1");
+  const forgotten = store.userData("U1");
+  expect(forgotten).toMatchObject({
+    added: { count: 1 },
+    plays: { count: 0 },
+    likes: { count: 0 },
+    skips: { count: 0 },
+    scrobbles: 0,
+    saves: [],
+  });
+  // A channel's saves are the channel's, so they stay.
+  expect(forgotten.channelSaves.map((save) => save.id)).toEqual([channel]);
+  expect(store.getUserScrobbling("U1").lastFmSessionKey).toBeUndefined();
+  // Nobody else's data is touched.
+  const theirs = store.userData("U2");
+  expect(theirs).toMatchObject({
+    added: { count: 1 },
+    plays: { count: 1 },
+    likes: { count: 1 },
+    skips: { count: 1 },
+    scrobbles: 1,
+  });
+  expect(theirs.saves).toHaveLength(1);
+  expect(store.getUserScrobbling("U2").lastFmSessionKey).toBe("key");
+  store.close();
+});
