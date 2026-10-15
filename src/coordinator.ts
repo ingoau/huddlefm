@@ -5123,7 +5123,9 @@ export class Coordinator {
                   // land after the song has rolled over, and it should like
                   // the song they were listening to rather than whatever is
                   // playing by the time it arrives.
-                  button("like_track", icon("💖"), { value: current.id }),
+                  button("like_track", icon(":ms-sparkling-heart:"), {
+                    value: current.id,
+                  }),
                 ]),
                 actions(`seek_${id}`, [
                   button("seek_back", icon(":ms-rewind:"), { value }),
