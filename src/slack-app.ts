@@ -153,6 +153,7 @@ export class SlackAppAdapter {
   private socket?: WebSocket;
   private web: WebClient;
   private names = new Map<string, Promise<string>>();
+  private publicChannels = new Map<string, Promise<boolean>>();
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
   private stopHeartbeat?: () => void;
@@ -318,6 +319,43 @@ export class SlackAppAdapter {
       ...(hash ? { hash } : {}),
       view: view as never,
     });
+  }
+
+  /**
+   * Whether anyone in the workspace could see the channel. Direct messages,
+   * group DMs, private channels, and channels Slack will not describe all
+   * count as private. A public answer is rechecked after an hour, in case the
+   * channel has since been made private.
+   */
+  isPublicChannel(channelId: string) {
+    const cached = this.publicChannels.get(channelId);
+    if (cached) return cached;
+    const known = this.web.conversations
+      .info({ channel: channelId })
+      .then(({ channel }) => {
+        const isPublic = Boolean(
+          channel?.is_channel &&
+          !channel.is_private &&
+          !channel.is_im &&
+          !channel.is_mpim,
+        );
+        if (isPublic)
+          setTimeout(
+            () => this.publicChannels.delete(channelId),
+            60 * 60_000,
+          ).unref();
+        return isPublic;
+      })
+      .catch((error) => {
+        log.warn(
+          { event: "channel_lookup_failed", channelId, err: error },
+          "Slack channel lookup failed",
+        );
+        this.publicChannels.delete(channelId);
+        return false;
+      });
+    this.publicChannels.set(channelId, known);
+    return known;
   }
 
   userName(userId: string) {

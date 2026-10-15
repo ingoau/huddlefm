@@ -81,17 +81,17 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Optional Slack behavior
 
-| Variable                      | Default | Purpose                                                                                                                                |
-| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                                                                   |
-| `CHANNEL_MANAGER_PERMISSIONS` | `end`   | What managers of a huddle's channel may do without joining: `none`, `end` the session, or everything a `host` can                      |
-| `WORKSPACE_ADMIN_PERMISSIONS` | `end`   | The same for Slack workspace admins and owners. Replaces `WORKSPACE_ADMINS_AS_MANAGERS=true`, which still means `host` until it is set |
-| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                            |
-| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                                                                          |
-| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                     |
-| `SLACK_CANVAS_ID`             | unset   | Canvas updated with all-time listening stats                                                                                           |
-| `CANVAS_SECTIONS`             | all     | Comma-separated canvas sections to show, in order: `summary`, `top artists`, `top tracks`, `top channels`, `controls`, `integrations`  |
-| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                                                                        |
+| Variable                      | Default | Purpose                                                                                                                                                  |
+| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                                                                                     |
+| `CHANNEL_MANAGER_PERMISSIONS` | `end`   | What managers of a huddle's channel may do without joining: `none`, `end` the session, or everything a `host` can                                        |
+| `WORKSPACE_ADMIN_PERMISSIONS` | `end`   | The same for Slack workspace admins and owners. Replaces `WORKSPACE_ADMINS_AS_MANAGERS=true`, which still means `host` until it is set                   |
+| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                                              |
+| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                                                                                            |
+| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                                       |
+| `SLACK_CANVAS_ID`             | unset   | Canvas updated with live sessions and all-time listening stats                                                                                           |
+| `CANVAS_SECTIONS`             | all     | Comma-separated canvas sections to show, in order: `summary`, `active sessions`, `top artists`, `top tracks`, `top channels`, `controls`, `integrations` |
+| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                                                                                          |
 
 #### Optional features
 

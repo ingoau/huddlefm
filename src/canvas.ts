@@ -3,6 +3,7 @@ import type { CanvasStats } from "./store.ts";
 
 export const canvasSections = [
   "summary",
+  "active-sessions",
   "top-artists",
   "top-tracks",
   "top-channels",
@@ -12,8 +13,24 @@ export const canvasSections = [
 
 export type CanvasSection = (typeof canvasSections)[number];
 
+/**
+ * A Huddle HuddleFM is in right now, as the canvas lists it. A private one
+ * (a DM or private channel) carries no channel or track, so the canvas never
+ * says where it is or what it plays.
+ */
+export type ActiveCanvasSession =
+  | {
+      channelId: string;
+      listeners: number;
+      state: string;
+      track?: { title: string; artist: string };
+    }
+  | { private: true; listeners: number };
+
 const sectionAliases = new Map<string, CanvasSection>([
   ["top-songs", "top-tracks"],
+  ["active", "active-sessions"],
+  ["now-playing", "active-sessions"],
 ]);
 
 /**
@@ -49,10 +66,12 @@ export function canvasMarkdown(
   stats: CanvasStats,
   controls: { label: string; count: number }[],
   {
+    active = [],
     integrations = [],
     sections = canvasSections,
     updatedAt = Date.now(),
   }: {
+    active?: ActiveCanvasSession[];
     integrations?: { id: string; name: string }[];
     sections?: readonly CanvasSection[];
     updatedAt?: number;
@@ -84,6 +103,20 @@ export function canvasMarkdown(
       `| Average songs per session | ${stats.sessions.count ? (stats.tracks.count / stats.sessions.count).toFixed(1) : "0"} |`,
       `| Unique artists | ${stats.tracks.artists} |`,
       `| Requested / autoplay | ${requested} / ${stats.tracks.autoplay} |`,
+    ],
+    "active-sessions": () => [
+      "## Active sessions",
+      active
+        .map((session) => {
+          const listeners = plural(session.listeners, "listener");
+          if ("private" in session) return `- A private Huddle · ${listeners}`;
+          const { channelId, state, track } = session;
+          const playing = track
+            ? `${state === "paused" ? "Paused" : "Playing"} **${escapeMarkdown(track.title)}** — ${escapeMarkdown(track.artist)}`
+            : "Nothing playing";
+          return `- ![](#${channelId}) · ${listeners} · ${playing}`;
+        })
+        .join("\n") || "No Huddles right now.",
     ],
     "top-artists": () => [
       "## Top artists",
@@ -138,5 +171,7 @@ export function canvasMarkdown(
 }
 
 function escapeMarkdown(value: string) {
-  return value.replace(/([\\`*_[\]{}()#+.!|])/g, "\\$1");
+  return value
+    .replace(/\s*[\r\n]+\s*/g, " ")
+    .replace(/([\\`*_~[\]{}()#+.!|])/g, "\\$1");
 }

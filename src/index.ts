@@ -7,7 +7,7 @@ import {
   startAnalytics,
 } from "./analytics.ts";
 import { AuditLog } from "./audit-log.ts";
-import { canvasMarkdown } from "./canvas.ts";
+import { canvasMarkdown, type ActiveCanvasSession } from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
 import { FallbackReports } from "./fallback-reports.ts";
 import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
@@ -168,24 +168,38 @@ let canvasTimer: ReturnType<typeof setInterval> | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let canvasUpdate: Promise<void> | undefined;
 let canvasPending = false;
+let canvasDelay: ReturnType<typeof setTimeout> | undefined;
+const canvasDelayMs = 10_000;
 const reconcilingSessions = new Set<string>();
 const reconcilePendingSessions = new Set<string>();
 let shuttingDown = false;
 
-function updateCanvas() {
+// Sessions report every track, pause, and membership change. Waiting a moment
+// turns a burst of them into one Canvas edit.
+function scheduleCanvasUpdate() {
+  if (!config.canvasId || shuttingDown || canvasDelay) return;
+  canvasDelay = setTimeout(() => {
+    canvasDelay = undefined;
+    void updateCanvas();
+  }, canvasDelayMs);
+}
+
+/** `final` publishes once more during shutdown, after sessions suspend. */
+function updateCanvas(final = false) {
   const canvasId = config.canvasId;
-  if (!canvasId || shuttingDown) return;
+  if (!canvasId || (shuttingDown && !final)) return;
   if (canvasUpdate) {
     canvasPending = true;
     return canvasUpdate;
   }
   const startedAt = Date.now();
   log.debug({ event: "canvas_update_started" }, "Updating Slack Canvas");
-  canvasUpdate = canvasIntegrations()
-    .then((integrations) =>
+  canvasUpdate = Promise.all([canvasIntegrations(), canvasActiveSessions()])
+    .then(([integrations, active]) =>
       slackApp.updateCanvas(
         canvasId,
         canvasMarkdown(store.canvasStats(), store.usageStats(), {
+          active,
           integrations,
           sections: config.canvasSections,
         }),
@@ -211,6 +225,22 @@ function updateCanvas() {
       }
     });
   return canvasUpdate;
+}
+
+// A Huddle outside a public channel is listed without its channel or track:
+// the canvas is for the whole workspace.
+function canvasActiveSessions(): Promise<ActiveCanvasSession[]> {
+  if (!config.canvasSections.includes("active-sessions"))
+    return Promise.resolve([]);
+  return Promise.all(
+    activeCoordinators()
+      .flatMap((coordinator) => coordinator.canvasSession() ?? [])
+      .map(async (session) =>
+        (await slackApp.isPublicChannel(session.channelId))
+          ? session
+          : { private: true as const, listeners: session.listeners },
+      ),
+  );
 }
 
 function canvasIntegrations() {
@@ -893,7 +923,7 @@ async function joinHuddle(
       },
       restored,
       scrobbling,
-      () => void updateCanvas(),
+      scheduleCanvasUpdate,
       (sessionId, participantIds) => {
         scheduleEndCleanup(sessionId);
         if (joined.companionChannelId)
@@ -2046,6 +2076,7 @@ async function shutdownSteps() {
   canvasPending = false;
   clearInterval(restoreTimer);
   clearInterval(canvasTimer);
+  clearTimeout(canvasDelay);
   clearInterval(reconcileTimer);
   fallbackReports.stop();
   companions.stop();
@@ -2066,6 +2097,13 @@ async function shutdownSteps() {
         runtime.media.close(),
     ),
   );
+  // Suspended sessions are no longer active, so this clears them from the
+  // canvas rather than leaving them listed as playing while the bot is down.
+  if (config.canvasSections.includes("active-sessions")) {
+    log.debug({ event: "shutdown_canvas_final" }, "Clearing Canvas sessions");
+    // Bounded, so a slow Slack cannot use up the shutdown failsafe.
+    await Promise.race([updateCanvas(true), Bun.sleep(5_000)]);
+  }
   log.debug({ event: "shutdown_media_browsers" }, "Closing media browsers");
   await mediaBrowsers.close();
   log.debug({ event: "shutdown_server" }, "Stopping server");
