@@ -405,7 +405,8 @@ function savedTrack(track: Row) {
   } satisfies SavedTrack);
 }
 
-export type SessionSaveTrack = TrackMetadata & { requesterId: string };
+// A saved song. Who asked for it is left out: loading credits whoever loads.
+export type SessionSaveTrack = TrackMetadata;
 
 // Whoever a saved queue belongs to: a channel, for anyone in its Huddles, or
 // one user's account.
@@ -475,16 +476,46 @@ function parseSessionSaveSettings(value: unknown): SessionSaveSettings {
 export const sessionSaveLimit = 25;
 export const sessionSaveNameLength = 50;
 
-function isSessionSaveTrack(value: unknown): value is SessionSaveTrack {
-  const track = value as Record<string, unknown> | null;
-  return Boolean(
-    track &&
-    typeof track === "object" &&
-    ["sourceInput", "canonicalUrl", "sourceId", "title", "artist"].every(
-      (key) => typeof track[key] === "string",
-    ) &&
-    typeof track.requesterId === "string",
-  );
+// A saved song as stored, or nothing when it lacks what playing it needs.
+// Optional details of the wrong type are dropped rather than the song.
+function sessionSaveTrack(value: unknown): SessionSaveTrack | undefined {
+  if (!value || typeof value !== "object") return;
+  const track = value as Record<string, unknown>;
+  const text = (key: string) =>
+    typeof track[key] === "string" ? track[key] : undefined;
+  const [sourceInput, canonicalUrl, sourceId, title, artist] = [
+    "sourceInput",
+    "canonicalUrl",
+    "sourceId",
+    "title",
+    "artist",
+  ].map(text);
+  if (
+    sourceInput === undefined ||
+    canonicalUrl === undefined ||
+    sourceId === undefined ||
+    title === undefined ||
+    artist === undefined
+  )
+    return;
+  const album = text("album");
+  const artwork = text("artwork");
+  const duration =
+    typeof track.duration === "number" &&
+    Number.isFinite(track.duration) &&
+    track.duration >= 0
+      ? track.duration
+      : undefined;
+  return {
+    sourceInput,
+    canonicalUrl,
+    sourceId,
+    title,
+    artist,
+    ...(album === undefined ? {} : { album }),
+    ...(duration === undefined ? {} : { duration }),
+    ...(artwork === undefined ? {} : { artwork }),
+  };
 }
 
 export class Store {
@@ -1010,7 +1041,7 @@ export class Store {
       if (row.owner_type !== "channel" && row.owner_type !== "user") return [];
       const parsed = parseJson(row.tracks);
       const tracks = Array.isArray(parsed)
-        ? parsed.filter(isSessionSaveTrack)
+        ? parsed.flatMap((value) => sessionSaveTrack(value) ?? [])
         : [];
       return [
         {
@@ -1024,20 +1055,6 @@ export class Store {
         },
       ];
     });
-  }
-
-  /** Whether any of `owners` has a session saved. */
-  hasSessionSaves(owners: SessionSaveOwner[]) {
-    if (!owners.length) return false;
-    return Boolean(
-      this.db
-        .query(
-          `SELECT 1 FROM session_saves WHERE ${owners
-            .map(() => "(owner_type = ? AND owner_id = ?)")
-            .join(" OR ")} LIMIT 1`,
-        )
-        .get(...owners.flatMap((owner) => [owner.type, owner.id])),
-    );
   }
 
   deleteSessionSave(id: string) {

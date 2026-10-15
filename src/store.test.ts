@@ -1175,7 +1175,6 @@ test("keeps saved sessions per owner, replacing one saved under the same name", 
     sourceId: "a",
     title: "A",
     artist: "Artist",
-    requesterId: "host",
   };
   const channel = { type: "channel", id: "C1" } as const;
   const user = { type: "user", id: "U1" } as const;
@@ -1199,8 +1198,10 @@ test("keeps saved sessions per owner, replacing one saved under the same name", 
     tracks: [],
     settings: { autoplayMode: "huddle" },
   });
-  expect(store.hasSessionSaves([{ type: "user", id: "U2" }])).toBeFalse();
-  expect(store.hasSessionSaves([{ type: "user", id: "U2" }, user])).toBeTrue();
+  expect(store.sessionSaves([{ type: "user", id: "U2" }])).toEqual([]);
+  expect(store.sessionSaves([{ type: "user", id: "U2" }, user])).toHaveLength(
+    1,
+  );
 
   store.deleteSessionSave(saves[0]!.id);
   expect(store.sessionSaves([channel])).toEqual([]);
@@ -1222,5 +1223,33 @@ test("drops a saved session's invalid settings and caps each owner's saves", () 
   for (let index = 0; index < 30; index++)
     store.addSessionSave(owner, `Save ${index}`, "host", [], {});
   expect(store.sessionSaves([owner])).toHaveLength(25);
+  store.close();
+});
+
+test("drops a saved song's details of the wrong type, and songs without a source", () => {
+  const store = new Store(":memory:");
+  const owner = { type: "user", id: "U1" } as const;
+  store.addSessionSave(owner, "Odd", "U1", [], {});
+  const track = {
+    sourceInput: "a",
+    canonicalUrl: "a",
+    sourceId: "a",
+    title: "A",
+    artist: "Artist",
+  };
+  store.db
+    .query("UPDATE session_saves SET tracks = ?")
+    .run(
+      JSON.stringify([
+        { ...track, album: 4, duration: "long", artwork: null },
+        { ...track, album: "Album", duration: 180, artwork: "https://art" },
+        { ...track, sourceId: undefined },
+        "a",
+      ]),
+    );
+  expect(store.sessionSaves([owner])[0]!.tracks).toEqual([
+    track,
+    { ...track, album: "Album", duration: 180, artwork: "https://art" },
+  ]);
   store.close();
 });

@@ -95,6 +95,24 @@ export function plain(text: string) {
   return { type: "plain_text", text: text.slice(0, 150) };
 }
 
+// Cuts text to `length` characters without splitting a surrogate pair.
+export function truncate(text: string, length: number) {
+  const characters = [...text];
+  return characters.length > length
+    ? characters.slice(0, length).join("")
+    : text;
+}
+
+// A plain message in place of Settings, for when it has nothing to show.
+export function settingsMessageView(text: string) {
+  return {
+    type: "modal",
+    title: plain("HuddleFM settings"),
+    close: plain("Close"),
+    blocks: [section(text)],
+  };
+}
+
 export function mrkdwn(text: string) {
   return { type: "mrkdwn", text };
 }

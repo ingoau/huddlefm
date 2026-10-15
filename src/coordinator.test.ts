@@ -139,7 +139,6 @@ function setup(
         sessions.push({ status: "ended", args });
       },
       setEndMessage: () => {},
-      hasSessionSaves: () => false,
       sessionSaves: () => [],
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
@@ -6718,12 +6717,8 @@ test("ending can save the session for the next one in the channel to load", asyn
   expect(JSON.stringify(first.updatedModals.at(-1))).toContain("“Friday”");
   const [saved] = store.sessionSaves([{ type: "channel", id: "channel" }]);
   expect(saved).toMatchObject({ name: "Friday", savedBy: "host" });
-  expect(
-    saved!.tracks.map((track) => [track.sourceId, track.requesterId]),
-  ).toEqual([
-    ["a", "host"],
-    ["b", "guest"],
-  ]);
+  expect(saved!.tracks.map((track) => track.sourceId)).toEqual(["a", "b"]);
+  expect(saved!.tracks[0]).not.toHaveProperty("requesterId");
   expect(saved!.settings).toMatchObject({ volume: 0.3, loopMode: "queue" });
   expect(saved!.settings).not.toHaveProperty("permissions");
 
@@ -6748,9 +6743,10 @@ test("ending can save the session for the next one in the channel to load", asyn
     Reflect.get(second.coordinator, "current"),
     ...(Reflect.get(second.coordinator, "queue") as unknown[]),
   ] as { sourceId: string; requesterId: string }[];
+  // Whoever loads the save asked for its songs this time.
   expect(loaded.map((entry) => [entry.sourceId, entry.requesterId])).toEqual([
     ["a", "host"],
-    ["b", "guest"],
+    ["b", "host"],
   ]);
   expect(Reflect.get(second.coordinator, "volume")).toBe(0.3);
   expect(Reflect.get(second.coordinator, "loopMode")).toBe("queue");
@@ -6819,8 +6815,254 @@ test("ending without choosing to save keeps nothing", async () => {
     }),
   );
   expect(Reflect.get(result.coordinator, "state")).toBe("ended");
+  expect(store.sessionSaves([{ type: "channel", id: "channel" }])).toEqual([]);
+  store.close();
+});
+
+const savedTrack = (id: string) => ({
+  sourceInput: id,
+  canonicalUrl: id,
+  sourceId: id,
+  title: id.toUpperCase(),
+  artist: "Artist",
+});
+
+const channelSave = { type: "channel", id: "channel" } as const;
+
+const loadSave = (
+  coordinator: Coordinator,
+  userId: string,
+  id: string,
+  forget = false,
+) =>
+  submission(coordinator, "load_session_save", userId, {
+    save: { selection: { selected_option: { value: id } } },
+    ...(forget
+      ? { forget: { enabled: { selected_options: [{ value: "enabled" }] } } }
+      : {}),
+  });
+
+test("loading a save takes the add permission, even one without songs", async () => {
+  const store = new Store(":memory:");
+  const withSongs = store.addSessionSave(
+    channelSave,
+    "Songs",
+    "host",
+    [savedTrack("a")],
+    {},
+  );
+  const empty = store.addSessionSave(channelSave, "Empty", "guest", [], {
+    loopMode: "queue",
+  });
+  const result = sessionSaveSetup(store);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "allowed", new Set(["configure-settings"]));
+
+  await result.coordinator.action(
+    loadSave(result.coordinator, "guest", withSongs),
+  );
+  expect(result.ephemeral.at(-1)).toBe("You do not have permission for that.");
+  expect(Reflect.get(result.coordinator, "queue")).toEqual([]);
+
+  // Not even its saver can use an empty save to change settings or delete it.
+  await result.coordinator.action(
+    loadSave(result.coordinator, "guest", empty, true),
+  );
+  expect(result.ephemeral.at(-1)).toBe("You do not have permission for that.");
+  expect(Reflect.get(result.coordinator, "loopMode")).not.toBe("queue");
+  expect(store.sessionSaves([channelSave])).toHaveLength(2);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("only whoever saved a channel save, or can end the session, deletes it", async () => {
+  const store = new Store(":memory:");
+  const hosts = store.addSessionSave(
+    channelSave,
+    "Host's",
+    "host",
+    [savedTrack("a")],
+    {},
+  );
+  const guests = store.addSessionSave(
+    channelSave,
+    "Guest's",
+    "guest",
+    [savedTrack("b")],
+    {},
+  );
+  const result = sessionSaveSetup(store);
+  await result.coordinator.start();
+
+  await result.coordinator.action(
+    loadSave(result.coordinator, "guest", hosts, true),
+  );
+  expect(result.ephemeral.at(-1)).toContain(
+    "It was kept: only whoever saved it, or someone who can end the session, can delete it.",
+  );
+  await result.coordinator.action(
+    loadSave(result.coordinator, "guest", guests, true),
+  );
+  expect(store.sessionSaves([channelSave]).map((save) => save.id)).toEqual([
+    hosts,
+  ]);
+  // The guest asked for both songs this time.
+  await until(
+    () => (Reflect.get(result.coordinator, "queue") as unknown[]).length === 1,
+  );
   expect(
-    store.hasSessionSaves([{ type: "channel", id: "channel" }]),
-  ).toBeFalse();
+    [
+      Reflect.get(result.coordinator, "current"),
+      ...(Reflect.get(result.coordinator, "queue") as unknown[]),
+    ].map((entry) => (entry as { requesterId: string }).requesterId),
+  ).toEqual(["guest", "guest"]);
+
+  // The host can end the session, so can delete anyone's channel save.
+  await result.coordinator.action(
+    loadSave(result.coordinator, "host", hosts, true),
+  );
+  expect(store.sessionSaves([channelSave])).toEqual([]);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("a save that does not all fit in the queue loads what fits and is kept", async () => {
+  const store = new Store(":memory:");
+  const id = store.addSessionSave(
+    channelSave,
+    "Rock & <Roll>",
+    "host",
+    [savedTrack("a"), savedTrack("b")],
+    {},
+  );
+  const result = sessionSaveSetup(store);
+  await result.coordinator.start();
+  const full = Array.from({ length: 50 }, (_, index) => queued(`q${index}`));
+  Reflect.set(result.coordinator, "queue", full);
+  await result.coordinator.action(
+    loadSave(result.coordinator, "host", id, true),
+  );
+  expect(result.ephemeral.at(-1)).toBe("The queue is full.");
+  expect(Reflect.get(result.coordinator, "queue")).toHaveLength(50);
+
+  Reflect.set(result.coordinator, "queue", full.slice(1));
+  await result.coordinator.action(
+    loadSave(result.coordinator, "host", id, true),
+  );
+  expect(result.ephemeral.at(-1)).toBe(
+    "Loaded “Rock &amp; &lt;Roll&gt;”, but 1 song did not fit in the queue. It was kept, since not all of its songs fit.",
+  );
+  expect(store.sessionSaves([channelSave])).toHaveLength(1);
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("a save submitted after its session stopped loads nothing", async () => {
+  const store = new Store(":memory:");
+  const id = store.addSessionSave(
+    channelSave,
+    "Late",
+    "host",
+    [savedTrack("a")],
+    {},
+  );
+  const result = sessionSaveSetup(store);
+  await result.coordinator.start();
+  await result.coordinator.endFromSlack();
+  const notices = result.ephemeral.length;
+  await result.coordinator.action(
+    loadSave(result.coordinator, "host", id, true),
+  );
+  expect(Reflect.get(result.coordinator, "queue")).toEqual([]);
+  expect(result.ephemeral).toHaveLength(notices);
+  expect(store.sessionSaves([channelSave])).toHaveLength(1);
+  store.close();
+});
+
+test("a loaded song that fails to prepare, with no way to say so, is dropped", async () => {
+  const store = new Store(":memory:");
+  const id = store.addSessionSave(
+    channelSave,
+    "Broken",
+    "host",
+    [savedTrack("bad")],
+    {},
+  );
+  const result = setup(
+    {
+      prepare: async () => {
+        throw new Error("Video unavailable");
+      },
+      upNextIds: async () => [],
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  Reflect.set(Reflect.get(result.coordinator, "slack"), "ephemeral", () =>
+    Promise.reject(new Error("user_not_in_channel")),
+  );
+  await result.coordinator.action(loadSave(result.coordinator, "host", id));
+  expect(Reflect.get(result.coordinator, "queue")).toEqual([]);
+  expect(Reflect.get(result.coordinator, "current")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("opening the end dialog without the end permission says so", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  await result.coordinator.action({
+    ...interaction(result.coordinator, "open_end_session"),
+    userId: "guest",
+  });
+  expect(result.pushedModals).toEqual([]);
+  expect(result.ephemeral.at(-1)).toBe(
+    "You do not have permission to end this session.",
+  );
+  expect(Reflect.get(result.coordinator, "state")).not.toBe("ended");
+  await result.coordinator.endFromSlack();
+});
+
+test("an end dialog confirmed after the session ended saves nothing", async () => {
+  const store = new Store(":memory:");
+  const result = sessionSaveSetup(store);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [queued("a")]);
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_end_session"),
+  );
+  await result.coordinator.endFromSlack();
+  await result.coordinator.action(
+    submission(result.coordinator, "end_session_confirm", "host", {
+      save_to: { choice: { selected_option: { value: "channel" } } },
+    }),
+  );
+  expect(store.sessionSaves([channelSave])).toEqual([]);
+  expect(JSON.stringify(result.updatedModals.at(-1))).toContain(
+    "The session had already ended, so it was not saved.",
+  );
+  store.close();
+});
+
+test("a session that cannot be saved still ends", async () => {
+  const store = new Store(":memory:");
+  store.addSessionSave = () => {
+    throw new Error("SQLITE_FULL");
+  };
+  const result = sessionSaveSetup(store);
+  await result.coordinator.start();
+  Reflect.set(result.coordinator, "queue", [queued("a")]);
+  await result.coordinator.action(
+    submission(result.coordinator, "end_session_confirm", "host", {
+      save_to: { choice: { selected_option: { value: "user" } } },
+    }),
+  );
+  expect(Reflect.get(result.coordinator, "state")).toBe("ended");
+  expect(JSON.stringify(result.updatedModals.at(-1))).toContain(
+    "The session has ended, but it could not be saved.",
+  );
   store.close();
 });
