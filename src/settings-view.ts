@@ -11,6 +11,7 @@ import {
   plain,
   section,
   songCount,
+  staticSelect,
   toggle,
   when,
 } from "./coordinator-ui.ts";
@@ -155,8 +156,22 @@ export function settingsTabFromAction(actionId: string) {
 
 // Inputs whose values never go into a draft, which Slack hands back to every
 // later interaction with the modal. Settings no longer asks for a token
-// itself, but a token form's state must not be carried either.
-const undraftedBlocks = new Set(["listenbrainz_token"]);
+// itself, but a token form's state must not be carried either, and a preset
+// is only ever a way to fill in the permissions.
+const undraftedBlocks = new Set(["listenbrainz_token", "permission_preset"]);
+
+// Inputs whose block IDs change when Settings refills them, which the form
+// reads back under their usual ID.
+const versionedBlocks = ["permissions", "permission_preset"];
+
+function versionedBlockId(blockId: string, revision: number) {
+  return revision ? `${blockId}.${revision}` : blockId;
+}
+
+function unversionedBlockId(blockId: string) {
+  const [base, revision] = blockId.split(".");
+  return revision && versionedBlocks.includes(base!) ? base! : blockId;
+}
 
 /**
  * The meaningful part of a form, without the labels Slack echoes back, so a
@@ -166,7 +181,8 @@ const undraftedBlocks = new Set(["listenbrainz_token"]);
 export function compactForm(state: unknown): FormState {
   const form: FormState = {};
   if (!isRecord(state)) return form;
-  for (const [blockId, block] of Object.entries(state)) {
+  for (const [versionedId, block] of Object.entries(state)) {
+    const blockId = unversionedBlockId(versionedId);
     if (undraftedBlocks.has(blockId) || !isRecord(block)) continue;
     for (const [actionId, value] of Object.entries(block)) {
       if (!isRecord(value)) continue;
@@ -201,6 +217,8 @@ export type SettingsMetadata = {
   hostId?: string;
   tab?: SettingsTab;
   integrationPage: number;
+  // How many times a preset has refilled the permissions.
+  revision: number;
   // Edits not yet saved, from tabs no longer on screen.
   draft: FormState;
 };
@@ -225,6 +243,12 @@ export function parseSettingsMetadata(metadata: unknown): SettingsMetadata {
     ...(settingsTabs.includes(value.tab) ? { tab: value.tab } : {}),
     integrationPage:
       typeof page === "number" && Number.isInteger(page) && page > 0 ? page : 0,
+    revision:
+      typeof value.revision === "number" &&
+      Number.isInteger(value.revision) &&
+      value.revision > 0
+        ? value.revision
+        : 0,
     draft: compactForm(value.draft),
   };
 }
@@ -280,6 +304,7 @@ export type SettingsViewOptions = {
   hostId?: string;
   tab?: SettingsTab;
   integrationPage: number;
+  revision?: number;
   draft?: FormState;
   // A word on what just happened, shown once above the tab.
   notice?: string;
@@ -386,6 +411,7 @@ export function settingsView(options: SettingsViewOptions) {
       hostId: options.hostId,
       tab,
       integrationPage: options.integrationPage,
+      revision: options.revision ?? 0,
       draft,
     });
   // A draft too large to keep is let go rather than the modal refused.
@@ -404,18 +430,11 @@ export function settingsView(options: SettingsViewOptions) {
 
 function sessionBlocks(options: SettingsViewOptions, form: FormState) {
   const { access, session, sessionId: value } = options;
-  const volumeText =
-    form.volume?.percent?.value ??
+  const volume =
+    form.volume?.percent?.selected_option?.value ??
     String(Math.round(session.volume * 10_000) / 100);
   return [
-    ...when(
-      access.volume,
-      input("volume", "Volume (%)", {
-        type: "plain_text_input",
-        action_id: "percent",
-        initial_value: volumeText,
-      }),
-    ),
+    ...when(access.volume, input("volume", "Volume", volumeSelect(volume))),
     ...when(
       access.configure,
       input(
@@ -507,6 +526,20 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
   ];
 }
 
+// Volume in the player's steps of 5%, and the current volume when it falls
+// between them, as from an older default or a channel's.
+function volumeSelect(current: string) {
+  const steps = Array.from({ length: 21 }, (_, index) => String(index * 5));
+  const values = steps.includes(current)
+    ? steps
+    : [...steps, current].sort((a, b) => Number(a) - Number(b));
+  return staticSelect(
+    "percent",
+    values.map((value) => ({ text: plain(`${value}%`), value })),
+    current,
+  );
+}
+
 function channelBlocks(options: SettingsViewOptions) {
   const { access, channel, sessionId: value } = options;
   const defaults = channel.defaults;
@@ -582,10 +615,10 @@ function hostBlocks(options: SettingsViewOptions, form: FormState) {
       ["communism", "Communism"],
     ] satisfies [string, string][]
   ).map(([value, label]) => ({ text: plain(label), value }));
-  const preset = presets.find(
-    (option) =>
-      option.value === form.permission_preset?.selected?.selected_option?.value,
-  );
+  // A preset fills in the checkboxes when picked. Slack keeps what an input
+  // showed across a redraw unless its block ID changes, so each fill gives
+  // both inputs new ones.
+  const revision = options.revision ?? 0;
   return [
     input(
       "host",
@@ -598,23 +631,25 @@ function hostBlocks(options: SettingsViewOptions, form: FormState) {
       { optional: true },
     ),
     { type: "header", text: plain("Permissions") },
+    {
+      ...input(
+        versionedBlockId("permission_preset", revision),
+        "Start from a preset",
+        {
+          type: "static_select",
+          action_id: "apply_permission_preset",
+          placeholder: plain("Choose a preset"),
+          options: presets,
+        },
+        {
+          optional: true,
+          hint: "Fills in the permissions below. Nothing changes until you save.",
+        },
+      ),
+      dispatch_action: true,
+    },
     input(
-      "permission_preset",
-      "Apply permission preset",
-      {
-        type: "static_select",
-        action_id: "selected",
-        placeholder: plain("Choose a preset"),
-        options: presets,
-        ...(preset ? { initial_option: preset } : {}),
-      },
-      {
-        optional: true,
-        hint: "Saving overwrites the custom permissions below.",
-      },
-    ),
-    input(
-      "permissions",
+      versionedBlockId("permissions", revision),
       "Everyone else may",
       {
         type: "checkboxes",

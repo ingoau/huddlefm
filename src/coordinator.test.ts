@@ -2415,7 +2415,7 @@ test("a channel manager saves only the settings they can see", async () => {
   );
   // The permissions are not in the guest's form, so a forged value is ignored.
   await pressInSettings(result, "guest", "save_channel_defaults", {
-    volume: { percent: { value: "25" } },
+    volume: { percent: { selected_option: { value: "25" } } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
     permissions: { selected: { selected_options: [{ value: "clear" }] } },
   });
@@ -3165,7 +3165,7 @@ test("host transfers ownership and global permissions atomically", async () => {
       hostId: "host",
     }),
     state: {
-      volume: { percent: { value: "37.25" } },
+      volume: { percent: { selected_option: { value: "37.25" } } },
       host: { user: { selected_user: "guest" } },
       display: { mode: { selected_option: { value: "off" } } },
       permissions: {
@@ -3268,7 +3268,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -3282,7 +3282,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     "view_submission",
   );
   disable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "off" } } },
   };
   await result.coordinator.action(disable);
@@ -3627,7 +3627,7 @@ test("delegated users only see and save settings they can configure", async () =
   );
   save.userId = "guest";
   save.state = {
-    volume: { percent: { value: "25" } },
+    volume: { percent: { selected_option: { value: "25" } } },
     display: { mode: { selected_option: { value: "lyrics" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
@@ -4008,7 +4008,7 @@ test("display mode defaults to album art and persists dropdown changes", async (
     "view_submission",
   );
   save.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     display: { mode: { selected_option: { value: "lyrics" } } },
   };
   await test.coordinator.action(save);
@@ -4060,7 +4060,7 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4132,7 +4132,7 @@ test("autoplay favors recommendations shared by recent manual tracks", async () 
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4188,7 +4188,7 @@ test("skipping a manual track plays the queued autoplay recommendation", async (
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4266,7 +4266,7 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4390,7 +4390,7 @@ test("a late-prepared autoplay track still queues the following recommendation",
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4458,7 +4458,7 @@ test("player shows autoplay search while the next song is being chosen", async (
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4500,7 +4500,7 @@ test("failed recommendation lookup leaves the session running", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4546,7 +4546,7 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4572,24 +4572,40 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
 test("collaborative preset grants everything except destructive permissions", async () => {
   const test = setup();
   await test.coordinator.start();
+  await pressInSettings(
+    test,
+    "host",
+    "apply_permission_preset",
+    { autoplay: { mode: { selected_option: { value: "huddle" } } } },
+    "host",
+    { tab: "host" },
+    "collaborative",
+  );
+  // Picking the preset ticks its permissions and saves nothing yet.
+  expect(test.permissions).toEqual([]);
+  const view = test.updatedModals.at(-1)![2] as {
+    private_metadata: string;
+    blocks: { block_id?: string; element?: Record<string, any> }[];
+  };
+  const ticked = view.blocks
+    .find((block) => block.block_id === "permissions.1")!
+    .element!.initial_options.map((option: { value: string }) => option.value);
+  expect(ticked).toContain("manage-queue");
+  expect(ticked).not.toContain("clear");
+  expect(
+    view.blocks.find((block) => block.block_id === "permission_preset.1"),
+  ).toBeDefined();
+
+  // Saving submits what the checkboxes show, under their new block ID.
   await test.coordinator.action({
-    type: "view_submission",
-    userId: "host",
-    actionId: "save_settings",
-    value: "",
-    channelId: "channel",
-    messageTs: "",
-    triggerId: "",
-    metadata: JSON.stringify({
-      sessionId: test.coordinator.id,
-      hostId: "host",
-    }),
+    ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+    metadata: view.private_metadata,
     state: {
-      volume: { percent: { value: "60" } },
-      permission_preset: {
-        selected: { selected_option: { value: "collaborative" } },
+      "permissions.1": {
+        selected: {
+          selected_options: ticked.map((value: string) => ({ value })),
+        },
       },
-      permissions: { selected: { selected_options: [] } },
     },
   });
   expect(test.permissions).toContainEqual({
@@ -4612,6 +4628,25 @@ test("collaborative preset grants everything except destructive permissions", as
     capability: "end-session",
     allowed: false,
   });
+  // The edit made before picking the preset was kept too.
+  expect(Reflect.get(test.coordinator, "autoplayMode")).toBe("huddle");
+  await test.coordinator.endFromSlack();
+});
+
+test("only the host can fill in a permission preset", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await pressInSettings(
+    test,
+    "guest",
+    "apply_permission_preset",
+    {},
+    "host",
+    { tab: "host" },
+    "communism",
+  );
+  expect(test.updatedModals).toEqual([]);
+  expect(test.ephemeral.at(-1)).toBe("Only the host can change permissions.");
   await test.coordinator.endFromSlack();
 });
 
@@ -4648,7 +4683,7 @@ test("thread anchoring is disabled by default and can be enabled", async () => {
   )[1].blocks.find((block) => block.block_id === "anchor");
   expect(initialAnchor?.element.initial_options).toEqual([]);
   await action("view_submission", {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
   });
   expect(test.posted).toHaveLength(2);
@@ -5661,7 +5696,7 @@ test("huddle mix autoplay uses compiled past additions when YouTube up next is e
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
   };
   await result.coordinator.action(enable);
@@ -6150,7 +6185,7 @@ async function enableHuddleMix(coordinator: Coordinator) {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { value: "60" } },
+    volume: { percent: { selected_option: { value: "60" } } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
   };
   await coordinator.action(enable);
@@ -6630,6 +6665,7 @@ test("settings selects offer an initial option Slack can match", async () => {
     .flatMap((view) => view.blocks)
     .filter((block) => block.element?.type === "static_select");
   expect(selects.map((block) => block.block_id)).toEqual([
+    "volume",
     "display",
     "autoplay",
     "loop",
@@ -7284,7 +7320,7 @@ test("saving settings audits the list of settings that changed", async () => {
     "view_submission",
   );
   save.state = {
-    volume: { percent: { value: "80" } },
+    volume: { percent: { selected_option: { value: "80" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
     loop: { mode: { selected_option: { value: "off" } } },
   };

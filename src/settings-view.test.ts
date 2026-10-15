@@ -121,7 +121,7 @@ test("a tab shows the edits a draft kept for it", () => {
       draft: {
         autoplay: { mode: { selected_option: { value: "huddle" } } },
         anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
-        volume: { percent: { value: "35" } },
+        volume: { percent: { selected_option: { value: "35" } } },
       },
     }),
   );
@@ -129,17 +129,18 @@ test("a tab shows the edits a draft kept for it", () => {
     "huddle",
   );
   expect(block(session, "anchor")!.element.initial_options).toHaveLength(1);
-  expect(block(session, "volume")!.element.initial_value).toBe("35");
+  expect(block(session, "volume")!.element.initial_option.value).toBe("35");
   // The draft goes with the modal, for the next interaction to hand back.
   expect(parseSettingsMetadata(session.private_metadata)).toEqual({
     sessionId: "session",
     hostId: "host",
     tab: "session",
     integrationPage: 0,
+    revision: 0,
     draft: {
       autoplay: { mode: { selected_option: { value: "huddle" } } },
       anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
-      volume: { percent: { value: "35" } },
+      volume: { percent: { selected_option: { value: "35" } } },
     },
   });
 });
@@ -182,13 +183,19 @@ test("a draft keeps only form values, and never a token", () => {
 test("malformed metadata reads as none", () => {
   expect(parseSettingsMetadata("{")).toEqual({
     integrationPage: 0,
+    revision: 0,
     draft: {},
   });
   expect(
     parseSettingsMetadata(
-      JSON.stringify({ tab: "elsewhere", integrationPage: -1, draft: [] }),
+      JSON.stringify({
+        tab: "elsewhere",
+        integrationPage: -1,
+        revision: 1.5,
+        draft: [],
+      }),
     ),
-  ).toEqual({ integrationPage: 0, draft: {} });
+  ).toEqual({ integrationPage: 0, revision: 0, draft: {} });
 });
 
 test("a draft too large for the modal is let go", () => {
@@ -231,5 +238,57 @@ test("the Channel tab says who saved the defaults and lists saves to delete", ()
   expect(save.accessory).toMatchObject({
     action_id: "delete_channel_save",
     value: "save-1",
+  });
+});
+
+test("volume is picked in the player's steps, keeping a volume between them", () => {
+  const values = (view: View) =>
+    block(view, "volume")!.element.options.map(
+      (option: { value: string }) => option.value,
+    );
+  const stepped = settingsView(options());
+  expect(values(stepped)).toHaveLength(21);
+  expect(block(stepped, "volume")!.element.initial_option).toEqual({
+    text: { type: "plain_text", text: "60%" },
+    value: "60",
+  });
+  const between = settingsView(
+    options({ session: { ...options().session, volume: 0.625 } }),
+  );
+  expect(values(between).slice(12, 15)).toEqual(["60", "62.5", "65"]);
+  expect(block(between, "volume")!.element.initial_option.value).toBe("62.5");
+});
+
+test("a preset's refill gives the permission inputs new block IDs", () => {
+  const view = settingsView(
+    options({
+      access: { ...access, admin: true },
+      tab: "host",
+      revision: 2,
+      draft: {
+        permissions: { selected: { selected_options: [{ value: "skip" }] } },
+      },
+    }),
+  );
+  expect(block(view, "permissions.2")!.element.initial_options).toHaveLength(1);
+  expect(block(view, "permission_preset.2")).toMatchObject({
+    dispatch_action: true,
+    element: { action_id: "apply_permission_preset" },
+  });
+  expect(block(view, "permission_preset.2")!.element.initial_option).toBe(
+    undefined,
+  );
+  // Read back, the form is under the usual IDs, and a preset is not kept.
+  expect(
+    compactForm({
+      "permissions.2": {
+        selected: { selected_options: [{ value: "pause" }] },
+      },
+      "permission_preset.2": {
+        apply_permission_preset: { selected_option: { value: "default" } },
+      },
+    }),
+  ).toEqual({
+    permissions: { selected: { selected_options: [{ value: "pause" }] } },
   });
 });

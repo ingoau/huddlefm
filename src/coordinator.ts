@@ -117,6 +117,8 @@ type SettingsChange = {
   tab?: SettingsTab;
   integrationPage?: number;
   notice?: string;
+  revision?: number;
+  draft?: FormState;
 };
 
 const endRestoreMs = 2 * 60_000;
@@ -795,6 +797,7 @@ export class Coordinator {
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
         delete_channel_save: () => this.deleteChannelSave(interaction),
+        apply_permission_preset: () => this.applyPermissionPreset(interaction),
         ...Object.fromEntries(
           settingsTabs.map((tab) => [
             `${settingsTabActionPrefix}${tab}`,
@@ -4465,6 +4468,35 @@ export class Coordinator {
     await this.updateSettings(interaction, { tab });
   }
 
+  // Picking a preset ticks its permissions in the form; saving applies them.
+  private async applyPermissionPreset(interaction: Interaction) {
+    if (!interaction.viewId) return;
+    if (!this.settingsAdmin(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "Only the host can change permissions.",
+      );
+    const preset = interaction.value;
+    if (!Object.hasOwn(permissionPresets, preset)) return;
+    const context = this.settingsContext(interaction);
+    const allowed = new Set<string>(
+      permissionPresets[preset as keyof typeof permissionPresets],
+    );
+    await this.updateSettings(interaction, {
+      revision: context.revision + 1,
+      draft: {
+        ...context.draft,
+        permissions: {
+          selected: {
+            selected_options: capabilities
+              .filter((capability) => allowed.has(capability))
+              .map((value) => ({ value })),
+          },
+        },
+      },
+    });
+  }
+
   private async integrationGrantsPage(interaction: Interaction) {
     if (!this.settingsAdmin(interaction.userId))
       return this.notice(
@@ -4484,7 +4516,7 @@ export class Coordinator {
   // still caught as stale.
   private settingsView(
     userId: string,
-    context: SettingsChange & { hostId?: string; draft?: FormState } = {},
+    context: SettingsChange & { hostId?: string } = {},
   ) {
     const saveDefaults = this.canSaveChannelDefaults(userId);
     const saved = saveDefaults
@@ -4497,6 +4529,7 @@ export class Coordinator {
         tab: context.tab,
         draft: context.draft,
         notice: context.notice,
+        revision: context.revision,
       }),
       integrationPage: context.integrationPage ?? 0,
       access: {
@@ -4550,6 +4583,7 @@ export class Coordinator {
       hostId: context.hostId ?? this.hostId,
       ...defined({ tab: context.tab }),
       integrationPage: context.integrationPage,
+      revision: context.revision,
       draft: context.draft,
     };
   }
@@ -4821,7 +4855,7 @@ export class Coordinator {
       );
     const previous = this.settingsSnapshot();
     const previousScrobbling = this.scrobblingSnapshot(interaction.userId);
-    const value = state.volume?.percent?.value?.trim();
+    const value = state.volume?.percent?.selected_option?.value?.trim();
     if (value !== undefined && this.can(interaction.userId, "volume")) {
       const percent = Number(value);
       if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
@@ -4842,17 +4876,11 @@ export class Coordinator {
         duckingMode: selected(state.ducking?.mode, duckingModes),
         anchorEnabled: checked(state.anchor?.enabled),
       });
-    const preset = admin
-      ? state.permission_preset?.selected?.selected_option?.value
-      : undefined;
+    // A preset only fills in the checkboxes, so they are all that is saved.
     const chosen = admin
       ? state.permissions?.selected?.selected_options
       : undefined;
-    if (preset)
-      this.setPermissions(
-        permissionPresets[preset as keyof typeof permissionPresets],
-      );
-    else if (chosen)
+    if (chosen)
       this.setPermissions(
         chosen.map((option) => option.value).filter(Boolean) as string[],
       );
@@ -5011,7 +5039,7 @@ export class Coordinator {
     };
     if (fields.includes("volume")) {
       let volume = this.volume;
-      const percentText = state.volume?.percent?.value?.trim();
+      const percentText = state.volume?.percent?.selected_option?.value?.trim();
       if (percentText !== undefined) {
         const percent = Number(percentText);
         if (
@@ -5044,15 +5072,10 @@ export class Coordinator {
         checked(state.anchor?.enabled) ?? this.anchorEnabled;
     }
     if (fields.includes("permissions")) {
-      const preset = state.permission_preset?.selected?.selected_option?.value;
       const chosen = state.permissions?.selected?.selected_options
         ?.map((option) => option.value)
         .filter((value): value is string => Boolean(value));
-      const allowed = new Set<string>(
-        preset && preset in permissionPresets
-          ? permissionPresets[preset as keyof typeof permissionPresets]
-          : (chosen ?? this.allowed),
-      );
+      const allowed = new Set<string>(chosen ?? this.allowed);
       defaults.permissions = capabilities.filter((capability) =>
         allowed.has(capability),
       );
