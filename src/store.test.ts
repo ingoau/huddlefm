@@ -1166,3 +1166,48 @@ test("remembers that a session fell back to browser media", () => {
   expect(store.restorableSessions()[0]?.mediaFallback).toBeTrue();
   store.close();
 });
+
+test("channel defaults keep only settings that are still valid", () => {
+  const store = new Store(":memory:");
+  expect(store.channelDefaults("C1")).toBeUndefined();
+  store.setChannelDefaults(
+    "C1",
+    { volume: 0.4, autoplay: "huddle", permissions: ["add", "skip"] },
+    "U1",
+  );
+  expect(store.channelDefaults("C1")).toEqual({
+    volume: 0.4,
+    autoplay: "huddle",
+    permissions: ["add", "skip"],
+  });
+  store.db
+    .query("UPDATE channel_defaults SET settings = ? WHERE channel_id = ?")
+    .run(
+      JSON.stringify({
+        volume: 3,
+        autoplay: "radio",
+        loopMode: "queue",
+        anchorEnabled: "yes",
+        permissions: ["skip", "fly"],
+      }),
+      "C1",
+    );
+  expect(store.channelDefaults("C1")).toEqual({
+    loopMode: "queue",
+    permissions: ["skip"],
+  });
+  store.db
+    .query("UPDATE channel_defaults SET settings = '{' WHERE channel_id = ?")
+    .run("C1");
+  expect(store.channelDefaults("C1")).toBeUndefined();
+});
+
+test("clears a channel's defaults", () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults("C1", { volume: 0.4 }, "U1");
+  store.setChannelDefaults("C2", { volume: 0.5 }, "U1");
+  store.clearChannelDefaults("C1");
+  expect(store.channelDefaults("C1")).toBeUndefined();
+  expect(store.channelDefaults("C2")).toEqual({ volume: 0.5 });
+  store.close();
+});

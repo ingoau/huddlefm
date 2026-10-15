@@ -14,6 +14,7 @@ export const capabilities = [
   "clear",
   "end-session",
 ] as const;
+export type Capability = (typeof capabilities)[number];
 
 export const permissionPresets = {
   default: ["add", "remove-own"],
@@ -57,6 +58,46 @@ export function usableHuddleMixSources(
       (source === "lastfm" && Boolean(settings.lastFmSessionKey)) ||
       (source === "listenbrainz" && Boolean(settings.listenBrainzToken)),
   );
+}
+
+/** Session settings saved for a channel; a missing field keeps the default. */
+export type ChannelDefaults = {
+  volume?: number;
+  autoplay?: AutoplayMode;
+  loopMode?: LoopMode;
+  displayMode?: DisplayMode;
+  transitionMode?: TransitionMode;
+  duckingMode?: DuckingMode;
+  anchorEnabled?: boolean;
+  permissions?: Capability[];
+};
+
+// Keeps only the fields that still hold a valid value, so a row saved by an
+// older or newer version cannot put a session into an unknown state.
+export function parseChannelDefaults(
+  saved: Record<string, unknown>,
+): ChannelDefaults {
+  const defaults: ChannelDefaults = {};
+  const { volume } = saved;
+  if (typeof volume === "number" && volume >= 0 && volume <= 1)
+    defaults.volume = volume;
+  const autoplay = modeOf(autoplayModes, saved.autoplay);
+  if (autoplay) defaults.autoplay = autoplay;
+  const loopMode = modeOf(loopModes, saved.loopMode);
+  if (loopMode) defaults.loopMode = loopMode;
+  const displayMode = modeOf(displayModes, saved.displayMode);
+  if (displayMode) defaults.displayMode = displayMode;
+  const transitionMode = modeOf(transitionModes, saved.transitionMode);
+  if (transitionMode) defaults.transitionMode = transitionMode;
+  const duckingMode = modeOf(duckingModes, saved.duckingMode);
+  if (duckingMode) defaults.duckingMode = duckingMode;
+  if (typeof saved.anchorEnabled === "boolean")
+    defaults.anchorEnabled = saved.anchorEnabled;
+  if (Array.isArray(saved.permissions))
+    defaults.permissions = capabilities.filter((capability) =>
+      (saved.permissions as unknown[]).includes(capability),
+    );
+  return defaults;
 }
 
 export const autoplayModes = ["off", "related", "huddle"] as const;
@@ -574,6 +615,15 @@ export class Store {
         artist TEXT NOT NULL,
         liked_at INTEGER NOT NULL,
         PRIMARY KEY (user_id, title COLLATE NOCASE, artist COLLATE NOCASE)
+      );
+      -- The session settings a channel manager saved for a channel, which
+      -- every new session there starts with. Stored as JSON, so a setting
+      -- added later is simply absent from older rows.
+      CREATE TABLE IF NOT EXISTS channel_defaults (
+        channel_id TEXT PRIMARY KEY,
+        settings TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
@@ -1537,6 +1587,42 @@ export class Store {
 
   removeTrack(id: string) {
     this.db.query("DELETE FROM tracks WHERE id = ?").run(id);
+  }
+
+  /** The settings new sessions in the channel start with, if any were saved. */
+  channelDefaults(channelId: string): ChannelDefaults | undefined {
+    const row = this.db
+      .query("SELECT settings FROM channel_defaults WHERE channel_id = ?")
+      .get(channelId) as { settings: string } | null;
+    if (!row) return undefined;
+    let saved: Record<string, unknown>;
+    try {
+      saved = JSON.parse(row.settings) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+    return parseChannelDefaults(saved);
+  }
+
+  setChannelDefaults(
+    channelId: string,
+    defaults: ChannelDefaults,
+    userId: string,
+  ) {
+    this.db
+      .query(
+        `INSERT INTO channel_defaults (channel_id, settings, updated_by, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (channel_id) DO UPDATE SET settings = excluded.settings,
+          updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+      )
+      .run(channelId, JSON.stringify(defaults), userId, Date.now());
+  }
+
+  clearChannelDefaults(channelId: string) {
+    this.db
+      .query("DELETE FROM channel_defaults WHERE channel_id = ?")
+      .run(channelId);
   }
 
   setPermission(sessionId: string, capability: string, allowed: boolean) {

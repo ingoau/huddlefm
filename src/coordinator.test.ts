@@ -139,6 +139,7 @@ function setup(
         sessions.push({ status: "ended", args });
       },
       setEndMessage: () => {},
+      channelDefaults: () => undefined,
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
       },
@@ -2129,6 +2130,7 @@ function channelManagerSetup(
   excludedUserIds = new Set<string>(),
   permissions: RolePermissions = "end",
   admins?: WorkspaceAdmins,
+  store?: Store,
 ) {
   const lookups: string[] = [];
   // How many modals had opened when each lookup asked Slack.
@@ -2138,7 +2140,7 @@ function channelManagerSetup(
     undefined,
     undefined,
     undefined,
-    undefined,
+    store,
     excludedUserIds,
     undefined,
     undefined,
@@ -2180,6 +2182,296 @@ test("a channel manager outside the huddle can end the session", async () => {
   await result.act("channel-manager", "end_session");
   expect(ended(result)).toBeTrue();
   expect(result.media).toContainEqual({ type: "leave" });
+});
+
+function settingsButtons(view: unknown) {
+  const blocks = (
+    view as {
+      blocks: { block_id?: string; elements?: { action_id: string }[] }[];
+    }
+  ).blocks;
+  return (
+    blocks
+      .find((block) => block.block_id === "session_actions")
+      ?.elements?.map((element) => element.action_id) ?? []
+  );
+}
+
+// Presses a Settings button with the modal's state and metadata.
+function pressInSettings(
+  result: ReturnType<typeof channelManagerSetup>,
+  userId: string,
+  actionId: string,
+  state: Parameters<Coordinator["action"]>[0]["state"] = {},
+  hostId = "host",
+) {
+  return result.coordinator.action({
+    ...interaction(result.coordinator, actionId, result.coordinator.id),
+    userId,
+    messageTs: "",
+    viewId: "view-1",
+    metadata: JSON.stringify({ sessionId: result.coordinator.id, hostId }),
+    state,
+  });
+}
+
+test("the configured manager can save and clear the channel's defaults", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("manager", "open_settings");
+  // Left of End session; Clear appears only once there is something saved.
+  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "save_channel_defaults",
+    "end_session",
+  ]);
+
+  await pressInSettings(result, "manager", "save_channel_defaults", {
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+    anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
+  });
+  expect(result.ephemeral).toContain(
+    "Saved. New sessions in this channel will start with these settings.",
+  );
+  // What the form showed was saved; the session waits for Settings to save.
+  expect(store.channelDefaults("channel")).toEqual({
+    volume: 0.6,
+    autoplay: "huddle",
+    loopMode: "off",
+    displayMode: "default",
+    transitionMode: "none",
+    duckingMode: "gentle",
+    anchorEnabled: true,
+    permissions: ["add", "remove-own"],
+  });
+  expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "save_channel_defaults",
+    "clear_channel_defaults",
+    "end_session",
+  ]);
+
+  await pressInSettings(result, "manager", "clear_channel_defaults");
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  expect(result.ephemeral).toContain(
+    "Cleared. New sessions in this channel will start with the usual settings.",
+  );
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "save_channel_defaults",
+    "end_session",
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("saving the channel's defaults from stale Settings is refused", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await pressInSettings(
+    result,
+    "manager",
+    "save_channel_defaults",
+    {},
+    "guest",
+  );
+  expect(result.ephemeral).toContain("Settings are stale; reopen them.");
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("only channel managers can save the channel's defaults", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await pressInSettings(result, "host", "save_channel_defaults");
+  expect(result.ephemeral).toContain(
+    "Only channel managers can change defaults for this channel.",
+  );
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("a channel manager who sees no settings cannot save them as defaults", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["guest"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "end_session",
+  ]);
+  await pressInSettings(result, "guest", "save_channel_defaults", {
+    permissions: { selected: { selected_options: [{ value: "clear" }] } },
+  });
+  expect(result.ephemeral).toContain(
+    "Only channel managers can change defaults for this channel.",
+  );
+  expect(store.channelDefaults("channel")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("a channel manager saves only the settings they can see", async () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults(
+    "channel",
+    { permissions: ["add", "volume"] },
+    "manager",
+  );
+  const result = channelManagerSetup(
+    ["guest"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  expect(settingsButtons(result.updatedModals.at(-1)![2])).toEqual([
+    "save_channel_defaults",
+    "clear_channel_defaults",
+    "end_session",
+  ]);
+  // The permissions are not in the guest's form, so a forged value is ignored.
+  await pressInSettings(result, "guest", "save_channel_defaults", {
+    volume: { percent: { value: "25" } },
+    autoplay: { mode: { selected_option: { value: "huddle" } } },
+    permissions: { selected: { selected_options: [{ value: "clear" }] } },
+  });
+  expect(store.channelDefaults("channel")).toEqual({
+    volume: 0.25,
+    permissions: ["add", "volume"],
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings in a direct message offers no channel defaults", async () => {
+  const result = channelManagerSetup();
+  Object.assign(result.coordinator.room, { sourceChannelId: "D123" });
+  await result.coordinator.start();
+  await result.act("manager", "open_settings");
+  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "end_session",
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("channel managers granted nothing are not offered the channel's defaults", async () => {
+  const result = channelManagerSetup(["host"], new Set(), "none");
+  await result.coordinator.start();
+  await result.act("host", "open_settings");
+  expect(result.lookups).toEqual([]);
+  expect(settingsButtons((result.modals.at(-1) as unknown[])[1])).toEqual([
+    "end_session",
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("a restored session keeps its own settings over the channel's defaults", async () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults(
+    "channel",
+    { volume: 0.35, autoplay: "related", permissions: ["add", "skip"] },
+    "manager",
+  );
+  const restored: SavedSession = {
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    uiTs: "player",
+    revision: 2,
+    creatorId: "creator",
+    hostId: "host",
+    state: "paused",
+    volume: 0.4,
+    autoplay: "off",
+    loopMode: "off",
+    transitionMode: "none",
+    displayMode: "lyrics",
+    anchorEnabled: false,
+    playbackSeconds: 0,
+    listenedSeconds: 0,
+    resumeUntil: 180_000,
+    permissions: ["add"],
+    tracks: [],
+  };
+  const result = setup(undefined, undefined, restored, undefined, store);
+  const coordinator = result.coordinator;
+  expect(Reflect.get(coordinator, "volume")).toBe(0.4);
+  expect(Reflect.get(coordinator, "autoplayMode")).toBe("off");
+  expect([...Reflect.get(coordinator, "allowed")]).toEqual(["add"]);
+  expect(Reflect.get(coordinator, "channelDefaultsApplied")).toBeFalse();
+});
+
+test("a new session starts with its channel's saved defaults", async () => {
+  const store = new Store(":memory:");
+  store.setChannelDefaults(
+    "channel",
+    {
+      volume: 0.35,
+      autoplay: "related",
+      displayMode: "lyrics",
+      transitionMode: "gapless",
+      duckingMode: "strong",
+      permissions: ["add", "skip"],
+    },
+    "channel-manager",
+  );
+  const result = channelManagerSetup(
+    ["channel-manager"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  expect(result.media).toEqual(
+    expect.arrayContaining([
+      { type: "volume", value: 0.35 },
+      { type: "display_mode", mode: "lyrics" },
+      { type: "transition_mode", mode: "gapless" },
+      { type: "ducking_mode", mode: "strong" },
+    ]),
+  );
+  const row = store.db
+    .query("SELECT volume, autoplay, display_mode FROM sessions WHERE id = ?")
+    .get(result.coordinator.id);
+  expect(row).toEqual({
+    volume: 0.35,
+    autoplay: "related",
+    display_mode: "lyrics",
+  });
+  const allowed = store.db
+    .query(
+      "SELECT capability FROM permissions WHERE session_id = ? AND allowed = 1 ORDER BY capability",
+    )
+    .all(result.coordinator.id);
+  expect(allowed).toEqual([{ capability: "add" }, { capability: "skip" }]);
+  await result.coordinator.endFromSlack();
 });
 
 test("a channel manager in the huddle can end it whatever the permissions", async () => {
@@ -2335,10 +2627,21 @@ test("a refusal replaces the loading view instead of leaving it", async () => {
 test("Settings opens directly when no role needs a lookup", async () => {
   const result = channelManagerSetup();
   await result.coordinator.start();
-  await result.act("host", "open_settings");
+  // The configured manager holds every role without asking Slack.
+  await result.act("manager", "open_settings");
   expect(result.lookups).toEqual([]);
   expect(result.updatedModals).toHaveLength(0);
   expect(JSON.stringify(result.modals.at(-1))).toContain("save_settings");
+  await result.coordinator.endFromSlack();
+});
+
+test("Settings asks who manages the channel when the user could save its defaults", async () => {
+  const result = channelManagerSetup();
+  await result.coordinator.start();
+  // The host can already end the session, but sees settings a channel
+  // manager could save.
+  await result.act("host", "open_settings");
+  expect(result.lookups).toEqual(["channel"]);
   await result.coordinator.endFromSlack();
 });
 
