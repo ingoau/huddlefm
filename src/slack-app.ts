@@ -324,21 +324,28 @@ export class SlackAppAdapter {
   /**
    * Whether anyone in the workspace could see the channel. Direct messages,
    * group DMs, private channels, and channels Slack will not describe all
-   * count as private.
+   * count as private. A public answer is rechecked after an hour, in case the
+   * channel has since been made private.
    */
   isPublicChannel(channelId: string) {
     const cached = this.publicChannels.get(channelId);
     if (cached) return cached;
     const known = this.web.conversations
       .info({ channel: channelId })
-      .then(({ channel }) =>
-        Boolean(
+      .then(({ channel }) => {
+        const isPublic = Boolean(
           channel?.is_channel &&
           !channel.is_private &&
           !channel.is_im &&
           !channel.is_mpim,
-        ),
-      )
+        );
+        if (isPublic)
+          setTimeout(
+            () => this.publicChannels.delete(channelId),
+            60 * 60_000,
+          ).unref();
+        return isPublic;
+      })
       .catch((error) => {
         log.warn(
           { event: "channel_lookup_failed", channelId, err: error },

@@ -2101,7 +2101,8 @@ async function shutdownSteps() {
   // canvas rather than leaving them listed as playing while the bot is down.
   if (config.canvasSections.includes("active-sessions")) {
     log.debug({ event: "shutdown_canvas_final" }, "Clearing Canvas sessions");
-    await updateCanvas(true);
+    // Bounded, so a slow Slack cannot use up the shutdown failsafe.
+    await Promise.race([updateCanvas(true), Bun.sleep(5_000)]);
   }
   log.debug({ event: "shutdown_media_browsers" }, "Closing media browsers");
   await mediaBrowsers.close();
