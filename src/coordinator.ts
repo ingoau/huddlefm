@@ -95,12 +95,14 @@ import {
   defaultUserSettings,
   mergeForm,
   parseSettingsMetadata,
+  listenBrainzTokenView,
   selected,
   settingsTabActionPrefix,
   settingsTabFromAction,
   settingsTabs,
   settingsView,
   submittedHuddleMixSources,
+  submittedScrobbleServices,
   type FormState,
   type SettingsTab,
 } from "./settings-view.ts";
@@ -109,6 +111,13 @@ import {
   settingsChanges,
   type Settings,
 } from "./settings-diff.ts";
+
+// What redrawing Settings may change about it.
+type SettingsChange = {
+  tab?: SettingsTab;
+  integrationPage?: number;
+  notice?: string;
+};
 
 const endRestoreMs = 2 * 60_000;
 const searchDebounceMs = 300;
@@ -732,6 +741,8 @@ export class Coordinator {
           return this.queuePositionSubmission(interaction);
         if (interaction.actionId === "end_session_confirm")
           return this.endSubmission(interaction);
+        if (interaction.actionId === "listenbrainz_token")
+          return this.listenBrainzTokenSubmission(interaction);
         return this.settingsSubmission(interaction);
       }
       if (
@@ -780,6 +791,7 @@ export class Coordinator {
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
+        open_listenbrainz_token: () => this.listenBrainzTokenModal(interaction),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
         delete_channel_save: () => this.deleteChannelSave(interaction),
@@ -4421,7 +4433,7 @@ export class Coordinator {
 
   private settingsViewFor(
     interaction: Interaction,
-    change: { tab?: SettingsTab; integrationPage?: number } = {},
+    change: SettingsChange = {},
   ) {
     const context = this.settingsContext(interaction);
     return this.settingsView(interaction.userId, {
@@ -4433,7 +4445,7 @@ export class Coordinator {
   // Redraws the settings modal an interaction came from.
   private updateSettings(
     interaction: Interaction,
-    change: { tab?: SettingsTab; integrationPage?: number } = {},
+    change: SettingsChange = {},
   ) {
     return this.slack.updateModal(
       interaction.viewId!,
@@ -4472,12 +4484,7 @@ export class Coordinator {
   // still caught as stale.
   private settingsView(
     userId: string,
-    context: {
-      hostId?: string;
-      tab?: SettingsTab;
-      integrationPage?: number;
-      draft?: FormState;
-    } = {},
+    context: SettingsChange & { hostId?: string; draft?: FormState } = {},
   ) {
     const saveDefaults = this.canSaveChannelDefaults(userId);
     const saved = saveDefaults
@@ -4486,7 +4493,11 @@ export class Coordinator {
     return settingsView({
       sessionId: this.id,
       hostId: context.hostId ?? this.hostId,
-      ...defined({ tab: context.tab, draft: context.draft }),
+      ...defined({
+        tab: context.tab,
+        draft: context.draft,
+        notice: context.notice,
+      }),
       integrationPage: context.integrationPage ?? 0,
       access: {
         volume: this.can(userId, "volume"),
@@ -4648,6 +4659,59 @@ export class Coordinator {
     }
   }
 
+  private async listenBrainzTokenModal(interaction: Interaction) {
+    if (!this.scrobbling || !interaction.triggerId) return;
+    await this.slack.pushModal(
+      interaction.triggerId,
+      listenBrainzTokenView({
+        sessionId: this.id,
+        settings: this.settingsMetadata(interaction),
+      }),
+    );
+  }
+
+  // The token form closes when submitted, so Settings under it says how
+  // checking the token went.
+  private async listenBrainzTokenSubmission(interaction: Interaction) {
+    if (!this.scrobbling) return;
+    const token = interaction.state.listenbrainz_token?.value?.value?.trim();
+    if (!token) return;
+    let notice: string;
+    try {
+      const wasEnabled = this.scrobbling.settings(
+        interaction.userId,
+      ).listenBrainzEnabled;
+      const username = await this.scrobbling.setListenBrainz(
+        interaction.userId,
+        token,
+        true,
+      );
+      notice = `ListenBrainz connected${username ? ` as ${escape(username)}` : ""}.`;
+      if (
+        !wasEnabled &&
+        this.scrobbling.sessionEnabled(this.id, interaction.userId)
+      )
+        this.playbackScrobbling?.settingsEnabled(interaction.userId);
+    } catch (error) {
+      this.log.warn(
+        {
+          event: "listenbrainz_connect_failed",
+          userId: interaction.userId,
+          err: error,
+        },
+        "Could not connect ListenBrainz",
+      );
+      notice = `ListenBrainz was not connected: ${escape(message(error))}`;
+    }
+    if (interaction.previousViewId)
+      await this.slack.updateModal(
+        interaction.previousViewId,
+        undefined,
+        this.settingsViewFor(interaction, { notice }),
+      );
+    else await this.notice(interaction.userId, notice);
+  }
+
   private async disconnectLastFm(interaction: Interaction) {
     if (!this.scrobbling) return;
     this.scrobbling.disconnectLastFm(interaction.userId);
@@ -4802,26 +4866,34 @@ export class Coordinator {
         let newlyEnabled = false;
         const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
         if (mode) this.scrobbling.setMode(interaction.userId, mode);
-        const lastFm = checked(state.lastfm_scrobbling?.enabled);
-        if (lastFm !== undefined) {
-          newlyEnabled ||= lastFm && !userSettings.lastFmEnabled;
-          this.scrobbling.setLastFmEnabled(interaction.userId, lastFm);
+        const services = submittedScrobbleServices(state.scrobble_to);
+        if (services?.lastfm !== undefined) {
+          newlyEnabled ||= services.lastfm && !userSettings.lastFmEnabled;
+          this.scrobbling.setLastFmEnabled(interaction.userId, services.lastfm);
         }
-        const listenBrainz = checked(state.listenbrainz_scrobbling?.enabled);
-        // The token is never kept in a draft, so only one on screen counts.
-        const listenBrainzToken =
-          interaction.state.listenbrainz_token?.value?.value?.trim();
-        if (listenBrainz !== undefined) {
+        if (services?.listenbrainz !== undefined) {
           newlyEnabled ||=
-            listenBrainz &&
-            (!userSettings.listenBrainzEnabled || Boolean(listenBrainzToken));
+            services.listenbrainz && !userSettings.listenBrainzEnabled;
           await this.scrobbling.setListenBrainz(
             interaction.userId,
-            listenBrainzToken || undefined,
-            listenBrainz,
+            undefined,
+            services.listenbrainz,
           );
         }
-        // After any service this save connects, so its checkbox counts.
+        // The mode is the default for new Huddles, so a change to it leaves
+        // this session as the form showed it.
+        const session = checked(state.session_scrobbling?.enabled);
+        if (
+          session !== undefined &&
+          userSettings.configured &&
+          (session !== userSettings.sessionEnabled ||
+            (mode !== undefined && mode !== userSettings.mode))
+        )
+          this.scrobbling.setSessionEnabled(
+            this.id,
+            interaction.userId,
+            session,
+          );
         const sources = submittedHuddleMixSources(state.huddle_mix);
         if (sources)
           this.scrobbling.setHuddleMixSources(interaction.userId, sources);

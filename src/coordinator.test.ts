@@ -3787,7 +3787,10 @@ test("ask mode prompts configured users and the shared session toggle overrides 
   expect(modal).toContain('"block_id":"scrobbling_mode"');
   for (const mode of ["always", "ask", "disabled"])
     expect(modal).toContain(`"value":"${mode}"`);
-  expect(modal).toContain("Disable scrobbling for this session");
+  // The prompt's answer shows as this session's choice.
+  expect(modal).toContain(
+    '"block_id":"session_scrobbling","optional":true,"label":{"type":"plain_text","text":"This session"},"element":{"type":"checkboxes","action_id":"enabled","options":[{"text":{"type":"plain_text","text":"Scrobble what I listen to here"},"value":"enabled"}],"initial_options":[{',
+  );
 
   const save = interaction(
     test.coordinator,
@@ -3836,6 +3839,151 @@ test("user settings remove saved scrobbling credentials", async () => {
     huddleMixSources: ["added"],
     mode: "always",
   });
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("the You tab saves where and whether a user scrobbles", async () => {
+  const userStore = new Store(":memory:");
+  userStore.connectLastFm("host", "last-user", "session-key");
+  userStore.setListenBrainzToken("host", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("host", true);
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const you = JSON.stringify(await settingsTab(test, "host", "you"));
+  expect(you).toContain('"action_id":"services:lastfm,listenbrainz"');
+  expect(you).toContain("Connected as last-user");
+  expect(you).toContain("Connected as lb-user");
+  // Last.fm is connected, though no longer configured, so it can be removed.
+  expect(you).toContain('"action_id":"disconnect_lastfm"');
+  expect(you).toContain('"action_id":"disconnect_listenbrainz"');
+  expect(you).not.toContain("listenbrainz_token");
+
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    scrobble_to: {
+      "services:lastfm,listenbrainz": {
+        selected_options: [{ value: "listenbrainz" }],
+      },
+    },
+    scrobbling_mode: { mode: { selected_option: { value: "disabled" } } },
+    session_scrobbling: {
+      enabled: { selected_options: [{ value: "enabled" }] },
+    },
+  };
+  await test.coordinator.action(save);
+  expect(userStore.getUserScrobbling("host")).toMatchObject({
+    lastFmEnabled: false,
+    listenBrainzEnabled: true,
+    mode: "disabled",
+  });
+  // A new default leaves this session scrobbling, as the form showed.
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    true,
+  );
+
+  save.state = { session_scrobbling: { enabled: { selected_options: [] } } };
+  await test.coordinator.action(save);
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    false,
+  );
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("a ListenBrainz token is added in a form of its own over Settings", async () => {
+  const userStore = new Store(":memory:");
+  const tokens: string[] = [];
+  const scrobbling = new ScrobbleDispatcher(userStore, {}, (async (
+    _input,
+    init,
+  ) => {
+    const token = String(
+      (init?.headers as Record<string, string>).authorization,
+    ).replace("Token ", "");
+    tokens.push(token);
+    return Response.json(
+      token === "good"
+        ? { valid: true, user_name: "lb-user" }
+        : { valid: false },
+    );
+  }) as typeof fetch);
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  await test.coordinator.action(interaction(test.coordinator, "open_settings"));
+  const you = JSON.stringify(await settingsTab(test, "host", "you"));
+  expect(you).toContain('"action_id":"open_listenbrainz_token"');
+  // Last.fm has no app key here, so it is not offered at all.
+  expect(you).not.toContain("lastfm_account");
+
+  await pressInSettings(
+    test,
+    "host",
+    "open_listenbrainz_token",
+    { huddle_mix: { "sources:added": { selected_options: [] } } },
+    "host",
+    { tab: "you" },
+  );
+  const form = test.pushedModals.at(-1) as [
+    string,
+    { callback_id: string; private_metadata: string },
+  ];
+  expect(form[1].callback_id).toBe("listenbrainz_token");
+  // Settings' tab and unsaved edits ride along, to redraw it with.
+  expect(JSON.parse(form[1].private_metadata)).toMatchObject({
+    sessionId: test.coordinator.id,
+    settings: {
+      tab: "you",
+      draft: { huddle_mix: { "sources:added": { selected_options: [] } } },
+    },
+  });
+
+  const submit = (token: string) =>
+    test.coordinator.action({
+      ...interaction(
+        test.coordinator,
+        "listenbrainz_token",
+        "",
+        "view_submission",
+      ),
+      metadata: form[1].private_metadata,
+      previousViewId: "settings-view",
+      state: { listenbrainz_token: { value: { value: ` ${token} ` } } },
+    });
+  await submit("bad");
+  expect(userStore.getUserScrobbling("host").listenBrainzToken).toBeUndefined();
+  let settings = test.updatedModals.at(-1)!;
+  expect(settings[0]).toBe("settings-view");
+  expect(JSON.stringify(settings[2])).toContain(
+    "ListenBrainz was not connected: That ListenBrainz user token is invalid",
+  );
+
+  await submit("good");
+  expect(tokens).toEqual(["bad", "good"]);
+  expect(userStore.getUserScrobbling("host")).toMatchObject({
+    listenBrainzToken: "good",
+    listenBrainzUsername: "lb-user",
+    listenBrainzEnabled: true,
+  });
+  settings = test.updatedModals.at(-1)!;
+  const body = JSON.stringify(settings[2]);
+  expect(body).toContain("ListenBrainz connected as lb-user.");
+  expect(body).toContain('"action_id":"disconnect_listenbrainz"');
+  // Still on the You tab, with the unsaved edit kept.
+  expect(
+    JSON.parse((settings[2] as { private_metadata: string }).private_metadata),
+  ).toMatchObject({
+    tab: "you",
+    draft: { huddle_mix: { "sources:added": { selected_options: [] } } },
+  });
+  expect(body).not.toContain("good");
   await test.coordinator.endFromSlack();
   userStore.close();
 });

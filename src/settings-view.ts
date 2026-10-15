@@ -154,7 +154,8 @@ export function settingsTabFromAction(actionId: string) {
 }
 
 // Inputs whose values never go into a draft, which Slack hands back to every
-// later interaction with the modal.
+// later interaction with the modal. Settings no longer asks for a token
+// itself, but a token form's state must not be carried either.
 const undraftedBlocks = new Set(["listenbrainz_token"]);
 
 /**
@@ -280,6 +281,8 @@ export type SettingsViewOptions = {
   tab?: SettingsTab;
   integrationPage: number;
   draft?: FormState;
+  // A word on what just happened, shown once above the tab.
+  notice?: string;
   // What the viewer may change.
   access: {
     volume: boolean;
@@ -356,6 +359,10 @@ export function settingsView(options: SettingsViewOptions) {
       ),
     ),
   );
+  const noticeBlocks = when(
+    options.notice,
+    context("settings_notice", options.notice ?? ""),
+  );
   const content =
     tab === "you"
       ? youBlocks(options, form)
@@ -391,7 +398,7 @@ export function settingsView(options: SettingsViewOptions) {
     title: plain("HuddleFM settings"),
     submit: plain("Save"),
     close: plain("Cancel"),
-    blocks: [...tabBlocks, ...content, ...integrationBlocks],
+    blocks: [...tabBlocks, ...noticeBlocks, ...content, ...integrationBlocks],
   };
 }
 
@@ -628,12 +635,70 @@ function hostBlocks(options: SettingsViewOptions, form: FormState) {
   ];
 }
 
+// The services a user scrobbles to, named in the checkboxes' action ID as the
+// Huddle mix sources are, so only the services the form offered are saved.
+const scrobbleServicesPrefix = "services:";
+export const scrobbleServices = ["lastfm", "listenbrainz"] as const;
+export type ScrobbleService = (typeof scrobbleServices)[number];
+const scrobbleServiceLabels: Record<ScrobbleService, string> = {
+  lastfm: "Last.fm",
+  listenbrainz: "ListenBrainz",
+};
+
+// Whether the form ticks each scrobbling service it offered, or undefined
+// when the checkboxes were not part of it.
+export function submittedScrobbleServices(
+  block: Record<string, InputState> | undefined,
+) {
+  const [actionId, state] =
+    Object.entries(block ?? {}).find(([actionId]) =>
+      actionId.startsWith(scrobbleServicesPrefix),
+    ) ?? [];
+  if (!actionId || !state) return undefined;
+  const offered = new Set(
+    actionId.slice(scrobbleServicesPrefix.length).split(","),
+  );
+  const ticked = new Set(
+    state.selected_options?.map((option) => option.value) ?? [],
+  );
+  return Object.fromEntries(
+    scrobbleServices
+      .filter((service) => offered.has(service))
+      .map((service) => [service, ticked.has(service)]),
+  ) as Partial<Record<ScrobbleService, boolean>>;
+}
+
 function youBlocks(options: SettingsViewOptions, form: FormState) {
   const { user: settings, sessionId: value } = options;
   const mix = submittedHuddleMixSources(form.huddle_mix);
   const chosen = settings.huddleMixUsable.filter(
     (source) => mix?.[source] ?? settings.huddleMixSources.includes(source),
   );
+  const connected = scrobbleServices.filter((service) =>
+    service === "lastfm"
+      ? settings.lastFmConnected
+      : settings.listenBrainzConnected,
+  );
+  const services = submittedScrobbleServices(form.scrobble_to);
+  const serviceOption = (service: ScrobbleService) => ({
+    text: plain(scrobbleServiceLabels[service]),
+    value: service,
+  });
+  const scrobblingTo = connected.filter(
+    (service) =>
+      services?.[service] ??
+      (service === "lastfm"
+        ? settings.lastFmEnabled
+        : settings.listenBrainzEnabled),
+  );
+  const lastFm = settings.lastFmConnected
+    ? `Connected as ${escape(settings.lastFmUsername ?? "unknown")}`
+    : "Not connected";
+  const listenBrainz = settings.listenBrainzConnected
+    ? settings.listenBrainzUsername
+      ? `Connected as ${escape(settings.listenBrainzUsername)}`
+      : "Token saved"
+    : "Not connected";
   return [
     input(
       "huddle_mix",
@@ -646,109 +711,94 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
     ),
     ...when(
       settings.configured,
+      { type: "header", text: plain("Scrobbling") },
+      input(
+        "session_scrobbling",
+        "This session",
+        toggle(
+          "enabled",
+          "Scrobble what I listen to here",
+          checked(form.session_scrobbling?.enabled) ??
+            Boolean(settings.sessionEnabled),
+        ),
+        { optional: true },
+      ),
       input(
         "scrobbling_mode",
-        "Scrobbling mode",
+        "Default for new Huddles",
         modeSelect(
           scrobblingModes,
           selected(form.scrobbling_mode?.mode, scrobblingModes) ??
             settings.mode,
           (mode) => (mode === "ask" ? "Ask every time" : capitalize(mode)),
         ),
-        { hint: "Sets the default for each Huddle" },
       ),
-      actions("session_scrobbling", [
-        button(
-          "toggle_session_scrobbling",
-          plain(
-            `${settings.sessionEnabled ? "Disable" : "Enable"} scrobbling for this session`,
-          ),
-          { value },
-        ),
-      ]),
+      input(
+        "scrobble_to",
+        "Scrobble to",
+        {
+          type: "checkboxes",
+          action_id: `${scrobbleServicesPrefix}${connected.join(",")}`,
+          options: connected.map(serviceOption),
+          initial_options: scrobblingTo.map(serviceOption),
+        },
+        { optional: true },
+      ),
     ),
-    section(
-      settings.lastFmConnected
-        ? `*Last.fm*\nConnected as ${escape(settings.lastFmUsername ?? "unknown")}`
-        : `*Last.fm*\n${settings.lastFmAvailable ? "Disconnected" : "Unavailable until the app API key is configured"}`,
-    ),
-    ...(settings.lastFmConnected
-      ? [
-          input(
-            "lastfm_scrobbling",
-            "Last.fm scrobbling",
-            toggle(
-              "enabled",
-              "Enabled",
-              checked(form.lastfm_scrobbling?.enabled) ??
-                settings.lastFmEnabled,
+    { type: "header", text: plain("Accounts") },
+    ...when(settings.lastFmConnected || settings.lastFmAvailable, {
+      type: "section",
+      block_id: "lastfm_account",
+      text: { type: "mrkdwn", text: `*Last.fm*\n${lastFm}` },
+      accessory: settings.lastFmConnected
+        ? button("disconnect_lastfm", plain("Disconnect"), {
+            style: "danger",
+            value,
+            confirm: confirm(
+              "Disconnect Last.fm?",
+              "This removes your saved Last.fm login and stops scrobbling to it.",
+              "Disconnect",
             ),
-            { optional: true },
-          ),
-          actions("lastfm_actions", [
-            button("disconnect_lastfm", plain("Disconnect"), {
-              style: "danger",
-              value,
-              confirm: confirm(
-                "Disconnect Last.fm?",
-                "This removes your saved Last.fm login.",
-                "Disconnect",
-              ),
-            }),
-          ]),
-        ]
-      : when(
-          settings.lastFmAvailable,
-          actions("lastfm_actions", [
-            button("connect_lastfm", plain("Log in to Last.fm"), { value }),
-          ]),
-        )),
-    input(
-      "listenbrainz_scrobbling",
-      "ListenBrainz scrobbling",
-      toggle(
-        "enabled",
-        "Enabled",
-        checked(form.listenbrainz_scrobbling?.enabled) ??
-          settings.listenBrainzEnabled,
+          })
+        : button("connect_lastfm", plain("Connect"), { value }),
+    }),
+    {
+      type: "section",
+      block_id: "listenbrainz_account",
+      text: { type: "mrkdwn", text: `*ListenBrainz*\n${listenBrainz}` },
+      accessory: settings.listenBrainzConnected
+        ? button("disconnect_listenbrainz", plain("Remove"), {
+            style: "danger",
+            value,
+            confirm: confirm(
+              "Remove ListenBrainz token?",
+              "This removes your saved token and stops scrobbling to ListenBrainz.",
+              "Remove",
+            ),
+          })
+        : button("open_listenbrainz_token", plain("Add token"), { value }),
+    },
+  ];
+}
+
+/** The form a ListenBrainz token is pasted into, over Settings. */
+export function listenBrainzTokenView(settingsMetadata: unknown) {
+  return {
+    type: "modal",
+    callback_id: "listenbrainz_token",
+    private_metadata: JSON.stringify(settingsMetadata),
+    title: plain("Connect ListenBrainz"),
+    submit: plain("Connect"),
+    close: plain("Cancel"),
+    blocks: [
+      section(
+        "Paste your user token from <https://listenbrainz.org/settings/|your ListenBrainz settings>. HuddleFM checks it with ListenBrainz before saving it.",
       ),
-      {
-        optional: true,
-        hint: settings.listenBrainzConnected
-          ? `Token saved${settings.listenBrainzUsername ? ` for ${settings.listenBrainzUsername}` : ""}`
-          : "Uses your ListenBrainz user token",
-      },
-    ),
-    input(
-      "listenbrainz_token",
-      "ListenBrainz API key / user token",
-      {
+      input("listenbrainz_token", "User token", {
         type: "plain_text_input",
         action_id: "value",
-        placeholder: plain(
-          settings.listenBrainzConnected ? "Saved" : "Paste token",
-        ),
-      },
-      {
-        optional: true,
-        hint: settings.listenBrainzConnected
-          ? "Leave blank to keep the saved token"
-          : "Find it in ListenBrainz settings",
-      },
-    ),
-    ...when(
-      settings.listenBrainzConnected,
-      actions("listenbrainz_actions", [
-        button("disconnect_listenbrainz", plain("Remove token"), {
-          style: "danger",
-          value,
-          confirm: confirm(
-            "Remove ListenBrainz token?",
-            "This disables ListenBrainz scrobbling and removes your saved token.",
-            "Remove",
-          ),
-        }),
-      ]),
-    ),
-  ];
+        placeholder: plain("Paste token"),
+      }),
+    ],
+  };
 }
