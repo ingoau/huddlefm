@@ -6380,6 +6380,43 @@ test("liking a song records it, answers only the listener, and leaves the card a
   await test.coordinator.endFromSlack();
 });
 
+test("the save button sits with the seek controls and DMs a song.link link", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", playingTrack());
+  const player = JSON.stringify(
+    (Reflect.get(test.coordinator, "blocks") as () => unknown).call(
+      test.coordinator,
+    ),
+  );
+  const seek = player.slice(player.indexOf('"block_id":"seek_'));
+  expect(seek).toContain('"action_id":"save_track"');
+  expect(seek).toContain(":ms-floppy-disk:");
+  const renders = test.updates.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  expect(test.updates).toHaveLength(renders);
+  const sent = test.dms.at(-1)!;
+  expect(sent[0]).toBe("host");
+  expect(sent[1]).toBe(
+    "<https://song.link/https://example.com/likedlikedl|Worth Hearing Again — Band>",
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("saving a song nobody remembers tells the listener", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const dms = test.dms.length;
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "gone"),
+  );
+  expect(test.dms).toHaveLength(dms);
+  expect(test.ephemeral.at(-1)).toBe("That song has already finished.");
+  await test.coordinator.endFromSlack();
+});
+
 test("the undo button is not the player's to handle", async () => {
   const test = setup();
   await test.coordinator.start();

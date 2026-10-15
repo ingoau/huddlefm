@@ -221,6 +221,11 @@ function throwIfAborted(signal?: AbortSignal) {
 // so it says what the like is for rather than announcing it to the room.
 const likedNotice = "This will be recommended to you more";
 
+/** A song.link page for a track, which links it on every streaming service. */
+function songLink(url: string) {
+  return `https://song.link/${url}`;
+}
+
 const autoplayDescriptions: Record<AutoplayMode, string> = {
   off: "Do not queue recommendations",
   related: "Continue from songs requested in this huddle",
@@ -753,6 +758,7 @@ export class Coordinator {
         volume_down: () => this.changeVolume(interaction, -0.05),
         volume_up: () => this.changeVolume(interaction, 0.05),
         like_track: () => this.like(interaction),
+        save_track: () => this.save(interaction),
         queue_move_up: () => this.reorder(interaction, -1),
         queue_move_down: () => this.reorder(interaction, 1),
         queue_play_next: () => this.playNext(interaction),
@@ -2390,6 +2396,38 @@ export class Coordinator {
           "Could not post like notice",
         ),
       );
+  }
+
+  // DMs the listener a song.link page for the song, so they can find it again
+  // on whichever service they use. Like the like button, it refers to the song
+  // that was playing when they pressed it.
+  private async save(interaction: Interaction) {
+    const entry = this.likeable(interaction.value);
+    if (!entry)
+      return this.notice(interaction.userId, "That song has already finished.");
+    const link = songLink(entry.canonicalUrl);
+    const text = `<${link}|${escape(entry.title)} — ${escape(entry.artist)}>`;
+    this.log.info(
+      {
+        event: "track_saved",
+        entryId: entry.id,
+        sourceId: entry.sourceId,
+        userId: interaction.userId,
+      },
+      "Track link sent",
+    );
+    await this.slack
+      .dm(interaction.userId, text, { blocks: [section(text)] })
+      .catch((error) => {
+        this.log.warn(
+          { event: "save_dm_failed", userId: interaction.userId, err: error },
+          "Could not send saved track",
+        );
+        return this.notice(
+          interaction.userId,
+          "Couldn't send you that song. Try again in a moment.",
+        ).catch(() => {});
+      });
   }
 
   // The song a like button refers to. It is only ever rendered for whatever is
@@ -5128,6 +5166,10 @@ export class Coordinator {
                 actions(`seek_${id}`, [
                   button("seek_back", icon(":ms-rewind:"), { value }),
                   button("seek_forward", icon(":ms-fast-forward:"), { value }),
+                  // Carries the entry for the same reason the like button does.
+                  button("save_track", icon(":ms-floppy-disk:"), {
+                    value: current.id,
+                  }),
                 ]),
               ]
             : when(
