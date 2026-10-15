@@ -1414,3 +1414,42 @@ test("Your data counts what is kept about a user and forgets it on request", () 
   expect(store.getUserScrobbling("U2").lastFmSessionKey).toBe("key");
   store.close();
 });
+
+test("songs left queued in a session that ended let go of who added them", () => {
+  const store = new Store(":memory:");
+  createSession(store, { id: "live" });
+  createSession(store, { id: "gone" });
+  createSession(store, { id: "restorable" });
+  const track = (id: string, sessionId: string) =>
+    store.addTrack({
+      id,
+      sessionId,
+      requesterId: "U1",
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: id,
+      title: id,
+      artist: "Artist",
+      status: "ready",
+    });
+  track("queued-live", "live");
+  track("queued-gone", "gone");
+  track("queued-restorable", "restorable");
+  store.expireSession("gone");
+  store.endSession(
+    "restorable",
+    {
+      state: "playing",
+      playbackSeconds: 0,
+      listenedSeconds: 0,
+      displayMode: "default",
+      anchorEnabled: false,
+      queue: [],
+    },
+    Date.now() + 60_000,
+  );
+  expect(store.forgetAddedTracks("U1")).toBe(1);
+  // The live session and the one that can come back still show who added them.
+  expect(store.userData("U1").added.count).toBe(2);
+  store.close();
+});

@@ -1871,14 +1871,19 @@ export class Store {
 
   /**
    * Takes the user's name off the songs they added that have finished,
-   * leaving the songs for the play counts. Songs still queued or playing
-   * keep it, as their session still shows who added them.
+   * leaving the songs for the play counts. Songs still queued or playing in
+   * a live session, or one that can still be restored, keep it, as that
+   * session still shows who added them. Ending a session leaves its songs'
+   * status as it was, so a song left queued in one that ended lets go too.
    */
   forgetAddedTracks(userId: string) {
     return this.db
       .query(
         `UPDATE tracks SET requester_id = '' WHERE requester_id = ?
-        AND status IN ('played', 'failed')`,
+        AND (status IN ('played', 'failed') OR session_id NOT IN (
+          SELECT id FROM sessions
+          WHERE status != 'ended' OR resume_until IS NOT NULL
+        ))`,
       )
       .run(userId).changes;
   }
