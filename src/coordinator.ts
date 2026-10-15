@@ -157,13 +157,13 @@ type Entry = TrackMetadata & {
 
 // The actions that need to know whether the user manages the channel: those
 // that show or change the Channel tab of Settings, and loading a save, which
-// a channel manager may delete as they load it.
+// a channel manager may delete as they load it. Opening the load dialog is
+// not one: its trigger ID would expire while Slack is asked.
 const channelRoleActions = new Set([
   "open_settings",
   "save_channel_defaults",
   "clear_channel_defaults",
   "delete_channel_save",
-  "open_load_session",
   "load_session_save",
   ...settingsTabs.map((tab) => `${settingsTabActionPrefix}${tab}`),
 ]);
@@ -3389,7 +3389,7 @@ export class Coordinator {
     void this.loadLyrics(next).then((lyrics) => {
       if (this.current !== next) return;
       captureAnalytics(lyrics ? "lyrics.available" : "lyrics.unavailable", {
-        distinctId: next.automatic ? undefined : next.requesterId,
+        distinctId: next.automatic ? undefined : next.requesterId || undefined,
         sessionId: this.id,
         properties: {
           trackId: next.id,
@@ -3440,11 +3440,14 @@ export class Coordinator {
   }
 
   private async playMessage(entry: Entry) {
+    // A listener can take their name off the songs they added.
     const requesterLabel = entry.automatic
       ? "Autoplay recommendation"
       : entry.requesterId === this.botUserId
         ? undefined
-        : `Added by ${await this.slack.userName(entry.requesterId)}`;
+        : entry.requesterId
+          ? `Added by ${await this.slack.userName(entry.requesterId)}`
+          : "Added by a listener";
     const localArtwork =
       entry.filePath &&
       (await Bun.file(embeddedArtworkPath(entry.filePath)).exists())
@@ -4889,7 +4892,7 @@ export class Coordinator {
         },
         "Could not connect ListenBrainz",
       );
-      notice = `ListenBrainz was not connected: ${escape(message(error))}`;
+      notice = `ListenBrainz was not connected: ${escape(truncate(message(error), 500))}`;
     }
     if (interaction.previousViewId)
       await this.slack.updateModal(
@@ -6223,8 +6226,9 @@ export class Coordinator {
     const [topArtist, topSongs] = [...artists].sort(
       (a, b) => b[1].length - a[1].length,
     )[0]!;
+    // Songs whose adder took their name off them count for nobody.
     const requesters = Map.groupBy(
-      songs.filter((song) => !song.automatic),
+      songs.filter((song) => !song.automatic && song.requesterId),
       (song) => song.requesterId,
     );
     const topRequester = [...requesters].sort(
@@ -6259,7 +6263,7 @@ export class Coordinator {
           "*Songs*",
           songs.map(
             (song, index) =>
-              `${index + 1}. *${escape(song.title)}* — ${escape(song.artist)}${song.automatic ? " · Autoplay" : ` · <@${song.requesterId}>`}`,
+              `${index + 1}. *${escape(song.title)}* — ${escape(song.artist)}${song.automatic ? " · Autoplay" : song.requesterId ? ` · <@${song.requesterId}>` : ""}`,
           ),
         ),
       ],

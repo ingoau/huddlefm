@@ -8110,3 +8110,27 @@ test("Settings opened with no host is stale once someone becomes host", async ()
   expect(test.ephemeral.at(-1)).toBe("Settings are stale; reopen them.");
   await test.coordinator.endFromSlack();
 });
+
+test("songs whose adder took their name off them name nobody", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const anonymous = queued("a", { requesterId: "", status: "played" });
+  const play = await Reflect.get(result.coordinator, "playMessage").call(
+    result.coordinator,
+    anonymous,
+  );
+  expect(play.requesterLabel).toBe("Added by a listener");
+  Reflect.set(result.coordinator, "history", [
+    anonymous,
+    queued("b", { requesterId: "guest", status: "played" }),
+  ]);
+  const recap = JSON.stringify(
+    Reflect.get(result.coordinator, "recapBlocks").call(
+      result.coordinator,
+      "Ended",
+    ),
+  );
+  expect(recap).not.toContain("<@>");
+  expect(recap).toContain("*Most frequent requester:* <@guest>");
+  await result.coordinator.endFromSlack();
+});
