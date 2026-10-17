@@ -30,7 +30,7 @@ Invite the bot to a huddle or ping it in the thread. It will join the huddle and
 
 Anyone in the huddle can open Your data from the You tab of Settings to see what HuddleFM keeps about them (sessions saved to their account, the songs they added, heard, liked and skipped, and their scrobbles) and delete any of it, or all of it at once. The audit log is never deleted.
 
-With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap Gemini model through OpenRouter and the same permissions you already have in the player UI. Replies are ephemeral. This also works in the original huddle thread when the session uses a forced companion controls channel (where the bot cannot post publicly).
+With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap AI model through OpenRouter and the same permissions you already have in the player UI. Replies are ephemeral. This also works in the original huddle thread when the session uses a forced companion controls channel (where the bot cannot post publicly).
 
 ## Self hosting
 
