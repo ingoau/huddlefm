@@ -21,7 +21,7 @@ const log = logger.child({ component: "agent" });
 const agentTimeoutMs = 60_000;
 const activeAgentUsers = new Set<string>();
 
-export const agentModel = "google/gemini-3.5-flash-lite";
+export const agentModel = "openai/gpt-6-luna";
 
 const mentionPattern = (botUserId: string) =>
   new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, "g");
