@@ -932,6 +932,11 @@ async function cleanupEndedSession(sessionId: string) {
 // that nothing was saved if the user asked to save.
 async function endedBeforeConfirming(interaction: Interaction) {
   if (
+    interaction.actionId === "scrobble_track" ||
+    interaction.actionId === "enable_session_scrobbling"
+  )
+    return endedScrobblingPrompt(interaction);
+  if (
     interaction.type !== "view_submission" ||
     interaction.actionId !== "end_session_confirm" ||
     !interaction.previousViewId
@@ -956,6 +961,27 @@ async function endedBeforeConfirming(interaction: Interaction) {
           err: error,
         },
         "Could not update Settings for a session that already ended",
+      ),
+    );
+}
+
+// A scrobbling prompt stays up after its session ends, with nothing left to
+// scrobble into.
+async function endedScrobblingPrompt(interaction: Interaction) {
+  if (!interaction.responseUrl) return;
+  await slackApp
+    .replaceOriginal(
+      interaction.responseUrl,
+      "That HuddleFM session has ended, so there is nothing left to scrobble.",
+    )
+    .catch((error) =>
+      log.warn(
+        {
+          event: "ended_scrobbling_prompt_failed",
+          userId: interaction.userId,
+          err: error,
+        },
+        "Could not answer a scrobbling prompt from an ended session",
       ),
     );
 }

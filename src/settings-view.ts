@@ -837,7 +837,7 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
           scrobblingModes,
           selected(form.scrobbling_mode?.mode, scrobblingModes) ??
             settings.mode,
-          (mode) => (mode === "ask" ? "Ask every time" : capitalize(mode)),
+          scrobblingModeLabel,
         ),
       ),
       input(
@@ -1095,4 +1095,10 @@ export function yourDataView(options: YourDataOptions) {
       ]),
     ],
   };
+}
+
+function scrobblingModeLabel(mode: ScrobblingMode) {
+  if (mode === "ask") return "Ask every Huddle";
+  if (mode === "ask_track") return "Ask for every track";
+  return capitalize(mode);
 }

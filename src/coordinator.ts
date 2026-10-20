@@ -36,7 +36,11 @@ import {
   type SessionSaveTrack,
   type TransitionMode,
 } from "./store.ts";
-import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
+import {
+  type PlaybackScrobbler,
+  ScrobbleDispatcher,
+  type ScrobbleTrack,
+} from "./scrobbling.ts";
 import {
   embeddedArtworkPath,
   isExpectedTrackFailure,
@@ -193,9 +197,11 @@ type Entry = TrackMetadata & {
 };
 
 // Actions on messages other than the player, which are not stale for it: the
-// scrobbling prompt, and the host's request for video mode.
+// scrobbling prompts, and the host's request for video mode.
 const offPlayerActions = new Set([
   "toggle_session_scrobbling",
+  "enable_session_scrobbling",
+  "scrobble_track",
   "approve_video_request",
   "decline_video_request",
 ]);
@@ -450,7 +456,11 @@ export class Coordinator {
       huddleId: room.huddleId,
       channelId: room.uiChannelId,
     });
-    this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
+    this.playbackScrobbling = scrobbling?.playback(
+      this.id,
+      botUserId,
+      (userId, track) => void this.promptTrackScrobbling(userId, track),
+    );
     const requestedHost = restored?.hostId ?? hostId;
     this.hostId = this.isExcluded(requestedHost)
       ? room.participantIds.find(
@@ -590,7 +600,9 @@ export class Coordinator {
     this.prefetchRecommendations();
     if (!this.current) await this.startNext();
     else {
-      this.startScrobbling(this.current);
+      // Listeners were already asked about this track before the restart,
+      // and that prompt still answers for it.
+      this.startScrobbling(this.current, this.playbackSeconds, false);
       await this.sendCurrent(this.current);
       await this.render();
       this.refreshIdle();
@@ -741,6 +753,7 @@ export class Coordinator {
     )
       return true;
     if (interaction.value === this.id) return true;
+    if (this.promptedTrackId(interaction.value)) return true;
     const action = parseIntegrationActionValue(interaction.value);
     if (action?.sessionId === this.id) return true;
     return parseMetadata(interaction.metadata).sessionId === this.id;
@@ -877,6 +890,9 @@ export class Coordinator {
         delete_all_data: () => this.deleteYourData(interaction, "all"),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
+        enable_session_scrobbling: () =>
+          this.enableSessionScrobbling(interaction),
+        scrobble_track: () => this.scrobbleTrack(interaction),
         delete_channel_save: () => this.deleteChannelSave(interaction),
         apply_permission_preset: () => this.applyPermissionPreset(interaction),
         ...Object.fromEntries(
@@ -5399,21 +5415,7 @@ export class Coordinator {
     const settings = this.scrobbling.settings(interaction.userId, this.id);
     if (!settings.configured) return;
     const enabled = !settings.sessionEnabled;
-    this.scrobbling.setSessionEnabled(this.id, interaction.userId, enabled);
-    this.audit.record("settings.changed", interaction.userId, {
-      sessionId: this.id,
-      source: "toggle",
-      changed: ["sessionScrobbling"],
-      changes: [
-        {
-          setting: "sessionScrobbling",
-          from: settings.sessionEnabled,
-          to: enabled,
-        },
-      ],
-    });
-    this.store.incrementUsage("settings");
-    if (enabled) this.playbackScrobbling?.sessionEnabled(interaction.userId);
+    this.setSessionScrobbling(interaction.userId, enabled);
     if (interaction.responseUrl)
       await this.slack.deleteOriginal(interaction.responseUrl);
     if (interaction.viewId) await this.updateSettings(interaction);
@@ -5422,6 +5424,66 @@ export class Coordinator {
         interaction.userId,
         `Scrobbling ${enabled ? "enabled" : "disabled"} for this session.`,
       );
+  }
+
+  private setSessionScrobbling(userId: string, enabled: boolean) {
+    this.scrobbling!.setSessionEnabled(this.id, userId, enabled);
+    this.audit.record("settings.changed", userId, {
+      sessionId: this.id,
+      source: "toggle",
+      changed: ["sessionScrobbling"],
+      changes: [{ setting: "sessionScrobbling", from: !enabled, to: enabled }],
+    });
+    this.store.incrementUsage("settings");
+    if (enabled) this.playbackScrobbling?.sessionEnabled(userId);
+  }
+
+  // Answers "Scrobble everything in this Huddle" on a prompt. Unlike the
+  // toggle, an old prompt pressed again never turns scrobbling back off.
+  private async enableSessionScrobbling(interaction: Interaction) {
+    if (!this.scrobbling) return;
+    const settings = this.scrobbling.settings(interaction.userId, this.id);
+    if (!settings.configured) return;
+    // The track the prompt was about counts from when they started hearing
+    // it, not from the press.
+    const trackId = this.promptedTrackId(interaction.value);
+    if (trackId) this.confirmTrack(interaction.userId, trackId);
+    if (!settings.sessionEnabled)
+      this.setSessionScrobbling(interaction.userId, true);
+    if (interaction.responseUrl)
+      await this.slack.deleteOriginal(interaction.responseUrl);
+    await this.notice(
+      interaction.userId,
+      settings.sessionEnabled
+        ? "You're already scrobbling this Huddle."
+        : "Scrobbling enabled for this session.",
+    );
+  }
+
+  private async scrobbleTrack(interaction: Interaction) {
+    const trackId = this.promptedTrackId(interaction.value);
+    if (!this.playbackScrobbling || !trackId) return;
+    const result = this.confirmTrack(interaction.userId, trackId);
+    if (interaction.responseUrl)
+      await this.slack.deleteOriginal(interaction.responseUrl);
+    await this.notice(
+      interaction.userId,
+      result === "scrobbling"
+        ? "Scrobbling this track."
+        : result === "too_short"
+          ? "You didn't hear enough of that track to scrobble it."
+          : "That track finished a while ago, so it can't be scrobbled now.",
+    );
+  }
+
+  private confirmTrack(userId: string, trackId: string) {
+    const result = this.playbackScrobbling?.confirm(userId, trackId);
+    if (result === "scrobbling")
+      this.audit.record("track.scrobble_confirmed", userId, {
+        sessionId: this.id,
+        entryId: trackId,
+      });
+    return result;
   }
 
   /** The session settings, as recorded in audit and analytics events. */
@@ -5538,8 +5600,11 @@ export class Coordinator {
           this.id,
         );
         let newlyEnabled = false;
+        // The mode is in every submission, but only a change to it applies:
+        // setting it drops pending scrobbles the new mode would not send.
         const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
-        if (mode) this.scrobbling.setMode(interaction.userId, mode);
+        if (mode && mode !== userSettings.mode)
+          this.scrobbling.setMode(interaction.userId, mode);
         const services = submittedScrobbleServices(state.scrobble_to);
         // A draft can hold a choice for a service disconnected since, which
         // there is nothing left to apply to.
@@ -6461,7 +6526,11 @@ export class Coordinator {
   }
 
   // Scrobbling follows the music, so video mode leaves it be.
-  private startScrobbling(entry: Entry, position = this.playbackSeconds) {
+  private startScrobbling(
+    entry: Entry,
+    position = this.playbackSeconds,
+    ask = true,
+  ) {
     if (this.videoMode) {
       this.playbackScrobbling?.finish();
       return;
@@ -6471,6 +6540,7 @@ export class Coordinator {
       this.participants,
       this.state === "playing",
       position,
+      ask,
     );
   }
 
@@ -6973,7 +7043,7 @@ export class Coordinator {
           section("Do you want to scrobble your listening in this Huddle?"),
           actions("session_scrobbling_prompt", [
             button(
-              "toggle_session_scrobbling",
+              "enable_session_scrobbling",
               plain("Enable scrobbling for this session"),
               { style: "primary", value: this.id },
             ),
@@ -6984,6 +7054,42 @@ export class Coordinator {
         this.log.warn(
           { event: "scrobbling_prompt_failed", userId, err: error },
           "Could not send scrobbling prompt",
+        ),
+      );
+  }
+
+  // The track a "Scrobble this track" button from this session names.
+  private promptedTrackId(value: string | undefined) {
+    const prefix = `${this.id}:`;
+    return value?.startsWith(prefix) ? value.slice(prefix.length) : undefined;
+  }
+
+  private async promptTrackScrobbling(userId: string, track: ScrobbleTrack) {
+    const text = `Scrobble *${escape(track.title)}* — ${escape(track.artist)}?`;
+    await this.slack
+      .ephemeral(this.room.uiChannelId, userId, text, this.room.uiThreadTs, [
+        section(text),
+        actions("track_scrobbling_prompt", [
+          button("scrobble_track", plain("Scrobble this track"), {
+            style: "primary",
+            value: `${this.id}:${track.id}`,
+          }),
+          button(
+            "enable_session_scrobbling",
+            plain("Scrobble everything in this Huddle"),
+            { value: `${this.id}:${track.id}` },
+          ),
+        ]),
+      ])
+      .catch((error) =>
+        this.log.warn(
+          {
+            event: "track_scrobbling_prompt_failed",
+            userId,
+            trackId: track.id,
+            err: error,
+          },
+          "Could not send track scrobbling prompt",
         ),
       );
   }
