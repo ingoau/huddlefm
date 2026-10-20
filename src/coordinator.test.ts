@@ -3768,7 +3768,7 @@ test("ask mode prompts configured users and the shared session toggle overrides 
   await test.coordinator.action({
     ...interaction(
       test.coordinator,
-      "toggle_session_scrobbling",
+      "enable_session_scrobbling",
       test.coordinator.id,
     ),
     responseUrl: "https://hooks.slack.com/actions/test",
@@ -3782,7 +3782,7 @@ test("ask mode prompts configured users and the shared session toggle overrides 
   await test.coordinator.action(interaction(test.coordinator, "open_settings"));
   const modal = JSON.stringify(await settingsTab(test, "host", "you"));
   expect(modal).toContain('"block_id":"scrobbling_mode"');
-  for (const mode of ["always", "ask", "disabled"])
+  for (const mode of ["always", "ask", "ask_track", "disabled"])
     expect(modal).toContain(`"value":"${mode}"`);
   // The prompt's answer shows as this session's choice.
   expect(modal).toContain(
@@ -4841,7 +4841,6 @@ test("asks listeners about each track in ask-for-every-track mode", async () => 
     prompt,
   )?.[1];
   expect(value).toStartWith(`${test.coordinator.id}:`);
-  expect(prompt).toContain('"action_id":"toggle_session_scrobbling"');
 
   // The button comes from an ephemeral message, not the player.
   const confirm = {
@@ -4859,6 +4858,45 @@ test("asks listeners about each track in ask-for-every-track mode", async () => 
   expect(test.ephemeral).toContain(
     "That track finished a while ago, so it can't be scrobbled now.",
   );
+
+  // "Scrobble everything" only ever turns scrobbling on, however often an
+  // old prompt is pressed.
+  const everything = {
+    ...interaction(test.coordinator, "enable_session_scrobbling", value),
+    messageTs: "2",
+  };
+  expect(prompt).toContain('"action_id":"enable_session_scrobbling"');
+  expect(test.coordinator.handles(everything)).toBeTrue();
+  await test.coordinator.action(everything);
+  expect(test.ephemeral).toContain("Scrobbling enabled for this session.");
+  await test.coordinator.action(everything);
+  expect(test.ephemeral).toContain("You're already scrobbling this Huddle.");
+  expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
+    true,
+  );
+
+  // Saving Settings without changing the mode keeps pending scrobbles.
+  userStore.queueScrobble(
+    test.coordinator.id,
+    "queued",
+    "host",
+    "listenbrainz",
+    1,
+    {},
+  );
+  const save = interaction(
+    test.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  save.state = {
+    scrobbling_mode: { mode: { selected_option: { value: "ask_track" } } },
+  };
+  await test.coordinator.action(save);
+  expect(
+    userStore.db.query("SELECT track_id FROM scrobbles").all(),
+  ).toContainEqual({ track_id: "queued" });
   await test.coordinator.endFromSlack();
   userStore.close();
 });

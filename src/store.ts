@@ -2265,17 +2265,21 @@ export class Store {
       .run(userId, service);
   }
 
+  // Tracks a listener said yes to one at a time are kept by this and the
+  // next, as they asked for those whatever their defaults say.
   clearPendingSessionScrobbles(sessionId: string, userId: string) {
     this.db
       .query(
-        "DELETE FROM scrobbles WHERE session_id = ? AND user_id = ? AND status = 'pending'",
+        "DELETE FROM scrobbles WHERE session_id = ? AND user_id = ? AND status = 'pending' AND confirmed = 0",
       )
       .run(sessionId, userId);
   }
 
   clearPendingUserScrobbles(userId: string) {
     this.db
-      .query("DELETE FROM scrobbles WHERE user_id = ? AND status = 'pending'")
+      .query(
+        "DELETE FROM scrobbles WHERE user_id = ? AND status = 'pending' AND confirmed = 0",
+      )
       .run(userId);
   }
 

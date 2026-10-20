@@ -352,7 +352,7 @@ test("ask-for-every-track mode asks about each track and scrobbles only confirme
   expect(calls).toHaveLength(0);
 
   // Confirming after the threshold sends the listen straight away.
-  expect(playback.confirm("user", "first")).toBeTrue();
+  expect(playback.confirm("user", "first")).toBe("scrobbling");
   await until(() => sent().includes("first"));
 
   // An unanswered track is never scrobbled, and nobody without a service is
@@ -364,18 +364,125 @@ test("ask-for-every-track mode asks about each track and scrobbles only confirme
 
   // Confirming before the threshold scrobbles once it is reached.
   playback.start(track("third"), ["user"]);
-  expect(playback.confirm("user", "third")).toBeTrue();
+  expect(playback.confirm("user", "third")).toBe("scrobbling");
   for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
   await until(() => sent().includes("third"));
   expect(sent()).not.toContain("second");
 
   // Only the current and previous tracks can still be confirmed.
-  expect(playback.confirm("user", "first")).toBeFalse();
+  expect(playback.confirm("user", "first")).toBe("unknown");
 
   // With the whole Huddle enabled there is nothing to ask.
   dispatcher.setSessionEnabled("session", "user", true);
   playback.start(track("fourth"), ["user"]);
   expect(asked).toEqual(["user:first", "user:second", "user:third"]);
+  store.close();
+});
+
+function askTrackSetup(request: typeof fetch) {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "user",
+    hostId: "user",
+    volume: 0.6,
+  });
+  store.setListenBrainzToken("user", "lb-token", "lb-user");
+  store.setListenBrainzEnabled("user", true);
+  const dispatcher = new ScrobbleDispatcher(store, {}, request);
+  dispatcher.setMode("user", "ask_track");
+  const asked: string[] = [];
+  const playback = dispatcher.playback("session", "bot", (userId, track) =>
+    asked.push(`${userId}:${track.id}`),
+  );
+  const pending = () =>
+    (
+      store.db
+        .query("SELECT track_id FROM scrobbles WHERE status = 'pending'")
+        .all() as { track_id: string }[]
+    ).map((row) => row.track_id);
+  return { store, dispatcher, playback, asked, pending };
+}
+
+const askTrack = (id: string) => ({
+  id,
+  requesterId: "user",
+  title: "Title",
+  artist: "Artist",
+  duration: 40,
+});
+
+test("ask-for-every-track mode asks once per track, not per replay or restart", () => {
+  const { store, playback, asked } = askTrackSetup((async () =>
+    Response.json({ status: "ok" })) as unknown as typeof fetch);
+  playback.start(askTrack("loop"), ["user"]);
+  expect(playback.confirm("user", "loop")).toBe("scrobbling");
+  // A loop finishes the track before starting it again.
+  playback.finish();
+  playback.start(askTrack("loop"), ["user"]);
+  expect(asked).toEqual(["user:loop"]);
+  expect(playback.confirm("user", "loop")).toBe("scrobbling");
+
+  // A restored session does not ask again about the track it resumes.
+  const restored = askTrackSetup((async () =>
+    Response.json({ status: "ok" })) as unknown as typeof fetch);
+  restored.playback.start(askTrack("resumed"), ["user"], false, 12, false);
+  expect(restored.asked).toEqual([]);
+  restored.store.close();
+  store.close();
+});
+
+test("a finished track can only be confirmed if enough of it was heard", () => {
+  const { store, playback, pending } = askTrackSetup(
+    (async () =>
+      new Response("down", { status: 500 })) as unknown as typeof fetch,
+  );
+  playback.start(askTrack("skipped"), ["user"]);
+  playback.position(5);
+  playback.start(askTrack("next"), ["user"]);
+  expect(playback.confirm("user", "skipped")).toBe("too_short");
+  expect(pending()).toEqual([]);
+  store.close();
+});
+
+test("confirmed scrobbles survive mode and session changes until sent", async () => {
+  const { store, dispatcher, playback, pending } = askTrackSetup(
+    (async () =>
+      new Response("down", { status: 503 })) as unknown as typeof fetch,
+  );
+  playback.start(askTrack("kept"), ["user"]);
+  expect(playback.confirm("user", "kept")).toBe("scrobbling");
+  for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+  await dispatcher.flush();
+  expect(pending()).toEqual(["kept"]);
+
+  dispatcher.setMode("user", "disabled");
+  dispatcher.setSessionEnabled("session", "user", true);
+  dispatcher.setSessionEnabled("session", "user", false);
+  expect(pending()).toEqual(["kept"]);
+
+  // Disconnecting the service is still the end of it.
+  dispatcher.disconnectListenBrainz("user");
+  expect(pending()).toEqual([]);
+  store.close();
+});
+
+test("enabling the session keeps the listening already counted for a confirmed track", () => {
+  const { store, dispatcher, playback, pending } = askTrackSetup(
+    (async () =>
+      new Response("down", { status: 503 })) as unknown as typeof fetch,
+  );
+  playback.start(askTrack("long"), ["user"]);
+  for (const seconds of [5, 10, 15]) playback.position(seconds);
+  playback.confirm("user", "long");
+  dispatcher.setSessionEnabled("session", "user", true);
+  playback.sessionEnabled("user");
+  for (const seconds of [20, 25]) playback.position(seconds);
+  expect(pending()).toEqual(["long"]);
   store.close();
 });
 

@@ -603,6 +603,9 @@ type Playing = {
   listeners: Map<string, Listener>;
 };
 
+// What became of a listener's yes to one track.
+export type TrackConfirmation = "scrobbling" | "too_short" | "unknown";
+
 export class PlaybackScrobbler {
   private current?: Playing;
   // The track before this one, so a listener who answers its prompt late
@@ -621,10 +624,12 @@ export class PlaybackScrobbler {
     userIds: Iterable<string>,
     playing = true,
     position = 0,
+    ask = true,
   ) {
-    // A replay of the same track keeps the answers already given for it.
-    const replayed =
-      this.current?.track.id === track.id ? this.current.listeners : undefined;
+    // A replay of the same track, as when it loops, keeps the answers already
+    // given for it, and its earlier prompt still answers for it.
+    const last = this.current ?? this.previous;
+    const replayed = last?.track.id === track.id ? last.listeners : undefined;
     const listeners = new Map<string, Listener>();
     for (const userId of userIds)
       if (userId !== this.botUserId)
@@ -635,8 +640,9 @@ export class PlaybackScrobbler {
     if (this.current) this.previous = this.current;
     this.current = { track, playing, lastPosition: position, listeners };
     this.announce(listeners.keys());
-    for (const [userId, listener] of listeners)
-      if (!listener.confirmed) this.askAbout(userId, track);
+    if (ask)
+      for (const userId of listeners.keys())
+        if (!replayed?.has(userId)) this.askAbout(userId, track);
   }
 
   memberJoined(userId: string) {
@@ -649,17 +655,16 @@ export class PlaybackScrobbler {
     if (!existing) this.askAbout(userId, this.current.track);
   }
 
-  /**
-   * Scrobbles one track for a listener who has scrobbling off here. Returns
-   * false when the track is too far back or they did not hear it.
-   */
-  confirm(userId: string, trackId: string) {
+  /** Scrobbles one track for a listener who has scrobbling off here. */
+  confirm(userId: string, trackId: string): TrackConfirmation {
     const playing = [this.current, this.previous].find(
       (candidate) => candidate?.track.id === trackId,
     );
     const listener = playing?.listeners.get(userId);
-    if (!playing || !listener) return false;
-    if (listener.confirmed) return true;
+    if (!playing || !listener) return "unknown";
+    // A finished track is only worth scrobbling if they heard enough of it.
+    if (playing !== this.current && !listener.reported) return "too_short";
+    if (listener.confirmed) return "scrobbling";
     listener.confirmed = true;
     // They already heard enough of it, so it goes out now.
     if (listener.reported)
@@ -671,7 +676,7 @@ export class PlaybackScrobbler {
         true,
       );
     if (playing === this.current) this.announce([userId]);
-    return true;
+    return "scrobbling";
   }
 
   memberLeft(userId: string) {
@@ -691,7 +696,8 @@ export class PlaybackScrobbler {
 
   sessionEnabled(userId: string) {
     const listener = this.current?.listeners.get(userId);
-    if (listener) {
+    // A track they already said yes to keeps counting from where it was.
+    if (listener && !listener.confirmed) {
       listener.listenedAt = Math.floor(Date.now() / 1000);
       listener.seconds = 0;
     }
