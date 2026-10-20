@@ -105,7 +105,7 @@ log.info(
   "Loaded resumable sessions",
 );
 await Promise.all(saved.expiredIds.map(removeMediaFiles));
-const catalog = new TrackCatalog(config);
+const catalog = new TrackCatalog(config, store);
 const jellyfin = config.jellyfin
   ? new Jellyfin({
       // Jellyfin is only reached through the catalog's public network proxy,

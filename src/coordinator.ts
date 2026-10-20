@@ -211,6 +211,8 @@ type Entry = TrackMetadata & {
   form?: MediaForm;
   /** Prepared in video mode, so a song's video has been looked for. */
   videoChecked?: boolean;
+  /** What a video's sound is turned by to reach the loudness target. */
+  gainDb?: number;
   /** Watched as a video, which keeps it out of the music stats. */
   isVideo?: boolean;
   /** A prepared video's chapters, once read. */
@@ -648,9 +650,16 @@ export class Coordinator {
       )
     ).filter((entry): entry is Entry => Boolean(entry));
     if (this.current && missingEntries.includes(this.current)) {
-      // A stream is fetched again, and a Jellyfin item goes on from where
-      // it was; anything else that had to be prepared again starts over.
-      if (parseJellyfinSource(this.current.sourceId))
+      // A stream is fetched again, and a Jellyfin item or a video goes on
+      // from where it was; anything else that had to be prepared again
+      // starts over.
+      if (
+        parseJellyfinSource(this.current.sourceId) ||
+        (this.videoMode &&
+          !this.current.live &&
+          (this.current.form === "video" ||
+            this.current.form === "music_video"))
+      )
         this.current.startAt = this.playbackSeconds;
       this.current.status = "preparing";
       this.queue.unshift(this.current);
@@ -3837,6 +3846,7 @@ export class Coordinator {
     next.status = "playing";
     next.streamRetries = 0;
     if (next.live) next.liveSince = Date.now();
+    await this.useCachedVideo(next);
     // An autoplay pick only counts towards fairness and discovery cadence
     // once it actually plays; a queued pick can still be displaced by a
     // manual add, and Previous can bring a played one back.
@@ -3993,6 +4003,7 @@ export class Coordinator {
             }),
           }
         : {}),
+      ...(entry.gainDb !== undefined ? { gainDb: entry.gainDb } : {}),
       title: entry.title,
       artist: entry.artist,
       album: entry.album,
@@ -4028,6 +4039,7 @@ export class Coordinator {
         url: this.mediaUrl(entry),
         introSeconds: entry.introSeconds ?? 0,
         fadeInSeconds: entry.fadeInSeconds ?? 0,
+        ...(entry.gainDb !== undefined ? { gainDb: entry.gainDb } : {}),
       })),
     });
   }
@@ -4050,7 +4062,7 @@ export class Coordinator {
     entry: Entry,
     media: PreparedMedia & { videoChecked?: boolean },
   ) {
-    const { filePath, stream, form } = media;
+    const { filePath, stream, form, gainDb } = media;
     const transition = filePath
       ? this.tracks.transition?.(filePath)
       : undefined;
@@ -4060,14 +4072,17 @@ export class Coordinator {
       filePath,
       stream,
       form,
+      gainDb,
       videoChecked: media.videoChecked,
       status: entry === this.current ? entry.status : "ready",
       ...transition,
     });
+    if (media.leveling) void this.levelLater(entry, media);
     this.store.setTrack(entry.id, {
       ...(entry === this.current ? {} : { status: "ready" }),
       filePath: filePath ?? null,
       form,
+      gainDb: gainDb ?? null,
       title: entry.title,
       artist: entry.artist,
       album: entry.album ?? null,
@@ -4077,6 +4092,45 @@ export class Coordinator {
     });
     // The mode changed while it was being prepared.
     if (!this.formFits(entry)) this.reprepare(entry);
+  }
+
+  // Turns a video to its loudness once that has been measured, which
+  // glides in when it is already playing.
+  private async levelLater(entry: Entry, media: PreparedMedia) {
+    const gainDb = await media.leveling;
+    if (gainDb === undefined) return;
+    await this.enqueue(() => {
+      // Prepared again since as something else, such as its audio for music.
+      if (this.inactive() || entry.form !== media.form) return;
+      entry.gainDb = gainDb;
+      this.store.setTrack(entry.id, { gainDb });
+      if (this.current === entry)
+        this.sendMedia({ type: "gain", entryId: entry.id, gainDb });
+      else this.syncPreloads();
+    });
+  }
+
+  // A streamed video whose download behind it has finished plays from the
+  // file, rather than from an address that may since have expired.
+  private async useCachedVideo(entry: Entry) {
+    const stream = entry.stream;
+    if (!stream?.cacheKey) return;
+    const filePath = await this.tracks
+      .cachedStream(stream, `data/media/${this.id}`, entry.id)
+      .catch((error) => {
+        this.log.warn(
+          { event: "cached_video_failed", entryId: entry.id, err: error },
+          "Streaming the video again instead of playing it from the cache",
+        );
+        return undefined;
+      });
+    if (!filePath || entry.stream !== stream) return;
+    this.prepared(entry, {
+      filePath,
+      form: entry.form ?? "video",
+      videoChecked: entry.videoChecked,
+      gainDb: entry.gainDb,
+    });
   }
 
   // Reads a prepared video's chapters onto its entry, for Jump to.
@@ -4342,6 +4396,7 @@ export class Coordinator {
             kind: finished.kind,
             chapters: finished.chapters,
             videoChecked: finished.videoChecked,
+            gainDb: finished.gainDb,
           }),
           ...transition,
         };
@@ -4354,6 +4409,7 @@ export class Coordinator {
         this.store.setTrack(looping.id, {
           status: "ready",
           ...(looping.filePath ? { filePath: looping.filePath } : {}),
+          ...(looping.gainDb !== undefined ? { gainDb: looping.gainDb } : {}),
           ...transition,
         });
         this.queueChanged();

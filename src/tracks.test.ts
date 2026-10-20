@@ -16,7 +16,9 @@ import {
   embeddedArtworkPath,
   extractEmbeddedArtwork,
   extractorFailure,
+  integratedLoudness as summaryLoudness,
   isExpectedTrackFailure,
+  levelingGain,
   looksLikeFilenameTitle,
   metadataKind,
   metadataLooksWeak,
@@ -1405,9 +1407,11 @@ test("video mode prepares a video as audio when its picture will not come", asyn
     },
   );
   let failure: Error = new Error("network went away");
-  Reflect.set(catalog, "downloadVideo", async () => {
-    throw failure;
-  });
+  // YouTube streams; anything else downloads. Both fail alike.
+  for (const method of ["streamVideo", "downloadVideo"])
+    Reflect.set(catalog, method, async () => {
+      throw failure;
+    });
   // A video that will not download plays as audio, and says so.
   expect(await catalog.prepareVideo(trackFixture, "media", "a")).toEqual({
     filePath: "media/a.opus",
@@ -1447,4 +1451,216 @@ test("video mode prepares a video as audio when its picture will not come", asyn
     form: "audio",
   });
   expect(audioFor).toEqual(["a", "d"]);
+});
+
+test("reads integrated loudness and turns it into a bounded gain", () => {
+  const summary = `[Parsed_ebur128_0 @ 0x1] Summary:
+
+  Integrated loudness:
+    I:         -20.3 LUFS
+    Threshold: -30.4 LUFS`;
+  expect(summaryLoudness(summary)).toBe(-20.3);
+  expect(
+    summaryLoudness("  Integrated loudness:\n    I:  -70.0 LUFS"),
+  ).toBeUndefined();
+  expect(summaryLoudness("no summary")).toBeUndefined();
+  expect(levelingGain(-20.3)).toBe(6);
+  expect(levelingGain(-17)).toBe(3);
+  expect(levelingGain(-8.4)).toBe(-5.6);
+  expect(levelingGain(-50)).toBe(6);
+});
+
+/** A catalog whose extractor prints `metadata`, writing its arguments down. */
+async function extracting(
+  metadata: Record<string, unknown>,
+  options: { loudnessNormalization?: boolean } = {},
+) {
+  const directory = await mkdtemp(join(tmpdir(), "huddlefm-extract-"));
+  await writeFile(join(directory, "info.json"), JSON.stringify(metadata));
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    ...options,
+    video: {
+      durationSeconds: 3_600,
+      downloadBytes: 1_500_000_000,
+      maxHeight: 720,
+      maxFps: 30,
+      cacheBytes: 0,
+    },
+    videoCacheDirectory: join(directory, "video"),
+  });
+  Reflect.set(catalog, "extractor", () => [
+    "sh",
+    "-c",
+    `printf '%s\\n' "$@" > '${directory}/args'; cat '${directory}/info.json'`,
+  ]);
+  return {
+    catalog,
+    directory,
+    args: async () => (await readFile(join(directory, "args"), "utf8")).trim(),
+  };
+}
+
+const sound = {
+  format_id: "234",
+  vcodec: "none",
+  acodec: "mp4a.40.2",
+  url: "https://93.184.216.34/sound",
+  http_headers: { "User-Agent": "yt-dlp" },
+};
+const picture = {
+  format_id: "232",
+  vcodec: "avc1.4D401F",
+  acodec: "none",
+  url: "https://93.184.216.34/picture",
+  http_headers: { "User-Agent": "yt-dlp" },
+};
+const radio: TrackMetadata = {
+  sourceInput: "https://www.youtube.com/watch?v=tRsQsTMvPNg",
+  canonicalUrl: "https://www.youtube.com/watch?v=tRsQsTMvPNg",
+  sourceId: "tRsQsTMvPNg",
+  title: "Radio",
+  artist: "Channel",
+  kind: "video",
+  live: true,
+};
+
+test("video mode plays a live stream YouTube serves as separate sound and picture", async () => {
+  const { catalog, directory, args } = await extracting({
+    is_live: true,
+    requested_formats: [picture, sound],
+  });
+  try {
+    expect(await catalog.prepareLive(radio, true)).toEqual({
+      stream: {
+        url: "https://93.184.216.34/sound",
+        videoUrl: "https://93.184.216.34/picture",
+        live: true,
+        headers: { "User-Agent": "yt-dlp" },
+      },
+      form: "video",
+    });
+    // A picture and sound apart are asked for, and sound alone at last.
+    expect(await args()).toContain("+ba");
+    expect(
+      (await args()).split("\n").find((arg) => arg.includes("+ba")),
+    ).toEndWith("/w/ba");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a live stream with only its sound to play shows the card", async () => {
+  const { catalog, directory } = await extracting({
+    is_live: true,
+    vcodec: "none",
+    url: "https://93.184.216.34/sound",
+  });
+  try {
+    expect(await catalog.prepareLive(radio, true)).toMatchObject({
+      stream: { url: "https://93.184.216.34/sound", live: true },
+      form: "audio",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a YouTube video streams in video mode instead of downloading first", async () => {
+  const { catalog, directory } = await extracting({
+    duration: 1_873,
+    requested_formats: [picture, sound],
+    chapters: [
+      { start_time: 0, end_time: 60, title: "Intro" },
+      { start_time: 60, end_time: 1_873, title: "Talk" },
+    ],
+  });
+  Reflect.set(catalog, "downloadVideo", async () => {
+    throw new Error("downloaded");
+  });
+  try {
+    const prepared = await catalog.prepareVideo(
+      { ...trackFixture, duration: 1_873 },
+      join(directory, "media"),
+      "entry",
+    );
+    expect(prepared).toEqual({
+      stream: {
+        url: "https://93.184.216.34/sound",
+        videoUrl: "https://93.184.216.34/picture",
+        headers: { "User-Agent": "yt-dlp" },
+      },
+      form: "video",
+      chapters: [
+        { start: 0, title: "Intro" },
+        { start: 60, title: "Talk" },
+      ],
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a video's loudness is measured once, kept, and waited on only briefly", async () => {
+  const kept = new Map<string, number>();
+  const catalog = new TrackCatalog(
+    {
+      durationSeconds: 1_200,
+      downloadBytes: 100_000_000,
+      loudnessNormalization: true,
+    },
+    {
+      loudness: (source) => kept.get(source),
+      setLoudness: (source, lufs) => kept.set(source, lufs),
+    },
+  );
+  Reflect.set(catalog, "levelingWait", 20);
+  const level = (
+    sourceId: string,
+    measure: () => Promise<number | undefined>,
+  ) =>
+    Reflect.apply(Reflect.get(catalog, "level"), catalog, [
+      { url: `https://www.youtube.com/watch?v=${sourceId}`, sourceId },
+      measure,
+    ]) as Promise<{ gainDb?: number; leveling?: Promise<number | undefined> }>;
+  // Measured in time: it plays levelled from the start, and is kept.
+  expect(await level("abcdefghijk", async () => -20)).toEqual({ gainDb: 6 });
+  expect(kept.get("youtube:abcdefghijk")).toBe(-20);
+  // Known: never measured again.
+  let measured = 0;
+  expect(await level("abcdefghijk", async () => (measured++, -5))).toEqual({
+    gainDb: 6,
+  });
+  expect(measured).toBe(0);
+  // Too slow: it plays at once, and the gain follows.
+  let finish = (_lufs: number) => {};
+  const slow = await level(
+    "zzzzzzzzzzz",
+    () => new Promise<number>((resolve) => (finish = resolve)),
+  );
+  expect(slow.gainDb).toBeUndefined();
+  finish(-11);
+  expect(await slow.leveling).toBe(-3);
+  expect(kept.get("youtube:zzzzzzzzzzz")).toBe(-11);
+  // Nothing to measure, or a failure: no gain, and nothing kept.
+  expect(await level("yyyyyyyyyyy", async () => undefined)).toEqual({});
+  expect(
+    await level("xxxxxxxxxxx", async () => {
+      throw new Error("no sound");
+    }),
+  ).toEqual({});
+  expect(kept.has("youtube:xxxxxxxxxxx")).toBeFalse();
+});
+
+test("videos are not levelled when loudness normalization is off", async () => {
+  const catalog = testCatalog();
+  let measured = 0;
+  expect(
+    (await Reflect.apply(Reflect.get(catalog, "level"), catalog, [
+      trackFixture,
+      async () => (measured++, -20),
+    ])) as object,
+  ).toEqual({});
+  expect(measured).toBe(0);
 });

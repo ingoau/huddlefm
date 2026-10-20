@@ -36,7 +36,7 @@ class FakeDecoder implements Decoder {
   }
 }
 
-function setup(trackSeconds = 30, probe?: DurationProbe) {
+function setup(trackSeconds = 30, probe?: DurationProbe, value?: number) {
   const events: { type: string; details?: any }[] = [];
   const decoders: FakeDecoder[] = [];
   const engine = new AudioEngine(
@@ -45,6 +45,7 @@ function setup(trackSeconds = 30, probe?: DurationProbe) {
         url,
         start,
         Math.max(0, Math.round((trackSeconds - start) * sampleRate)),
+        value,
       );
       decoders.push(decoder);
       return decoder;
@@ -410,5 +411,56 @@ describe("streams", () => {
     });
     engine.handle(play("b"));
     expect(engine.progress()).toEqual({ position: 0, duration: 30 });
+  });
+
+  /** The output, settled past the compressor, of a track at `value`. */
+  const settled = (engine: AudioEngine) => {
+    engine.render(960 * 25);
+    return engine.render(960)[0]!;
+  };
+  const reference = (value: number) => {
+    const { engine } = setup(30, undefined, value);
+    engine.handle(play("a"));
+    return settled(engine);
+  };
+  const decibels = (db: number) => 0.1 * 10 ** (db / 20);
+
+  test("a video plays at its loudness gain, and a late one glides in", () => {
+    const { engine, run } = setup(30);
+    engine.handle(play("a", { gainDb: -6 }));
+    expect(settled(engine)).toBeCloseTo(reference(decibels(-6)), 5);
+    // Measured after it started: no jump, but the full gain in three seconds.
+    engine.handle({ type: "gain", entryId: "a", gainDb: 0 });
+    run(1.5);
+    const midway = engine.render(960)[0]!;
+    expect(midway).toBeGreaterThan(reference(decibels(-6)));
+    expect(midway).toBeLessThan(reference(0.1));
+    run(1.6);
+    expect(settled(engine)).toBeCloseTo(reference(0.1), 5);
+    // A track with no gain plays as it is.
+    engine.handle(play("b"));
+    expect(settled(engine)).toBeCloseTo(reference(0.1), 5);
+  });
+
+  test("a preloaded video carries its gain into the transition", () => {
+    const { engine, run } = setup(4);
+    engine.handle({ type: "transition_mode", mode: "gapless" });
+    engine.handle(play("a", { duration: 4, outroSeconds: 4 }));
+    engine.handle({
+      type: "preload",
+      nextEntryId: "b",
+      entries: [
+        {
+          entryId: "b",
+          url: "http://127.0.0.1/audio/b",
+          introSeconds: 0,
+          fadeInSeconds: 0,
+          gainDb: -12,
+        },
+      ],
+    });
+    run(4.1);
+    expect(engine.current).toBe("b");
+    expect(settled(engine)).toBeCloseTo(reference(decibels(-12)), 5);
   });
 });
