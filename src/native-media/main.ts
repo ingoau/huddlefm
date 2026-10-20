@@ -1,7 +1,7 @@
 // The native media backend for one Huddle, run as a child process by
 // NativeMediaSession. It reads the bootstrap and then the coordinator's media
-// messages as JSON lines on stdin, and writes the same events the media page
-// sends, plus log lines, as JSON lines on stdout.
+// messages as JSON lines on stdin, and writes media events and log lines as
+// JSON lines on stdout.
 import { Application, createEncoder, Signal } from "libopus-wasm";
 import type { Lyric } from "@braccato/core";
 import type { ChimeBootstrap } from "../slack-huddle.ts";

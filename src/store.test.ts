@@ -1149,24 +1149,6 @@ test("a like can be taken back once", () => {
   expect(store.unlikeTrack("host", "Song", "Band")).toBeFalse();
 });
 
-test("remembers that a session fell back to browser media", () => {
-  const store = new Store(":memory:");
-  createSession(store);
-  const snapshot = {
-    state: "playing",
-    playbackSeconds: 12,
-    listenedSeconds: 12,
-    displayMode: "default" as const,
-    anchorEnabled: false,
-    queue: [],
-  };
-  store.endSession("session", snapshot, 120_000);
-  expect(store.restorableSessions()[0]).not.toHaveProperty("mediaFallback");
-  store.setSession("session", { mediaFallback: true });
-  expect(store.restorableSessions()[0]?.mediaFallback).toBeTrue();
-  store.close();
-});
-
 test("keeps saved sessions per owner, replacing one saved under the same name", () => {
   const store = new Store(":memory:");
   const track = {

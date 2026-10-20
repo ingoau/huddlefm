@@ -12,14 +12,14 @@ import { LyricsView, type LyricsCredits } from "./lyrics-view.ts";
 import { clamp, ease, easeOut, lerp, motion, Tween } from "./motion.ts";
 
 /**
- * The card is laid out at the media page's 720px viewport, then drawn at the
- * smaller size it is sent at.
+ * The card is laid out at a 720px viewport, then drawn at the smaller size it
+ * is sent at.
  */
 const layoutSize = 720;
 const ratio = cardSize / layoutSize;
 const maxArtworkBytes = 15_000_000;
 
-// The media page's geometry at its 720px viewport (see media-page.css).
+// The card's geometry at its 720px viewport.
 const unit = layoutSize / 100;
 const coverSmall = { x: 6 * unit, y: 6.7 * unit, scale: 0.15 };
 const coverRadius = 106;
@@ -115,12 +115,11 @@ type Track = {
 type Outgoing = Track & { leftAt: number };
 
 /**
- * The video card: the media page's layouts drawn with Skia instead of a
- * browser. The default layout is full-bleed artwork with the title and the
- * timeline; the lyrics layout shrinks the artwork into the corner over its
- * blurred backdrop and scrolls synced lyrics beneath. Swapping layouts or
- * tracks animates. A frame is only redrawn while something moves; otherwise
- * the last one is handed out again.
+ * The video card, drawn with Skia. The default layout is full-bleed artwork
+ * with the title and the timeline; the lyrics layout shrinks the artwork into
+ * the corner over its blurred backdrop and scrolls synced lyrics beneath.
+ * Swapping layouts or tracks animates. A frame is only redrawn while something
+ * moves; otherwise the last one is handed out again.
  */
 export class VideoCard {
   private canvas = createCanvas(cardSize, cardSize);

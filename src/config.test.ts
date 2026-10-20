@@ -1,10 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  parseIds,
-  parseMediaBackend,
-  parseRolePermissions,
-  parseWholeNumber,
-} from "./config.ts";
+import { parseIds, parseRolePermissions, parseWholeNumber } from "./config.ts";
 
 test("parses comma and whitespace separated IDs", () => {
   expect([...parseIds("C123,C456 C789\nC123")]).toEqual([
@@ -12,28 +7,6 @@ test("parses comma and whitespace separated IDs", () => {
     "C456",
     "C789",
   ]);
-});
-
-test("uses the browser media backend unless native is chosen", () => {
-  const browser = { backend: "browser", fallback: false } as const;
-  expect(parseMediaBackend(undefined)).toEqual(browser);
-  expect(parseMediaBackend("")).toEqual(browser);
-  expect(parseMediaBackend("chromium")).toEqual(browser);
-  expect(parseMediaBackend(" Native ")).toEqual({
-    backend: "native",
-    fallback: false,
-  });
-});
-
-test("native media can fall back to the browser", () => {
-  expect(parseMediaBackend("native-with-fallback")).toEqual({
-    backend: "native",
-    fallback: true,
-  });
-  expect(parseMediaBackend(" Native-With-Fallback ")).toEqual({
-    backend: "native",
-    fallback: true,
-  });
 });
 
 test("falls back when a count is unset, fractional, or too small", () => {

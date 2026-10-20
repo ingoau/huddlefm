@@ -89,7 +89,6 @@ import {
   type IntegrationCommand,
 } from "./integration.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
-import { playbackReportView } from "./playback-report.ts";
 import {
   checked,
   defaultUserSettings,
@@ -372,13 +371,6 @@ export class Coordinator {
     ) => {},
     private recommendations?: RecommendationCatalog,
     private workspaceAdmins?: WorkspaceAdmins,
-    // Present when this Huddle's native media may give way to the browser.
-    private mediaFallback?: {
-      /** Whether the Huddle is still on native media that can fall back. */
-      available(): boolean;
-      /** Starts the move to the browser without waiting for it. */
-      start(userId: string, reportId: string): void;
-    },
     private channelManagers?: ChannelManagers,
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
@@ -585,50 +577,6 @@ export class Coordinator {
     this.syncPreloads();
   }
 
-  /**
-   * The Huddle is moving from native media to the browser. The player drops
-   * its report button, and a move nobody asked for is explained in the
-   * thread, since everyone just heard the music stop.
-   */
-  mediaFallbackStarted(automatic: boolean) {
-    if (this.inactive()) return;
-    this.queueRender();
-    if (automatic)
-      void this.post(
-        this.room.uiChannelId,
-        this.room.uiThreadTs,
-        "Playback hit a problem, so I switched to the old player. The music should be back in a few seconds.",
-      ).catch((error) =>
-        this.log.warn(
-          { event: "media_fallback_notice_failed", err: error },
-          "Could not post media fallback notice",
-        ),
-      );
-  }
-
-  /** Replays the session into a media backend that joined in place of another. */
-  mediaReplaced() {
-    return this.enqueue(async () => {
-      if (this.inactive()) return;
-      this.sendMediaSettings();
-      if (this.current) await this.sendCurrent(this.current);
-      else this.syncPreloads();
-      this.log.info(
-        { event: "media_replaced", entryId: this.current?.id },
-        "Playback handed to the replacement media backend",
-      );
-    });
-  }
-
-  /** What was playing, for the audit trail of a media fallback. */
-  playbackSnapshot() {
-    return {
-      state: this.state,
-      playbackSeconds: this.playbackSeconds,
-      ...(this.current ? auditTrack(this.current) : {}),
-    };
-  }
-
   private async prepareRestored(entry: Entry) {
     const startedAt = Date.now();
     this.log.info(
@@ -796,7 +744,6 @@ export class Coordinator {
         clear_queue: () => this.clear(interaction),
         view_full_queue: () => this.queueModal(interaction),
         open_settings: () => this.settingsModal(interaction, loading),
-        report_playback_problem: () => this.reportPlaybackProblem(interaction),
         end_session: async () => {
           await this.end(interaction.userId, "ended by host");
         },
@@ -5881,23 +5828,6 @@ export class Coordinator {
                 : ""
             }`,
           ),
-          ...when(
-            this.mediaFallback?.available(),
-            actions(`playback_help_${id}`, [
-              button(
-                "report_playback_problem",
-                plain("Playback not working?"),
-                {
-                  value,
-                  confirm: confirm(
-                    "Switch to the old player?",
-                    "The music will pause while it switches to the old player. Then you can tell us what went wrong.",
-                    "Switch",
-                  ),
-                },
-              ),
-            ]),
-          ),
         ],
       },
       {
@@ -5950,18 +5880,6 @@ export class Coordinator {
         ],
       },
     ];
-  }
-
-  // Starts the move to the old player before asking anything, so the music
-  // comes back whether or not the form is ever sent.
-  private async reportPlaybackProblem(interaction: Interaction) {
-    const reportId = crypto.randomUUID();
-    const switched = Boolean(this.mediaFallback?.available());
-    if (switched) this.mediaFallback!.start(interaction.userId, reportId);
-    await this.slack.modal(
-      interaction.triggerId,
-      playbackReportView({ sessionId: this.id, reportId, switched }),
-    );
   }
 
   private async notice(user: string, text: string) {

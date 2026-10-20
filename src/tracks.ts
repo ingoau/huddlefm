@@ -1328,7 +1328,7 @@ function artworkUrl(value: unknown) {
   }
 }
 
-// Artwork from arbitrary media pages is fetched by the host-side browser, so
+// Artwork from arbitrary media pages is fetched by the media backend, so
 // it must pass the same public-network check as the media URL itself.
 export async function publicArtworkUrl(value: unknown) {
   const artwork = artworkUrl(value);
