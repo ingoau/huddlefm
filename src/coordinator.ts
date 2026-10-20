@@ -48,9 +48,11 @@ import {
   parseBulkLinkList,
   normalizeToken,
   TrackCatalog,
+  TrackError,
   trackFailureDetail,
   trackKind,
   type MediaForm,
+  type MediaStream,
   type PreparedMedia,
   type TrackMetadata,
 } from "./tracks.ts";
@@ -108,6 +110,17 @@ import {
   type IntegrationCommand,
 } from "./integration.ts";
 import { RecommendationCatalog } from "./recommendations.ts";
+import {
+  isJellyfinStreamLink,
+  parseJellyfinLink,
+  parseJellyfinSource,
+  type Jellyfin,
+} from "./jellyfin.ts";
+import {
+  JellyfinUi,
+  jellyfinTracksCallback,
+  type QueuedItem,
+} from "./jellyfin-ui.ts";
 import {
   checked,
   defaultUserSettings,
@@ -181,6 +194,16 @@ type Entry = TrackMetadata & {
   counted?: boolean;
   status: string;
   filePath?: string;
+  /** Where a track that plays as it arrives comes from; never persisted. */
+  stream?: MediaStream;
+  /** When the live stream playing started, for the player. */
+  liveSince?: number;
+  /** Times the playing stream has been picked up again after failing. */
+  streamRetries?: number;
+  /** Where to start playing, when not from the top: a resumed item. */
+  startAt?: number;
+  /** The audio and captions picked for a Jellyfin item. */
+  jellyfinTracks?: { audioStreamIndex?: number; subtitleStreamIndex?: number };
   /** What the prepared file holds. */
   form?: MediaForm;
   /** Prepared in video mode, so a song's video has been looked for. */
@@ -288,6 +311,15 @@ function displayTitle(track: Pick<Entry, "title" | "kind" | "canonicalUrl">) {
   return trackKind(track) === "video" ? shorten(track.title, 100) : track.title;
 }
 
+// The player's word on a live stream: that it is live, and since when, in
+// each viewer's own time.
+function liveStatus(entry: Pick<Entry, "live" | "liveSince">) {
+  if (!entry.live) return "";
+  if (!entry.liveSince) return "🔴 LIVE · ";
+  const seconds = Math.floor(entry.liveSince / 1_000);
+  return `🔴 LIVE · watching since <!date^${seconds}^{time}|${new Date(entry.liveSince).toISOString().slice(11, 16)} UTC> · `;
+}
+
 function shuffle<T>(items: T[]) {
   const shuffled = [...items];
   for (let index = shuffled.length - 1; index > 0; index--) {
@@ -345,6 +377,8 @@ export class Coordinator {
   // Whether each add dialog shows the video hint, so typing only redraws a
   // dialog when the hint comes or goes.
   private hintedViews = new Map<string, boolean>();
+  // Jellyfin, for whoever in the session has linked a server.
+  private jellyfinUi?: JellyfinUi;
   private autoplayGeneration = 0;
   // Discovery turns come every `autoplayDiscoveryInterval` picks; a skipped
   // discovery backs the interval off, one that plays through restores it.
@@ -448,6 +482,7 @@ export class Coordinator {
     private channelManagers?: ChannelManagers,
     /** How many sessions, this one included, are in video mode. */
     private videoSessions: () => number = () => 0,
+    jellyfin?: Jellyfin,
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
@@ -456,6 +491,35 @@ export class Coordinator {
       huddleId: room.huddleId,
       channelId: room.uiChannelId,
     });
+    if (jellyfin)
+      this.jellyfinUi = new JellyfinUi({
+        sessionId: this.id,
+        slack,
+        store,
+        jellyfin,
+        log: this.log,
+        videoMode: () => this.videoMode,
+        canUse: (userId) => this.isParticipantOrManager(userId),
+        notice: (userId, text) => this.notice(userId, text),
+        queue: (interaction, capability, items) =>
+          this.queueItems(interaction, capability, items),
+        refreshSettings: async (userId, viewId, settings) => {
+          await this.slack
+            .updateModal(
+              viewId,
+              undefined,
+              this.settingsView(userId, parseSettingsMetadata(settings)),
+            )
+            .catch((error) =>
+              this.log.debug(
+                { event: "settings_refresh_failed", err: error },
+                "Could not redraw Settings",
+              ),
+            );
+        },
+        audit: (event, userId, fields) =>
+          this.audit.record(event, userId, fields),
+      });
     this.playbackScrobbling = scrobbling?.playback(
       this.id,
       botUserId,
@@ -581,6 +645,10 @@ export class Coordinator {
       )
     ).filter((entry): entry is Entry => Boolean(entry));
     if (this.current && missingEntries.includes(this.current)) {
+      // A stream is fetched again, and a Jellyfin item goes on from where
+      // it was; anything else that had to be prepared again starts over.
+      if (parseJellyfinSource(this.current.sourceId))
+        this.current.startAt = this.playbackSeconds;
       this.current.status = "preparing";
       this.queue.unshift(this.current);
       this.current = undefined;
@@ -667,9 +735,16 @@ export class Coordinator {
   // has just joined: after a restart, or in place of one that failed.
   private async sendCurrent(entry: Entry) {
     this.sendMedia(await this.playMessage(entry));
-    if (this.playbackSeconds)
+    // A live stream picks up where it is now, not where it was.
+    if (this.playbackSeconds && !entry.live)
       this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
     if (this.state === "paused") this.sendMedia({ type: "pause" });
+    this.jellyfinUi?.playing(
+      entry,
+      this.playbackSeconds,
+      this.state === "paused",
+      true,
+    );
     this.sendLyrics(entry);
     this.syncPreloads();
   }
@@ -677,6 +752,10 @@ export class Coordinator {
   // Lyrics for the playing song, which video mode does without.
   private sendLyrics(entry: Entry) {
     if (this.videoMode) return;
+    if (entry.live) {
+      this.sendMedia({ type: "lyrics_unavailable", entryId: entry.id });
+      return;
+    }
     void this.loadLyrics(entry).then((lyrics) => {
       if (this.current !== entry || this.videoMode) return;
       if (lyrics)
@@ -743,6 +822,11 @@ export class Coordinator {
     this.lastSearch.set(interaction.userId, generation);
     await Bun.sleep(searchDebounceMs);
     if (this.lastSearch.get(interaction.userId) !== generation) return [];
+    if (
+      this.jellyfinUi &&
+      parseMetadata(interaction.metadata).source === "jellyfin"
+    )
+      return this.jellyfinUi.search(interaction.userId, interaction.value);
     return this.tracks.suggestions(interaction.value, allowed, this.videoMode);
   }
 
@@ -786,6 +870,10 @@ export class Coordinator {
     );
     if (interaction.actionId === "add_track_to_queue")
       return this.add(interaction);
+    // Jellyfin's dialogs wait on far servers, so they run beside the
+    // session's queue of actions rather than in it.
+    if (this.jellyfinUi?.handles(interaction))
+      return this.jellyfinUi.action(interaction);
     if (interaction.actionId === "bulk_add_to_queue")
       return this.bulkAddLinks(interaction);
     if (
@@ -819,6 +907,8 @@ export class Coordinator {
           return this.endSubmission(interaction);
         if (interaction.actionId === "listenbrainz_token")
           return this.listenBrainzTokenSubmission(interaction);
+        if (interaction.actionId === jellyfinTracksCallback)
+          return this.jellyfinTracksSubmission(interaction);
         return this.settingsSubmission(interaction);
       }
       if (
@@ -849,6 +939,7 @@ export class Coordinator {
         selection: () => this.videoLinkHint(interaction),
         text: () => this.videoLinkHint(interaction),
         add_with_video_mode: () => this.addWithVideoMode(interaction),
+        add_source: () => this.switchAddSource(interaction),
         approve_video_request: () => this.answerVideoRequest(interaction, true),
         decline_video_request: () =>
           this.answerVideoRequest(interaction, false),
@@ -928,6 +1019,12 @@ export class Coordinator {
       this.countTime(details.seconds - this.playbackSeconds);
       this.playbackSeconds = details.seconds;
       this.playbackScrobbling?.position(details.seconds);
+      if (this.current)
+        this.jellyfinUi?.playing(
+          this.current,
+          details.seconds,
+          this.state === "paused",
+        );
       this.store.setSession(this.id, {
         playbackSeconds: details.seconds,
         listenedSeconds: this.listenedSeconds,
@@ -954,12 +1051,9 @@ export class Coordinator {
     );
     if (type === "share_failed" || type === "video_failed")
       return this.enqueue(() => this.videoFailed(type, details?.entryId));
-    if (
-      type === "track_ended" ||
-      type === "transition" ||
-      type === "track_error" ||
-      type === "stalled"
-    )
+    if (type === "track_error" || type === "stalled")
+      return this.enqueue(() => this.streamFailed(type, details?.entryId));
+    if (type === "track_ended" || type === "transition")
       return this.enqueue(() => this.advance(type, details?.entryId));
     if (type === "fatal" || type === "ended")
       return this.enqueue(() => this.end(undefined, "media connection ended"));
@@ -1039,6 +1133,7 @@ export class Coordinator {
             album: current.album,
             kind: trackKind(current),
             playingAs: showing ? "video" : "audio",
+            ...(current.live ? { live: true } : {}),
             durationSeconds: current.duration,
             status: current.status,
             automatic: Boolean(current.automatic),
@@ -1059,6 +1154,7 @@ export class Coordinator {
         title: track.title,
         artist: track.artist,
         kind: trackKind(track),
+        ...(track.live ? { live: true } : {}),
         status: track.status,
         automatic: Boolean(track.automatic),
         addedBy: track.requesterId,
@@ -1480,6 +1576,11 @@ export class Coordinator {
       if (!this.can(userId, "skip")) return this.denied(userId);
       if (!this.current)
         return { ok: false as const, error: "Nothing is playing." };
+      if (this.current.live)
+        return {
+          ok: false as const,
+          error: "A live stream can't be seeked; it plays where it is now.",
+        };
       if (!Number.isFinite(seconds))
         return { ok: false as const, error: "Seconds must be a number." };
       this.seekBy(userId, seconds);
@@ -1500,12 +1601,17 @@ export class Coordinator {
       if (!this.can(userId, "skip")) return this.denied(userId);
       const current = this.current;
       if (!current) return { ok: false as const, error: "Nothing is playing." };
+      if (current.live)
+        return {
+          ok: false as const,
+          error: "A live stream can't be seeked; it plays where it is now.",
+        };
       let seconds = target.position;
       if (target.chapter !== undefined) {
         const wanted = normalizeToken(target.chapter);
         const chapters = current.filePath
           ? await readChapters(current.filePath)
-          : [];
+          : (current.chapters ?? []);
         const chapter =
           chapters.find((item) => normalizeToken(item.title) === wanted) ??
           chapters.find((item) => normalizeToken(item.title).includes(wanted));
@@ -2635,8 +2741,11 @@ export class Coordinator {
   }
 
   // Video mode plays only what people queue.
+  // A live stream never ends, so autoplay waits for it to.
   private autoplayOn() {
-    return !this.videoMode && this.autoplayMode !== "off";
+    return (
+      !this.videoMode && this.autoplayMode !== "off" && !this.current?.live
+    );
   }
 
   private listenerIds() {
@@ -2897,7 +3006,9 @@ export class Coordinator {
       searchValue || recommendId
         ? undefined
         : interaction.state.recent?.selection?.selected_option?.value;
-    const value = searchValue || recommendId || recentId;
+    const jellyfinValue =
+      interaction.state.jellyfin_track?.selection?.selected_option?.value;
+    const value = jellyfinValue || searchValue || recommendId || recentId;
     if (!value) return;
     const accepted = await this.enqueue(async () => {
       if (this.inactive()) return false;
@@ -2914,6 +3025,17 @@ export class Coordinator {
       );
     });
     if (!accepted) return;
+    if (this.jellyfinUi && (await this.jellyfinUi.choose(interaction, value)))
+      return;
+    const link = this.tracks.referencedUrl?.(value);
+    if (link && isJellyfinStreamLink(link))
+      return this.notice(
+        interaction.userId,
+        "That link has your Jellyfin sign-in in it, so HuddleFM won’t play it. Paste the link from the item’s page in Jellyfin instead, and HuddleFM will link your server.",
+      );
+    const jellyfinLink = link ? parseJellyfinLink(link) : undefined;
+    if (jellyfinLink && this.jellyfinUi)
+      return this.jellyfinUi.openLink(interaction, jellyfinLink);
     let selection: TrackMetadata | TrackMetadata[];
     try {
       selection = recommendId
@@ -2942,6 +3064,44 @@ export class Coordinator {
     tracks: TrackMetadata[],
     total = tracks.length,
   ) {
+    const pending = await this.stageRequested(
+      interaction,
+      capability,
+      tracks,
+      total,
+    );
+    if (!pending) return;
+    await Promise.all(
+      pending.map(({ entry, controller }) =>
+        this.prepareManual(entry, controller),
+      ),
+    );
+  }
+
+  // Queues Jellyfin items without waiting for them to be ready, and says
+  // whether any went on the queue.
+  private async queueItems(
+    interaction: Interaction,
+    capability: string,
+    items: QueuedItem[],
+  ) {
+    const pending = await this.stageRequested(interaction, capability, items);
+    if (!pending?.length) return false;
+    void Promise.all(
+      pending.map(({ entry, controller }) =>
+        this.prepareManual(entry, controller),
+      ),
+    );
+    return true;
+  }
+
+  // Puts what a user asked for on the queue, with their permission checked.
+  private async stageRequested(
+    interaction: Interaction,
+    capability: string,
+    tracks: QueuedItem[],
+    total = tracks.length,
+  ) {
     const pending = await this.enqueue(async () => {
       if (this.inactive() || !(await this.require(interaction, capability)))
         return;
@@ -2964,16 +3124,12 @@ export class Coordinator {
         interaction.userId,
         `Added ${pending.length} of ${total} songs; the rest did not fit.`,
       );
-    await Promise.all(
-      pending.map(({ entry, controller }) =>
-        this.prepareManual(entry, controller),
-      ),
-    );
+    return pending;
   }
 
   // Puts requested tracks on the queue, recorded and announced, and hands
   // back each with the controller that cancels its preparation.
-  private stageEntries(userId: string, items: TrackMetadata[]) {
+  private stageEntries(userId: string, items: QueuedItem[]) {
     return items.map((metadata) => {
       const entry: Entry = {
         ...metadata,
@@ -3089,6 +3245,26 @@ export class Coordinator {
   ): Promise<PreparedMedia & { videoChecked?: boolean }> {
     const directory = `data/media/${this.id}`;
     const priority = this.preparationPriority(entry);
+    if (parseJellyfinSource(entry.sourceId)) {
+      if (!this.jellyfinUi) throw new TrackError("No longer available");
+      return {
+        ...(await this.jellyfinUi.prepare(entry, {
+          video: this.videoMode,
+          directory,
+          ...entry.jellyfinTracks,
+        })),
+        videoChecked: this.videoMode || undefined,
+      };
+    }
+    if (entry.live)
+      return {
+        ...(await this.tracks.prepareLive(
+          entry,
+          this.videoMode,
+          controller.signal,
+        )),
+        videoChecked: this.videoMode || undefined,
+      };
     if (this.videoMode)
       return {
         ...(await this.tracks.prepareVideo(
@@ -3122,7 +3298,7 @@ export class Coordinator {
     this.preparations.delete(entry.id);
     if (this.state === "suspended") return false;
     if (this.state === "ended" || !this.queue.includes(entry)) {
-      await removePreparedMedia(media.filePath);
+      if (media.filePath) await removePreparedMedia(media.filePath);
       return false;
     }
     this.prepared(entry, media);
@@ -3643,8 +3819,12 @@ export class Coordinator {
     this.queue.splice(this.queue.indexOf(next), 1);
     this.queueChanged();
     this.current = next;
-    this.playbackSeconds = 0;
+    // A resumed item starts where it was left.
+    this.playbackSeconds = next.live ? 0 : (next.startAt ?? 0);
+    next.startAt = undefined;
     next.status = "playing";
+    next.streamRetries = 0;
+    if (next.live) next.liveSince = Date.now();
     // An autoplay pick only counts towards fairness and discovery cadence
     // once it actually plays; a queued pick can still be displaced by a
     // manual add, and Previous can bring a played one back.
@@ -3659,7 +3839,10 @@ export class Coordinator {
     }
     this.state = "playing";
     this.store.setTrack(next.id, { status: "playing" });
-    this.store.setSession(this.id, { status: "playing", playbackSeconds: 0 });
+    this.store.setSession(this.id, {
+      status: "playing",
+      playbackSeconds: this.playbackSeconds,
+    });
     this.audit.record("track.started", undefined, {
       sessionId: this.id,
       ...auditTrack(next),
@@ -3683,7 +3866,11 @@ export class Coordinator {
     await this.markWatched(next);
     this.noteSessionRecommendations();
     this.sendMedia(await this.playMessage(next));
-    if (!this.videoMode)
+    if (this.playbackSeconds)
+      this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
+    this.jellyfinUi?.playing(next, this.playbackSeconds, false, true);
+    if (next.live) this.sendLyrics(next);
+    else if (!this.videoMode)
       void this.loadLyrics(next).then((lyrics) => {
         if (this.current !== next || this.videoMode) return;
         captureAnalytics(lyrics ? "lyrics.available" : "lyrics.unavailable", {
@@ -3727,8 +3914,12 @@ export class Coordinator {
   }
 
   artworkPath(entryId: string, token: string) {
-    const filePath = this.audioPath(entryId, token);
-    return filePath ? embeddedArtworkPath(filePath) : undefined;
+    if (token !== this.mediaToken) return;
+    const entry = [this.current, ...this.queue, ...this.history].find(
+      (entry) => entry?.id === entryId,
+    );
+    if (entry?.stream) return entry.stream.cover;
+    return entry?.filePath ? embeddedArtworkPath(entry.filePath) : undefined;
   }
 
   private mediaUrl(entry: Entry) {
@@ -3748,25 +3939,40 @@ export class Coordinator {
         : entry.requesterId
           ? `Added by ${await this.slack.userName(entry.requesterId)}`
           : "Added by a listener";
+    const coverPath = entry.stream
+      ? entry.stream.cover
+      : entry.filePath && embeddedArtworkPath(entry.filePath);
     const localArtwork =
-      entry.filePath &&
-      (await Bun.file(embeddedArtworkPath(entry.filePath)).exists())
+      coverPath && (await Bun.file(coverPath).exists())
         ? this.mediaArtworkUrl(entry)
         : undefined;
     // In video mode a prepared video shows on the screen share, with its
     // captions for when they are on.
     const shown =
       this.videoMode &&
-      entry.filePath &&
+      Boolean(entry.filePath || entry.stream) &&
       (entry.form === "video" || entry.form === "music_video");
+    const captionsFile = entry.stream
+      ? entry.stream.subtitles
+      : entry.filePath && captionsPath(entry.filePath);
     const captions =
-      shown && (await Bun.file(captionsPath(entry.filePath!)).exists())
-        ? resolvePath(captionsPath(entry.filePath!))
+      shown && captionsFile && (await Bun.file(captionsFile).exists())
+        ? resolvePath(captionsFile)
         : undefined;
     return {
       type: "play",
       entryId: entry.id,
-      url: this.mediaUrl(entry),
+      url: entry.stream?.url ?? this.mediaUrl(entry),
+      ...(entry.stream
+        ? {
+            stream: defined({
+              proxy: this.tracks.streamProxy,
+              headers: entry.stream.headers,
+              live: entry.stream.live,
+              audioStream: entry.stream.audioStream,
+            }),
+          }
+        : {}),
       ...(shown ? { video: captions ? { subtitles: captions } : {} } : {}),
       title: entry.title,
       artist: entry.artist,
@@ -3824,11 +4030,15 @@ export class Coordinator {
     entry: Entry,
     media: PreparedMedia & { videoChecked?: boolean },
   ) {
-    const { filePath, form } = media;
-    const transition = this.tracks.transition?.(filePath);
-    this.loadChapters(entry, filePath);
+    const { filePath, stream, form } = media;
+    const transition = filePath
+      ? this.tracks.transition?.(filePath)
+      : undefined;
+    if (filePath) this.loadChapters(entry, filePath);
+    else entry.chapters = media.chapters;
     Object.assign(entry, {
       filePath,
+      stream,
       form,
       videoChecked: media.videoChecked,
       status: entry === this.current ? entry.status : "ready",
@@ -3836,7 +4046,7 @@ export class Coordinator {
     });
     this.store.setTrack(entry.id, {
       ...(entry === this.current ? {} : { status: "ready" }),
-      filePath,
+      filePath: filePath ?? null,
       form,
       title: entry.title,
       artist: entry.artist,
@@ -3861,8 +4071,12 @@ export class Coordinator {
   // video; video mode wants a video's picture, and a song's video once it
   // has been looked for.
   private formFits(entry: Entry) {
-    if (!entry.filePath) return true;
-    if (!this.videoMode) return entry.form !== "music_video";
+    if (!entry.filePath && !entry.stream) return true;
+    // A live stream's picture is not wanted for music, nor fetched.
+    if (!this.videoMode)
+      return entry.stream
+        ? entry.form === "audio"
+        : entry.form !== "music_video";
     if (entry.videoChecked) return true;
     return trackKind(entry) === "video"
       ? entry.form === "video"
@@ -3908,7 +4122,7 @@ export class Coordinator {
             mode !== this.mediaMode ||
             !wanted
           ) {
-            await this.discardMedia(media.filePath);
+            if (media.filePath) await this.discardMedia(media.filePath);
             return;
           }
           const previous = { filePath: entry.filePath, form: entry.form };
@@ -3994,6 +4208,11 @@ export class Coordinator {
           ? (this.current.outroSeconds ?? this.current.duration)
           : this.current.duration;
       const natural = reason === "track_ended" || reason === "transition";
+      if (reason === "track_ended" && this.current.live)
+        await this.notice(
+          this.current.requesterId,
+          `The live stream ${this.current.title} has ended.`,
+        );
       if (natural && this.current.discovery)
         this.autoplayDiscoveryInterval = autoplayDiscoveryEvery;
       if (natural && end) {
@@ -4024,6 +4243,10 @@ export class Coordinator {
         return;
       }
       this.playbackScrobbling?.finish();
+      this.jellyfinUi?.stopped(
+        this.current.id,
+        natural ? this.current.duration : this.playbackSeconds,
+      );
       const played = [
         "played",
         "track_ended",
@@ -4116,6 +4339,52 @@ export class Coordinator {
     await this.startNext();
   }
 
+  /**
+   * A track that stopped playing. A stream is picked up again a couple of
+   * times, from where it was or, live, from where it is now, since a far
+   * server's hiccup should not cost the room what it was watching. Anything
+   * else, or a stream that keeps failing, moves on.
+   */
+  private async streamFailed(reason: string, entryId?: string) {
+    const entry = this.current;
+    if (!entry?.stream || entry.id !== entryId)
+      return this.advance(reason, entryId);
+    // Runs in the session's queue of actions, which this already is in.
+    const skip = async (error?: unknown) => {
+      if (this.current !== entry) return;
+      await this.notice(
+        entry.requesterId,
+        error && isExpectedTrackFailure(error)
+          ? `${entry.title} stopped playing: ${message(error)}`
+          : entry.live
+            ? `The live stream ${entry.title} stopped working, so it was skipped.`
+            : `${entry.title} stopped streaming, so it was skipped.`,
+      );
+      await this.advance(reason, entry.id);
+    };
+    if ((entry.streamRetries ?? 0) >= 2) return skip();
+    entry.streamRetries = (entry.streamRetries ?? 0) + 1;
+    this.log.warn(
+      {
+        event: "stream_retry",
+        entryId: entry.id,
+        reason,
+        attempt: entry.streamRetries,
+      },
+      "Picking the stream up again",
+    );
+    const controller = new AbortController();
+    void this.download(entry, controller).then(
+      (media) =>
+        this.enqueue(async () => {
+          if (this.current !== entry || this.inactive()) return;
+          this.prepared(entry, media);
+          await this.sendCurrent(entry);
+        }),
+      (error) => this.enqueue(() => skip(error)),
+    );
+  }
+
   private async next(interaction: Interaction, expectedId?: string) {
     if (!(await this.require(interaction, "skip"))) return;
     if (!expectedId || this.current?.id !== expectedId)
@@ -4190,6 +4459,11 @@ export class Coordinator {
 
   private async seek(interaction: Interaction, offset: number) {
     if (!(await this.require(interaction, "skip")) || !this.current) return;
+    if (this.current.live)
+      return this.notice(
+        interaction.userId,
+        "A live stream plays where it is now, so it can't be skipped through.",
+      );
     this.seekBy(interaction.userId, offset);
   }
 
@@ -4197,6 +4471,12 @@ export class Coordinator {
     const previous = this.playbackSeconds;
     this.playbackSeconds = Math.max(0, previous + offset);
     this.sendMedia({ type: "seek", offset });
+    this.jellyfinUi?.playing(
+      this.current!,
+      this.playbackSeconds,
+      this.state === "paused",
+      true,
+    );
     this.audit.record("playback.seeked", userId, {
       sessionId: this.id,
       trackId: this.current!.id,
@@ -4220,7 +4500,22 @@ export class Coordinator {
     const event = `playback.${paused ? "paused" : "resumed"}`;
     if (paused) this.playbackScrobbling?.pause();
     else this.playbackScrobbling?.resume();
-    this.sendMedia({ type: paused ? "pause" : "resume" });
+    // Falling behind a live stream is rarely what a group wants, so resuming
+    // one joins it where it is now.
+    if (!paused && this.current?.live)
+      this.sendMedia({
+        type: "replay",
+        entryId: this.current.id,
+        introSeconds: 0,
+      });
+    else this.sendMedia({ type: paused ? "pause" : "resume" });
+    if (this.current)
+      this.jellyfinUi?.playing(
+        this.current,
+        this.playbackSeconds,
+        paused,
+        true,
+      );
     this.store.setSession(this.id, { status: next });
     this.audit.record(event, userId, {
       sessionId: this.id,
@@ -4495,16 +4790,24 @@ export class Coordinator {
   // The add dialog, with the video hint under the search when it holds a
   // video link in music mode. Video mode searches YouTube, and leaves out the
   // music recommendations and recent songs.
-  private async addView(userId: string, videoHint = false) {
-    const recent = this.videoMode
-      ? []
-      : this.store.recentTracks(userId, recentTrackLimit);
-    const recommended = this.videoMode
-      ? undefined
-      : this.recommendations?.userRecommendations(
-          userId,
-          this.sessionExclusions(),
-        );
+  private async addView(
+    userId: string,
+    videoHint = false,
+    source: "search" | "jellyfin" = "search",
+  ) {
+    const jellyfin =
+      source === "jellyfin" && Boolean(this.jellyfinUi?.hasServers(userId));
+    const recent =
+      this.videoMode || jellyfin
+        ? []
+        : this.store.recentTracks(userId, recentTrackLimit);
+    const recommended =
+      this.videoMode || jellyfin
+        ? undefined
+        : this.recommendations?.userRecommendations(
+            userId,
+            this.sessionExclusions(),
+          );
     const recommendedGroups = [
       { label: "Your favourites", tracks: recommended?.favourites ?? [] },
       { label: "Discover", tracks: recommended?.discover ?? [] },
@@ -4517,6 +4820,52 @@ export class Coordinator {
           value: track.id,
         })),
       }));
+    // Whoever has linked Jellyfin picks where to search.
+    const sourceOption = (value: string, label: string) => ({
+      text: plain(label),
+      value,
+    });
+    const sources = [
+      sourceOption("search", "YouTube"),
+      sourceOption("jellyfin", "Jellyfin"),
+    ];
+    const sourcePicker = when(
+      this.jellyfinUi?.hasServers(userId),
+      actions("add_source", [
+        {
+          type: "static_select",
+          action_id: "add_source",
+          options: sources,
+          initial_option: sources[jellyfin ? 1 : 0],
+        },
+      ]),
+    );
+    if (jellyfin)
+      return {
+        type: "modal",
+        callback_id: "add_track_to_queue",
+        private_metadata: JSON.stringify({
+          sessionId: this.id,
+          source: "jellyfin",
+        }),
+        title: plain("Add to queue"),
+        submit: plain("Add"),
+        close: plain("Cancel"),
+        blocks: [
+          ...sourcePicker,
+          input(
+            "jellyfin_track",
+            this.videoMode ? "Movie, show, or video" : "Song or album",
+            {
+              type: "external_select",
+              action_id: "selection",
+              placeholder: plain("Search your Jellyfin"),
+              min_query_length: 2,
+              focus_on_load: true,
+            },
+          ),
+        ],
+      };
     return {
       type: "modal",
       callback_id: "add_track_to_queue",
@@ -4525,6 +4874,7 @@ export class Coordinator {
       submit: plain("Add"),
       close: plain("Cancel"),
       blocks: [
+        ...sourcePicker,
         {
           ...input(
             "track",
@@ -4584,6 +4934,18 @@ export class Coordinator {
         ),
       ],
     };
+  }
+
+  // The add dialog's source changed: YouTube's search, or Jellyfin's.
+  private async switchAddSource(interaction: Interaction) {
+    if (!interaction.viewId) return;
+    const source = interaction.value === "jellyfin" ? "jellyfin" : "search";
+    this.hintedViews.delete(interaction.viewId);
+    await this.slack.updateModal(
+      interaction.viewId,
+      interaction.viewHash,
+      await this.addView(interaction.userId, false, source),
+    );
   }
 
   private async openBulkAdd(interaction: Interaction) {
@@ -4835,7 +5197,7 @@ export class Coordinator {
               ];
               return [
                 section(
-                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${addedBy(track)}`,
+                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.live ? "🔴 LIVE · " : ""}${addedBy(track)}`,
                   `queue_item_${track.id}`,
                 ),
                 ...when(
@@ -5077,6 +5439,7 @@ export class Coordinator {
         allowed: this.allowed,
       },
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
+      ...(this.jellyfinUi ? { jellyfin: this.jellyfinUi.summary(userId) } : {}),
       yourData: this.isParticipantOrManager(userId),
       channel: {
         ...(saved && this.store.channelDefaults(this.roomId)
@@ -5249,6 +5612,11 @@ export class Coordinator {
         ...save(item),
         channelId: item.owner.id,
       })),
+      jellyfinServers: this.store.jellyfinServers(userId).map((server) => ({
+        name: server.name,
+        host: URL.parse(server.baseUrl)?.host ?? server.baseUrl,
+        linkedAt: server.linkedAt,
+      })),
     });
   }
 
@@ -5289,6 +5657,7 @@ export class Coordinator {
         notice = `Deleted “${escape(save.name)}”.`;
       } else notice = "That saved session is no longer there.";
     } else if (kind === "all") {
+      await this.jellyfinUi?.forget(userId);
       this.store.forgetUser(userId);
       notice =
         "Deleted everything kept about you, apart from sessions you saved to channels.";
@@ -5877,6 +6246,17 @@ export class Coordinator {
   // The idle player's one button: turn on Huddle mix and let it pick, with
   // a popular song as the backstop when the mix has nothing to draw on.
   private async playSomething(interaction: Interaction) {
+    // Video mode has no autoplay; it suggests from the user's Jellyfin.
+    if (this.videoMode) {
+      if (!(await this.require(interaction, "add"))) return;
+      if (this.jellyfinUi?.hasServers(interaction.userId))
+        // Jellyfin can be slow; the session carries on meanwhile.
+        return void this.jellyfinUi.openPlaySomething(interaction);
+      return this.notice(
+        interaction.userId,
+        "Play something suggests from your Jellyfin in video mode. Link a server under Settings › You.",
+      );
+    }
     if (!(await this.require(interaction, "configure-settings"))) return;
     if (this.current || this.queue.length || this.autoplayPending) return;
     if (this.loopMode !== "off") {
@@ -5915,6 +6295,8 @@ export class Coordinator {
                 album: entry.album,
                 duration: entry.duration,
                 artwork: entry.artwork,
+                kind: entry.kind,
+                live: entry.live,
               }),
             },
           ]
@@ -6385,11 +6767,14 @@ export class Coordinator {
             ? [
                 context(
                   `current_status_${id}`,
-                  // A video's title can be cut short, so it is a click away.
-                  trackKind(current) === "video" &&
+                  `${liveStatus(current)}${
+                    // A video's title can be cut short, so it is a click
+                    // away.
+                    trackKind(current) === "video" &&
                     /^https?:\/\//.test(current.canonicalUrl)
-                    ? `${addedBy(current)} · <${escape(current.canonicalUrl).replaceAll("|", "%7C")}|Open video>`
-                    : addedBy(current),
+                      ? `${addedBy(current)} · <${escape(current.canonicalUrl).replaceAll("|", "%7C")}|Open video>`
+                      : addedBy(current)
+                  }`,
                 ),
                 actions(`playback_${id}`, [
                   button("previous_track", icon(":ms-skip-back:"), { value }),
@@ -6408,20 +6793,34 @@ export class Coordinator {
                     value,
                   }),
                   // Likes feed music recommendations, so video mode puts
-                  // Jump to in their place.
-                  this.videoMode
-                    ? button("open_jump_to", plain("Jump to"), { value })
+                  // Jump to in their place; a live stream has nowhere to
+                  // jump to.
+                  ...(this.videoMode
+                    ? when(
+                        !current.live,
+                        button("open_jump_to", plain("Jump to"), { value }),
+                      )
                     : // Carries the entry rather than the session: a click
                       // can land after the song has rolled over, and it
                       // should like the song they were listening to rather
                       // than whatever is playing by the time it arrives.
-                      button("like_track", icon(":ms-sparkling-heart:"), {
-                        value: current.id,
-                      }),
+                      [
+                        button("like_track", icon(":ms-sparkling-heart:"), {
+                          value: current.id,
+                        }),
+                      ]),
                 ]),
                 actions(`seek_${id}`, [
-                  button("seek_back", icon(":ms-rewind:"), { value }),
-                  button("seek_forward", icon(":ms-fast-forward:"), { value }),
+                  ...when(
+                    !current.live,
+                    button("seek_back", icon(":ms-rewind:"), { value }),
+                  ),
+                  ...when(
+                    !current.live,
+                    button("seek_forward", icon(":ms-fast-forward:"), {
+                      value,
+                    }),
+                  ),
                   // Carries the entry for the same reason the like button does.
                   button("save_track", icon(":ms-floppy-disk:"), {
                     value: current.id,
@@ -6438,9 +6837,10 @@ export class Coordinator {
             : when(
                 idle,
                 actions(`play_something_${id}`, [
-                  // Play something picks songs, which is music mode's.
+                  // Play something picks songs, which is music mode's, or in
+                  // video mode suggests from Jellyfin, for whoever linked it.
                   ...when(
-                    !this.videoMode,
+                    !this.videoMode || this.anyoneHasJellyfin(),
                     button("play_something", plain("Play something"), {
                       style: "primary",
                       value,
@@ -6474,13 +6874,15 @@ export class Coordinator {
               : "Nothing queued",
         ),
         subtitle: plain(
-          next
-            ? `${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}`
-            : findingAutoplay
-              ? "Autoplay is picking a recommendation"
-              : this.videoMode
-                ? "Add a video to keep watching"
-                : "Add a song to keep the music going",
+          next && current?.live
+            ? "Up next: waiting on the live stream"
+            : next
+              ? `${next.live ? "🔴 LIVE · " : ""}${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}`
+              : findingAutoplay
+                ? "Autoplay is picking a recommendation"
+                : this.videoMode
+                  ? "Add a video to keep watching"
+                  : "Add a song to keep the music going",
         ),
         ...artworkIcon(next),
         child_blocks: [
@@ -6517,6 +6919,14 @@ export class Coordinator {
     ];
   }
 
+  private anyoneHasJellyfin() {
+    const jellyfin = this.jellyfinUi;
+    return (
+      jellyfin !== undefined &&
+      [...this.participants].some((userId) => jellyfin.hasServers(userId))
+    );
+  }
+
   // Time played counts as watching while a video shows, and as listening
   // otherwise.
   private countTime(seconds: number) {
@@ -6531,7 +6941,8 @@ export class Coordinator {
     position = this.playbackSeconds,
     ask = true,
   ) {
-    if (this.videoMode) {
+    // Nor is a live stream a listen to scrobble.
+    if (this.videoMode || entry.live) {
       this.playbackScrobbling?.finish();
       return;
     }
@@ -6657,6 +7068,20 @@ export class Coordinator {
     if (!(await this.require(interaction, "pause"))) return;
     if (!this.videoMode)
       return this.notice(interaction.userId, "Captions are for video mode.");
+    // A Jellyfin item has its own audio languages and captions to pick.
+    const playback = this.current?.stream?.jellyfin;
+    if (
+      playback &&
+      this.jellyfinUi &&
+      interaction.triggerId &&
+      (playback.audioTracks.length > 1 || playback.subtitleTracks.length)
+    ) {
+      await this.slack.modal(
+        interaction.triggerId,
+        this.jellyfinUi.tracksView(playback, this.captions),
+      );
+      return;
+    }
     this.captions = !this.captions;
     this.store.setSession(this.id, { captions: this.captions });
     this.sendMedia({ type: "captions", on: this.captions });
@@ -6669,13 +7094,70 @@ export class Coordinator {
       this.captions &&
       current &&
       !(
-        current.filePath &&
         (current.form === "video" || current.form === "music_video") &&
-        (await Bun.file(captionsPath(current.filePath)).exists())
+        (current.stream
+          ? Boolean(current.stream.subtitles)
+          : current.filePath &&
+            (await Bun.file(captionsPath(current.filePath)).exists()))
       )
     )
       await this.notice(interaction.userId, "This video has no captions.");
     await this.render();
+  }
+
+  // The audio and captions picked for the playing Jellyfin item. The server
+  // streams it again with them, from where it is.
+  private async jellyfinTracksSubmission(interaction: Interaction) {
+    if (!(await this.require(interaction, "pause"))) return;
+    const current = this.current;
+    const playback = current?.stream?.jellyfin;
+    if (
+      !current ||
+      !playback ||
+      parseMetadata(interaction.metadata).itemId !== playback.itemId
+    )
+      return this.notice(
+        interaction.userId,
+        "That is no longer playing; press CC again.",
+      );
+    const audioValue = interaction.state.audio?.track?.selected_option?.value;
+    const subtitleValue =
+      interaction.state.subtitles?.track?.selected_option?.value;
+    const audioStreamIndex =
+      audioValue === undefined ? playback.audioStreamIndex : Number(audioValue);
+    const captions = subtitleValue !== undefined && subtitleValue !== "off";
+    const subtitleStreamIndex = captions
+      ? Number(subtitleValue)
+      : playback.subtitleStreamIndex;
+    if (captions !== this.captions) {
+      this.captions = captions;
+      this.store.setSession(this.id, { captions });
+      this.sendMedia({ type: "captions", on: captions });
+      this.audit.record("playback.captions", interaction.userId, {
+        sessionId: this.id,
+        captions,
+      });
+    }
+    const changed =
+      audioStreamIndex !== playback.audioStreamIndex ||
+      subtitleStreamIndex !== playback.subtitleStreamIndex;
+    current.jellyfinTracks = { audioStreamIndex, subtitleStreamIndex };
+    await this.render();
+    if (!changed) return;
+    const controller = new AbortController();
+    void this.download(current, controller).then(
+      (media) =>
+        this.enqueue(async () => {
+          if (this.current !== current || this.inactive()) return;
+          this.prepared(current, media);
+          await this.sendCurrent(current);
+        }),
+      (error) =>
+        this.notice(
+          interaction.userId,
+          `Couldn’t switch the audio or captions: ${message(error)}`,
+        ),
+    );
   }
 
   private async jumpToModal(interaction: Interaction) {
@@ -6683,9 +7165,16 @@ export class Coordinator {
     const current = this.current;
     if (!current || !interaction.triggerId)
       return this.notice(interaction.userId, "Nothing is playing.");
-    const chapters = current.filePath
-      ? (await readChapters(current.filePath)).slice(0, selectOptionLimit)
-      : [];
+    if (current.live)
+      return this.notice(
+        interaction.userId,
+        "A live stream plays where it is now, so there is nowhere to jump to.",
+      );
+    const chapters = (
+      current.filePath
+        ? await readChapters(current.filePath)
+        : (current.chapters ?? [])
+    ).slice(0, selectOptionLimit);
     await this.slack.modal(interaction.triggerId, {
       type: "modal",
       callback_id: "jump_to_time",
@@ -7184,6 +7673,9 @@ export class Coordinator {
 
   // Stops everything in flight: autoplay, downloads and timers.
   private stopWork() {
+    if (this.current)
+      this.jellyfinUi?.stopped(this.current.id, this.playbackSeconds);
+    this.jellyfinUi?.close();
     this.cancelAutoplay();
     for (const controller of this.preparations.values()) controller.abort();
     this.preparations.clear();

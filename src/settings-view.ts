@@ -368,6 +368,8 @@ export type SettingsViewOptions = {
     allowed: ReadonlySet<string>;
   };
   user: UserSettingsView;
+  // The viewer's Jellyfin servers, when Jellyfin is available.
+  jellyfin?: { linked: number; needsLink: number };
   channel: {
     // Who saved the channel's defaults, when it has any.
     defaults?: { savedBy: string; savedAt: number };
@@ -885,6 +887,17 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
           })
         : button("open_listenbrainz_token", plain("Add token"), { value }),
     },
+    ...when(options.jellyfin, {
+      type: "section",
+      block_id: "jellyfin_account",
+      text: {
+        type: "mrkdwn",
+        text: `*Jellyfin*\n${jellyfinSummary(options.jellyfin ?? { linked: 0, needsLink: 0 })}`,
+      },
+      accessory: options.jellyfin?.linked
+        ? button("jellyfin_view_servers", plain("View"), { value })
+        : button("jellyfin_open_link", plain("Link"), { value }),
+    }),
     ...when(
       options.yourData,
       { type: "header", text: plain("Your data") },
@@ -899,6 +912,14 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
       },
     ),
   ];
+}
+
+function jellyfinSummary(jellyfin: { linked: number; needsLink: number }) {
+  if (!jellyfin.linked) return "Not linked";
+  const linked = `${jellyfin.linked} ${jellyfin.linked === 1 ? "server" : "servers"} linked`;
+  return jellyfin.needsLink
+    ? `${linked} · ${jellyfin.needsLink} ${jellyfin.needsLink === 1 ? "needs" : "need"} linking again`
+    : linked;
 }
 
 /** The form a ListenBrainz token is pasted into, over Settings. */
@@ -964,6 +985,8 @@ export type YourDataOptions = {
   saves: ChannelSaveView[];
   // Sessions the user saved to a channel, with the channel they are in.
   channelSaves: (ChannelSaveView & { channelId: string })[];
+  // Jellyfin servers the user linked.
+  jellyfinServers?: { name: string; host: string; linkedAt: number }[];
 };
 
 /** What HuddleFM keeps about the user, each kind with a way to delete it. */
@@ -1081,6 +1104,20 @@ export function yourDataView(options: YourDataOptions) {
             }
           : {}),
       },
+      ...when(
+        options.jellyfinServers?.length,
+        { type: "header", text: plain("Jellyfin") },
+        section(
+          [
+            ...(options.jellyfinServers ?? []).map(
+              (server) =>
+                `*${escape(server.name)}* · ${escape(server.host)} · linked ${slackDate(server.linkedAt)}`,
+            ),
+            "HuddleFM keeps its sign-in to each, which you can unlink under Settings › You.",
+          ].join("\n"),
+          "data_jellyfin",
+        ),
+      ),
       { type: "divider" },
       actions("data_everything", [
         button("delete_all_data", plain("Delete everything"), {
@@ -1088,7 +1125,7 @@ export function yourDataView(options: YourDataOptions) {
           value: options.sessionId,
           confirm: confirm(
             "Delete everything?",
-            "This deletes your saved sessions and listening history above, disconnects Last.fm and ListenBrainz, and resets your choices. Sessions you saved to channels belong to them, so they stay unless you delete them yourself.",
+            "This deletes your saved sessions and listening history above, disconnects Last.fm and ListenBrainz, unlinks Jellyfin, and resets your choices. Sessions you saved to channels belong to them, so they stay unless you delete them yourself.",
             "Delete everything",
           ),
         }),

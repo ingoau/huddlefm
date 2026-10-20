@@ -1501,3 +1501,85 @@ test("keeps a session's mode, captions and watching time, and a track's kind and
   expect(store.recentTracks("host")).toEqual([]);
   store.close();
 });
+
+test("keeps that a track is live, in the session and in saves", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "host",
+    volume: 0.5,
+  });
+  const radio = {
+    sourceInput: "https://www.youtube.com/watch?v=jfKfPfyJRdk",
+    canonicalUrl: "https://www.youtube.com/watch?v=jfKfPfyJRdk",
+    sourceId: "jfKfPfyJRdk",
+    title: "lofi hip hop radio",
+    artist: "Lofi Girl",
+    kind: "video" as const,
+    live: true,
+  };
+  store.addTrack({
+    ...radio,
+    id: "radio",
+    sessionId: "session",
+    requesterId: "host",
+    status: "ready",
+  });
+  const [saved] = store.resumableSessions(Date.now(), 60_000).sessions;
+  expect(saved!.tracks[0]).toMatchObject({ live: true, kind: "video" });
+  const owner = { type: "user", id: "U1" } as const;
+  store.addSessionSave(owner, "Radio", "U1", [radio], {});
+  expect(store.sessionSaves([owner])[0]!.tracks).toEqual([radio]);
+  store.close();
+});
+
+test("keeps each user's linked Jellyfin servers, once per server", () => {
+  const store = new Store(":memory:");
+  const server = {
+    userId: "U1",
+    serverId: "8a3e05b08edd4f20987437e9f07c4af8",
+    baseUrl: "https://jellyfin.example.com",
+    name: "Home",
+    accessToken: "first",
+    jellyfinUserId: "jf1",
+    deviceId: "device1",
+    linkedAt: 1,
+  };
+  store.saveJellyfinServer(server);
+  store.saveJellyfinServer({
+    ...server,
+    serverId: "f".repeat(32),
+    linkedAt: 2,
+  });
+  expect(store.jellyfinServers("U1").map((item) => item.linkedAt)).toEqual([
+    1, 2,
+  ]);
+  expect(store.jellyfinServers("U2")).toEqual([]);
+  store.revokeJellyfinServer("U1", server.serverId);
+  expect(store.jellyfinServer("U1", server.serverId)?.revoked).toBeTrue();
+  // Linking again, at another address, replaces the token and the revocation.
+  store.saveJellyfinServer({
+    ...server,
+    baseUrl: "https://media.example.com",
+    accessToken: "second",
+    jellyfinUserName: "Ingo",
+    linkedAt: 3,
+  });
+  expect(store.jellyfinServer("U1", server.serverId)).toEqual({
+    ...server,
+    baseUrl: "https://media.example.com",
+    accessToken: "second",
+    jellyfinUserName: "Ingo",
+    linkedAt: 3,
+  });
+  expect(store.jellyfinServers("U1")).toHaveLength(2);
+  expect(store.removeJellyfinServer("U1", "f".repeat(32))).toBeTrue();
+  expect(store.removeJellyfinServer("U1", "f".repeat(32))).toBeFalse();
+  store.forgetUser("U1");
+  expect(store.jellyfinServers("U1")).toEqual([]);
+  store.close();
+});

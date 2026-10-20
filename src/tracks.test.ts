@@ -447,6 +447,21 @@ test("separates unreleased and unsupported media from missing media", () => {
   ).toBe("That link is not supported");
 });
 
+test("says a video needs a login, but not for YouTube's bot check", () => {
+  for (const line of [
+    "ERROR: [vimeo] 12345: This video requires login. Use --cookies, --cookies-from-browser, --username and --password",
+    "ERROR: [instagram] abc: Requested content is not available, rate-limit reached or login required. Use --cookies",
+    "ERROR: [twitter] 1: Sign in to view this post",
+    "ERROR: [niconico] sm9: This video is only available to registered users",
+  ])
+    expect(extractorFailure(line).message).toBe("That video needs a login");
+  const bot = extractorFailure(
+    "ERROR: [youtube] H1FAwIMz-RQ: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication.",
+  );
+  expect(bot.message).not.toBe("That video needs a login");
+  expect(isExpectedTrackFailure(bot)).toBe(false);
+});
+
 test("still reports unexpected extractor faults, without the source ID", () => {
   const failure = extractorFailure(
     "ERROR: [youtube] H1FAwIMz-RQ: Sign in to confirm you're not a bot",

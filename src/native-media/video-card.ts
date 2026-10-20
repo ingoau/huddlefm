@@ -88,7 +88,12 @@ function ellipsize(context: SKRSContext2D, text: string, width: number) {
 const progressOf = (now: number, since: number | undefined, span: number) =>
   since === undefined ? 0 : clamp((now - since) / span);
 
-export type CardProgress = { position: number; duration?: number };
+export type CardProgress = {
+  position: number;
+  duration?: number;
+  /** Where a live stream's audio timestamps started; see FfmpegLog. */
+  streamStart?: number;
+};
 
 export type VideoCardOptions = {
   /** Milliseconds, for animation; a fixed clock lets a test step frames. */

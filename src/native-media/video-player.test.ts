@@ -185,3 +185,37 @@ test.skipIf(!hasFfmpeg)(
   },
   10_000,
 );
+
+/** A live decoder, which knows where its stream's timestamps start. */
+class LiveDecoder extends FakeDecoder {
+  streamStart: number | undefined;
+}
+
+test("lines a live stream's picture up with its sound by where each joined", () => {
+  const decoders: LiveDecoder[] = [];
+  const video = new VideoPlayer(
+    { width: 1280, height: 720, fps: 10 },
+    () => {},
+    (_url, start, subtitles, input) => {
+      expect(input).toEqual({ live: true });
+      const decoder = new LiveDecoder(start, subtitles);
+      decoders.push(decoder);
+      return decoder;
+    },
+  );
+  video.setSource({ key: 1, url: "live.m3u8", input: { live: true } });
+  expect(video.frame(0, 1, 100)).toBeUndefined();
+  decoders[0]!.decode(30);
+  // Not lined up until the picture's start is known.
+  expect(video.frame(0.5, 1, 100)).toBeUndefined();
+  // The picture joined a second before the sound, so it is 1 s further in.
+  decoders[0]!.streamStart = 99;
+  expect(shown(video.frame(0.5, 1, 100))).toBe("0:15");
+  // Far ahead: frames are dropped to catch up, never a seek.
+  expect(shown(video.frame(2.9, 1, 100))).toBe("0:29");
+  expect(decoders).toHaveLength(1);
+  // The sound joined again after a pause; so does the picture.
+  video.frame(0.1, 1, 200);
+  expect(decoders).toHaveLength(2);
+  expect(decoders[0]!.closed).toBeTrue();
+});

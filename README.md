@@ -19,7 +19,9 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 - Save whatever is playing: the bot DMs you a link to it, through song.link for YouTube and SoundCloud so you can find it on your streaming service
 - Loop: repeat the current track or cycle the finished queue
 - Auto-duck: lower the music while someone is speaking in the huddle, and bring it back when they stop
-- Video mode: watch YouTube videos together on a screen share in the huddle, with captions and chapters
+- Video mode: watch YouTube videos together on a screen share in the huddle, with captions and chapters; links from other sites yt-dlp supports work too
+- Live streams: lofi radio and other live YouTube or Twitch streams play as they arrive, as audio in music mode and as video in video mode
+- Jellyfin: link your own Jellyfin servers with Quick Connect to search, browse shows and play from them, with resume points, chapters, audio languages and captions
 - Support for simultaneous huddles
 - End of session recaps & a statistics canvas
 - Auto leave when inactive
@@ -32,6 +34,10 @@ Invite the bot to a huddle or ping it in the thread. It will join the huddle and
 Anyone in the huddle can open Your data from the You tab of Settings to see what HuddleFM keeps about them (sessions saved to their account, the songs they added, heard, liked and skipped, and their scrobbles) and delete any of it, or all of it at once. The audit log is never deleted.
 
 The host can switch the session to video mode on the Session tab of Settings, to watch YouTube videos together. The bot shares its screen in the huddle for as long as video mode is on, so it needs one of Slack's two screen share slots free. Search finds YouTube videos, and songs already queued play as their official video when there surely is one, or as audio with the artwork card when there is not. Autoplay, Huddle mix, lyrics, crossfades, ducking and scrobbling pause until the host switches back to music, and their settings are left as they were. The player gains Jump to (a video's chapters, or a time) in place of 💖, and a CC button for captions, which are off by default. In music mode a YouTube video link still plays as audio; the add dialog says so, and offers the host a button to add it and switch, or anyone else a button to add it and ask the host, who gets a direct message to switch or say not now (which stops asking for 15 minutes).
+
+Pasting a live stream adds it as 🔴 LIVE. It plays as it arrives until someone skips it or it ends, so the queue waits behind it and autoplay doesn't kick in. It can't be seeked, resuming it after a pause joins it where it is now, and it is never scrobbled. If it drops, the bot picks it up again twice before skipping it.
+
+To watch from Jellyfin, paste a link to a movie, show or episode from Jellyfin's web app (the address bar on the item's page) into Add to queue. The first time, the bot shows a Quick Connect code and a button that opens your Jellyfin with it filled in; once you approve it, the item is queued, and the dialog says so. You can also link servers, see them, and unlink them under Settings › You. After that the add dialog has a YouTube/Jellyfin source picker, shows open their seasons and episodes, part-watched items ask whether to resume, Play something in video mode suggests what you were watching and what was added recently, and CC picks the audio language and captions. Items stream from your server, converted to fit the video limits when they don't already, and your watch progress is reported back to your account. Only you can use the servers you link; others in the huddle see only the title. The server has to be reachable from the internet, and HuddleFM shows up in its dashboard but takes no remote control; removing the HuddleFM device there stops it working until you link the server again. Jellyfin's "Copy stream URL" links contain your sign-in, so the bot refuses them.
 
 With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap AI model through OpenRouter and the same permissions you already have in the player UI. Replies are ephemeral. This also works in the original huddle thread when the session uses a forced companion controls channel (where the bot cannot post publicly).
 
@@ -137,6 +143,7 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 | `VIDEO_MAX_FPS`                | `30`         | Frame rate videos are downloaded and shared at, up to `30`                                                    |
 | `VIDEO_SESSION_LIMIT`          | `2`          | Huddles that may be in video mode at once; each takes about a CPU core. `0` turns it off                      |
 | `VIDEO_CACHE_LIMIT_BYTES`      | `5000000000` | Disk kept for prepared videos under `data/cache/video`, apart from the song cache; `0` disables and clears it |
+| `JELLYFIN_ENABLED`             | `true`       | Lets users link their own Jellyfin servers; `false` turns it off                                              |
 
 #### Runtime and logging
 
@@ -154,6 +161,8 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 HuddleFM joins each Huddle's Chime meeting itself. Each Huddle's media runs in its own Bun process, so a crash ends only that session. The video tile is drawn at 540×540 and 24 fps, with a default and a lyrics layout, syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
 
 In video mode the bot also joins as its own screen share, the way Chime's content share does, and sends the video and the music there instead of the camera tile; the picture follows the audio's position, and captions are burned in when they are on. If the share cannot start or is lost, the camera tile and the bot's own audio take over, and whoever added the video hears why.
+
+Live streams and Jellyfin items are not downloaded: the media process reads them as they arrive, through the same public-network proxy as every download, and lines up a live stream's picture with its sound by the timestamps each joined at.
 
 Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`.
 

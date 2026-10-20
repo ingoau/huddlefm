@@ -98,7 +98,7 @@ async function start(bootstrap: ChimeBootstrap) {
   sessionId = bootstrap.sessionId;
   bootstrapped = bootstrap;
   const audio = new AudioEngine(
-    (url, startSeconds) => new FfmpegDecoder(url, startSeconds),
+    (url, startSeconds, input) => new FfmpegDecoder(url, startSeconds, input),
     emit,
     probeDuration,
   );
@@ -369,6 +369,7 @@ function handle(message: Record<string, any>) {
             url: message.url,
             subtitles:
               typeof video.subtitles === "string" ? video.subtitles : undefined,
+            ...(message.stream ? { input: message.stream } : {}),
           }
         : undefined,
     );

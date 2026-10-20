@@ -293,8 +293,12 @@ export class SlackAppAdapter {
   }
 
   async pushModal(triggerId: string, view: unknown) {
-    await this.web.views.push({ trigger_id: triggerId, view: view as never });
+    const result = await this.web.views.push({
+      trigger_id: triggerId,
+      view: view as never,
+    });
     log.debug({ event: "modal_pushed" }, "Slack modal pushed");
+    return result.view;
   }
 
   async updateModal(viewId: string, hash: string | undefined, view: unknown) {

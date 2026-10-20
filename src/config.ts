@@ -137,6 +137,8 @@ export function loadConfig() {
       10_000,
     ),
     loudnessNormalization: process.env.LOUDNESS_NORMALIZATION === "true",
+    // Users linking their own Jellyfin servers; on unless turned off.
+    jellyfin: process.env.JELLYFIN_ENABLED !== "false",
     preparationConcurrency: parseWholeNumber(
       process.env.TRACK_PREPARATION_CONCURRENCY,
       2,

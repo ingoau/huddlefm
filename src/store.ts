@@ -2,6 +2,7 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { MediaForm, TrackKind, TrackMetadata } from "./tracks.ts";
+import type { LinkedServer } from "./jellyfin.ts";
 
 export const capabilities = [
   "add",
@@ -237,6 +238,7 @@ type SavedTrack = {
   duration?: number;
   artwork?: string;
   kind?: TrackKind;
+  live?: boolean;
   automatic?: boolean;
   status: string;
   filePath?: string;
@@ -420,6 +422,7 @@ const addedColumns = [
   ["tracks", "media_form", "TEXT"],
   // Watched as a video in video mode: kept out of the music stats and taste.
   ["tracks", "is_video", "INTEGER NOT NULL DEFAULT 0"],
+  ["tracks", "live", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -470,6 +473,21 @@ function numeric(value: unknown) {
   return value === null ? undefined : Number(value);
 }
 
+function linkedServer(row: Row): LinkedServer {
+  return compact({
+    userId: String(row.user_id),
+    serverId: String(row.server_id),
+    baseUrl: String(row.base_url),
+    name: String(row.name),
+    accessToken: String(row.access_token),
+    jellyfinUserId: String(row.jellyfin_user_id),
+    jellyfinUserName: text(row.jellyfin_user_name),
+    deviceId: String(row.device_id),
+    linkedAt: Number(row.linked_at),
+    revoked: row.revoked ? true : undefined,
+  });
+}
+
 function savedTrack(track: Row) {
   return compact({
     id: String(track.id),
@@ -483,6 +501,7 @@ function savedTrack(track: Row) {
     duration: numeric(track.duration),
     artwork: text(track.artwork),
     kind: modeOf(trackKinds, track.kind),
+    live: track.live ? true : undefined,
     automatic: track.automatic ? true : undefined,
     status: String(track.status),
     filePath: text(track.file_path),
@@ -605,6 +624,11 @@ function sessionSaveTrack(value: unknown): SessionSaveTrack | undefined {
     ...(album === undefined ? {} : { album }),
     ...(duration === undefined ? {} : { duration }),
     ...(artwork === undefined ? {} : { artwork }),
+    ...(track.kind === "song" || track.kind === "video"
+      ? { kind: track.kind }
+      : {}),
+    // A saved live stream plays live again, rather than being downloaded.
+    ...(track.live === true ? { live: true } : {}),
   };
 }
 
@@ -806,6 +830,22 @@ export class Store {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS session_saves_owner_name
         ON session_saves(owner_type, owner_id, name COLLATE NOCASE);
+      -- Jellyfin servers each user linked with Quick Connect, matched by the
+      -- server's own ID so one reached at two addresses is linked once. The
+      -- token is HuddleFM's own sign-in, which the user can revoke.
+      CREATE TABLE IF NOT EXISTS jellyfin_servers (
+        user_id TEXT NOT NULL,
+        server_id TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        name TEXT NOT NULL,
+        access_token TEXT NOT NULL,
+        jellyfin_user_id TEXT NOT NULL,
+        jellyfin_user_name TEXT,
+        device_id TEXT NOT NULL,
+        linked_at INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, server_id)
+      );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
       CREATE INDEX IF NOT EXISTS tracks_session_status
@@ -1633,6 +1673,7 @@ export class Store {
     duration?: number;
     artwork?: string;
     kind?: TrackKind;
+    live?: boolean;
     automatic?: boolean;
     status: string;
     isVideo?: boolean;
@@ -1640,8 +1681,8 @@ export class Store {
     this.db
       .query(
         `INSERT INTO tracks
-        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, kind, automatic, status, is_video, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, kind, live, automatic, status, is_video, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         track.id,
@@ -1656,6 +1697,7 @@ export class Store {
         track.duration ?? null,
         track.artwork ?? null,
         track.kind ?? null,
+        track.live ? 1 : 0,
         track.automatic ? 1 : 0,
         track.status,
         track.isVideo ? 1 : 0,
@@ -2015,8 +2057,78 @@ export class Store {
       this.db
         .query("DELETE FROM user_scrobbling WHERE user_id = ?")
         .run(userId);
+      this.db
+        .query("DELETE FROM jellyfin_servers WHERE user_id = ?")
+        .run(userId);
       if (!mixesAdded) this.setHuddleMixSources(userId, { added: false });
     })();
+  }
+
+  /** The Jellyfin servers a user linked, oldest first. */
+  jellyfinServers(userId: string): LinkedServer[] {
+    return (
+      this.db
+        .query(
+          "SELECT * FROM jellyfin_servers WHERE user_id = ? ORDER BY linked_at, server_id",
+        )
+        .all(userId) as Row[]
+    ).map(linkedServer);
+  }
+
+  jellyfinServer(userId: string, serverId: string) {
+    const row = this.db
+      .query(
+        "SELECT * FROM jellyfin_servers WHERE user_id = ? AND server_id = ?",
+      )
+      .get(userId, serverId) as Row | null;
+    return row ? linkedServer(row) : undefined;
+  }
+
+  /** Links a server, or links it again with a new token. */
+  saveJellyfinServer(server: LinkedServer) {
+    this.db
+      .query(
+        `INSERT INTO jellyfin_servers
+        (user_id, server_id, base_url, name, access_token, jellyfin_user_id, jellyfin_user_name, device_id, linked_at, revoked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ON CONFLICT (user_id, server_id) DO UPDATE SET
+          base_url = excluded.base_url, name = excluded.name,
+          access_token = excluded.access_token,
+          jellyfin_user_id = excluded.jellyfin_user_id,
+          jellyfin_user_name = excluded.jellyfin_user_name,
+          device_id = excluded.device_id, linked_at = excluded.linked_at,
+          revoked = 0`,
+      )
+      .run(
+        server.userId,
+        server.serverId,
+        server.baseUrl,
+        server.name,
+        server.accessToken,
+        server.jellyfinUserId,
+        server.jellyfinUserName ?? null,
+        server.deviceId,
+        server.linkedAt,
+      );
+  }
+
+  /** Notes that a server stopped taking its token, which then needs linking again. */
+  revokeJellyfinServer(userId: string, serverId: string) {
+    this.db
+      .query(
+        "UPDATE jellyfin_servers SET revoked = 1 WHERE user_id = ? AND server_id = ?",
+      )
+      .run(userId, serverId);
+  }
+
+  removeJellyfinServer(userId: string, serverId: string) {
+    return (
+      this.db
+        .query(
+          "DELETE FROM jellyfin_servers WHERE user_id = ? AND server_id = ?",
+        )
+        .run(userId, serverId).changes > 0
+    );
   }
 
   setTrack(
