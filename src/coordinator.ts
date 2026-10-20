@@ -6827,7 +6827,7 @@ export class Coordinator {
                   ...(this.videoMode
                     ? when(
                         !current.live,
-                        button("open_jump_to", plain("Jump to"), { value }),
+                        button("open_jump_to", plain(":ms-3-00:"), { value }),
                       )
                     : // Carries the entry rather than the session: a click
                       // can land after the song has rolled over, and it
