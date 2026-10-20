@@ -270,9 +270,6 @@ export type SavedSession = {
   duckingMode?: DuckingMode;
   displayMode: DisplayMode;
   anchorEnabled: boolean;
-  // Set once native media gave way to the browser, so a restore rejoins with
-  // the browser instead of the backend that already failed this Huddle.
-  mediaFallback?: boolean;
   playbackSeconds: number;
   listenedSeconds: number;
   resumeUntil: number;
@@ -342,7 +339,6 @@ const sessionColumns = {
   listenedSeconds: "listened_seconds",
   displayMode: "display_mode",
   anchorEnabled: "anchor_enabled",
-  mediaFallback: "media_fallback",
 };
 
 const trackColumns = {
@@ -379,7 +375,6 @@ const addedColumns = [
   ["sessions", "huddle_thread_ts", "TEXT"],
   ["sessions", "companion_channel_id", "TEXT"],
   ["sessions", "message_cleanup_at", "INTEGER"],
-  ["sessions", "media_fallback", "INTEGER NOT NULL DEFAULT 0"],
   ["tracks", "automatic", "INTEGER NOT NULL DEFAULT 0"],
   ["tracks", "queue_position", "INTEGER"],
   ["tracks", "intro_seconds", "REAL"],
@@ -952,7 +947,6 @@ export class Store {
       listenedSeconds?: number;
       displayMode?: DisplayMode;
       anchorEnabled?: boolean;
-      mediaFallback?: boolean;
     },
   ) {
     const { sql, values } = assignments(sessionColumns, fields);
@@ -1307,7 +1301,6 @@ export class Store {
           duckingMode: modeOf(duckingModes, row.ducking_mode),
           displayMode: modeOf(displayModes, row.display_mode) ?? "default",
           anchorEnabled: Boolean(row.anchor_enabled),
-          mediaFallback: Boolean(row.media_fallback) || undefined,
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
           resumeUntil: deadline,

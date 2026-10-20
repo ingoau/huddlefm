@@ -25,14 +25,12 @@ The code in this repo runs in a Docker container, and this is the primary deploy
 `src/index.ts` is the composition root. It:
 
 - Loads configuration.
-- Starts the Bun HTTP/WebSocket server.
+- Starts the Bun HTTP server.
 - Connects to Slack.
-- Initializes track search, persistence, scrobbling, and Chromium.
+- Initializes track search, persistence, and scrobbling.
 - Creates one runtime and coordinator per active Huddle.
 - Restores interrupted sessions after a short restart.
 - Handles graceful shutdown.
-
-A shared Chromium process can host isolated browser contexts for multiple simultaneous Huddles.
 
 ### Slack integration
 
@@ -58,22 +56,14 @@ User actions are serialized through an internal promise queue, preventing concur
 
 ### Media bridge
 
-`src/media-browser.ts` launches a headless Chromium context for each session.
+`src/native-media/` joins each Huddle's Amazon Chime meeting directly. Each Huddle's media runs in its own Bun process (`main.ts`, supervised by `session.ts`), so a crash ends only that session. Inside it:
 
-Inside it, `src/media-page.ts`:
+- Protobuf signaling (`signaling.ts`) and a relay-only `node-datachannel` peer with reconnects (`chime-link.ts`).
+- An audio engine with decks, transitions, volume, ducking and a limiter (`audio-engine.ts`), which decodes downloaded tracks with ffmpeg and sends them as the Huddle microphone input.
+- A video card drawn with Skia and encoded with x264 (`video-card.ts`, `video-feed.ts`): a default and a lyrics layout, with Apple Music style synced lyrics (`lyrics-view.ts`) animated on springs and tweens (`motion.ts`). The card and its encoder run in a worker (`video-worker.ts`, driven by `video-thread.ts`) so drawing never delays the audio pacer; the playback position and the encoded video cross between the threads in shared memory (`unit-ring.ts`), because frame-rate messages are costly in Bun.
+- Playback position and errors are reported back to the server.
 
-- Joins the Amazon Chime meeting.
-- Plays downloaded audio through the Web Audio API.
-- Sends that audio as the Huddle microphone input.
-- Captures its own page as a video input.
-- Displays artwork, progress, and synchronized lyrics.
-- Reports playback position and errors to the server.
-
-The coordinator communicates with this page over WebSocket. Audio files are exposed through token-protected, loopback-only URLs.
-
-`MEDIA_BACKEND=native` swaps the browser for `src/native-media/`, which is experimental and off by default. Each Huddle's media runs in its own Bun process (`main.ts`, supervised by `session.ts`) that joins Chime directly: protobuf signaling (`signaling.ts`), a relay-only `node-datachannel` peer with reconnects (`chime-link.ts`), an audio engine that ports the media page's decks, transitions, volume, ducking and limiter (`audio-engine.ts`), and a video card drawn with Skia and encoded with x264 (`video-card.ts`, `video-feed.ts`): the media page's default and lyrics layouts, with Apple Music style synced lyrics (`lyrics-view.ts`) animated on springs and tweens (`motion.ts`). The card and its encoder run in a worker (`video-worker.ts`, driven by `video-thread.ts`) so drawing never delays the audio pacer; the playback position and the encoded video cross between the threads in shared memory (`unit-ring.ts`), because frame-rate messages are costly in Bun. It speaks the media page's message protocol over stdin/stdout, so the coordinator works with either backend.
-
-`MEDIA_BACKEND=native-with-fallback` starts each Huddle on native media and swaps its runtime to the browser, keeping the session, when native media fails or a user presses the player's report button (`src/playback-report.ts`). The swap lives in `src/index.ts` (`fallBackToBrowser`); the coordinator replays the current song into the new backend. Each swap writes a report file (`src/fallback-reports.ts`) with the native backend's recent lines and the session's recent app log lines, which `src/recent-logs.ts` keeps in memory from a logger hook.
+The coordinator talks to the process with JSON lines over stdin/stdout. Audio files and artwork are exposed through token-protected, loopback-only URLs.
 
 #### Additional services include:
 
@@ -83,7 +73,7 @@ The coordinator communicates with this page over WebSocket. Audio files are expo
 - `src/audit-log.ts`: writes append-only JSONL audit events.
 - `src/canvas.ts`: generates aggregate statistics for an optional Slack Canvas.
 
-In short: Slack is the interface, each coordinator is the session brain, and a headless browser is the virtual Huddle participant that actually transmits the music and visuals.
+In short: Slack is the interface, each coordinator is the session brain, and a native media process is the virtual Huddle participant that actually transmits the music and visuals.
 
 ## Glossary
 

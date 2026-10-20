@@ -126,30 +126,20 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Runtime and logging
 
-| Variable         | Default                          | Purpose                                                              |
-| ---------------- | -------------------------------- | -------------------------------------------------------------------- |
-| `BIND_ADDRESS`   | `127.0.0.1`                      | HTTP bind address (loopback is fine; Compose does not publish ports) |
-| `PORT`           | `3210`                           | HTTP port                                                            |
-| `MEDIA_BACKEND`  | `browser`                        | `native` or `native-with-fallback` (experimental, see below)         |
-| `CHROME_PATH`    | `/usr/bin/chromium` in the image | Chromium executable path                                             |
-| `LOG_LEVEL`      | `info`                           | Minimum operational log level (`debug`, `trace`, …)                  |
-| `LOG_FILE`       | `data/logs/huddlefm.jsonl`       | Rotated JSON log path; set empty to disable file logging             |
-| `LOG_FILE_SIZE`  | `10m`                            | Maximum size of each log file                                        |
-| `LOG_FILE_COUNT` | `7`                              | Rotated files retained in addition to the active file                |
+| Variable         | Default                    | Purpose                                                              |
+| ---------------- | -------------------------- | -------------------------------------------------------------------- |
+| `BIND_ADDRESS`   | `127.0.0.1`                | HTTP bind address (loopback is fine; Compose does not publish ports) |
+| `PORT`           | `3210`                     | HTTP port                                                            |
+| `LOG_LEVEL`      | `info`                     | Minimum operational log level (`debug`, `trace`, …)                  |
+| `LOG_FILE`       | `data/logs/huddlefm.jsonl` | Rotated JSON log path; set empty to disable file logging             |
+| `LOG_FILE_SIZE`  | `10m`                      | Maximum size of each log file                                        |
+| `LOG_FILE_COUNT` | `7`                        | Rotated files retained in addition to the active file                |
 
-#### Native media backend (experimental)
+#### Media
 
-With `MEDIA_BACKEND=native`, HuddleFM joins each Huddle's Chime meeting itself instead of through headless Chromium. Each Huddle's media runs in its own Bun process, which uses much less memory and CPU and joins faster.
+HuddleFM joins each Huddle's Chime meeting itself. Each Huddle's media runs in its own Bun process, so a crash ends only that session. The video tile is drawn at 540×540 and 24 fps, with a default and a lyrics layout, syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
 
-Everything else behaves the same, except that the video tile is drawn natively at 540×540 and 24 fps. It has the same default and lyrics layouts as the browser's, with syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
-
-Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`, the same as the browser backend. Leave the variable unset to keep the browser backend.
-
-With `MEDIA_BACKEND=native-with-fallback`, Huddles start on the native backend but can move to Chromium for the rest of the session. That happens automatically when native media crashes, fails to join, or loses its connection, and when someone presses **Playback not working?** under the player. The button switches straight away, so the music drops out for a few seconds, then asks what went wrong. A session that fell back stays on Chromium if it is restored.
-
-Each switch gets a JSON file in `data/reports`, named by time and `reportId`. It holds why the switch happened, what was playing, the native backend's last 200 log lines and media events at every level (more than the log file keeps at `LOG_LEVEL=info`), this session's recent app log lines, whether the browser took over, and the form answers once they are sent. The newest 200 files are kept, for up to 30 days. They include Slack user IDs and whatever people type into the form, and stay on the host.
-
-The audit log (`data/audit.jsonl`) records each switch as `media.fallback`, with `trigger` set to `automatic` or `report`, and each submitted form as `media.problem_reported`, both with the `reportId`. These go to PostHog too when it is configured, which is the easiest way to count how often Huddles fall back.
+Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`.
 
 ### Updating
 

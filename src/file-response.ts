@@ -3,8 +3,8 @@ import type { BunFile } from "bun";
 /**
  * Serves a file, honouring a single-range `Range` header. Bun only does that
  * for static routes, not for a response built in `fetch`, and without it a
- * seek has to read the file from the top: ffmpeg in the native media backend
- * and the media page's <audio> both seek with ranges.
+ * seek has to read the file from the top, and ffmpeg in the media backend
+ * seeks with ranges.
  */
 export function fileResponse(
   file: BunFile,
