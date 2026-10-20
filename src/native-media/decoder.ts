@@ -12,10 +12,140 @@ export interface Decoder {
   readonly drained: boolean;
   /** Why decoding failed, once it has. */
   readonly error: string | undefined;
+  /** Where the input's timestamps start, once known; see FfmpegLog. */
+  readonly streamStart?: number;
   close(): void;
 }
 
-export type DecoderFactory = (url: string, startSeconds: number) => Decoder;
+export type DecoderFactory = (
+  url: string,
+  startSeconds: number,
+  input?: StreamInput,
+) => Decoder;
+
+/**
+ * How to read a source that plays as it arrives from another server, rather
+ * than a prepared file: a live stream, or a Jellyfin item.
+ */
+export type StreamInput = {
+  /** The public network proxy, which keeps the stream off the host network. */
+  proxy?: string;
+  /** Headers the source asks for, such as its own user agent. */
+  headers?: Record<string, string>;
+  /** Has no end and no start to seek from; joins where the stream is now. */
+  live?: boolean;
+  /** The container's stream to take the audio from, when not its default. */
+  audioStream?: number;
+};
+
+const headerName = /^[A-Za-z0-9-]+$/;
+
+/** ffmpeg's options for opening `url` at `startSeconds`, then `-i url`. */
+export function inputArgs(
+  url: string,
+  startSeconds: number,
+  input?: StreamInput,
+) {
+  const headers = Object.entries(input?.headers ?? {}).filter(
+    ([name, value]) =>
+      headerName.test(name) &&
+      name.toLowerCase() !== "user-agent" &&
+      !/[\r\n]/.test(value),
+  );
+  const userAgent = Object.entries(input?.headers ?? {}).find(
+    ([name, value]) =>
+      name.toLowerCase() === "user-agent" && !/[\r\n]/.test(value),
+  )?.[1];
+  return [
+    ...(startSeconds > 0 && !input?.live
+      ? ["-ss", startSeconds.toFixed(3)]
+      : []),
+    ...(input?.proxy ? ["-http_proxy", input.proxy] : []),
+    ...(input && /^https?:/i.test(url)
+      ? [
+          // A short drop on the far end's connection is picked up again
+          // instead of ending the item.
+          "-reconnect",
+          "1",
+          "-reconnect_streamed",
+          "1",
+          "-reconnect_on_network_error",
+          "1",
+          "-reconnect_delay_max",
+          "10",
+          "-rw_timeout",
+          "30000000",
+        ]
+      : []),
+    ...(userAgent ? ["-user_agent", userAgent] : []),
+    ...(headers.length
+      ? [
+          "-headers",
+          headers.map(([name, value]) => `${name}: ${value}\r\n`).join(""),
+        ]
+      : []),
+    "-i",
+    url,
+  ];
+}
+
+const logLevel = /\[(panic|fatal|error|warning|info|verbose|debug|trace)\] ?/;
+
+/**
+ * Reads ffmpeg's log as it runs (`-loglevel level+info`), so a long stream
+ * never fills the pipe: keeps where the input's timestamps start, which lines
+ * up two decoders that joined a live stream at different points, and the
+ * last error, for when it fails.
+ */
+export class FfmpegLog {
+  /** The input's first timestamp, in seconds, once ffmpeg has opened it. */
+  start: number | undefined;
+  lastError: string | undefined;
+  readonly done: Promise<void>;
+
+  constructor(stream: ReadableStream<Uint8Array>) {
+    this.done = this.read(stream).catch(() => {});
+  }
+
+  /** Takes in one line of the log. */
+  line(line: string) {
+    const level = logLevel.exec(line);
+    const text = (
+      level ? line.slice(level.index + level[0].length) : line
+    ).trim();
+    if (!text) return;
+    if (this.start === undefined) {
+      const start = /^Duration: .*?\bstart: (-?\d+(?:\.\d+)?)/.exec(text);
+      if (start) this.start = Number(start[1]);
+    }
+    if (!level || ["panic", "fatal", "error"].includes(level[1]!))
+      this.lastError = text;
+  }
+
+  private async read(stream: ReadableStream<Uint8Array>) {
+    const decoder = new TextDecoder();
+    const reader = stream.getReader();
+    let pending = "";
+    while (true) {
+      const { value: chunk, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(chunk, { stream: true });
+      const lines = pending.split(/\r?\n|\r/);
+      pending = lines.pop() ?? "";
+      for (const line of lines) this.line(line);
+    }
+    if (pending) this.line(pending);
+  }
+}
+
+/** ffmpeg's leading options: quiet, but logging levels for FfmpegLog. */
+export const ffmpegLogArgs = [
+  "-nostdin",
+  "-hide_banner",
+  "-nostats",
+  "-loglevel",
+  "level+info",
+];
 
 /** Finds how long a track's file really runs, in seconds. */
 export type DurationProbe = (
@@ -102,6 +232,7 @@ export class SampleQueue {
 export class FfmpegDecoder implements Decoder {
   private queue = new SampleQueue();
   private process: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  private log: FfmpegLog;
   private finished = false;
   private closed = false;
   error: string | undefined;
@@ -109,18 +240,18 @@ export class FfmpegDecoder implements Decoder {
   constructor(
     url: string,
     startSeconds: number,
-    private aheadFrames = sampleRate * 10,
+    input?: StreamInput,
+    // A stream keeps more ahead, to ride out a slow patch on the far end.
+    private aheadFrames = sampleRate * (input ? 30 : 10),
   ) {
     this.process = Bun.spawn(
       [
         "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        ...(startSeconds > 0 ? ["-ss", startSeconds.toFixed(3)] : []),
-        "-i",
-        url,
+        ...ffmpegLogArgs,
+        ...inputArgs(url, startSeconds, input),
+        ...(input?.audioStream !== undefined
+          ? ["-map", `0:${input.audioStream}`]
+          : []),
         "-vn",
         "-f",
         "f32le",
@@ -132,7 +263,13 @@ export class FfmpegDecoder implements Decoder {
       ],
       { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
     );
+    this.log = new FfmpegLog(this.process.stderr);
     void this.pump();
+  }
+
+  /** Where the input's timestamps start, once known; see FfmpegLog. */
+  get streamStart() {
+    return this.log.start;
   }
 
   get bufferedFrames() {
@@ -178,11 +315,8 @@ export class FfmpegDecoder implements Decoder {
     if (this.closed) return;
     const exitCode = await this.process.exited;
     if (exitCode !== 0 && !this.closed) {
-      const stderr = await new Response(this.process.stderr)
-        .text()
-        .catch(() => "");
-      this.error =
-        stderr.trim().split("\n").at(-1) || `ffmpeg exited with ${exitCode}`;
+      await this.log.done;
+      this.error = this.log.lastError || `ffmpeg exited with ${exitCode}`;
     }
     this.finished = true;
   }

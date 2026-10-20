@@ -347,3 +347,68 @@ describe("AudioEngine", () => {
     expect(Math.max(...engine.render(960).map(Math.abs))).toBe(0);
   });
 });
+
+describe("streams", () => {
+  test("a stream is read as it arrives and never probed", () => {
+    const inputs: unknown[] = [];
+    const probed: string[] = [];
+    const engine = new AudioEngine(
+      (url, start, input) => {
+        inputs.push(input);
+        return new FakeDecoder(url, start, sampleRate * 30);
+      },
+      () => {},
+      async (url) => {
+        probed.push(url);
+        return 30;
+      },
+    );
+    const stream = { proxy: "http://127.0.0.1:1", live: true };
+    engine.handle(play("a", { url: "https://example.com/live.m3u8", stream }));
+    expect(inputs).toEqual([stream]);
+    expect(probed).toEqual([]);
+    engine.handle(play("b"));
+    expect(probed).toEqual(["http://127.0.0.1/audio/b"]);
+  });
+
+  test("playing a failed or stalled stream again starts it afresh", () => {
+    const { engine, decoders, run, of } = setup(600);
+    engine.handle(play("a"));
+    run(1);
+    decoders[0]!.error = "connection reset";
+    run(0.1);
+    expect(of("track_error")).toHaveLength(1);
+    engine.handle(play("a"));
+    expect(decoders).toHaveLength(2);
+    expect(decoders[0]!.closed).toBeTrue();
+    run(1);
+    expect(of("track_error")).toHaveLength(1);
+    // Stalled: nothing arrives for ten seconds.
+    decoders[1]!.available = 0;
+    run(11);
+    expect(of("stalled")).toHaveLength(1);
+    engine.handle(play("a"));
+    expect(decoders).toHaveLength(3);
+    // Playing on undisturbed does not restart it.
+    engine.handle(play("a"));
+    expect(decoders).toHaveLength(3);
+  });
+
+  test("tells the video where a live stream's sound started", () => {
+    const engine = new AudioEngine(
+      (url, start) =>
+        Object.assign(new FakeDecoder(url, start, sampleRate * 30), {
+          streamStart: 42.5,
+        }),
+      () => {},
+    );
+    engine.handle(play("a", { stream: { live: true } }));
+    expect(engine.progress()).toEqual({
+      position: 0,
+      duration: 30,
+      streamStart: 42.5,
+    });
+    engine.handle(play("b"));
+    expect(engine.progress()).toEqual({ position: 0, duration: 30 });
+  });
+});

@@ -386,3 +386,44 @@ test("the host picks the mode, and video mode leaves out the music's settings", 
     ),
   ).toBeUndefined();
 });
+
+test("the You tab links Jellyfin, or says how many servers are linked", () => {
+  const text = (jellyfin?: { linked: number; needsLink: number }) =>
+    JSON.stringify(
+      settingsView(options({ tab: "you", ...(jellyfin ? { jellyfin } : {}) })),
+    );
+  expect(text()).not.toContain("Jellyfin");
+  expect(text({ linked: 0, needsLink: 0 })).toContain(
+    "*Jellyfin*\\nNot linked",
+  );
+  expect(text({ linked: 0, needsLink: 0 })).toContain("jellyfin_open_link");
+  expect(text({ linked: 2, needsLink: 0 })).toContain("2 servers linked");
+  expect(text({ linked: 2, needsLink: 0 })).toContain("jellyfin_view_servers");
+  expect(text({ linked: 1, needsLink: 1 })).toContain(
+    "1 server linked · 1 needs linking again",
+  );
+});
+
+test("Your data lists linked Jellyfin servers", () => {
+  const empty = { count: 0, recent: [] };
+  const view = yourDataView({
+    sessionId: "session",
+    added: empty,
+    plays: empty,
+    likes: empty,
+    skips: empty,
+    scrobbles: 0,
+    saves: [],
+    channelSaves: [],
+    jellyfinServers: [
+      {
+        name: "Home",
+        host: "jellyfin.example.com",
+        linkedAt: 1_700_000_000_000,
+      },
+    ],
+  });
+  const text = JSON.stringify(view);
+  expect(text).toContain("*Home* · jellyfin.example.com");
+  expect(text).toContain("unlinks Jellyfin");
+});

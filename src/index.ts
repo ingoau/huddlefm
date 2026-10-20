@@ -38,6 +38,7 @@ import {
 import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
 import { TrackCatalog } from "./tracks.ts";
+import { Jellyfin } from "./jellyfin.ts";
 import { likeWindowMs, RecommendationCatalog } from "./recommendations.ts";
 import { ChannelManagers } from "./channel-managers.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
@@ -105,6 +106,20 @@ log.info(
 );
 await Promise.all(saved.expiredIds.map(removeMediaFiles));
 const catalog = new TrackCatalog(config);
+const jellyfin = config.jellyfin
+  ? new Jellyfin({
+      // Jellyfin is only reached through the catalog's public network proxy,
+      // which is up once the catalog is.
+      proxy: () => {
+        try {
+          return catalog.streamProxy;
+        } catch {
+          return undefined;
+        }
+      },
+      limits: () => catalog.video,
+    })
+  : undefined;
 const lyrics = new LyricsCatalog();
 const recommendations = new RecommendationCatalog(store, catalog, config);
 const slackApp = new SlackAppAdapter(config);
@@ -684,6 +699,7 @@ async function joinHuddle(
       () =>
         [...runtimes.values()].filter((other) => other.coordinator?.videoMode)
           .length,
+      jellyfin,
     ));
     try {
       if (restored) await coordinator.resume(resumeActorId);

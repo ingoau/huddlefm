@@ -98,7 +98,7 @@ async function start(bootstrap: ChimeBootstrap) {
   sessionId = bootstrap.sessionId;
   bootstrapped = bootstrap;
   const audio = new AudioEngine(
-    (url, startSeconds) => new FfmpegDecoder(url, startSeconds),
+    (url, startSeconds, input) => new FfmpegDecoder(url, startSeconds, input),
     emit,
     probeDuration,
   );
@@ -361,14 +361,16 @@ function handle(message: Record<string, any>) {
     // A share that failed gets another go with each new song, unless it
     // keeps failing.
     if (videoMode && !share && shareFailures < 3) startShare();
-    const video = message.video as { subtitles?: unknown } | undefined;
+    const video = message.video as
+      { subtitles?: unknown; url?: unknown } | undefined;
     card?.setShareSource(
       video && typeof message.url === "string"
         ? {
             key: entryKey(String(message.entryId)),
-            url: message.url,
+            url: typeof video.url === "string" ? video.url : message.url,
             subtitles:
               typeof video.subtitles === "string" ? video.subtitles : undefined,
+            ...(message.stream ? { input: message.stream } : {}),
           }
         : undefined,
     );

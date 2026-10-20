@@ -74,9 +74,14 @@ class Share {
           message: "Video could not be decoded; showing the card",
           error,
         }),
-      (url, start, subtitles) =>
-        new FfmpegFrameDecoder(url, start, subtitles, format, (pid) =>
-          send({ type: "player_decoder", pid }),
+      (url, start, subtitles, input) =>
+        new FfmpegFrameDecoder(
+          url,
+          start,
+          subtitles,
+          format,
+          (pid) => send({ type: "player_decoder", pid }),
+          input,
         ),
     );
     this.cardFeed = new VideoFeed(
@@ -87,7 +92,7 @@ class Share {
       { input: cardInput, format, epoch },
     );
     this.videoFeed = new VideoFeed(
-      () => this.player.frame(this.position(), this.key()),
+      () => this.player.frame(this.position(), this.key(), this.audioStart()),
       write,
       failed,
       encoder,
@@ -135,6 +140,11 @@ class Share {
   private key() {
     const key = this.clock[2]!;
     return Number.isNaN(key) ? undefined : key;
+  }
+
+  private audioStart() {
+    const start = this.clock[3]!;
+    return Number.isNaN(start) ? undefined : start;
   }
 
   // Keeps the decoder going while the card is up, so the video can take over

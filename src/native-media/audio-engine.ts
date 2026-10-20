@@ -11,6 +11,7 @@ import {
   type Decoder,
   type DecoderFactory,
   type DurationProbe,
+  type StreamInput,
 } from "./decoder.ts";
 
 export type MediaEmit = (type: string, details?: unknown) => void;
@@ -49,9 +50,10 @@ class Deck {
     readonly url: string,
     private factory: DecoderFactory,
     startSeconds = 0,
+    readonly input?: StreamInput,
   ) {
     this.position = startSeconds;
-    this.decoder = factory(url, startSeconds);
+    this.decoder = factory(url, startSeconds, input);
   }
 
   /** Moves playback to `seconds`, skipping decoded audio when it can. */
@@ -71,7 +73,7 @@ class Deck {
       }
     } else {
       this.decoder.close();
-      this.decoder = this.factory(this.url, seconds);
+      this.decoder = this.factory(this.url, seconds, this.input);
     }
     this.position = seconds;
     this.underrunFrames = 0;
@@ -107,6 +109,7 @@ type NextEntry = {
   url: string;
   introSeconds: number;
   fadeInSeconds: number;
+  stream?: StreamInput;
 };
 
 type Ramp = { from: number; to: number; start: number; length: number };
@@ -194,7 +197,11 @@ export class AudioEngine {
   progress() {
     const deck = this.currentId ? this.decks.get(this.currentId) : undefined;
     if (!deck) return undefined;
-    return { position: deck.position, duration: this.durationOf(deck) };
+    return {
+      position: deck.position,
+      duration: this.durationOf(deck),
+      ...(deck.input?.live ? { streamStart: deck.decoder.streamStart } : {}),
+    };
   }
 
   /** Like the page's `audio.duration`: the file's, once it is known. */
@@ -282,17 +289,31 @@ export class AudioEngine {
     }
   }
 
-  private deck(entryId: string, url: string, startSeconds = 0) {
+  private deck(
+    entryId: string,
+    url: string,
+    startSeconds = 0,
+    input?: StreamInput,
+  ) {
     const existing = this.decks.get(entryId);
     if (existing?.url === url) return existing;
     existing?.close();
-    const deck = new Deck(entryId, url, this.decoderFactory, startSeconds);
+    const deck = new Deck(
+      entryId,
+      url,
+      this.decoderFactory,
+      startSeconds,
+      input,
+    );
     this.decks.set(entryId, deck);
-    this.probe(url, deck.probing.signal)
-      .then((seconds) => {
-        if (seconds && seconds > 0) deck.duration = seconds;
-      })
-      .catch(() => {});
+    // A stream is not probed: the probe would reach it without the proxy,
+    // and its length is listed, or it has none.
+    if (!input)
+      this.probe(url, deck.probing.signal)
+        .then((seconds) => {
+          if (seconds && seconds > 0) deck.duration = seconds;
+        })
+        .catch(() => {});
     return deck;
   }
 
@@ -306,7 +327,7 @@ export class AudioEngine {
         this.transitionMode !== "none"
           ? Number(entry.introSeconds) || 0
           : 0;
-      this.deck(entry.entryId, entry.url, start);
+      this.deck(entry.entryId, entry.url, start, entry.stream);
     }
     for (const [entryId, deck] of this.decks)
       if (!keep.has(entryId)) {
@@ -318,10 +339,15 @@ export class AudioEngine {
   private play(message: Record<string, any>) {
     this.tone = undefined;
     // The same entry from another file, as when video mode prepares it
-    // again, starts over rather than carrying on.
+    // again, starts over rather than carrying on, as does one whose stream
+    // failed or stalled and is being picked up again.
+    const existing = this.decks.get(message.entryId);
     const alreadyPlaying =
       this.currentId === message.entryId &&
-      this.decks.get(message.entryId)?.url === message.url;
+      existing !== undefined &&
+      existing.url === message.url &&
+      !existing.decoder.error &&
+      !existing.stalledSent;
     if (!alreadyPlaying) {
       this.cancelTransition(message.entryId);
       const previous = this.currentId
@@ -334,9 +360,15 @@ export class AudioEngine {
     this.currentFadeOut = message.fadeOutSeconds ?? 0;
     this.listedDuration =
       Number(message.duration) > 0 ? Number(message.duration) : undefined;
-    const deck = this.deck(message.entryId, message.url);
+    const deck = this.deck(
+      message.entryId,
+      message.url,
+      0,
+      message.stream as StreamInput | undefined,
+    );
     if (!alreadyPlaying) {
-      if (deck.position !== 0) deck.seek(0);
+      if (deck.position !== 0 || deck.decoder.error || deck.stalledSent)
+        deck.seek(0);
       else {
         deck.endedSent = false;
         deck.errorSent = false;
@@ -428,7 +460,7 @@ export class AudioEngine {
     const next = this.nextEntry!;
     const previousId = this.currentId!;
     const previous = this.decks.get(previousId)!;
-    const deck = this.deck(next.entryId, next.url);
+    const deck = this.deck(next.entryId, next.url, 0, next.stream);
     const seconds = this.crossfadeSeconds();
     this.transitioning = true;
     const intro = Number(next.introSeconds) || 0;

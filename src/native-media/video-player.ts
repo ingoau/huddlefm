@@ -1,3 +1,9 @@
+import {
+  FfmpegLog,
+  ffmpegLogArgs,
+  inputArgs,
+  type StreamInput,
+} from "./decoder.ts";
 import { frameBytes, type FeedInput } from "./video-feed.ts";
 
 /** A video for the screen share: the playing entry's file, and its captions. */
@@ -7,6 +13,8 @@ export type VideoSource = {
   url: string;
   /** An SRT file to burn in while captions are on. */
   subtitles?: string;
+  /** How to read a stream, as the audio does. */
+  input?: StreamInput;
 };
 
 export type PlayerFormat = { width: number; height: number; fps: number };
@@ -68,16 +76,12 @@ export function decoderArgs(
   format: PlayerFormat,
   startSeconds: number,
   subtitles?: string,
+  input?: StreamInput,
 ) {
   return [
     "ffmpeg",
-    "-nostdin",
-    "-hide_banner",
-    "-loglevel",
-    "error",
-    ...(startSeconds > 0 ? ["-ss", startSeconds.toFixed(3)] : []),
-    "-i",
-    url,
+    ...ffmpegLogArgs,
+    ...inputArgs(url, startSeconds, input),
     "-map",
     "0:v:0",
     "-an",
@@ -106,6 +110,8 @@ export interface FrameDecoder {
   readonly finished: boolean;
   /** Why decoding failed, once it has. */
   readonly error: string | undefined;
+  /** Where the input's timestamps start, once known; see FfmpegLog. */
+  readonly streamStart?: number;
   close(): void;
 }
 
@@ -113,6 +119,7 @@ export type FrameDecoderFactory = (
   url: string,
   startSeconds: number,
   subtitles: string | undefined,
+  input?: StreamInput,
 ) => FrameDecoder;
 
 /** Decodes a video's frames with ffmpeg, a few ahead of where they show. */
@@ -123,6 +130,7 @@ export class FfmpegFrameDecoder implements FrameDecoder {
   error: string | undefined;
   private closed = false;
   private process: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  private log: FfmpegLog;
   private frameSize: number;
 
   constructor(
@@ -132,19 +140,24 @@ export class FfmpegFrameDecoder implements FrameDecoder {
     format: PlayerFormat,
     /** The running ffmpeg's pid, or undefined once it is gone. */
     private onProcess: (pid: number | undefined) => void = () => {},
+    input?: StreamInput,
   ) {
-    const input: FeedInput = { ...format, pixelFormat: "yuv420p" };
-    this.frameSize = frameBytes(input);
-    this.process = Bun.spawn(decoderArgs(url, format, start, subtitles), {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const frames: FeedInput = { ...format, pixelFormat: "yuv420p" };
+    this.frameSize = frameBytes(frames);
+    this.process = Bun.spawn(
+      decoderArgs(url, format, start, subtitles, input),
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    this.log = new FfmpegLog(this.process.stderr);
     onProcess(this.process.pid);
     void this.process.exited.then(() => {
       if (!this.closed) this.onProcess(undefined);
     });
     void this.pump();
+  }
+
+  get streamStart() {
+    return this.log.start;
   }
 
   close() {
@@ -185,11 +198,8 @@ export class FfmpegFrameDecoder implements FrameDecoder {
     if (this.closed) return;
     const exitCode = await this.process.exited;
     if (exitCode !== 0 && !this.closed) {
-      const stderr = await new Response(this.process.stderr)
-        .text()
-        .catch(() => "");
-      this.error =
-        stderr.trim().split("\n").at(-1) || `ffmpeg exited with ${exitCode}`;
+      await this.log.done;
+      this.error = this.log.lastError || `ffmpeg exited with ${exitCode}`;
     }
     this.finished = true;
   }
@@ -214,8 +224,8 @@ export class VideoPlayer {
   constructor(
     private format: PlayerFormat,
     private onError: (message: string) => void,
-    private factory: FrameDecoderFactory = (url, start, subtitles) =>
-      new FfmpegFrameDecoder(url, start, subtitles, format),
+    private factory: FrameDecoderFactory = (url, start, subtitles, input) =>
+      new FfmpegFrameDecoder(url, start, subtitles, format, undefined, input),
   ) {}
 
   /** A frame is up for the current source. */
@@ -231,7 +241,8 @@ export class VideoPlayer {
     if (
       source?.key === this.source?.key &&
       source?.url === this.source?.url &&
-      source?.subtitles === this.source?.subtitles
+      source?.subtitles === this.source?.subtitles &&
+      JSON.stringify(source?.input) === JSON.stringify(this.source?.input)
     )
       return;
     this.closeDecoder();
@@ -251,13 +262,20 @@ export class VideoPlayer {
 
   /**
    * The frame for `position` seconds into the entry `key` is playing, or the
-   * last one shown while that frame is still being decoded.
+   * last one shown while that frame is still being decoded. For a live
+   * stream, `audioStart` is where the audio's timestamps started, which
+   * lines the picture up with it.
    */
-  frame(position: number | undefined, key: number | undefined) {
+  frame(
+    position: number | undefined,
+    key: number | undefined,
+    audioStart?: number,
+  ) {
     const source = this.source;
     if (!source || key !== source.key || position === undefined)
       return this.current;
     if (this.failedKey === source.key) return undefined;
+    const rejoined = position < this.lastPosition - seekBackSeconds;
     this.lastPosition = position;
     let decoder = this.decoder;
     if (decoder?.error) {
@@ -266,6 +284,8 @@ export class VideoPlayer {
       this.closeDecoder();
       return undefined;
     }
+    if (source.input?.live)
+      return this.liveFrame(position, audioStart, rejoined);
     const target = decoder
       ? Math.floor((position - decoder.start) * this.format.fps + 1e-6)
       : -1;
@@ -281,6 +301,36 @@ export class VideoPlayer {
       decoder = this.restart(position);
       return this.current;
     }
+    const frames = decoder.frames;
+    while (frames.length && frames[0]!.index <= target) {
+      const next = frames.shift()!;
+      this.current = next.data;
+      this.shownIndex = next.index;
+    }
+    return this.current;
+  }
+
+  /**
+   * A live stream cannot seek: the decoder joins wherever the stream is, and
+   * so did the audio, so the two are lined up by where each one's
+   * timestamps started. A picture ahead of the sound waits; one behind
+   * catches up by dropping frames. The audio going back means it joined the
+   * stream again, after a pause, and the picture does too.
+   */
+  private liveFrame(
+    position: number,
+    audioStart: number | undefined,
+    rejoined: boolean,
+  ) {
+    let decoder = this.decoder;
+    if (!decoder || rejoined) decoder = this.restart(0);
+    const videoStart = decoder.streamStart;
+    if (audioStart === undefined || videoStart === undefined)
+      // Not lined up yet: show nothing new rather than the wrong moment.
+      return this.current;
+    const target = Math.floor(
+      (position + audioStart - videoStart) * this.format.fps + 1e-6,
+    );
     const frames = decoder.frames;
     while (frames.length && frames[0]!.index <= target) {
       const next = frames.shift()!;
@@ -310,6 +360,7 @@ export class VideoPlayer {
       source.url,
       start,
       this.captions ? source.subtitles : undefined,
+      source.input,
     );
     this.shownIndex = -1;
     return this.decoder;

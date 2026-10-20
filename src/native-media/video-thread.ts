@@ -69,9 +69,9 @@ export class VideoThread {
   private startedAt = 0;
   private stopping: Promise<void> | undefined;
   private pids = new Map<FromVideoWorker["type"], number>();
-  // position and duration in seconds, then which entry they belong to; NaN
-  // when there is no track.
-  private clock = new Float64Array(new SharedArrayBuffer(24)).fill(Number.NaN);
+  // position and duration in seconds, which entry they belong to, and where
+  // the audio's stream timestamps started; NaN when there is no track.
+  private clock = new Float64Array(new SharedArrayBuffer(32)).fill(Number.NaN);
   private units = new UnitRing();
   private shareUnits = new UnitRing();
   private state: {
@@ -106,6 +106,7 @@ export class VideoThread {
     this.clock[0] = progress ? progress.position : Number.NaN;
     this.clock[1] = progress?.duration ?? Number.NaN;
     this.clock[2] = progress && key !== undefined ? key : Number.NaN;
+    this.clock[3] = progress?.streamStart ?? Number.NaN;
     this.units.drain((nals, timestamp) =>
       this.events.onAccessUnit(nals, timestamp),
     );

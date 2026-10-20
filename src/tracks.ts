@@ -20,6 +20,11 @@ import {
   type Chapter,
 } from "./videos.ts";
 import { firstArtist } from "./artist.ts";
+import {
+  isJellyfinStreamLink,
+  parseJellyfinLink,
+  type JellyfinPlayback,
+} from "./jellyfin.ts";
 
 const log = logger.child({ component: "tracks" });
 const maxEmbeddedArtworkBytes = 5 * 1024 * 1024;
@@ -98,6 +103,12 @@ const expectedExtractorFailures = [
     pattern:
       /members[- ]only|join this channel|available to this channel's members/i,
     message: "That video is for channel members only",
+  },
+  {
+    // YouTube's bot check also says to use cookies, but is not a login.
+    pattern:
+      /^(?!.*not a bot).*(?:requires? (?:a )?log ?in|log(?:ged)? ?in (?:is )?required|need to log ?in|sign in to (?:view|watch|continue)|only available (?:to|for) registered users|use --cookies|--cookies-from-browser|account (?:is )?required)/i,
+    message: "That video needs a login",
   },
   {
     pattern: /unsupported url/i,
@@ -348,6 +359,8 @@ export type TrackMetadata = {
    * saved before video mode; see trackKind.
    */
   kind?: TrackKind;
+  /** A live stream: played as it arrives, with no end and no seeking. */
+  live?: boolean;
 };
 
 export type TrackKind = "song" | "video";
@@ -368,10 +381,37 @@ export function trackKind(track: Pick<TrackMetadata, "kind" | "canonicalUrl">) {
 export type MediaForm = "audio" | "video" | "music_video";
 
 export type PreparedMedia = {
-  filePath: string;
+  /** The prepared file, or none for a stream. */
+  filePath?: string;
+  /** Played as it arrives instead of from a file: see MediaStream. */
+  stream?: MediaStream;
   form: MediaForm;
   /** A video that would not download, prepared as audio in its place. */
   fellBack?: boolean;
+  /** Chapters known without a file to read them from. */
+  chapters?: Chapter[];
+};
+
+/**
+ * A source played as it arrives rather than downloaded first: a live stream,
+ * or an item on a Jellyfin server. Its URL can carry a credential, so it only
+ * ever goes to the media process, never to Slack or the logs.
+ */
+export type MediaStream = {
+  url: string;
+  /** Where the picture is read from, when not `url`. */
+  videoUrl?: string;
+  live?: boolean;
+  /** Headers the source asks for. */
+  headers?: Record<string, string>;
+  /** The container's stream to take the audio from, when not its default. */
+  audioStream?: number;
+  /** A captions file on disk, as SRT, for when captions are on. */
+  subtitles?: string;
+  /** A poster on disk for the video card, never shown in Slack. */
+  cover?: string;
+  /** How a Jellyfin item is playing, for progress and track choices. */
+  jellyfin?: JellyfinPlayback;
 };
 
 /** What video mode allows; see the VIDEO_* settings. */
@@ -691,6 +731,15 @@ export class TrackCatalog {
     const url = parseHttpUrl(input);
     if (!url)
       throw new TrackError("Only absolute HTTP or HTTPS URLs are supported");
+    // Jellyfin plays from a linked server, which the add dialog sets up.
+    if (isJellyfinStreamLink(url.href))
+      throw new TrackError(
+        "That link has a Jellyfin sign-in in it, so HuddleFM won’t play it",
+      );
+    if (parseJellyfinLink(url.href))
+      throw new TrackError(
+        "Paste Jellyfin links into Add to queue, which links your server",
+      );
     await assertPublicUrl(url);
     if (navidromeShare(url)) {
       const tracks = await this.resolveNavidromeShare(url.href);
@@ -718,12 +767,16 @@ export class TrackCatalog {
     ]);
     if (metadata._type === "playlist" || metadata.entries)
       throw new TrackError("Playlists are not supported");
-    if (metadata.is_live || metadata.live_status === "is_live")
-      throw new TrackError("Live streams are not supported");
+    if (metadata.live_status === "is_upcoming")
+      throw new TrackError("Track has not been released yet");
+    const live = Boolean(
+      metadata.is_live || metadata.live_status === "is_live",
+    );
     restrictedVideo(metadata);
     if (
+      !live &&
       (metadata.filesize ?? metadata.filesize_approx ?? 0) >
-      (video ? this.video.downloadBytes : this.limits.downloadBytes)
+        (video ? this.video.downloadBytes : this.limits.downloadBytes)
     )
       throw new TrackError(
         video
@@ -736,19 +789,22 @@ export class TrackCatalog {
     const channel = String(
       metadata.channel ?? metadata.uploader ?? "Unknown artist",
     );
+    // yt-dlp dates a live stream's title; the full title has no date.
+    const title = String(
+      (live ? metadata.fulltitle : undefined) ?? metadata.title ?? "Untitled",
+    );
     let track: TrackMetadata = {
       sourceInput: url.href,
       canonicalUrl,
       sourceId: String(metadata.id),
-      title:
-        kind === "video"
-          ? cleanVideoTitle(String(metadata.title ?? "Untitled"), channel)
-          : String(metadata.title ?? "Untitled"),
+      title: kind === "video" ? cleanVideoTitle(title, channel) : title,
       artist: String(metadata.artist ?? metadata.uploader ?? "Unknown artist"),
       album: metadata.album ? String(metadata.album) : undefined,
-      duration: metadata.duration ? Number(metadata.duration) : undefined,
+      duration:
+        metadata.duration && !live ? Number(metadata.duration) : undefined,
       artwork: await publicArtworkUrl(metadata.thumbnail),
       kind,
+      ...(live ? { live: true } : {}),
     };
     // Direct files and other generic sources often only expose the filename
     // through yt-dlp; prefer embedded tags when the extractor metadata is thin.
@@ -758,8 +814,9 @@ export class TrackCatalog {
         await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxyUrl),
       );
     this.validate(track, video);
-    // The extraction is only reused for the audio download it matches.
-    if (!video) this.rememberExtraction(canonicalUrl, metadata);
+    // The extraction is only reused for the audio download it matches, and a
+    // live stream is never downloaded.
+    if (!video && !live) this.rememberExtraction(canonicalUrl, metadata);
     return urlResolved(track, startedAt);
   }
 
@@ -1194,6 +1251,88 @@ export class TrackCatalog {
         ? prepared
         : { ...prepared, fellBack: true };
     }
+  }
+
+  /**
+   * The address a live stream plays from, picked for the mode: audio for
+   * music, a single file with picture and sound for video mode. Streams are
+   * played as they arrive, through the public network proxy, and never
+   * downloaded or cached.
+   */
+  async prepareLive(
+    track: TrackMetadata,
+    video: boolean,
+    signal?: AbortSignal,
+  ): Promise<PreparedMedia> {
+    const startedAt = Date.now();
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+    const { maxHeight, maxFps } = this.video;
+    const format = video
+      ? `b[height<=?${maxHeight}][fps<=?${maxFps}]/b[height<=?${maxHeight}]/w`
+      : // Live sites rarely have audio on its own; a small picture with the
+        // sound costs least.
+        "ba/b[height<=?360]/w";
+    const metadata = record(
+      JSON.parse(
+        (
+          await run(
+            [
+              ...this.extractor(),
+              "--dump-single-json",
+              "--skip-download",
+              "--no-playlist",
+              "--format",
+              format,
+              "--socket-timeout",
+              "10",
+              "--",
+              track.canonicalUrl,
+            ],
+            30_000,
+            signal,
+          )
+        ).stdout,
+      ),
+    );
+    if (!(metadata.is_live || metadata.live_status === "is_live"))
+      throw new TrackError("That live stream has ended");
+    restrictedVideo(metadata);
+    const address = typeof metadata.url === "string" ? metadata.url : "";
+    const url = parseHttpUrl(address);
+    if (!url)
+      throw new TrackError("That live stream can't be played", {
+        expected: false,
+        detail: "The extractor gave no single stream URL",
+      });
+    await assertPublicUrl(url);
+    const headers = Object.fromEntries(
+      Object.entries(record(metadata.http_headers)).filter(
+        (pair): pair is [string, string] => typeof pair[1] === "string",
+      ),
+    );
+    const picture =
+      typeof metadata.vcodec === "string"
+        ? metadata.vcodec !== "none"
+        : Boolean(metadata.width || metadata.height);
+    log.info(
+      {
+        event: "live_stream_resolved",
+        sourceId: track.sourceId,
+        video,
+        picture,
+        durationMs: Date.now() - startedAt,
+      },
+      "Live stream resolved",
+    );
+    return {
+      stream: { url: url.href, live: true, headers },
+      form: video && picture ? "video" : "audio",
+    };
+  }
+
+  /** The public network proxy, for media that streams through it. */
+  get streamProxy() {
+    return this.proxyUrl;
   }
 
   private queuePreparation(
