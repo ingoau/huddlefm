@@ -317,7 +317,11 @@ export class AudioEngine {
 
   private play(message: Record<string, any>) {
     this.tone = undefined;
-    const alreadyPlaying = this.currentId === message.entryId;
+    // The same entry from another file, as when video mode prepares it
+    // again, starts over rather than carrying on.
+    const alreadyPlaying =
+      this.currentId === message.entryId &&
+      this.decks.get(message.entryId)?.url === message.url;
     if (!alreadyPlaying) {
       this.cancelTransition(message.entryId);
       const previous = this.currentId

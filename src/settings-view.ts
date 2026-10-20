@@ -30,6 +30,7 @@ import {
   huddleMixSources,
   loopModeLabels,
   loopModes,
+  mediaModes,
   scrobblingModes,
   transitionModes,
   type AutoplayMode,
@@ -37,6 +38,7 @@ import {
   type DuckingMode,
   type HuddleMixSource,
   type LoopMode,
+  type MediaMode,
   type ScrobblingMode,
   type TransitionMode,
 } from "./store.ts";
@@ -50,6 +52,14 @@ const loopDescriptions: Record<LoopMode, string> = {
   off: "Do not repeat",
   track: "Restart the current song when it ends",
   queue: "Move finished songs back to the end of the queue",
+};
+const mediaModeLabels: Record<MediaMode, string> = {
+  music: "Music",
+  video: "Video",
+};
+const mediaModeDescriptions: Record<MediaMode, string> = {
+  music: "Listen together, with autoplay, lyrics and crossfades",
+  video: "Watch YouTube videos together on a screen share",
 };
 const duckingDescriptions: Record<DuckingMode, string> = {
   off: "Keep playing at full volume",
@@ -347,6 +357,7 @@ export type SettingsViewOptions = {
   };
   session: {
     hostId?: string;
+    mediaMode: MediaMode;
     volume: number;
     displayMode: DisplayMode;
     autoplayMode: AutoplayMode;
@@ -464,10 +475,27 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
   const volume =
     form.volume?.percent?.selected_option?.value ??
     String(Math.round(session.volume * 10_000) / 100);
+  // Video mode has no use for the music's own settings, so they are left
+  // out, and left as they are for when the music comes back.
+  const music = session.mediaMode === "music";
   return [
+    ...when(
+      access.admin,
+      input(
+        "media_mode",
+        "Mode",
+        modeSelect(
+          mediaModes,
+          selected(form.media_mode?.mode, mediaModes) ?? session.mediaMode,
+          (mode) => mediaModeLabels[mode],
+          mediaModeDescriptions,
+        ),
+        { hint: "Only the host can switch modes" },
+      ),
+    ),
     ...when(access.volume, input("volume", "Volume", volumeSelect(volume))),
     ...when(
-      access.configure,
+      access.configure && music,
       input(
         "display",
         "Display mode",
@@ -491,6 +519,9 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
           hint: "Play recommendations when the queue is empty",
         },
       ),
+    ),
+    ...when(
+      access.configure,
       input(
         "loop",
         "Loop",
@@ -505,6 +536,9 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
           hint: "Repeat the current track or cycle the queue",
         },
       ),
+    ),
+    ...when(
+      access.configure && music,
       input(
         "transition",
         "Transitions",
@@ -531,6 +565,9 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
         ),
         { hint: "Lower the music while someone is speaking" },
       ),
+    ),
+    ...when(
+      access.configure,
       input(
         "anchor",
         "Thread position",
@@ -766,14 +803,18 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
       : "Token saved"
     : "Not connected";
   return [
-    input(
-      "huddle_mix",
-      "Include in Huddle mix",
-      huddleMixSourceInput(settings.huddleMixUsable, chosen),
-      {
-        optional: true,
-        hint: "Only used while you're in the huddle, and never shown as yours. Untick everything to opt out of the mix.",
-      },
+    // The mix is autoplay's, which video mode does without.
+    ...when(
+      options.session.mediaMode === "music",
+      input(
+        "huddle_mix",
+        "Include in Huddle mix",
+        huddleMixSourceInput(settings.huddleMixUsable, chosen),
+        {
+          optional: true,
+          hint: "Only used while you're in the huddle, and never shown as yours. Untick everything to opt out of the mix.",
+        },
+      ),
     ),
     ...when(
       settings.configured,

@@ -1,5 +1,5 @@
 import { AnnexBSplitter } from "./rtp.ts";
-import { cardSize, videoFps, videoMaxKbps } from "./video-format.ts";
+import { cameraFormat, cardSize, type VideoFormat } from "./video-format.ts";
 /** An unchanged frame is skipped, but one still goes out this often. */
 const keepAliveMs = 500;
 /** Seconds between keyframes, so a new viewer gets a picture quickly. */
@@ -7,12 +7,39 @@ const keyframeSeconds = 2;
 /** Keyframe requests this soon after a keyframe wait out the rest. */
 const minKeyframeGapMs = 500;
 
+/** The raw frames a feed hands its encoder. */
+export type FeedInput = {
+  width: number;
+  height: number;
+  pixelFormat: "rgba" | "yuv420p";
+};
+
+/** The card's frames, as the camera tile sends them. */
+export const cardInput: FeedInput = {
+  width: cardSize,
+  height: cardSize,
+  pixelFormat: "rgba",
+};
+
+/** Bytes in one raw frame of `input`. */
+export function frameBytes(input: FeedInput) {
+  return input.pixelFormat === "rgba"
+    ? input.width * input.height * 4
+    : (input.width * input.height * 3) / 2;
+}
+
 /**
- * ffmpeg's arguments: raw RGBA in, stamped with the wall clock as it arrives
- * so frames can be skipped, and H.264 constrained baseline out, with keyframes
- * on the clock rather than every so many frames.
+ * ffmpeg's arguments: raw frames in, stamped with the wall clock as they
+ * arrive so frames can be skipped, and H.264 constrained baseline out, with
+ * keyframes on the clock rather than every so many frames. Input of another
+ * size is scaled to fit the output and centred on black.
  */
-export function encoderArgs(size = cardSize) {
+export function encoderArgs(
+  input: FeedInput = cardInput,
+  format: VideoFormat = cameraFormat,
+) {
+  const resized =
+    input.width !== format.width || input.height !== format.height;
   return [
     "ffmpeg",
     "-hide_banner",
@@ -21,13 +48,19 @@ export function encoderArgs(size = cardSize) {
     "-f",
     "rawvideo",
     "-pix_fmt",
-    "rgba",
+    input.pixelFormat,
     "-s",
-    `${size}x${size}`,
+    `${input.width}x${input.height}`,
     "-use_wallclock_as_timestamps",
     "1",
     "-i",
     "pipe:0",
+    ...(resized
+      ? [
+          "-vf",
+          `scale=${format.width}:${format.height}:force_original_aspect_ratio=decrease,pad=${format.width}:${format.height}:(ow-iw)/2:(oh-ih)/2:color=black`,
+        ]
+      : []),
     "-fps_mode",
     "passthrough",
     "-c:v",
@@ -47,13 +80,13 @@ export function encoderArgs(size = cardSize) {
     "-crf",
     "26",
     "-maxrate",
-    `${videoMaxKbps}k`,
+    `${format.maxKbps}k`,
     "-bufsize",
-    `${videoMaxKbps}k`,
+    `${format.maxKbps}k`,
     "-force_key_frames",
     `expr:gte(t,n_forced*${keyframeSeconds})`,
     "-g",
-    String(videoFps * keyframeSeconds),
+    String(format.fps * keyframeSeconds),
     "-bf",
     "0",
     "-x264-params",
@@ -65,18 +98,22 @@ export function encoderArgs(size = cardSize) {
 }
 
 /**
- * Encodes card frames with ffmpeg and hands out access units with 90 kHz
- * timestamps. A frame the card did not redraw is not sent again, which leaves
- * a still card a couple of frames a second instead of the full rate.
+ * Encodes frames, the card's or a video's, with ffmpeg and hands out access
+ * units with 90 kHz timestamps. A frame that did not change is not sent
+ * again, which leaves a still card a couple of frames a second instead of
+ * the full rate.
  * Keyframes come every two seconds, and sooner when a viewer asks for one
  * (PLI) through `requestKeyframe`.
  */
 export class VideoFeed {
   private encoder?: Bun.Subprocess<"pipe", "pipe", "pipe">;
   private timer?: ReturnType<typeof setInterval>;
+  private input: FeedInput;
+  private format: VideoFormat;
   // One timestamp base for every encoder this feed runs, so a restart
-  // continues the stream instead of jumping back to zero.
-  private readonly epoch = performance.now();
+  // continues the stream instead of jumping back to zero. Feeds that take
+  // turns on one stream share it.
+  private readonly epoch: number;
   private keyframeAt = 0;
   private awaitingKeyframe = false;
   private keyframeTimer?: ReturnType<typeof setTimeout>;
@@ -84,12 +121,22 @@ export class VideoFeed {
   private sentAt = 0;
 
   constructor(
-    private frame: () => Buffer,
+    /** The frame to send now, or undefined to send nothing new. */
+    private frame: () => Buffer | undefined,
     private onAccessUnit: (nals: Buffer[], timestamp: number) => void,
     private onError: (message: string) => void,
     /** The running encoder's pid, or undefined once there is none. */
     private onEncoder: (pid: number | undefined) => void = () => {},
-  ) {}
+    options: {
+      input?: FeedInput;
+      format?: VideoFormat;
+      epoch?: number;
+    } = {},
+  ) {
+    this.input = options.input ?? cardInput;
+    this.format = options.format ?? cameraFormat;
+    this.epoch = options.epoch ?? performance.now();
+  }
 
   get running() {
     return Boolean(this.encoder);
@@ -97,7 +144,7 @@ export class VideoFeed {
 
   start() {
     if (this.encoder) return;
-    const encoder = Bun.spawn(encoderArgs(), {
+    const encoder = Bun.spawn(encoderArgs(this.input, this.format), {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -117,6 +164,7 @@ export class VideoFeed {
     const write = () => {
       try {
         const frame = this.frame();
+        if (!frame) return;
         const now = performance.now();
         if (frame === this.sent && now - this.sentAt < keepAliveMs) return;
         this.sent = frame;
@@ -129,7 +177,7 @@ export class VideoFeed {
     // has not changed, so the opening keyframe is out as soon as ffmpeg is.
     this.sent = undefined;
     write();
-    this.timer = setInterval(write, 1_000 / videoFps);
+    this.timer = setInterval(write, 1_000 / this.format.fps);
   }
 
   /**

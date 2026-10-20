@@ -2,6 +2,11 @@ import type { Lyric } from "@braccato/core";
 import type { LyricsCredits } from "./lyrics-view.ts";
 import { UnitRing } from "./unit-ring.ts";
 import type { CardProgress, DisplayMode } from "./video-card.ts";
+import { shareFormat, type VideoFormat } from "./video-format.ts";
+import type { VideoSource } from "./video-player.ts";
+
+/** What the card says when nothing is playing. */
+export type IdleText = { title: string; subtitle: string };
 
 /** What the audio thread tells the video worker. */
 export type ToVideoWorker =
@@ -9,16 +14,22 @@ export type ToVideoWorker =
       type: "init";
       clock: SharedArrayBuffer;
       units: SharedArrayBuffer;
+      shareUnits: SharedArrayBuffer;
+      share: VideoFormat;
       lyricsOffset: number;
     }
   | { type: "begin_change"; artwork?: string }
   | { type: "track"; title: string; artist: string; artwork?: string }
-  | { type: "reset" }
+  | { type: "reset"; idle?: IdleText }
   | { type: "display_mode"; mode: DisplayMode }
   | { type: "lyrics"; lines: Lyric[]; credits: LyricsCredits }
   | { type: "lyrics_unavailable" }
   | { type: "video"; on: boolean }
   | { type: "keyframe" }
+  | { type: "share"; on: boolean }
+  | { type: "share_source"; source: VideoSource | undefined }
+  | { type: "captions"; on: boolean }
+  | { type: "share_keyframe" }
   | { type: "stop" };
 
 /** What the video worker tells the audio thread. */
@@ -26,10 +37,14 @@ export type FromVideoWorker =
   | { type: "log"; event: string; message: string; error: string }
   // A worker that dies cannot stop its ffmpeg, so this thread keeps its pid.
   | { type: "encoder"; pid: number | undefined }
+  | { type: "share_encoder"; pid: number | undefined }
+  | { type: "player_decoder"; pid: number | undefined }
   | { type: "stopped" };
 
 export type VideoThreadEvents = {
   onAccessUnit(nals: Buffer[], timestamp: number): void;
+  /** Encoded video for the screen share. */
+  onShareUnit?(nals: Buffer[], timestamp: number): void;
   log(event: string, message: string, fields: Record<string, unknown>): void;
 };
 
@@ -39,24 +54,26 @@ const minWorkerLifeMs = 5_000;
 const stopTimeoutMs = 1_000;
 
 /**
- * The video card and its encoder, run in a worker so drawing never holds up
- * the audio pacer on this thread. Stands in for the card and the feed with
- * the same calls. Anything that happens every frame goes through shared
- * memory instead of messages, which Bun makes costly at that rate: the
- * playback position one way, the encoded video (see UnitRing) the other, both
- * on the audio pacer's tick.
+ * The video card, the screen share and their encoders, run in a worker so
+ * drawing, decoding and encoding never hold up the audio pacer on this
+ * thread. Stands in for the card and the feeds with the same calls. Anything
+ * that happens every frame goes through shared memory instead of messages,
+ * which Bun makes costly at that rate: the playback position one way, the
+ * encoded video (see UnitRing) the other, both on the audio pacer's tick.
  *
- * If the worker dies it is started again with the track, lyrics, display mode
- * and video state it had, unless it keeps dying straight away.
+ * If the worker dies it is started again with the track, lyrics, display
+ * mode, share and video state it had, unless it keeps dying straight away.
  */
 export class VideoThread {
   private worker: Worker | undefined;
   private startedAt = 0;
   private stopping: Promise<void> | undefined;
-  private encoderPid: number | undefined;
-  // position and duration in seconds; NaN when there is no track.
-  private clock = new Float64Array(new SharedArrayBuffer(16)).fill(Number.NaN);
+  private pids = new Map<FromVideoWorker["type"], number>();
+  // position and duration in seconds, then which entry they belong to; NaN
+  // when there is no track.
+  private clock = new Float64Array(new SharedArrayBuffer(24)).fill(Number.NaN);
   private units = new UnitRing();
+  private shareUnits = new UnitRing();
   private state: {
     mode?: DisplayMode;
     track?: Extract<ToVideoWorker, { type: "track" }>;
@@ -64,26 +81,36 @@ export class VideoThread {
       ToVideoWorker,
       { type: "lyrics" } | { type: "lyrics_unavailable" }
     >;
+    idle?: IdleText;
     video: boolean;
-  } = { video: false };
+    share: boolean;
+    source?: VideoSource;
+    captions: boolean;
+  } = { video: false, share: false, captions: false };
 
   constructor(
     private lyricsOffset: number,
     private events: VideoThreadEvents,
     private minLifeMs = minWorkerLifeMs,
+    /** The size and rate the screen share is sent at. */
+    private share: VideoFormat = shareFormat(),
   ) {
     this.spawn();
   }
 
   /**
    * Called on the pacer's tick: hands the worker the playback position and
-   * sends on the video it has encoded since the last tick.
+   * which entry it is on, and sends on the video encoded since the last tick.
    */
-  tick(progress: CardProgress | undefined) {
+  tick(progress: CardProgress | undefined, key?: number) {
     this.clock[0] = progress ? progress.position : Number.NaN;
     this.clock[1] = progress?.duration ?? Number.NaN;
+    this.clock[2] = progress && key !== undefined ? key : Number.NaN;
     this.units.drain((nals, timestamp) =>
       this.events.onAccessUnit(nals, timestamp),
+    );
+    this.shareUnits.drain((nals, timestamp) =>
+      this.events.onShareUnit?.(nals, timestamp),
     );
   }
 
@@ -99,10 +126,12 @@ export class VideoThread {
     this.send(this.state.track);
   }
 
-  reset() {
+  /** Shows the idle card, saying `idle` or the usual words. */
+  reset(idle?: IdleText) {
     this.state.track = undefined;
     this.state.lyrics = undefined;
-    this.send({ type: "reset" });
+    this.state.idle = idle;
+    this.send({ type: "reset", idle });
   }
 
   setDisplayMode(mode: DisplayMode) {
@@ -131,7 +160,30 @@ export class VideoThread {
     this.send({ type: "keyframe" });
   }
 
-  /** Stops the encoder, then the worker. */
+  /** Starts or stops encoding the screen share. */
+  setShare(on: boolean) {
+    if (on === this.state.share) return;
+    this.state.share = on;
+    this.send({ type: "share", on });
+  }
+
+  /** The video the share shows, or none for the card. */
+  setShareSource(source: VideoSource | undefined) {
+    this.state.source = source;
+    this.send({ type: "share_source", source });
+  }
+
+  setCaptions(on: boolean) {
+    if (on === this.state.captions) return;
+    this.state.captions = on;
+    this.send({ type: "captions", on });
+  }
+
+  requestShareKeyframe() {
+    this.send({ type: "share_keyframe" });
+  }
+
+  /** Stops the encoders, then the worker. */
   stop() {
     this.stopping ??= (async () => {
       const worker = this.worker;
@@ -146,7 +198,7 @@ export class VideoThread {
       await Promise.race([stopped.promise, Bun.sleep(stopTimeoutMs)]);
       worker.terminate();
       this.worker = undefined;
-      this.killEncoder();
+      this.killProcesses();
     })();
     return this.stopping;
   }
@@ -171,21 +223,28 @@ export class VideoThread {
       type: "init",
       clock: this.clock.buffer as SharedArrayBuffer,
       units: this.units.buffer,
+      shareUnits: this.shareUnits.buffer,
+      share: this.share,
       lyricsOffset: this.lyricsOffset,
     } satisfies ToVideoWorker);
     // A replacement picks up where the last one was.
-    const { mode, track, lyrics, video } = this.state;
+    const { mode, track, lyrics, idle, video, share, source, captions } =
+      this.state;
     if (mode) worker.postMessage({ type: "display_mode", mode });
     if (track) worker.postMessage(track);
+    else if (idle) worker.postMessage({ type: "reset", idle });
     if (track && lyrics) worker.postMessage(lyrics);
+    if (captions) worker.postMessage({ type: "captions", on: true });
+    if (source) worker.postMessage({ type: "share_source", source });
     if (video) worker.postMessage({ type: "video", on: true });
+    if (share) worker.postMessage({ type: "share", on: true });
   }
 
   private died(worker: Worker, reason: string) {
     if (worker !== this.worker || this.stopping) return;
     this.worker = undefined;
     worker.terminate();
-    this.killEncoder();
+    this.killProcesses();
     const again = performance.now() - this.startedAt >= this.minLifeMs;
     this.events.log(
       "native_video_worker_died",
@@ -197,20 +256,25 @@ export class VideoThread {
     if (again) this.spawn();
   }
 
-  private killEncoder() {
-    const pid = this.encoderPid;
-    this.encoderPid = undefined;
-    if (pid === undefined) return;
+  private killProcesses() {
     // SIGKILL: ffmpeg only looks at SIGTERM between reads, and a dead worker
-    // leaves its input pipe open, so it would wait on that read forever.
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {}
+    // leaves its pipes open, so it would wait on them forever.
+    for (const pid of this.pids.values())
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+    this.pids.clear();
   }
 
   private receive(message: FromVideoWorker) {
-    if (message.type === "encoder") this.encoderPid = message.pid;
-    else if (message.type === "log")
+    if (
+      message.type === "encoder" ||
+      message.type === "share_encoder" ||
+      message.type === "player_decoder"
+    ) {
+      if (message.pid === undefined) this.pids.delete(message.type);
+      else this.pids.set(message.type, message.pid);
+    } else if (message.type === "log")
       this.events.log(message.event, message.message, {
         error: message.error,
       });

@@ -61,6 +61,7 @@ User actions are serialized through an internal promise queue, preventing concur
 - Protobuf signaling (`signaling.ts`) and a relay-only `node-datachannel` peer with reconnects (`chime-link.ts`).
 - An audio engine with decks, transitions, volume, ducking and a limiter (`audio-engine.ts`), which decodes downloaded tracks with ffmpeg and sends them as the Huddle microphone input.
 - A video card drawn with Skia and encoded with x264 (`video-card.ts`, `video-feed.ts`): a default and a lyrics layout, with Apple Music style synced lyrics (`lyrics-view.ts`) animated on springs and tweens (`motion.ts`). The card and its encoder run in a worker (`video-worker.ts`, driven by `video-thread.ts`) so drawing never delays the audio pacer; the playback position and the encoded video cross between the threads in shared memory (`unit-ring.ts`), because frame-rate messages are costly in Bun.
+- In video mode, a second attendee, `<bot>#content`, like the JS SDK's content share (`content-shares.ts` counts other people's shares). It carries the music and a 16:9 picture: the card, scaled, or the playing video, decoded by `video-player.ts` in step with the audio's position, with captions burned in. If it fails, the camera tile and the bot's own audio take over.
 - Playback position and errors are reported back to the server.
 
 The coordinator talks to the process with JSON lines over stdin/stdout. Audio files and artwork are exposed through token-protected, loopback-only URLs.
@@ -68,6 +69,7 @@ The coordinator talks to the process with JSON lines over stdin/stdout. Audio fi
 #### Additional services include:
 
 - `src/media-cache.ts`: keeps prepared tracks on disk, keyed by source, so a repeated song is hardlinked into its session instead of downloaded again.
+- `src/videos.ts`: video mode's helpers: YouTube search results, a song's official video, captions, chapters and video titles. Video mode itself lives in the coordinator, which prepares each track again for the mode it is in.
 - `src/lyrics.ts`: queries multiple lyric providers concurrently and selects the best synchronized result.
 - `src/scrobbling.ts`: tracks each participant's actual listening time and submits eligible listens to Last.fm or ListenBrainz.
 - `src/audit-log.ts`: writes append-only JSONL audit events.

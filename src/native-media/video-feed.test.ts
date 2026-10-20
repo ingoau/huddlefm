@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { cardSize } from "./video-format.ts";
-import { VideoFeed } from "./video-feed.ts";
+import { cardSize, shareFormat } from "./video-format.ts";
+import { cardInput, encoderArgs, VideoFeed } from "./video-feed.ts";
 
 const hasFfmpeg = Boolean(Bun.which("ffmpeg"));
 
@@ -49,4 +49,41 @@ describe("video feed", () => {
     },
     10_000,
   );
+});
+
+test("the screen share is 16:9 at the configured height, within Chime's levels", () => {
+  expect(shareFormat()).toEqual({
+    width: 1280,
+    height: 720,
+    fps: 30,
+    maxKbps: 2_488,
+    profileLevelId: "42e01f",
+  });
+  expect(shareFormat({ maxHeight: 1080, maxFps: 30 })).toMatchObject({
+    width: 1920,
+    height: 1080,
+    maxKbps: 4_000,
+    profileLevelId: "42e028",
+  });
+  expect(shareFormat({ maxHeight: 480, maxFps: 24 })).toMatchObject({
+    width: 854,
+    height: 480,
+    fps: 24,
+  });
+});
+
+test("the card is scaled into the share's frame, and a video's frames are not", () => {
+  const share = shareFormat();
+  const card = encoderArgs(cardInput, share);
+  expect(card).toContain(
+    "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black",
+  );
+  expect(card).toContain("2488k");
+  const video = encoderArgs(
+    { width: 1280, height: 720, pixelFormat: "yuv420p" },
+    share,
+  );
+  expect(video).not.toContain("-vf");
+  expect(video).toContain("yuv420p");
+  expect(video[video.indexOf("-g") + 1]).toBe("60");
 });

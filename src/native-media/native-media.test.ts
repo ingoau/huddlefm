@@ -110,6 +110,21 @@ describe("speech signals", () => {
     expect(ducking.speaking).toBe(1);
   });
 
+  test("the bot's own screen share is the music, not speech", () => {
+    const { speech, ducking } = setup();
+    speech.handle(
+      streams(
+        { audio_stream_id: 1, attendee_id: "bot#content" },
+        { audio_stream_id: 2, attendee_id: "person#content" },
+      ),
+      0,
+    );
+    speech.handle(volumes({ audio_stream_id: 1, volume: 14 }), 10);
+    expect(ducking.speaking).toBe(0);
+    speech.handle(volumes({ audio_stream_id: 2, volume: 14 }), 20);
+    expect(ducking.speaking).toBe(1);
+  });
+
   test("a frame without someone counts them as quiet", () => {
     const { speech, ducking } = setup();
     speech.handle(streams({ audio_stream_id: 2, attendee_id: "person" }), 0);

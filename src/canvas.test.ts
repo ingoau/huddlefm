@@ -8,10 +8,19 @@ import {
 test("formats canvas stats as Slack canvas markdown", () => {
   const markdown = canvasMarkdown(
     {
-      sessions: { count: 2, listened: 480, longest: 360, active: 1 },
+      sessions: {
+        count: 2,
+        listened: 480,
+        watched: 90,
+        longest: 360,
+        active: 1,
+      },
       tracks: { count: 3, uniqueTracks: 2, artists: 2, autoplay: 1 },
+      videos: { count: 2 },
       topArtists: [{ artist: "Artist", count: 2 }],
       topTracks: [{ title: "Song", artist: "Artist", count: 2 }],
+      topVideos: [{ title: "Clip", channel: "Channel", count: 2 }],
+      topVideoChannels: [{ channel: "Channel", count: 2 }],
       topChannels: [{ channelId: "C123", count: 3 }],
     },
     [{ label: "Next", count: 4 }],
@@ -26,15 +35,26 @@ test("formats canvas stats as Slack canvas markdown", () => {
   expect(markdown).toContain("| Average songs per session | 1.5 |");
   expect(markdown).toContain("| Next | 4 |");
   expect(markdown).toContain("1. ![](#C123) — 3 songs");
+  expect(markdown).toContain(
+    "| Time listened | 8m 0s |\n| Time watched | 1m 30s |",
+  );
+  expect(markdown).toContain("| Songs played | 3 |\n| Videos played | 2 |");
+  expect(markdown).toContain("## Top videos\n1. **Clip** — Channel · 2 plays");
+  expect(markdown).toContain(
+    "## Top YouTube channels\n1. **Channel** — 2 videos",
+  );
   expect(markdown).not.toContain("# HuddleFM stats");
   expect(markdown).not.toContain("## Integrations");
 });
 
 const stats = {
-  sessions: { count: 0, listened: 0, longest: 0, active: 0 },
+  sessions: { count: 0, listened: 0, watched: 0, longest: 0, active: 0 },
   tracks: { count: 0, uniqueTracks: 0, artists: 0, autoplay: 0 },
+  videos: { count: 0 },
   topArtists: [],
   topTracks: [{ title: "Song", artist: "Artist", count: 1 }],
+  topVideos: [],
+  topVideoChannels: [],
   topChannels: [],
 };
 

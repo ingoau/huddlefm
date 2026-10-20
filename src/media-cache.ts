@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { logger } from "./logger.ts";
 import type { EmbeddedMetadata, TransitionData } from "./tracks.ts";
+import type { Chapter } from "./videos.ts";
 
 const log = logger.child({ component: "media-cache" });
 
@@ -25,6 +26,10 @@ export type CachedMedia = {
    */
   embedded?: EmbeddedMetadata;
   cover: boolean;
+  /** A video's chapters. */
+  chapters?: Chapter[];
+  /** A video's captions, as SRT. */
+  captions?: string;
 };
 
 type Stored = CachedMedia & { version: 1; createdAt: number };
@@ -33,6 +38,7 @@ type Indexed = { media: Stored; bytes: number; usedAt: number };
 
 // Prepared tracks, kept across sessions and restarts so a song that is
 // played again is linked into place instead of downloaded and analysed.
+// Videos have a cache of their own, with files of their own extension.
 // Entries are keyed by source and evicted least recently used first once
 // the cache outgrows its limit. Caching is best-effort: any failure here is
 // logged and the track is prepared as if the cache were empty.
@@ -43,6 +49,8 @@ export class MediaCache {
   constructor(
     private directory: string,
     private limits: { maxBytes: number; maxAgeMs: number },
+    /** The extension of the media files it keeps. */
+    private extension = "opus",
   ) {}
 
   get enabled() {
@@ -64,7 +72,7 @@ export class MediaCache {
         const entry = key && (await this.read(key));
         if (!key || !entry) continue;
         this.entries.set(key, entry);
-        kept.add(name).add(`${key}.opus`);
+        kept.add(name).add(`${key}.${this.extension}`);
         if (entry.media.cover) kept.add(`${key}.cover.jpg`);
       }
       // Interrupted writes and files whose description is missing or corrupt.
@@ -100,7 +108,7 @@ export class MediaCache {
         return;
       }
       try {
-        await linkOrCopy(this.path(`${key}.opus`), audioPath);
+        await linkOrCopy(this.path(`${key}.${this.extension}`), audioPath);
         if (entry.media.cover)
           await linkOrCopy(this.path(`${key}.cover.jpg`), coverPath);
       } catch (error) {
@@ -120,8 +128,9 @@ export class MediaCache {
       await utimes(this.path(`${key}.json`), usedAt, usedAt).catch(
         () => undefined,
       );
-      const { duration, transition, embedded, cover } = entry.media;
-      return { duration, transition, embedded, cover };
+      const { duration, transition, embedded, cover, chapters, captions } =
+        entry.media;
+      return { duration, transition, embedded, cover, chapters, captions };
     });
   }
 
@@ -147,13 +156,16 @@ export class MediaCache {
           version: 1,
           createdAt: Date.now(),
         };
-        await linkOrCopy(audioPath, temporary("opus"));
+        await linkOrCopy(audioPath, temporary(this.extension));
         if (cover) await linkOrCopy(cover, temporary("cover.jpg"));
         await writeFile(temporary("json"), JSON.stringify(stored));
         // An entry exists once its description does, so that goes last.
         replacing = true;
         await rm(this.path(`${key}.json`), { force: true });
-        await rename(temporary("opus"), this.path(`${key}.opus`));
+        await rename(
+          temporary(this.extension),
+          this.path(`${key}.${this.extension}`),
+        );
         if (cover)
           await rename(temporary("cover.jpg"), this.path(`${key}.cover.jpg`));
         else await rm(this.path(`${key}.cover.jpg`), { force: true });
@@ -167,7 +179,7 @@ export class MediaCache {
           "Could not cache track",
         );
         await Promise.all(
-          ["opus", "cover.jpg", "json"].map((name) =>
+          [this.extension, "cover.jpg", "json"].map((name) =>
             rm(temporary(name), { force: true }),
           ),
         );
@@ -184,7 +196,7 @@ export class MediaCache {
       const media = JSON.parse(await readFile(description, "utf8")) as Stored;
       if (!validStored(media)) return;
       const [audio, cover, used] = await Promise.all([
-        stat(this.path(`${key}.opus`)),
+        stat(this.path(`${key}.${this.extension}`)),
         media.cover ? stat(this.path(`${key}.cover.jpg`)) : undefined,
         stat(description),
       ]);
@@ -219,10 +231,15 @@ export class MediaCache {
     this.entries.delete(key);
     // The description goes first so a partial removal reads as no entry.
     await rm(this.path(`${key}.json`), { force: true });
-    await Promise.all([
-      rm(this.path(`${key}.opus`), { force: true }),
-      rm(this.path(`${key}.cover.jpg`), { force: true }),
-    ]);
+    // Both go before a failure is reported, so it never leaves the other
+    // half-removed behind it.
+    const failed = (
+      await Promise.allSettled([
+        rm(this.path(`${key}.${this.extension}`), { force: true }),
+        rm(this.path(`${key}.cover.jpg`), { force: true }),
+      ])
+    ).find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 
   private expired(entry: Indexed) {

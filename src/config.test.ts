@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { parseIds, parseRolePermissions, parseWholeNumber } from "./config.ts";
+import {
+  parseIds,
+  parseRolePermissions,
+  parseVideoLimits,
+  parseWholeNumber,
+} from "./config.ts";
 
 test("parses comma and whitespace separated IDs", () => {
   expect([...parseIds("C123,C456 C789\nC123")]).toEqual([
@@ -75,4 +80,36 @@ test("WORKSPACE_ADMINS_AS_MANAGERS still grants host until replaced", () => {
   expect(replaced.warnings).toContain(
     "WORKSPACE_ADMINS_AS_MANAGERS is ignored because WORKSPACE_ADMIN_PERMISSIONS is set",
   );
+});
+
+test("video limits default to an hour at 720p30 and keep their bounds", () => {
+  expect(parseVideoLimits({})).toEqual({
+    durationSeconds: 3_600,
+    downloadBytes: 1_500_000_000,
+    maxHeight: 720,
+    maxFps: 30,
+    sessionLimit: 2,
+    cacheBytes: 5_000_000_000,
+  });
+  expect(
+    parseVideoLimits({
+      VIDEO_DURATION_LIMIT_SECONDS: "7200",
+      VIDEO_DOWNLOAD_LIMIT_BYTES: "2000000000",
+      VIDEO_MAX_HEIGHT: "1080",
+      VIDEO_MAX_FPS: "24",
+      VIDEO_SESSION_LIMIT: "0",
+      VIDEO_CACHE_LIMIT_BYTES: "0",
+    }),
+  ).toEqual({
+    durationSeconds: 7_200,
+    downloadBytes: 2_000_000_000,
+    maxHeight: 1_080,
+    maxFps: 24,
+    sessionLimit: 0,
+    cacheBytes: 0,
+  });
+  // Out of range: the default.
+  expect(
+    parseVideoLimits({ VIDEO_MAX_HEIGHT: "4320", VIDEO_MAX_FPS: "60" }),
+  ).toMatchObject({ maxHeight: 720, maxFps: 30 });
 });

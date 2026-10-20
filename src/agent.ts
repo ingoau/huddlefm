@@ -12,6 +12,7 @@ import {
   autoplayModes,
   displayModes,
   loopModes,
+  mediaModes,
   permissionPresets,
   transitionModes,
 } from "./store.ts";
@@ -53,7 +54,83 @@ function openRouterModel() {
   })(agentModel);
 }
 
-function agentTools(coordinator: Coordinator, userId: string) {
+// The tools match the mode the session is in, as the Slack controls do: video
+// mode has Jump to and captions, and no music settings.
+const addSchema = z.object({
+  reference: z
+    .string()
+    .min(1)
+    .describe("Reference value from search_tracks, or a media URL"),
+  withVideoMode: z
+    .boolean()
+    .optional()
+    .describe(
+      "To watch it: the host switches to video mode, and anyone else asks the host to",
+    ),
+});
+
+const settingsSchema = z.object({
+  mode: z
+    .enum(mediaModes)
+    .optional()
+    .describe("music, or video to watch videos together (host only)"),
+  displayMode: z.enum(displayModes).optional(),
+  autoplay: z.boolean().optional(),
+  autoplayMode: z
+    .enum(autoplayModes)
+    .optional()
+    .describe("off, related (YouTube up-next), or huddle mix"),
+  loopMode: z
+    .enum(loopModes)
+    .optional()
+    .describe("off, track (repeat current song), or queue (cycle queue)"),
+  transitionMode: z.enum(transitionModes).optional(),
+  anchorEnabled: z
+    .boolean()
+    .optional()
+    .describe("Keep the player message at the bottom of the thread"),
+  permissionPreset: z
+    .enum(
+      Object.keys(permissionPresets) as [
+        keyof typeof permissionPresets,
+        ...(keyof typeof permissionPresets)[],
+      ],
+    )
+    .optional(),
+  hostUserId: z
+    .string()
+    .optional()
+    .describe("Transfer host to this Slack user id"),
+});
+
+// What video mode adds: Jump to and captions, as on the player.
+function videoTools(coordinator: Coordinator, userId: string) {
+  return {
+    jump_to: tool({
+      description:
+        "Jump to a time in what is playing, or to one of its chapters by name (see get_status).",
+      inputSchema: z.object({
+        position: z
+          .number()
+          .min(0)
+          .optional()
+          .describe("Seconds from the start"),
+        chapter: z.string().min(1).optional().describe("Chapter title"),
+      }),
+      execute: async (target, { abortSignal }) =>
+        coordinator.agentJumpTo(userId, target, abortSignal),
+    }),
+    set_captions: tool({
+      description: "Turn captions on or off for the videos.",
+      inputSchema: z.object({ enabled: z.boolean() }),
+      execute: async ({ enabled }, { abortSignal }) =>
+        coordinator.agentSetCaptions(userId, enabled, abortSignal),
+    }),
+  };
+}
+
+export function agentTools(coordinator: Coordinator, userId: string) {
+  const video = coordinator.videoMode;
   // A tool that takes no input and only needs the abort signal.
   const action = <Output>(
     description: string,
@@ -66,14 +143,17 @@ function agentTools(coordinator: Coordinator, userId: string) {
       { abortSignal }: ToolExecutionOptions<Record<string, unknown>>,
     ) => run(abortSignal),
   });
-  return {
+  const tools = {
     get_status: action(
-      "Get what's playing, the queue, volume, settings, host, and this user's permissions.",
+      video
+        ? "Get the mode, what's playing (with its chapters), the queue, volume, captions, host, and this user's permissions."
+        : "Get the mode, what's playing, the queue, volume, settings, host, whether video mode has been asked for, and this user's permissions.",
       (signal) => coordinator.agentStatus(userId, signal),
     ),
     search_tracks: tool({
-      description:
-        "Search YouTube Music (and resolve media URLs) for songs, albums, or playlists. Use the returned reference values with add_tracks.",
+      description: video
+        ? "Search YouTube (and resolve media URLs) for videos. Use the returned reference values with add_tracks."
+        : "Search YouTube Music (and resolve media URLs) for songs, albums, or playlists. Use the returned reference values with add_tracks. Results are songs; links can be videos.",
       inputSchema: z.object({
         query: z
           .string()
@@ -84,16 +164,18 @@ function agentTools(coordinator: Coordinator, userId: string) {
         coordinator.agentSearch(userId, query, abortSignal),
     }),
     add_tracks: tool({
-      description:
-        "Add a search result or media URL reference to the queue. Prefer a reference from search_tracks.",
-      inputSchema: z.object({
-        reference: z
-          .string()
-          .min(1)
-          .describe("Reference value from search_tracks, or a media URL"),
-      }),
-      execute: async ({ reference }, { abortSignal }) =>
-        coordinator.agentAdd(userId, reference, abortSignal),
+      description: video
+        ? "Add a search result or media URL reference to the queue. Prefer a reference from search_tracks."
+        : "Add a search result or media URL reference to the queue. Prefer a reference from search_tracks. A video link plays as audio unless withVideoMode is set.",
+      inputSchema: video
+        ? (addSchema.omit({
+            withVideoMode: true,
+          }) as unknown as typeof addSchema)
+        : addSchema,
+      execute: async ({ reference, withVideoMode }, { abortSignal }) =>
+        coordinator.agentAdd(userId, reference, abortSignal, {
+          withVideoMode,
+        }),
     }),
     remove_from_queue: tool({
       description: "Remove a track from the upcoming queue by id.",
@@ -163,37 +245,18 @@ function agentTools(coordinator: Coordinator, userId: string) {
         coordinator.agentSetVolume(userId, percent, abortSignal),
     }),
     update_settings: tool({
-      description:
-        "Change session settings the user is allowed to configure (display, autoplay, loop, transitions, keep-player-at-bottom, permission preset, or host).",
-      inputSchema: z.object({
-        displayMode: z.enum(displayModes).optional(),
-        autoplay: z.boolean().optional(),
-        autoplayMode: z
-          .enum(autoplayModes)
-          .optional()
-          .describe("off, related (YouTube up-next), or huddle mix"),
-        loopMode: z
-          .enum(loopModes)
-          .optional()
-          .describe("off, track (repeat current song), or queue (cycle queue)"),
-        transitionMode: z.enum(transitionModes).optional(),
-        anchorEnabled: z
-          .boolean()
-          .optional()
-          .describe("Keep the player message at the bottom of the thread"),
-        permissionPreset: z
-          .enum(
-            Object.keys(permissionPresets) as [
-              keyof typeof permissionPresets,
-              ...(keyof typeof permissionPresets)[],
-            ],
-          )
-          .optional(),
-        hostUserId: z
-          .string()
-          .optional()
-          .describe("Transfer host to this Slack user id"),
-      }),
+      description: video
+        ? "Change session settings the user is allowed to configure (mode, loop, keep-player-at-bottom, permission preset, or host). Autoplay, display, transitions and ducking are paused in video mode."
+        : "Change session settings the user is allowed to configure (mode, display, autoplay, loop, transitions, keep-player-at-bottom, permission preset, or host).",
+      // Video mode leaves the music's own settings out of the schema.
+      inputSchema: video
+        ? (settingsSchema.omit({
+            displayMode: true,
+            autoplay: true,
+            autoplayMode: true,
+            transitionMode: true,
+          }) as unknown as typeof settingsSchema)
+        : settingsSchema,
       execute: async (input, { abortSignal }) =>
         coordinator.agentUpdateSettings(userId, input, abortSignal),
     }),
@@ -202,8 +265,9 @@ function agentTools(coordinator: Coordinator, userId: string) {
       (signal) => coordinator.agentClaimHost(userId, signal),
     ),
     set_session_scrobbling: tool({
-      description:
-        "Enable or disable scrobbling for this user in the current session. Requires Last.fm or ListenBrainz to already be connected in Settings.",
+      description: video
+        ? "Enable or disable scrobbling for this user in the current session. Requires Last.fm or ListenBrainz to already be connected in Settings. Scrobbling is paused in video mode; the setting applies when music mode comes back."
+        : "Enable or disable scrobbling for this user in the current session. Requires Last.fm or ListenBrainz to already be connected in Settings.",
       inputSchema: z.object({
         enabled: z
           .boolean()
@@ -217,6 +281,10 @@ function agentTools(coordinator: Coordinator, userId: string) {
       (signal) => coordinator.agentEnd(userId, signal),
     ),
   };
+  // Typed as the shared tools: the video ones only add to them.
+  return (
+    video ? { ...tools, ...videoTools(coordinator, userId) } : tools
+  ) as typeof tools;
 }
 
 export function isAgentBusy(userId: string) {
@@ -292,7 +360,12 @@ The user @mentioned you in the huddle thread (player controls may live in a comp
 Use tools for any playback, queue, search, settings, or session scrobbling change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
 Be concise. After taking actions, briefly confirm what changed. Do not invent track ids; search or read status first. Session scrobbling only works after the user has connected Last.fm or ListenBrainz in Settings.
 Do not use emojis.
-Display modes: ${displayModes.join(", ")}. Loop modes: ${loopModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`,
+${
+  options.coordinator.videoMode
+    ? "The session is in video mode: people watch videos together on a screen share. Autoplay, Huddle mix, lyrics, crossfades, ducking and scrobbling are paused until the host switches back to music mode."
+    : `The session is in music mode. A video link added here plays as audio unless add_tracks is given withVideoMode. Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`
+}
+Loop modes: ${loopModes.join(", ")}.`,
       tools: agentTools(options.coordinator, options.userId),
       stopWhen: stepCountIs(10),
       temperature: 0.2,

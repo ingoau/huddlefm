@@ -87,6 +87,23 @@ describe("AudioEngine", () => {
     ]);
   });
 
+  test("the same entry from another file starts that file over", () => {
+    const { engine, run, decoders, of } = setup(30);
+    engine.handle(play("a"));
+    run(5);
+    // Prepared again, as when video mode swaps a song for its video.
+    engine.handle(play("a", { url: "file:///media/a.video.mkv" }));
+    expect(decoders.at(-2)!.closed).toBeTrue();
+    expect(decoders.at(-1)!.url).toBe("file:///media/a.video.mkv");
+    expect(decoders.at(-1)!.start).toBe(0);
+    run(3);
+    expect(of("playback_position").at(-1)!.details.seconds).toBeLessThan(4);
+    // The same file again is the same playback, carried on.
+    const count = decoders.length;
+    engine.handle(play("a", { url: "file:///media/a.video.mkv" }));
+    expect(decoders).toHaveLength(count);
+  });
+
   test("pause holds the position and resume continues", () => {
     const { engine, run, of } = setup();
     engine.handle(play("a"));

@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import nodeDataChannel from "node-datachannel";
 import { ChimeLink } from "./chime-link.ts";
 import { decodeFrame, encodeFrame } from "./signaling.ts";
+import { shareFormat } from "./video-format.ts";
 
 const { PeerConnection } = nodeDataChannel;
 
@@ -15,6 +16,8 @@ function fakeChime(afterJoin: Uint8Array[] = []) {
   const received = { audio: 0, video: 0 };
   const joins: number[] = [];
   const subscribes: Subscribe[] = [];
+  const protocols: string[] = [];
+  const sendStreams: Record<string, unknown>[][] = [];
   let peer: InstanceType<typeof PeerConnection> | undefined;
 
   const answer = (offer: string) =>
@@ -57,6 +60,7 @@ function fakeChime(afterJoin: Uint8Array[] = []) {
     port: 0,
     hostname: "127.0.0.1",
     fetch(request, server) {
+      protocols.push(request.headers.get("sec-websocket-protocol") ?? "");
       return server.upgrade(request, {
         headers: { "Sec-WebSocket-Protocol": "_aws_wt_session" },
       })
@@ -80,6 +84,7 @@ function fakeChime(afterJoin: Uint8Array[] = []) {
         }
         if (frame.type === "SUBSCRIBE") {
           const offer: string = frame.sub.sdp_offer;
+          sendStreams.push(frame.sub.send_streams);
           const videoSection = offer.split(/^m=/m)[2] ?? "";
           subscribes.push({
             duplex: frame.sub.duplex,
@@ -106,6 +111,8 @@ function fakeChime(afterJoin: Uint8Array[] = []) {
     received,
     joins,
     subscribes,
+    protocols,
+    sendStreams,
     stop() {
       peer?.close();
       server.stop(true);
@@ -230,4 +237,44 @@ test("frames sent before media connects still reach the listener", async () => {
   cleanup.push(() => link.leave());
   await link.start();
   expect(events).toEqual(["signaling", "streams person", "connected"]);
+}, 30_000);
+
+test("a screen share joins as the content attendee and offers its own size", async () => {
+  const chime = fakeChime();
+  cleanup.push(() => chime.stop());
+  const format = shareFormat();
+  // Like the JS SDK's content share: the same attendee and token with the
+  // content modality on the end.
+  const link = new ChimeLink(
+    { MediaPlacement: { SignalingUrl: chime.url, AudioHostUrl: "audio" } },
+    { AttendeeId: "bot#content", JoinToken: "token#content" },
+    true,
+    {
+      log: () => {},
+      onSignaling: () => {},
+      onFrame: () => {},
+      onConnected: () => {},
+      onVideoChanged: () => {},
+      onPictureLoss: () => {},
+      onTerminal: (code, reason) => {
+        throw new Error(`terminal ${code}: ${reason}`);
+      },
+    },
+    false,
+    format,
+  );
+  cleanup.push(() => link.leave());
+  await link.start();
+  expect(link.sendingVideo).toBe(true);
+  expect(chime.protocols[0]).toContain("token#content");
+  expect(chime.sendStreams[0]).toContainEqual(
+    expect.objectContaining({
+      media_type: "VIDEO",
+      attendee_id: "bot#content",
+      width: 1280,
+      height: 720,
+      framerate: 30,
+      max_bitrate_kbps: format.maxKbps,
+    }),
+  );
 }, 30_000);
