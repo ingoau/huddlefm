@@ -74,8 +74,12 @@ export class ScrobbleDispatcher {
     log.info({ event: "stopped" }, "Scrobble dispatcher stopped");
   }
 
-  playback(sessionId: string, botUserId: string) {
-    return new PlaybackScrobbler(this, sessionId, botUserId);
+  playback(
+    sessionId: string,
+    botUserId: string,
+    ask?: (userId: string, track: ScrobbleTrack) => void,
+  ) {
+    return new PlaybackScrobbler(this, sessionId, botUserId, ask);
   }
 
   settings(userId: string, sessionId?: string) {
@@ -135,6 +139,16 @@ export class ScrobbleDispatcher {
       settings.mode === "ask" &&
       settings.enabledIntegration &&
       this.store.getSessionScrobbling(sessionId, userId) === undefined
+    );
+  }
+
+  // Whether to ask this listener about each track they hear here.
+  shouldAskForTrack(sessionId: string, userId: string) {
+    const settings = this.settings(userId);
+    return (
+      settings.mode === "ask_track" &&
+      settings.enabledIntegration &&
+      !this.sessionEnabled(sessionId, userId)
     );
   }
 
@@ -324,11 +338,32 @@ export class ScrobbleDispatcher {
     track: ScrobbleTrack,
     listenedAt: number,
     listenedSeconds: number,
+    {
+      confirmed = false,
+      remembered = false,
+    }: {
+      // The listener said yes to scrobbling this track.
+      confirmed?: boolean;
+      // This listen already reached the threshold once and was recorded.
+      remembered?: boolean;
+    } = {},
   ) {
     const threshold = track.duration ? Math.min(track.duration / 2, 240) : 240;
     if (listenedSeconds < threshold) return false;
-    this.rememberListen(sessionId, userId, track, listenedAt);
-    if (!this.sessionEnabled(sessionId, userId)) return true;
+    if (!remembered) this.rememberListen(sessionId, userId, track, listenedAt);
+    if (confirmed || this.sessionEnabled(sessionId, userId))
+      this.queueListen(sessionId, userId, track, listenedAt, confirmed);
+    return true;
+  }
+
+  // Queues an eligible listen for each service the listener scrobbles to.
+  queueListen(
+    sessionId: string,
+    userId: string,
+    track: ScrobbleTrack,
+    listenedAt: number,
+    confirmed = false,
+  ) {
     const settings = this.store.getUserScrobbling(userId);
     const lastFm = enabled(settings, "lastfm");
     const listenBrainz = enabled(settings, "listenbrainz");
@@ -340,6 +375,7 @@ export class ScrobbleDispatcher {
         service,
         listenedAt,
         track,
+        confirmed,
       );
     if (lastFm && (track.duration === undefined || track.duration > 30))
       queue("lastfm");
@@ -352,11 +388,11 @@ export class ScrobbleDispatcher {
         trackId: track.id,
         lastFm,
         listenBrainz,
+        confirmed,
       },
       "Eligible listen queued",
     );
     void this.flush();
-    return true;
   }
 
   flush() {
@@ -402,7 +438,11 @@ export class ScrobbleDispatcher {
       const service: Service =
         item.service === "lastfm" ? "lastfm" : "listenbrainz";
       try {
-        if (!this.sessionEnabled(item.sessionId, item.userId)) continue;
+        if (
+          !item.confirmed &&
+          !this.sessionEnabled(item.sessionId, item.userId)
+        )
+          continue;
         if (!enabled(settings, service)) continue;
         await this.submit(service, settings, item.track, item.listenedAt);
         this.store.finishScrobble(item.id, "sent");
@@ -560,20 +600,33 @@ type Listener = {
   seconds: number;
   active: boolean;
   reported?: boolean;
+  // Their listen is recorded for the Huddle mix, which it only ever is once.
+  remembered?: boolean;
+  // The listener said yes when asked whether to scrobble this track.
+  confirmed?: boolean;
 };
 
+type Playing = {
+  track: ScrobbleTrack;
+  playing: boolean;
+  lastPosition: number;
+  listeners: Map<string, Listener>;
+};
+
+// What became of a listener's yes to one track.
+export type TrackConfirmation = "scrobbling" | "too_short" | "unknown";
+
 export class PlaybackScrobbler {
-  private current?: {
-    track: ScrobbleTrack;
-    playing: boolean;
-    lastPosition: number;
-    listeners: Map<string, Listener>;
-  };
+  private current?: Playing;
+  // The track before this one, so a listener who answers its prompt late
+  // still gets it scrobbled.
+  private previous?: Playing;
 
   constructor(
     private dispatcher: ScrobbleDispatcher,
     private sessionId: string,
     private botUserId: string,
+    private ask?: (userId: string, track: ScrobbleTrack) => void,
   ) {}
 
   start(
@@ -581,12 +634,25 @@ export class PlaybackScrobbler {
     userIds: Iterable<string>,
     playing = true,
     position = 0,
+    ask = true,
   ) {
+    // A replay of the same track, as when it loops, keeps the answers already
+    // given for it, and its earlier prompt still answers for it.
+    const last = this.current ?? this.previous;
+    const replayed = last?.track.id === track.id ? last.listeners : undefined;
     const listeners = new Map<string, Listener>();
     for (const userId of userIds)
-      if (userId !== this.botUserId) listeners.set(userId, newListener());
+      if (userId !== this.botUserId)
+        listeners.set(userId, {
+          ...newListener(),
+          confirmed: replayed?.get(userId)?.confirmed,
+        });
+    if (this.current) this.previous = this.current;
     this.current = { track, playing, lastPosition: position, listeners };
     this.announce(listeners.keys());
+    if (ask)
+      for (const userId of listeners.keys())
+        if (!replayed?.has(userId)) this.askAbout(userId, track);
   }
 
   memberJoined(userId: string) {
@@ -596,6 +662,31 @@ export class PlaybackScrobbler {
     if (existing) existing.active = true;
     else this.current.listeners.set(userId, newListener());
     this.announce([userId]);
+    if (!existing) this.askAbout(userId, this.current.track);
+  }
+
+  /** Scrobbles one track for a listener who has scrobbling off here. */
+  confirm(userId: string, trackId: string): TrackConfirmation {
+    const playing = [this.current, this.previous].find(
+      (candidate) => candidate?.track.id === trackId,
+    );
+    const listener = playing?.listeners.get(userId);
+    if (!playing || !listener) return "unknown";
+    // A finished track is only worth scrobbling if they heard enough of it.
+    if (playing !== this.current && !listener.reported) return "too_short";
+    if (listener.confirmed) return "scrobbling";
+    listener.confirmed = true;
+    // They already heard enough of it, so it goes out now.
+    if (listener.reported)
+      this.dispatcher.queueListen(
+        this.sessionId,
+        userId,
+        playing.track,
+        listener.listenedAt,
+        true,
+      );
+    if (playing === this.current) this.announce([userId]);
+    return "scrobbling";
   }
 
   memberLeft(userId: string) {
@@ -615,7 +706,8 @@ export class PlaybackScrobbler {
 
   sessionEnabled(userId: string) {
     const listener = this.current?.listeners.get(userId);
-    if (listener) {
+    // A track they already said yes to keeps counting from where it was.
+    if (listener && !listener.confirmed) {
       listener.listenedAt = Math.floor(Date.now() / 1000);
       listener.seconds = 0;
     }
@@ -642,21 +734,32 @@ export class PlaybackScrobbler {
         this.current.track,
         listener.listenedAt,
         listener.seconds,
+        { confirmed: listener.confirmed, remembered: listener.remembered },
       );
+      if (listener.reported) listener.remembered = true;
     }
   }
 
   finish() {
+    if (this.current) this.previous = this.current;
     this.current = undefined;
   }
 
   // Tells the listeners who scrobble here what is playing, if anything is.
   private announce(userIds: Iterable<string>) {
     if (!this.current?.playing) return;
-    const enabled = [...userIds].filter((userId) =>
-      this.dispatcher.sessionEnabled(this.sessionId, userId),
+    const listeners = this.current.listeners;
+    const enabled = [...userIds].filter(
+      (userId) =>
+        listeners.get(userId)?.confirmed ||
+        this.dispatcher.sessionEnabled(this.sessionId, userId),
     );
     this.dispatcher.nowPlaying(enabled, this.current.track);
+  }
+
+  private askAbout(userId: string, track: ScrobbleTrack) {
+    if (this.ask && this.dispatcher.shouldAskForTrack(this.sessionId, userId))
+      this.ask(userId, track);
   }
 }
 

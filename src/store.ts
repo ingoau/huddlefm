@@ -40,7 +40,12 @@ export const duckingModeLabels: Record<DuckingMode, string> = {
   strong: "Strong",
 };
 
-export const scrobblingModes = ["always", "ask", "disabled"] as const;
+export const scrobblingModes = [
+  "always",
+  "ask",
+  "ask_track",
+  "disabled",
+] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
 
 // What a listener lets the Huddle mix draw on: the songs they have added or
@@ -306,6 +311,9 @@ type PendingScrobble = {
   service: string;
   listenedAt: number;
   attempts: number;
+  // The listener said yes to this one track, so it is sent even though
+  // scrobbling is off for them in its session.
+  confirmed: boolean;
   track: {
     id: string;
     requesterId: string;
@@ -386,6 +394,7 @@ const addedColumns = [
   ["user_scrobbling", "huddle_mix_added", "INTEGER NOT NULL DEFAULT 1"],
   ["user_scrobbling", "huddle_mix_lastfm", "INTEGER NOT NULL DEFAULT 1"],
   ["user_scrobbling", "huddle_mix_listenbrainz", "INTEGER NOT NULL DEFAULT 1"],
+  ["scrobbles", "confirmed", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -671,6 +680,7 @@ export class Store {
         attempts INTEGER NOT NULL DEFAULT 0,
         next_attempt_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
+        confirmed INTEGER NOT NULL DEFAULT 0,
         UNIQUE (session_id, track_id, user_id, service)
       );
       CREATE TABLE IF NOT EXISTS usage_counters (
@@ -2187,13 +2197,14 @@ export class Store {
     service: string,
     listenedAt: number,
     track: unknown,
+    confirmed = false,
   ) {
     const now = Date.now();
     this.db
       .query(
         `INSERT OR IGNORE INTO scrobbles
-      (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at, confirmed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         crypto.randomUUID(),
@@ -2205,6 +2216,7 @@ export class Store {
         JSON.stringify(track),
         now,
         now,
+        confirmed ? 1 : 0,
       );
   }
 
@@ -2212,7 +2224,7 @@ export class Store {
     return (
       this.db
         .query(
-          `SELECT id, session_id, user_id, service, listened_at, attempts, track FROM scrobbles
+          `SELECT id, session_id, user_id, service, listened_at, attempts, confirmed, track FROM scrobbles
       WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY listened_at, created_at`,
         )
         .all(now) as Row[]
@@ -2225,6 +2237,7 @@ export class Store {
           service: String(row.service),
           listenedAt: Number(row.listened_at),
           attempts: Number(row.attempts),
+          confirmed: Boolean(row.confirmed),
           track: JSON.parse(String(row.track)),
         }) satisfies PendingScrobble,
     );
@@ -2252,17 +2265,21 @@ export class Store {
       .run(userId, service);
   }
 
+  // Tracks a listener said yes to one at a time are kept by this and the
+  // next, as they asked for those whatever their defaults say.
   clearPendingSessionScrobbles(sessionId: string, userId: string) {
     this.db
       .query(
-        "DELETE FROM scrobbles WHERE session_id = ? AND user_id = ? AND status = 'pending'",
+        "DELETE FROM scrobbles WHERE session_id = ? AND user_id = ? AND status = 'pending' AND confirmed = 0",
       )
       .run(sessionId, userId);
   }
 
   clearPendingUserScrobbles(userId: string) {
     this.db
-      .query("DELETE FROM scrobbles WHERE user_id = ? AND status = 'pending'")
+      .query(
+        "DELETE FROM scrobbles WHERE user_id = ? AND status = 'pending' AND confirmed = 0",
+      )
       .run(userId);
   }
 
