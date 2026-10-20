@@ -486,6 +486,22 @@ test("enabling the session keeps the listening already counted for a confirmed t
   store.close();
 });
 
+test("a listen is remembered once however often scrobbling is switched on", () => {
+  const { store, dispatcher, playback } = askTrackSetup(
+    (async () =>
+      new Response("down", { status: 503 })) as unknown as typeof fetch,
+  );
+  playback.start(askTrack("heard"), ["user"]);
+  for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+  playback.confirm("user", "heard");
+  dispatcher.setSessionEnabled("session", "user", true);
+  playback.sessionEnabled("user");
+  playback.settingsEnabled("user");
+  for (const seconds of [30, 35]) playback.position(seconds);
+  expect(store.recentPlays(["user"], 0)).toHaveLength(1);
+  store.close();
+});
+
 test("remembers a real listen for the Huddle mix, scrobbler or not", () => {
   const store = new Store(":memory:");
   const dispatcher = new ScrobbleDispatcher(store, {});

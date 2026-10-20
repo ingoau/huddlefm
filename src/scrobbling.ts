@@ -338,11 +338,19 @@ export class ScrobbleDispatcher {
     track: ScrobbleTrack,
     listenedAt: number,
     listenedSeconds: number,
-    confirmed = false,
+    {
+      confirmed = false,
+      remembered = false,
+    }: {
+      // The listener said yes to scrobbling this track.
+      confirmed?: boolean;
+      // This listen already reached the threshold once and was recorded.
+      remembered?: boolean;
+    } = {},
   ) {
     const threshold = track.duration ? Math.min(track.duration / 2, 240) : 240;
     if (listenedSeconds < threshold) return false;
-    this.rememberListen(sessionId, userId, track, listenedAt);
+    if (!remembered) this.rememberListen(sessionId, userId, track, listenedAt);
     if (confirmed || this.sessionEnabled(sessionId, userId))
       this.queueListen(sessionId, userId, track, listenedAt, confirmed);
     return true;
@@ -592,6 +600,8 @@ type Listener = {
   seconds: number;
   active: boolean;
   reported?: boolean;
+  // Their listen is recorded for the Huddle mix, which it only ever is once.
+  remembered?: boolean;
   // The listener said yes when asked whether to scrobble this track.
   confirmed?: boolean;
 };
@@ -724,8 +734,9 @@ export class PlaybackScrobbler {
         this.current.track,
         listener.listenedAt,
         listener.seconds,
-        listener.confirmed,
+        { confirmed: listener.confirmed, remembered: listener.remembered },
       );
+      if (listener.reported) listener.remembered = true;
     }
   }
 
