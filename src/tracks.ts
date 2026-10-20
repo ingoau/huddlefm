@@ -4,6 +4,22 @@ import { basename, dirname } from "node:path";
 import { logger } from "./logger.ts";
 import { type CachedMedia, MediaCache } from "./media-cache.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
+import {
+  captionsPath,
+  chaptersFrom,
+  chaptersPath,
+  cleanVideoTitle,
+  coreTitle,
+  formatClock,
+  formatLimit,
+  musicVideoMatch,
+  parseYouTubeSearch,
+  pickSubtitles,
+  shorten,
+  vttToSrt,
+  type Chapter,
+} from "./videos.ts";
+import { firstArtist } from "./artist.ts";
 
 const log = logger.child({ component: "tracks" });
 const maxEmbeddedArtworkBytes = 5 * 1024 * 1024;
@@ -72,6 +88,16 @@ const expectedExtractorFailures = [
   {
     pattern: /live event will begin|premieres? in|is scheduled for/i,
     message: "Track has not been released yet",
+  },
+  {
+    pattern:
+      /sign in to confirm your age|age[- ]restricted|inappropriate for some users/i,
+    message: "That video is age-restricted",
+  },
+  {
+    pattern:
+      /members[- ]only|join this channel|available to this channel's members/i,
+    message: "That video is for channel members only",
   },
   {
     pattern: /unsupported url/i,
@@ -175,6 +201,104 @@ export async function normalizeLoudness(
   }
 }
 
+/**
+ * Like normalizeLoudness, for a video: the picture is copied as it is and
+ * only the audio is levelled.
+ */
+export async function normalizeVideoLoudness(
+  filePath: string,
+  entryId: string,
+  maxBytes: number,
+  signal?: AbortSignal,
+) {
+  const normalizedPath = filePath.replace(/\.[^.]+$/, ".normalized.mkv");
+  try {
+    await run(
+      [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+        "-i",
+        filePath,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0",
+        "-c:v",
+        "copy",
+        "-af",
+        "loudnorm=I=-14:LRA=11:TP=-1",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "160k",
+        "-f",
+        "matroska",
+        normalizedPath,
+      ],
+      600_000,
+      signal,
+    );
+    if ((await stat(normalizedPath)).size > maxBytes)
+      throw new Error("Normalized video exceeds the download limit");
+    await rename(normalizedPath, filePath);
+    return true;
+  } catch (error) {
+    await rm(normalizedPath, { force: true });
+    if (signal?.aborted) throw error;
+    log.warn(
+      {
+        event: "video_loudness_normalization_failed",
+        entryId,
+        detail: trackFailureDetail(error),
+        err: error,
+      },
+      "Playing video without loudness normalization",
+    );
+    return false;
+  }
+}
+
+/** Gives a video with no sound a silent track as long as its picture. */
+async function addSilence(filePath: string, signal?: AbortSignal) {
+  const silentPath = filePath.replace(/\.[^.]+$/, ".silent.mkv");
+  try {
+    await run(
+      [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+        "-i",
+        filePath,
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=48000:cl=stereo",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "32k",
+        "-shortest",
+        "-f",
+        "matroska",
+        silentPath,
+      ],
+      600_000,
+      signal,
+    );
+    await rename(silentPath, filePath);
+  } catch (error) {
+    await rm(silentPath, { force: true });
+    throw error;
+  }
+}
+
 export function isYoutubeVideoId(id: string) {
   return /^[a-zA-Z0-9_-]{11}$/.test(id);
 }
@@ -218,7 +342,57 @@ export type TrackMetadata = {
   album?: string;
   duration?: number;
   artwork?: string;
+  /**
+   * A song, or a video worth watching for its own sake. Video mode shows a
+   * video as it is and looks for a song's official video. Absent on tracks
+   * saved before video mode; see trackKind.
+   */
+  kind?: TrackKind;
 };
+
+export type TrackKind = "song" | "video";
+
+/** A track's kind, guessing for one saved before kinds were kept. */
+export function trackKind(track: Pick<TrackMetadata, "kind" | "canonicalUrl">) {
+  if (track.kind) return track.kind;
+  const host = parseHttpUrl(track.canonicalUrl)?.hostname.toLowerCase();
+  return youtubeUrl(track.canonicalUrl) && host !== "music.youtube.com"
+    ? "video"
+    : "song";
+}
+
+/**
+ * What a prepared file holds: audio, the track's own video, or a song's
+ * official video in place of the song.
+ */
+export type MediaForm = "audio" | "video" | "music_video";
+
+export type PreparedMedia = {
+  filePath: string;
+  form: MediaForm;
+  /** A video that would not download, prepared as audio in its place. */
+  fellBack?: boolean;
+};
+
+/** What video mode allows; see the VIDEO_* settings. */
+export type VideoLimits = {
+  durationSeconds: number;
+  downloadBytes: number;
+  maxHeight: number;
+  maxFps: number;
+  cacheBytes: number;
+};
+
+export const defaultVideoLimits: VideoLimits = {
+  durationSeconds: 3_600,
+  downloadBytes: 1_500_000_000,
+  maxHeight: 720,
+  maxFps: 30,
+  cacheBytes: 5_000_000_000,
+};
+
+/** A source that turned out to have no picture, so plays as audio. */
+class NoVideoError extends Error {}
 
 export type EmbeddedMetadata = {
   title?: string;
@@ -236,6 +410,8 @@ export async function removePreparedMedia(filePath: string) {
   await Promise.all([
     rm(filePath, { force: true }),
     rm(embeddedArtworkPath(filePath), { force: true }),
+    rm(captionsPath(filePath), { force: true }),
+    rm(chaptersPath(filePath), { force: true }),
   ]);
 }
 
@@ -262,6 +438,7 @@ export class TrackCatalog {
   private transitions = new Map<string, TransitionData>();
   private extractions = new Map<string, { info: string; expiresAt: number }>();
   private cache: MediaCache;
+  private videoCache: MediaCache;
   private preparationQueue: {
     priority: number;
     run: () => Promise<string>;
@@ -278,6 +455,8 @@ export class TrackCatalog {
       mediaCacheBytes?: number;
       mediaCacheMaxAgeDays?: number;
       mediaCacheDirectory?: string;
+      video?: VideoLimits;
+      videoCacheDirectory?: string;
     },
   ) {
     this.cache = new MediaCache(
@@ -287,6 +466,19 @@ export class TrackCatalog {
         maxAgeMs: (limits.mediaCacheMaxAgeDays ?? 0) * 86_400_000,
       },
     );
+    this.videoCache = new MediaCache(
+      limits.videoCacheDirectory ?? "data/cache/video",
+      {
+        maxBytes: this.video.cacheBytes,
+        maxAgeMs: (limits.mediaCacheMaxAgeDays ?? 0) * 86_400_000,
+      },
+      "mkv",
+    );
+  }
+
+  /** What video mode allows. */
+  get video() {
+    return this.limits.video ?? defaultVideoLimits;
   }
 
   async initialize() {
@@ -298,6 +490,14 @@ export class TrackCatalog {
         log.warn(
           { event: "media_cache_initialization_failed", err: error },
           "Preparing tracks without reading the media cache",
+        ),
+      );
+    await this.videoCache
+      .initialize()
+      .catch((error) =>
+        log.warn(
+          { event: "video_cache_initialization_failed", err: error },
+          "Preparing videos without reading the video cache",
         ),
       );
     this.proxy = await PublicNetworkProxy.start();
@@ -319,7 +519,11 @@ export class TrackCatalog {
     log.info({ event: "closed" }, "Track catalog closed");
   }
 
-  async suggestions(query: string, allowed = { songs: true, bulk: false }) {
+  async suggestions(
+    query: string,
+    allowed = { songs: true, bulk: false },
+    video = false,
+  ) {
     const startedAt = Date.now();
     const completed = (
       inputType: string,
@@ -339,6 +543,21 @@ export class TrackCatalog {
       return options;
     };
     const url = parseHttpUrl(query);
+    if (!url && video) {
+      const videos = allowed.songs ? await this.searchVideos(query) : [];
+      return completed(
+        "video_search",
+        videos.slice(0, 8).map((track) => {
+          // The length and channel stay; a long title gives way, at a word.
+          const suffix = ` — ${track.artist}${track.duration ? ` · ${formatClock(track.duration)}` : ""}`;
+          return option(
+            `${shorten(track.title, Math.max(20, 75 - [...suffix].length))}${suffix}`,
+            this.remember(track),
+          );
+        }),
+        { songsAllowed: allowed.songs },
+      );
+    }
     if (!url) {
       const [songs, albums] = await Promise.all([
         allowed.songs ? this.music.searchSongs(query) : [],
@@ -403,16 +622,24 @@ export class TrackCatalog {
     ]);
   }
 
-  async resolve(reference: string): Promise<TrackMetadata | TrackMetadata[]> {
+  /**
+   * The track or tracks a search result or link stands for. In video mode,
+   * links are checked against the video limits instead of the song ones.
+   */
+  async resolve(
+    reference: string,
+    video = false,
+  ): Promise<TrackMetadata | TrackMetadata[]> {
     const stored = this.references.get(reference);
     if (!stored) throw new TrackError("Track selection expired; search again");
-    const resolved = await this.resolveStored(stored);
+    const resolved = await this.resolveStored(stored, video);
     this.references.delete(reference);
     return resolved;
   }
 
   private async resolveStored(
     stored: TrackMetadata | CollectionReference | string,
+    video = false,
   ) {
     if (typeof stored === "object" && "type" in stored)
       return this.resolveCollection(stored.type, async () =>
@@ -427,10 +654,11 @@ export class TrackCatalog {
               ),
       );
     if (typeof stored !== "string") {
-      this.validate(stored);
+      this.validate(stored, video);
       return stored;
     }
-    if (!navidromeShare(parseHttpUrl(stored))) return this.resolveUrl(stored);
+    if (!navidromeShare(parseHttpUrl(stored)))
+      return this.resolveUrl(stored, video);
     const tracks = await this.resolveCollection("navidrome-share", () =>
       this.resolveNavidromeShare(stored),
     );
@@ -458,7 +686,7 @@ export class TrackCatalog {
     return tracks;
   }
 
-  async resolveUrl(input: string): Promise<TrackMetadata> {
+  async resolveUrl(input: string, video = false): Promise<TrackMetadata> {
     const startedAt = Date.now();
     const url = parseHttpUrl(input);
     if (!url)
@@ -470,7 +698,7 @@ export class TrackCatalog {
         throw new TrackError("That album or playlist has no playable songs");
       if (tracks.length > 1)
         throw new TrackError("Playlists are not supported");
-      this.validate(tracks[0]!);
+      this.validate(tracks[0]!, video);
       return urlResolved(tracks[0]!, startedAt);
     }
     const metadata = await runJson([
@@ -478,10 +706,11 @@ export class TrackCatalog {
       "--dump-single-json",
       "--skip-download",
       "--no-playlist",
-      // Match the format --extract-audio downloads so the size check
-      // measures the audio stream, not a merged video+audio format.
+      // Match the format the download takes, so the size check measures
+      // what will actually be fetched: the audio stream for a song, and the
+      // capped video and its audio in video mode.
       "--format",
-      "bestaudio/best",
+      video ? this.videoFormat() : "bestaudio/best",
       "--socket-timeout",
       "10",
       "--",
@@ -491,22 +720,35 @@ export class TrackCatalog {
       throw new TrackError("Playlists are not supported");
     if (metadata.is_live || metadata.live_status === "is_live")
       throw new TrackError("Live streams are not supported");
+    restrictedVideo(metadata);
     if (
       (metadata.filesize ?? metadata.filesize_approx ?? 0) >
-      this.limits.downloadBytes
+      (video ? this.video.downloadBytes : this.limits.downloadBytes)
     )
-      throw new TrackError("Track exceeds the download limit");
+      throw new TrackError(
+        video
+          ? "That video is too big to download"
+          : "Track exceeds the download limit",
+      );
     const canonicalUrl = metadata.webpage_url ?? url.href;
     await assertPublicUrl(new URL(canonicalUrl));
+    const kind = metadataKind(metadata);
+    const channel = String(
+      metadata.channel ?? metadata.uploader ?? "Unknown artist",
+    );
     let track: TrackMetadata = {
       sourceInput: url.href,
       canonicalUrl,
       sourceId: String(metadata.id),
-      title: String(metadata.title ?? "Untitled"),
+      title:
+        kind === "video"
+          ? cleanVideoTitle(String(metadata.title ?? "Untitled"), channel)
+          : String(metadata.title ?? "Untitled"),
       artist: String(metadata.artist ?? metadata.uploader ?? "Unknown artist"),
       album: metadata.album ? String(metadata.album) : undefined,
       duration: metadata.duration ? Number(metadata.duration) : undefined,
       artwork: await publicArtworkUrl(metadata.thumbnail),
+      kind,
     };
     // Direct files and other generic sources often only expose the filename
     // through yt-dlp; prefer embedded tags when the extractor metadata is thin.
@@ -515,8 +757,9 @@ export class TrackCatalog {
         track,
         await probeEmbeddedMetadata(canonicalUrl, undefined, this.proxyUrl),
       );
-    this.validate(track);
-    this.rememberExtraction(canonicalUrl, metadata);
+    this.validate(track, video);
+    // The extraction is only reused for the audio download it matches.
+    if (!video) this.rememberExtraction(canonicalUrl, metadata);
     return urlResolved(track, startedAt);
   }
 
@@ -631,6 +874,108 @@ export class TrackCatalog {
     return this.resolveUrl(`https://music.youtube.com/watch?v=${videoId}`);
   }
 
+  /**
+   * Videos on YouTube itself rather than YouTube Music, for video mode,
+   * through the web player's search. YouTube Music's video search stands in
+   * if that fails.
+   */
+  async searchVideos(query: string): Promise<TrackMetadata[]> {
+    try {
+      const response = await fetch(
+        "https://www.youtube.com/youtubei/v1/search?prettyPrint=false",
+        {
+          method: "POST",
+          proxy: this.proxyUrl,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            context: {
+              client: {
+                clientName: "WEB",
+                clientVersion: "2.20250101.00.00",
+                hl: "en",
+                gl: "US",
+              },
+            },
+            query,
+            // Videos only: no channels, playlists or shorts shelves.
+            params: "EgIQAQ==",
+          }),
+          signal: AbortSignal.timeout(2_500),
+        },
+      );
+      if (!response.ok)
+        throw new Error(`YouTube search HTTP ${response.status}`);
+      const videos = parseYouTubeSearch(await response.json());
+      return videos.map((video) => ({
+        sourceInput: `https://www.youtube.com/watch?v=${video.videoId}`,
+        canonicalUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
+        sourceId: video.videoId,
+        title: video.title,
+        artist: video.channel,
+        duration: video.duration,
+        artwork: video.thumbnail,
+        kind: "video" as const,
+      }));
+    } catch (error) {
+      log.warn(
+        { event: "video_search_failed", err: error },
+        "YouTube search failed; searching YouTube Music videos instead",
+      );
+      const videos = await this.music.searchVideos(query);
+      return videos.map((video) => ({
+        sourceInput: `https://www.youtube.com/watch?v=${video.videoId}`,
+        canonicalUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
+        sourceId: video.videoId,
+        title: cleanVideoTitle(video.name, video.artist.name),
+        artist: video.artist.name,
+        duration: video.duration ?? undefined,
+        artwork: artworkUrl(video.thumbnails.at(-1)?.url),
+        kind: "video" as const,
+      }));
+    }
+  }
+
+  /**
+   * The official video for a song from YouTube Music, if one surely is: see
+   * musicVideoMatch. Anything less leaves the song as audio.
+   */
+  async findMusicVideo(track: TrackMetadata) {
+    try {
+      const videos = await this.music.searchVideos(
+        `${coreTitle(track.title)} ${firstArtist(track.artist)}`,
+      );
+      const match = musicVideoMatch(
+        track,
+        videos.map((video) => ({
+          videoId: video.videoId,
+          title: video.name,
+          artist: video.artist.name,
+          duration: video.duration ?? undefined,
+        })),
+      );
+      log.info(
+        {
+          event: "music_video_lookup",
+          sourceId: track.sourceId,
+          match: match?.videoId,
+          candidates: videos.length,
+        },
+        match ? "Found the song's music video" : "No music video for the song",
+      );
+      return match;
+    } catch (error) {
+      log.warn(
+        {
+          event: "music_video_lookup_failed",
+          sourceId: track.sourceId,
+          err: error,
+        },
+        "Could not look for the song's music video",
+      );
+      return undefined;
+    }
+  }
+
   private async resolveNavidromeShare(input: string) {
     const startedAt = Date.now();
     const url = parseHttpUrl(input);
@@ -681,6 +1026,7 @@ export class TrackCatalog {
             ? track.duration
             : undefined,
         artwork: await publicArtworkUrl(share.coverUrl(track.id).href),
+        kind: "song",
       });
     }
     if (!tracks.length)
@@ -697,17 +1043,54 @@ export class TrackCatalog {
     return tracks;
   }
 
-  private validate(track: TrackMetadata) {
-    if (track.duration && track.duration > this.limits.durationSeconds)
+  private validate(track: TrackMetadata, video = false) {
+    if (!track.duration) return;
+    if (video && track.duration > this.video.durationSeconds)
+      throw new TrackError(
+        `That video is longer than ${formatLimit(this.video.durationSeconds)}, the limit on this server`,
+      );
+    if (!video && track.duration > this.limits.durationSeconds)
       throw new TrackError("Track exceeds the duration limit");
   }
 
+  /** The longest a track may run, given the mode it is prepared in. */
+  private durationLimit(video: boolean) {
+    return video
+      ? Math.max(this.limits.durationSeconds, this.video.durationSeconds)
+      : this.limits.durationSeconds;
+  }
+
+  /**
+   * yt-dlp's format for video mode: H.264 when there is one, being the
+   * cheapest to decode, within the size and rate limits, with the best audio.
+   */
+  private videoFormat() {
+    const { maxHeight, maxFps } = this.video;
+    // A direct file does not say how big it is, so unknown sizes pass.
+    const within = `[height<=?${maxHeight}][fps<=?${maxFps}]`;
+    return [
+      `bv*${within}[vcodec^=avc1]+ba`,
+      `bv*${within}+ba`,
+      `b${within}`,
+      `bv*[height<=?${maxHeight}]+ba`,
+      `b[height<=?${maxHeight}]`,
+      // Nothing small enough: the smallest there is.
+      "wv*+ba",
+      "w",
+    ].join("/");
+  }
+
+  /**
+   * Prepares a track's audio. `video` says it is for video mode, where songs
+   * may run as long as videos.
+   */
   async prepare(
     track: TrackMetadata,
     directory: string,
     entryId: string,
     signal?: AbortSignal,
     priority = 0,
+    video = false,
   ) {
     // A cached track is only linked into place, so it skips the queue that
     // holds back downloads.
@@ -717,13 +1100,112 @@ export class TrackCatalog {
         directory,
         entryId,
         signal,
+        video,
       );
       if (cached) return cached;
     }
+    return this.queuePreparation(priority, entryId, track, () =>
+      this.download(track, directory, entryId, signal, video),
+    );
+  }
+
+  /**
+   * Prepares a track for video mode: a video as it is, a song as its
+   * official video when one surely exists, and anything else, or anything
+   * whose video turns out not to be there, as audio.
+   */
+  async prepareVideo(
+    track: TrackMetadata,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
+    priority = 0,
+    /** The track's audio, already prepared, to fall back on as it is. */
+    preparedAudio?: string,
+  ): Promise<PreparedMedia> {
+    const audio = async (): Promise<PreparedMedia> => ({
+      filePath:
+        preparedAudio && (await Bun.file(preparedAudio).exists())
+          ? preparedAudio
+          : await this.prepare(
+              track,
+              directory,
+              entryId,
+              signal,
+              priority,
+              true,
+            ),
+      form: "audio",
+    });
+    let source: { url: string; sourceId: string; form: MediaForm } | undefined;
+    if (trackKind(track) === "video")
+      source = {
+        url: track.canonicalUrl,
+        sourceId: track.sourceId,
+        form: "video",
+      };
+    else if (
+      isYoutubeVideoId(track.sourceId) &&
+      youtubeUrl(track.canonicalUrl)
+    ) {
+      const match = await this.findMusicVideo(track);
+      if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+      if (match)
+        source = {
+          url: `https://www.youtube.com/watch?v=${match.videoId}`,
+          sourceId: match.videoId,
+          form: "music_video",
+        };
+    }
+    if (!source) return audio();
+    const key = this.videoCacheKey(source);
+    if (this.videoCache.enabled) {
+      const cached = await this.restoreVideo(key, directory, entryId, signal);
+      if (cached) return { filePath: cached, form: source.form };
+    }
+    try {
+      const filePath = await this.queuePreparation(
+        priority,
+        entryId,
+        track,
+        () => this.downloadVideo(source, key, directory, entryId, signal),
+      );
+      return { filePath, form: source.form };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // What video mode refuses stays refused; anything else that stops the
+      // picture leaves the sound, which a song's own video always does.
+      const refused =
+        error instanceof TrackError &&
+        error.expected &&
+        !(error instanceof NoVideoError);
+      if (refused && source.form === "video") throw error;
+      log.warn(
+        {
+          event: "video_fallback_to_audio",
+          entryId,
+          sourceId: source.sourceId,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+        "Preparing the track as audio instead of video",
+      );
+      const prepared = await audio();
+      return error instanceof NoVideoError || source.form === "music_video"
+        ? prepared
+        : { ...prepared, fellBack: true };
+    }
+  }
+
+  private queuePreparation(
+    priority: number,
+    entryId: string,
+    track: TrackMetadata,
+    run: () => Promise<string>,
+  ) {
     return new Promise<string>((resolve, reject) => {
       this.preparationQueue.push({
         priority,
-        run: () => this.download(track, directory, entryId, signal),
+        run,
         resolve,
         reject,
       });
@@ -752,6 +1234,7 @@ export class TrackCatalog {
     directory: string,
     entryId: string,
     signal?: AbortSignal,
+    video = false,
   ) {
     const startedAt = Date.now();
     if (signal?.aborted) throw new TrackError("Track preparation cancelled");
@@ -775,7 +1258,7 @@ export class TrackCatalog {
       const bytes = (await stat(filePath)).size;
       if (bytes > this.limits.downloadBytes)
         throw new TrackError("Track exceeds the download limit");
-      if (media.duration > this.limits.durationSeconds)
+      if (media.duration > this.durationLimit(video))
         throw new TrackError("Track exceeds the duration limit");
       if (media.embedded) applyEmbeddedMetadata(track, media.embedded);
       if (!track.duration) track.duration = media.duration;
@@ -806,6 +1289,7 @@ export class TrackCatalog {
     directory: string,
     entryId: string,
     signal?: AbortSignal,
+    video = false,
   ) {
     const startedAt = Date.now();
     // How long each step took, so slow preparations can be traced to one.
@@ -939,7 +1423,7 @@ export class TrackCatalog {
       const duration = Number(probe.stdout.trim());
       if (!Number.isFinite(duration) || duration <= 0)
         throw new Error("Could not verify the downloaded track duration");
-      if (duration > this.limits.durationSeconds)
+      if (duration > this.durationLimit(video))
         throw new TrackError("Track exceeds the duration limit");
       if (!track.duration) track.duration = duration;
       // A fallback taken below is kept out of the cache, so a later download
@@ -1097,6 +1581,295 @@ export class TrackCatalog {
     this.extractions.delete(canonicalUrl);
   }
 
+  private async restoreVideo(
+    key: string,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+    await mkdir(directory, { recursive: true });
+    const filePath = `${directory}/${entryId}.video.mkv`;
+    const media = await this.videoCache.restore(
+      key,
+      filePath,
+      embeddedArtworkPath(filePath),
+    );
+    if (!media) return;
+    try {
+      if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+      if ((await stat(filePath)).size > this.video.downloadBytes)
+        throw new TrackError("That video is too big to download");
+      if (media.duration > this.video.durationSeconds)
+        throw new TrackError(
+          `That video is longer than ${formatLimit(this.video.durationSeconds)}, the limit on this server`,
+        );
+      await writeVideoExtras(filePath, media.chapters, media.captions);
+      this.transitions.set(filePath, wholeTrack(media.duration));
+      log.info(
+        { event: "video_cached", entryId, key },
+        "Video restored from video cache",
+      );
+      return filePath;
+    } catch (error) {
+      await removePreparedMedia(filePath);
+      throw error;
+    }
+  }
+
+  /**
+   * Downloads a video, capped to the video limits, with its captions and
+   * chapters next to it. Extracts first, to refuse what video mode does not
+   * play before downloading any of it.
+   */
+  private async downloadVideo(
+    source: { url: string; sourceId: string },
+    key: string,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
+    const startedAt = Date.now();
+    log.info(
+      { event: "video_download_started", entryId, sourceId: source.sourceId },
+      "Video download started",
+    );
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+    await mkdir(directory, { recursive: true });
+    const format = this.videoFormat();
+    const metadata = record(
+      JSON.parse(
+        (
+          await run(
+            [
+              ...this.extractor(),
+              "--dump-single-json",
+              "--skip-download",
+              "--no-playlist",
+              "--format",
+              format,
+              "--socket-timeout",
+              "10",
+              "--",
+              source.url,
+            ],
+            30_000,
+            signal,
+          )
+        ).stdout,
+      ),
+    );
+    if (metadata.is_live || metadata.live_status === "is_live")
+      throw new TrackError("Live streams are not supported");
+    restrictedVideo(metadata);
+    if (!hasVideoFormats(metadata))
+      throw new NoVideoError("The source has no video");
+    const listed = Number(metadata.duration);
+    if (Number.isFinite(listed) && listed > this.video.durationSeconds)
+      throw new TrackError(
+        `That video is longer than ${formatLimit(this.video.durationSeconds)}, the limit on this server`,
+      );
+    if (
+      Number(metadata.filesize ?? metadata.filesize_approx ?? 0) >
+      this.video.downloadBytes
+    )
+      throw new TrackError("That video is too big to download");
+    const output = `${directory}/${entryId}.video.%(ext)s`;
+    const download = [
+      "--format",
+      format,
+      "--merge-output-format",
+      "mkv",
+      "--remux-video",
+      "mkv",
+      "--no-playlist",
+      "--max-filesize",
+      String(this.video.downloadBytes),
+      "--print",
+      "after_move:filepath",
+      "--output",
+      output,
+    ];
+    const infoPath = `${directory}/extraction-${entryId}.json`;
+    let result: { stdout: string } | undefined;
+    try {
+      await writeFile(infoPath, JSON.stringify(metadata));
+      result = await run(
+        [...this.extractor(), "--load-info-json", infoPath, ...download],
+        600_000,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      log.warn(
+        {
+          event: "video_extraction_reuse_failed",
+          entryId,
+          reason: trackFailureDetail(error),
+          err: error,
+        },
+        "Extracting the video again",
+      );
+    } finally {
+      await rm(infoPath, { force: true });
+    }
+    if (!result)
+      try {
+        result = await run(
+          [...this.extractor(), ...download, "--", source.url],
+          600_000,
+          signal,
+        );
+      } catch (error) {
+        // Like the audio download: the embedded player gets past some 403s.
+        const detail = trackFailureDetail(error) ?? String(error);
+        if (signal?.aborted || !detail.includes("HTTP Error 403")) throw error;
+        log.warn(
+          { event: "video_download_retry", entryId },
+          "Retrying video download with embedded player",
+        );
+        result = await run(
+          [
+            ...this.extractor(),
+            "--extractor-args",
+            "youtube:player_client=web_embedded",
+            ...download,
+            "--",
+            source.url,
+          ],
+          600_000,
+          signal,
+        );
+      }
+    const filePath = result.stdout.trim().split("\n").at(-1);
+    if (!filePath || !(await Bun.file(filePath).exists()))
+      throw new Error("Extractor produced no playable file");
+    try {
+      if ((await stat(filePath)).size > this.video.downloadBytes)
+        throw new TrackError("That video is too big to download");
+      const probe = await run(
+        [
+          "ffprobe",
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration:stream=codec_type",
+          "-of",
+          "json",
+          filePath,
+        ],
+        15_000,
+        signal,
+      );
+      const probed = record(JSON.parse(probe.stdout));
+      const duration = Number(record(probed.format).duration);
+      if (!Number.isFinite(duration) || duration <= 0)
+        throw new Error("Could not verify the downloaded video duration");
+      if (duration > this.video.durationSeconds)
+        throw new TrackError(
+          `That video is longer than ${formatLimit(this.video.durationSeconds)}, the limit on this server`,
+        );
+      const streams = asArray(probed.streams).map(
+        (stream) => record(stream).codec_type,
+      );
+      if (!streams.includes("video"))
+        throw new NoVideoError("The download has no video");
+      let complete = true;
+      // Playback runs on the sound, so a silent video gets silence to run on.
+      if (!streams.includes("audio")) await addSilence(filePath, signal);
+      else if (this.limits.loudnessNormalization)
+        complete = await normalizeVideoLoudness(
+          filePath,
+          entryId,
+          this.video.downloadBytes,
+          signal,
+        );
+      const chapters = chaptersFrom(metadata);
+      const captions = await this.fetchCaptions(metadata, entryId, signal);
+      await writeVideoExtras(filePath, chapters, captions);
+      this.transitions.set(filePath, wholeTrack(duration));
+      if (this.videoCache.enabled && complete)
+        await this.videoCache.store(
+          key,
+          filePath,
+          embeddedArtworkPath(filePath),
+          {
+            duration,
+            transition: wholeTrack(duration),
+            cover: false,
+            ...(chapters.length ? { chapters } : {}),
+            ...(captions ? { captions } : {}),
+          },
+        );
+      log.info(
+        {
+          event: "video_download_completed",
+          entryId,
+          sourceId: source.sourceId,
+          bytes: (await stat(filePath)).size,
+          durationSeconds: duration,
+          chapters: chapters.length,
+          captions: Boolean(captions),
+          durationMs: Date.now() - startedAt,
+        },
+        "Video download completed",
+      );
+      return filePath;
+    } catch (error) {
+      await removePreparedMedia(filePath);
+      throw error;
+    }
+  }
+
+  /** The video's captions as SRT, or nothing when it has none or they fail. */
+  private async fetchCaptions(
+    metadata: Record<string, unknown>,
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
+    const picked = pickSubtitles(metadata);
+    if (!picked) return undefined;
+    try {
+      const url = new URL(picked.url);
+      await assertPublicUrl(url);
+      const response = await fetch(url.href, {
+        proxy: this.proxyUrl,
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+          : AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new Error(`Captions HTTP ${response.status}`);
+      const srt = vttToSrt(await readText(response, 5_000_000));
+      return srt.trim() ? srt : undefined;
+    } catch (error) {
+      if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+      log.warn(
+        {
+          event: "captions_failed",
+          entryId,
+          language: picked.language,
+          err: error,
+        },
+        "Preparing the video without captions",
+      );
+      return undefined;
+    }
+  }
+
+  private videoCacheKey(source: { url: string; sourceId: string }) {
+    const id =
+      isYoutubeVideoId(source.sourceId) && youtubeUrl(source.url)
+        ? `youtube:${source.sourceId}`
+        : source.url;
+    const variant = this.limits.loudnessNormalization ? "normalized" : "source";
+    return new Bun.CryptoHasher("sha256")
+      .update(
+        `video\n${variant}\n${this.video.maxHeight}p${this.video.maxFps}\n${id}`,
+      )
+      .digest("hex")
+      .slice(0, 32);
+  }
+
   private cacheKey(track: TrackMetadata) {
     // The same video is reached through several URLs, so key it by its ID.
     const source =
@@ -1152,12 +1925,106 @@ export class TrackCatalog {
     return ["yt-dlp", "--force-ipv4", "--proxy", this.proxyUrl];
   }
 
+  /** The link a search result stands for, when it is one. */
+  referencedUrl(reference: string) {
+    const stored = this.references.get(reference);
+    return typeof stored === "string" ? stored : undefined;
+  }
+
+  /** What a search result is called, when it is known before resolving. */
+  referencedTitle(reference: string) {
+    const stored = this.references.get(reference);
+    return typeof stored === "object" && "title" in stored
+      ? stored.title
+      : undefined;
+  }
+
   private remember(value: TrackMetadata | CollectionReference | string) {
     const reference = `${typeof value === "object" && "type" in value ? "bulk" : "track"}ref_${crypto.randomUUID()}`;
     this.references.set(reference, value);
     setTimeout(() => this.references.delete(reference), 10 * 60_000);
     return reference;
   }
+}
+
+/** Boundaries for a file played whole: video mode cuts straight across. */
+function wholeTrack(duration: number): TransitionData {
+  return {
+    introSeconds: 0,
+    outroSeconds: duration,
+    fadeInSeconds: 0,
+    fadeOutSeconds: 0,
+  };
+}
+
+/** Saves a prepared video's chapters and captions next to it. */
+async function writeVideoExtras(
+  filePath: string,
+  chapters?: Chapter[],
+  captions?: string,
+) {
+  if (chapters?.length)
+    await writeFile(chaptersPath(filePath), JSON.stringify(chapters));
+  if (captions) await writeFile(captionsPath(filePath), captions);
+}
+
+async function readText(response: Response, limit: number) {
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (declared > limit) throw new Error("Response is too large");
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("Response is too large");
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
+/**
+ * Refuses what video mode will not play, with its own message: videos only
+ * signed-in adults or channel members may watch.
+ */
+export function restrictedVideo(metadata: Record<string, unknown>) {
+  if (Number(metadata.age_limit) >= 18)
+    throw new TrackError("That video is age-restricted");
+  const availability = String(metadata.availability ?? "");
+  if (availability === "subscriber_only" || availability === "premium_only")
+    throw new TrackError("That video is for channel members only");
+  if (availability === "needs_auth")
+    throw new TrackError("Track is not available");
+}
+
+function hasVideoFormats(metadata: Record<string, unknown>) {
+  const formats = [
+    ...asArray(metadata.requested_formats),
+    ...asArray(metadata.formats),
+    metadata,
+  ];
+  return formats.some((format) => {
+    const { vcodec, video_ext: videoExt } = record(format);
+    // A direct file's codec is unknown; its extension says if it is video.
+    return typeof vcodec === "string"
+      ? vcodec !== "none"
+      : typeof videoExt === "string" && videoExt !== "none";
+  });
+}
+
+/**
+ * Whether a link is a song or a video. YouTube's art tracks, which come from
+ * an artist's "Topic" channel, and anything without a picture are songs.
+ */
+export function metadataKind(metadata: Record<string, unknown>): TrackKind {
+  const channel = String(metadata.channel ?? metadata.uploader ?? "");
+  if (/ - Topic$/.test(channel)) return "song";
+  return hasVideoFormats(metadata) ? "video" : "song";
 }
 
 export function transitionData(output: string, duration: number) {
@@ -1247,6 +2114,7 @@ function youtubeMusicTrack(
     sourceInput,
     canonicalUrl: `https://music.youtube.com/watch?v=${videoId}`,
     sourceId: videoId,
+    kind: "song",
     ...fields,
   };
 }
@@ -1546,9 +2414,15 @@ export async function extractEmbeddedArtwork(
 async function retainedSourcePath(opusPath: string) {
   const directory = dirname(opusPath);
   const fileName = basename(opusPath);
-  const prefix = `${fileName.replace(/\.[^.]+$/, "")}.`;
+  const stem = fileName.replace(/\.[^.]+$/, "");
+  const prefix = `${stem}.`;
+  // The entry's video, and what goes with it, are not a source.
   const match = (await readdir(directory)).find(
-    (name) => name !== fileName && name.startsWith(prefix),
+    (name) =>
+      name !== fileName &&
+      name.startsWith(prefix) &&
+      !name.startsWith(`${stem}.video.`) &&
+      !name.startsWith(`${stem}.cover.`),
   );
   return match ? `${directory}/${match}` : undefined;
 }

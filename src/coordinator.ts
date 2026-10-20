@@ -8,10 +8,13 @@ import {
   type SlackAppAdapter,
 } from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
+import { resolve as resolvePath } from "node:path";
 import {
   capabilities,
   displayModes,
   duckingModes,
+  mediaModes,
+  type MediaMode,
   permissionPresets,
   recentTrackLimit,
   scrobblingModes,
@@ -42,8 +45,20 @@ import {
   normalizeToken,
   TrackCatalog,
   trackFailureDetail,
+  trackKind,
+  type MediaForm,
+  type PreparedMedia,
   type TrackMetadata,
 } from "./tracks.ts";
+import {
+  captionsPath,
+  formatClock,
+  type Chapter,
+  isVideoLink,
+  parseClock,
+  readChapters,
+  shorten,
+} from "./videos.ts";
 import { safeError as message } from "./error-message.ts";
 import { firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
@@ -134,6 +149,21 @@ type SettingsChange = {
 
 const endRestoreMs = 2 * 60_000;
 const searchDebounceMs = 300;
+// How long nobody may ask the host for video mode after they said not now.
+const videoRequestPauseMs = 15 * 60_000;
+// Slack allows this many screen shares at once in a huddle.
+const screenShareSlots = 2;
+// The most options a Slack select menu takes.
+const selectOptionLimit = 100;
+
+// A request to the host for video mode, in a direct message to them.
+type VideoRequest = {
+  userIds: string[];
+  // What the first to ask wanted to watch, when it is known.
+  title?: string;
+  hostId: string;
+  message?: Promise<{ channelId: string; ts: string } | undefined>;
+};
 
 type Entry = TrackMetadata & {
   id: string;
@@ -147,12 +177,28 @@ type Entry = TrackMetadata & {
   counted?: boolean;
   status: string;
   filePath?: string;
+  /** What the prepared file holds. */
+  form?: MediaForm;
+  /** Prepared in video mode, so a song's video has been looked for. */
+  videoChecked?: boolean;
+  /** Watched as a video, which keeps it out of the music stats. */
+  isVideo?: boolean;
+  /** A prepared video's chapters, once read. */
+  chapters?: Chapter[];
   lyrics?: Promise<LyricsPayload | undefined>;
   introSeconds?: number;
   outroSeconds?: number;
   fadeInSeconds?: number;
   fadeOutSeconds?: number;
 };
+
+// Actions on messages other than the player, which are not stale for it: the
+// scrobbling prompt, and the host's request for video mode.
+const offPlayerActions = new Set([
+  "toggle_session_scrobbling",
+  "approve_video_request",
+  "decline_video_request",
+]);
 
 // The actions that need to know whether the user manages the channel: those
 // that show or change the Channel tab of Settings, and loading a save, which
@@ -230,6 +276,12 @@ const autoplayRecentWindow = 100;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 
+// A track's title for the player: a video's long title is cut short at a
+// word, which a song's never needs.
+function displayTitle(track: Pick<Entry, "title" | "kind" | "canonicalUrl">) {
+  return trackKind(track) === "video" ? shorten(track.title, 100) : track.title;
+}
+
 function shuffle<T>(items: T[]) {
   const shuffled = [...items];
   for (let index = shuffled.length - 1; index > 0; index--) {
@@ -272,6 +324,21 @@ export class Coordinator {
   private loopMode: LoopMode = "off";
   private transitionMode: TransitionMode = "none";
   private duckingMode: DuckingMode;
+  // Music, or video mode's screen share. Video mode leaves the music
+  // settings as they are and only stops applying them.
+  private mediaMode: MediaMode = "music";
+  private captions = false;
+  private watchedSeconds = 0;
+  // Other people's screen shares in the huddle, as media last counted them.
+  private contentShares = 0;
+  // Preparations of tracks already prepared, for the other mode.
+  private reprepares = new Map<string, AbortController>();
+  // The open request for video mode, in a message to the host.
+  private videoRequest?: VideoRequest;
+  private videoRequestsPausedUntil = 0;
+  // Whether each add dialog shows the video hint, so typing only redraws a
+  // dialog when the hint comes or goes.
+  private hintedViews = new Map<string, boolean>();
   private autoplayGeneration = 0;
   // Discovery turns come every `autoplayDiscoveryInterval` picks; a skipped
   // discovery backs the interval off, one that plays through restores it.
@@ -353,6 +420,7 @@ export class Coordinator {
       managerUserId?: string;
       excludedUserIds: Set<string>;
       footer?: string;
+      video?: { sessionLimit: number };
     },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
@@ -372,6 +440,8 @@ export class Coordinator {
     private recommendations?: RecommendationCatalog,
     private workspaceAdmins?: WorkspaceAdmins,
     private channelManagers?: ChannelManagers,
+    /** How many sessions, this one included, are in video mode. */
+    private videoSessions: () => number = () => 0,
   ) {
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
@@ -402,10 +472,15 @@ export class Coordinator {
       this.transitionMode = restored.transitionMode;
       this.displayMode = restored.displayMode;
       this.anchorEnabled = restored.anchorEnabled;
+      this.mediaMode = restored.mediaMode ?? "music";
+      this.captions = restored.captions ?? false;
+      this.watchedSeconds = restored.watchedSeconds ?? 0;
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
       this.allowed = new Set(restored.permissions);
       const entries = restored.tracks.map((track) => ({ ...track }));
+      for (const entry of entries)
+        if (entry.filePath) this.loadChapters(entry, entry.filePath);
       this.current = entries.find((track) => track.status === "playing");
       this.history = entries.filter((track) => track.status === "played");
       this.queue = entries.filter(
@@ -515,17 +590,13 @@ export class Coordinator {
     this.prefetchRecommendations();
     if (!this.current) await this.startNext();
     else {
-      this.playbackScrobbling?.start(
-        this.current,
-        this.participants,
-        this.state === "playing",
-        this.playbackSeconds,
-      );
+      this.startScrobbling(this.current);
       await this.sendCurrent(this.current);
       await this.render();
       this.refreshIdle();
       this.scheduleAutoplay();
     }
+    this.syncForms();
     for (const entry of missingEntries) void this.prepareRestored(entry);
     this.log.info(
       {
@@ -554,11 +625,30 @@ export class Coordinator {
     );
   }
 
+  /** Whether the session is in video mode. */
+  get videoMode() {
+    return this.mediaMode === "video";
+  }
+
+  // Video mode stops applying the music settings without changing them: no
+  // lyrics, no crossfades, and no ducking under the conversation.
+  private mediaDisplayMode(): DisplayMode {
+    return this.videoMode ? "default" : this.displayMode;
+  }
+
   private sendMediaSettings() {
     this.sendMedia({ type: "volume", value: this.volume });
-    this.sendMedia({ type: "display_mode", mode: this.displayMode });
-    this.sendMedia({ type: "transition_mode", mode: this.transitionMode });
-    this.sendMedia({ type: "ducking_mode", mode: this.duckingMode });
+    this.sendMedia({ type: "display_mode", mode: this.mediaDisplayMode() });
+    this.sendMedia({
+      type: "transition_mode",
+      mode: this.videoMode ? "none" : this.transitionMode,
+    });
+    this.sendMedia({
+      type: "ducking_mode",
+      mode: this.videoMode ? "off" : this.duckingMode,
+    });
+    this.sendMedia({ type: "captions", on: this.captions });
+    this.sendMedia({ type: "video_mode", on: this.videoMode });
   }
 
   // Picks the current song back up where it was, for a media backend that
@@ -568,13 +658,19 @@ export class Coordinator {
     if (this.playbackSeconds)
       this.sendMedia({ type: "seek", seconds: this.playbackSeconds });
     if (this.state === "paused") this.sendMedia({ type: "pause" });
+    this.sendLyrics(entry);
+    this.syncPreloads();
+  }
+
+  // Lyrics for the playing song, which video mode does without.
+  private sendLyrics(entry: Entry) {
+    if (this.videoMode) return;
     void this.loadLyrics(entry).then((lyrics) => {
-      if (this.current !== entry) return;
+      if (this.current !== entry || this.videoMode) return;
       if (lyrics)
         this.sendMedia({ type: "lyrics", entryId: entry.id, ...lyrics });
       else this.sendMedia({ type: "lyrics_unavailable", entryId: entry.id });
     });
-    this.syncPreloads();
   }
 
   private async prepareRestored(entry: Entry) {
@@ -586,11 +682,11 @@ export class Coordinator {
     const controller = new AbortController();
     this.preparations.set(entry.id, controller);
     try {
-      const filePath = await this.download(entry, controller);
+      const media = await this.download(entry, controller);
       await this.enqueue(async () => {
         this.preparations.delete(entry.id);
         if (this.inactive() || !this.queue.includes(entry)) return;
-        this.prepared(entry, filePath);
+        this.prepared(entry, media);
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
@@ -635,7 +731,7 @@ export class Coordinator {
     this.lastSearch.set(interaction.userId, generation);
     await Bun.sleep(searchDebounceMs);
     if (this.lastSearch.get(interaction.userId) !== generation) return [];
-    return this.tracks.suggestions(interaction.value, allowed);
+    return this.tracks.suggestions(interaction.value, allowed, this.videoMode);
   }
 
   handles(interaction: Interaction) {
@@ -704,6 +800,8 @@ export class Coordinator {
       if (interaction.type === "view_submission") {
         if (interaction.actionId === "move_queue_track")
           return this.queuePositionSubmission(interaction);
+        if (interaction.actionId === "jump_to_time")
+          return this.jumpToSubmission(interaction);
         if (interaction.actionId === "end_session_confirm")
           return this.endSubmission(interaction);
         if (interaction.actionId === "listenbrainz_token")
@@ -713,7 +811,7 @@ export class Coordinator {
       if (
         interaction.messageTs &&
         interaction.messageTs !== this.uiTs &&
-        interaction.actionId !== "toggle_session_scrobbling"
+        !offPlayerActions.has(interaction.actionId)
       )
         return this.settingsNotice(
           interaction.userId,
@@ -731,6 +829,16 @@ export class Coordinator {
         next_track: () => this.next(interaction, currentId),
         seek_back: () => this.seek(interaction, -10),
         seek_forward: () => this.seek(interaction, 10),
+        open_jump_to: () => this.jumpToModal(interaction),
+        toggle_captions: () => this.toggleCaptions(interaction),
+        // The add dialogs' search and links, which say what was picked or
+        // pasted in music mode; nothing else sends these.
+        selection: () => this.videoLinkHint(interaction),
+        text: () => this.videoLinkHint(interaction),
+        add_with_video_mode: () => this.addWithVideoMode(interaction),
+        approve_video_request: () => this.answerVideoRequest(interaction, true),
+        decline_video_request: () =>
+          this.answerVideoRequest(interaction, false),
         volume_down: () => this.changeVolume(interaction, -0.05),
         volume_up: () => this.changeVolume(interaction, 0.05),
         like_track: () => this.like(interaction),
@@ -784,7 +892,15 @@ export class Coordinator {
     });
   }
 
-  mediaEvent(type: string, details?: { entryId?: string; seconds?: number }) {
+  mediaEvent(
+    type: string,
+    details?: {
+      entryId?: string;
+      seconds?: number;
+      count?: number;
+      reason?: string;
+    },
+  ) {
     if (this.state === "suspended") return;
     if (
       type === "playback_position" &&
@@ -793,15 +909,13 @@ export class Coordinator {
       typeof details.seconds === "number" &&
       Number.isFinite(details.seconds)
     ) {
-      this.listenedSeconds += Math.max(
-        0,
-        details.seconds - this.playbackSeconds,
-      );
+      this.countTime(details.seconds - this.playbackSeconds);
       this.playbackSeconds = details.seconds;
       this.playbackScrobbling?.position(details.seconds);
       this.store.setSession(this.id, {
         playbackSeconds: details.seconds,
         listenedSeconds: this.listenedSeconds,
+        watchedSeconds: this.watchedSeconds,
       });
       this.log.trace(
         {
@@ -813,10 +927,17 @@ export class Coordinator {
       );
       return;
     }
+    if (type === "content_shares") {
+      // Other people's screen shares, which video mode needs a slot beside.
+      this.contentShares = Math.max(0, Number(details?.count) || 0);
+      return;
+    }
     this.log.info(
       { event: "media_event", mediaEvent: type, entryId: details?.entryId },
       "Media event received",
     );
+    if (type === "share_failed" || type === "video_failed")
+      return this.enqueue(() => this.videoFailed(type, details?.entryId));
     if (
       type === "track_ended" ||
       type === "transition" ||
@@ -858,16 +979,34 @@ export class Coordinator {
     const host = this.hostId === userId || this.isManager(userId);
     const grant = this.integrations.get(userId);
     const scrobbling = this.scrobbling?.settings(userId, this.id);
+    const current = this.current;
+    const showing =
+      this.videoMode &&
+      (current?.form === "video" || current?.form === "music_video");
     return {
       ok: true as const,
+      mode: this.mediaMode,
       state: this.state,
       volumePercent: Math.round(this.volume * 100),
       playbackSeconds: this.playbackSeconds,
-      displayMode: this.displayMode,
-      autoplay: this.autoplayMode,
+      // Video mode leaves the music's own settings out, as Settings does.
+      ...(this.videoMode
+        ? {
+            captions: this.captions,
+            videoRequest: "not needed, video mode is on",
+          }
+        : {
+            displayMode: this.displayMode,
+            autoplay: this.autoplayMode,
+            transitionMode: this.transitionMode,
+            duckingMode: this.duckingMode,
+            videoRequest: this.videoRequest
+              ? "waiting for the host"
+              : Date.now() < this.videoRequestsPausedUntil
+                ? "paused: the host said not now"
+                : "none",
+          }),
       loopMode: this.loopMode,
-      transitionMode: this.transitionMode,
-      duckingMode: this.duckingMode,
       anchorEnabled: this.anchorEnabled,
       hostId: this.hostId ?? null,
       youAreHost: host,
@@ -876,15 +1015,26 @@ export class Coordinator {
         : grant
           ? [...grant.permissions]
           : [...this.allowed],
-      nowPlaying: this.current
+      nowPlaying: current
         ? {
-            id: this.current.id,
-            title: this.current.title,
-            artist: this.current.artist,
-            album: this.current.album,
-            status: this.current.status,
-            automatic: Boolean(this.current.automatic),
-            addedBy: this.current.requesterId,
+            id: current.id,
+            title: current.title,
+            artist: current.artist,
+            album: current.album,
+            kind: trackKind(current),
+            playingAs: showing ? "video" : "audio",
+            durationSeconds: current.duration,
+            status: current.status,
+            automatic: Boolean(current.automatic),
+            addedBy: current.requesterId,
+            ...(showing && current.chapters?.length
+              ? {
+                  chapters: current.chapters.map((chapter) => ({
+                    title: chapter.title,
+                    startSeconds: chapter.start,
+                  })),
+                }
+              : {}),
           }
         : null,
       queue: this.queue.map((track, index) => ({
@@ -892,6 +1042,7 @@ export class Coordinator {
         id: track.id,
         title: track.title,
         artist: track.artist,
+        kind: trackKind(track),
         status: track.status,
         automatic: Boolean(track.automatic),
         addedBy: track.requesterId,
@@ -924,7 +1075,11 @@ export class Coordinator {
         error: "You do not have permission to add tracks.",
       };
     try {
-      const options = await this.tracks.suggestions(query, allowed);
+      const options = await this.tracks.suggestions(
+        query,
+        allowed,
+        this.videoMode,
+      );
       throwIfAborted(signal);
       return {
         ok: true as const,
@@ -943,7 +1098,7 @@ export class Coordinator {
     userId: string,
     reference: string,
     signal?: AbortSignal,
-    options: { awaitPreparation?: boolean } = {},
+    options: { awaitPreparation?: boolean; withVideoMode?: boolean } = {},
   ) {
     throwIfAborted(signal);
     if (!this.canUsePlayer(userId))
@@ -959,12 +1114,33 @@ export class Coordinator {
       };
     if (this.inactive())
       return { ok: false as const, error: "This session is not active." };
+    // Like the add dialog's button: the host switches to video mode first,
+    // and anyone else asks them to once the track is queued.
+    let askHost = false;
+    if (options.withVideoMode && !this.videoMode) {
+      if (this.settingsAdmin(userId)) {
+        const blocked = await this.enqueue(() =>
+          this.switchMediaMode(userId, "video", "agent"),
+        );
+        if (blocked) return { ok: false as const, error: blocked };
+      } else if (!this.hostId)
+        return {
+          ok: false as const,
+          error: "There is no host to ask for video mode.",
+        };
+      else if (Date.now() < this.videoRequestsPausedUntil)
+        return {
+          ok: false as const,
+          error: "The host said not now; nobody can ask again for a while.",
+        };
+      else askHost = true;
+    }
     let selection: TrackMetadata | TrackMetadata[];
     try {
-      selection = await this.tracks.resolve(reference);
+      selection = await this.tracks.resolve(reference, this.videoMode);
     } catch (error) {
       try {
-        selection = await this.tracks.resolveUrl(reference);
+        selection = await this.tracks.resolveUrl(reference, this.videoMode);
       } catch (urlError) {
         return { ok: false as const, error: message(urlError) };
       }
@@ -1017,6 +1193,10 @@ export class Coordinator {
       return { ok: false as const, error: "Could not add tracks." };
     if ("error" in committed)
       return { ok: false as const, error: committed.error };
+    if (askHost)
+      await this.enqueue(() =>
+        this.requestVideoMode(userId, committed.pending[0]?.entry.title),
+      );
     const abortPreparations = () => {
       for (const { controller } of committed.pending) controller.abort();
     };
@@ -1294,6 +1474,91 @@ export class Coordinator {
     });
   }
 
+  async agentJumpTo(
+    userId: string,
+    target: { position?: number; chapter?: string },
+    signal?: AbortSignal,
+  ) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "skip")) return this.denied(userId);
+      const current = this.current;
+      if (!current) return { ok: false as const, error: "Nothing is playing." };
+      let seconds = target.position;
+      if (target.chapter !== undefined) {
+        const wanted = normalizeToken(target.chapter);
+        const chapters = current.filePath
+          ? await readChapters(current.filePath)
+          : [];
+        const chapter =
+          chapters.find((item) => normalizeToken(item.title) === wanted) ??
+          chapters.find((item) => normalizeToken(item.title).includes(wanted));
+        if (!chapter)
+          return {
+            ok: false as const,
+            error: chapters.length
+              ? "No chapter by that name."
+              : "This has no chapters.",
+          };
+        seconds = chapter.start;
+      }
+      if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0)
+        return { ok: false as const, error: "Give a time or a chapter." };
+      if (current.duration && seconds >= current.duration)
+        return {
+          ok: false as const,
+          error: `That is past the end; it runs ${formatClock(current.duration)}.`,
+        };
+      const previous = this.playbackSeconds;
+      this.playbackSeconds = seconds;
+      this.sendMedia({ type: "seek", seconds });
+      this.audit.record("playback.seeked", userId, {
+        sessionId: this.id,
+        trackId: current.id,
+        previous,
+        seconds,
+      });
+      this.store.incrementUsage(seconds >= previous ? "forward" : "back");
+      return { ok: true as const, playbackSeconds: seconds };
+    });
+  }
+
+  async agentSetCaptions(
+    userId: string,
+    enabled: boolean,
+    signal?: AbortSignal,
+  ) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "pause")) return this.denied(userId);
+      if (!this.videoMode)
+        return { ok: false as const, error: "Captions are for video mode." };
+      if (enabled !== this.captions) {
+        this.captions = enabled;
+        this.store.setSession(this.id, { captions: enabled });
+        this.sendMedia({ type: "captions", on: enabled });
+        this.audit.record("playback.captions", userId, {
+          sessionId: this.id,
+          captions: enabled,
+        });
+        await this.render();
+      }
+      const current = this.current;
+      const available = Boolean(
+        current?.filePath &&
+        (current.form === "video" || current.form === "music_video") &&
+        (await Bun.file(captionsPath(current.filePath)).exists()),
+      );
+      return {
+        ok: true as const,
+        captions: this.captions,
+        ...(enabled && current && !available
+          ? { note: "This video has no captions." }
+          : {}),
+      };
+    });
+  }
+
   async agentSetVolume(userId: string, percent: number, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
@@ -1323,6 +1588,7 @@ export class Coordinator {
       anchorEnabled?: boolean;
       permissionPreset?: keyof typeof permissionPresets;
       hostUserId?: string;
+      mode?: MediaMode;
     },
     signal?: AbortSignal,
   ) {
@@ -1333,6 +1599,23 @@ export class Coordinator {
           ok: false as const,
           error: "Join the huddle before using the player.",
         };
+      if (patch.mode !== undefined && !mediaModes.includes(patch.mode))
+        return { ok: false as const, error: "Invalid mode." };
+      if (patch.mode !== undefined && !this.settingsAdmin(userId))
+        return {
+          ok: false as const,
+          error: "Only the host can switch between music and video mode.",
+        };
+      if (
+        this.videoMode &&
+        patch.mode !== "music" &&
+        (patch.displayMode !== undefined ||
+          patch.autoplay !== undefined ||
+          patch.autoplayMode !== undefined ||
+          patch.transitionMode !== undefined ||
+          patch.duckingMode !== undefined)
+      )
+        return { ok: false as const, error: "That’s paused in video mode." };
       const before = this.settingsSnapshot();
       if (
         (patch.hostUserId !== undefined ||
@@ -1397,6 +1680,11 @@ export class Coordinator {
             error: "That user is not in this huddle.",
           };
       }
+      // Back to music first, so the music settings asked for apply.
+      if (patch.mode === "music") {
+        const blocked = await this.switchMediaMode(userId, "music", "agent");
+        if (blocked) return { ok: false as const, error: blocked };
+      }
       const changed = await this.applySettings({
         ...patch,
         autoplayMode:
@@ -1405,6 +1693,11 @@ export class Coordinator {
             ? undefined
             : parseAutoplayMode(patch.autoplay)),
       });
+      if (patch.mode === "video" && !this.videoMode) {
+        const blocked = await this.switchMediaMode(userId, "video", "agent");
+        if (blocked) return { ok: false as const, error: blocked };
+        changed.push("mode=video");
+      } else if (patch.mode === "music") changed.push("mode=music");
       if (permissionPreset) {
         this.setPermissions(permissionPreset);
         changed.push(`permissions=${patch.permissionPreset}`);
@@ -1428,6 +1721,7 @@ export class Coordinator {
       return {
         ok: true as const,
         changed,
+        mode: this.mediaMode,
         displayMode: this.displayMode,
         autoplay: this.autoplayMode,
         loopMode: this.loopMode,
@@ -2191,11 +2485,11 @@ export class Coordinator {
     });
     const status = this.integrationStatus(pending.userId);
     await this.replyIntegration(pending, {
+      ...(status.ok ? status : {}),
       ok: true,
       type: "grant_accepted",
       permissions: pending.permissions,
       events: pending.events,
-      ...(status.ok ? status : {}),
     });
     await this.render();
     await this.replaceOriginal(
@@ -2324,8 +2618,9 @@ export class Coordinator {
     return this.config.excludedUserIds.has(userId);
   }
 
+  // Video mode plays only what people queue.
   private autoplayOn() {
-    return this.autoplayMode !== "off";
+    return !this.videoMode && this.autoplayMode !== "off";
   }
 
   private listenerIds() {
@@ -2607,13 +2902,13 @@ export class Coordinator {
     try {
       selection = recommendId
         ? (this.recommendations?.recommendation(recommendId) ??
-          (await this.tracks.resolve(value)))
+          (await this.tracks.resolve(value, this.videoMode)))
         : recentId
           ? (this.store
               .recentTracks(interaction.userId, recentTrackLimit)
               .find((track) => track.id === recentId) ??
-            (await this.tracks.resolve(value)))
-          : await this.tracks.resolve(value);
+            (await this.tracks.resolve(value, this.videoMode)))
+          : await this.tracks.resolve(value, this.videoMode);
     } catch (error) {
       return this.notice(interaction.userId, message(error));
     }
@@ -2669,6 +2964,11 @@ export class Coordinator {
         id: crypto.randomUUID(),
         requesterId: userId,
         status: "preparing",
+        // A video queued to watch stays out of the music's history and
+        // taste, even before it plays.
+        ...(this.videoMode && trackKind(metadata) === "video"
+          ? { isVideo: true }
+          : {}),
       };
       const controller = new AbortController();
       this.preparations.set(entry.id, controller);
@@ -2714,9 +3014,9 @@ export class Coordinator {
     );
     const prepared = this.download(entry, controller);
     try {
-      const filePath = await prepared;
+      const media = await prepared;
       await this.enqueue(async () => {
-        if (!(await this.acceptPrepared(entry, filePath))) return;
+        if (!(await this.acceptPrepared(entry, media))) return;
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
@@ -2765,27 +3065,60 @@ export class Coordinator {
     }
   }
 
-  private download(entry: Entry, controller: AbortController) {
-    return this.tracks.prepare(
-      entry,
-      `data/media/${this.id}`,
-      entry.id,
-      controller.signal,
-      this.preparationPriority(entry),
-    );
+  // Prepares a track for the mode the session is in: audio for music, and
+  // for video mode a video, a song's video, or audio when there is none.
+  private async download(
+    entry: Entry,
+    controller: AbortController,
+  ): Promise<PreparedMedia & { videoChecked?: boolean }> {
+    const directory = `data/media/${this.id}`;
+    const priority = this.preparationPriority(entry);
+    if (this.videoMode)
+      return {
+        ...(await this.tracks.prepareVideo(
+          entry,
+          directory,
+          entry.id,
+          controller.signal,
+          priority,
+          entry.form === "audio" ? entry.filePath : undefined,
+        )),
+        videoChecked: true,
+      };
+    return {
+      filePath: await this.tracks.prepare(
+        entry,
+        directory,
+        entry.id,
+        controller.signal,
+        priority,
+      ),
+      form: "audio",
+    };
   }
 
   // Takes in a finished download, or discards it when the session no longer
   // wants the track. A suspended session keeps the file for its resume.
-  private async acceptPrepared(entry: Entry, filePath: string) {
+  private async acceptPrepared(
+    entry: Entry,
+    media: PreparedMedia & { videoChecked?: boolean },
+  ) {
     this.preparations.delete(entry.id);
     if (this.state === "suspended") return false;
     if (this.state === "ended" || !this.queue.includes(entry)) {
-      await removePreparedMedia(filePath);
+      await removePreparedMedia(media.filePath);
       return false;
     }
-    this.prepared(entry, filePath);
+    this.prepared(entry, media);
+    if (media.fellBack) await this.videoFellBack(entry);
     return true;
+  }
+
+  private videoFellBack(entry: Entry) {
+    return this.videoNotice(
+      entry,
+      `Couldn’t download the video for ${entry.title}, so it will play as audio.`,
+    );
   }
 
   // Drops a track whose preparation failed, unless the session has already
@@ -3158,9 +3491,9 @@ export class Coordinator {
     const startedAt = Date.now();
     const prepared = this.download(entry, controller);
     try {
-      const filePath = await prepared;
+      const media = await prepared;
       return await this.enqueue(async () => {
-        if (!(await this.acceptPrepared(entry, filePath))) return false;
+        if (!(await this.acceptPrepared(entry, media))) return false;
         if (!this.current) await this.startNext();
         else {
           await this.render();
@@ -3330,36 +3663,40 @@ export class Coordinator {
       },
       "Track started",
     );
-    this.playbackScrobbling?.start(next, this.participants);
+    this.startScrobbling(next, 0);
+    await this.markWatched(next);
     this.noteSessionRecommendations();
     this.sendMedia(await this.playMessage(next));
-    void this.loadLyrics(next).then((lyrics) => {
-      if (this.current !== next) return;
-      captureAnalytics(lyrics ? "lyrics.available" : "lyrics.unavailable", {
-        distinctId: next.automatic ? undefined : next.requesterId || undefined,
-        sessionId: this.id,
-        properties: {
-          trackId: next.id,
-          sourceId: next.sourceId,
-          origin: next.automatic ? "autoplay" : "manual",
-          ...(lyrics
-            ? { source: lyrics.source, lines: lyrics.lines.length }
-            : {}),
-        },
-      });
-      if (lyrics) {
-        this.log.info(
-          {
-            event: "lyrics_loaded",
-            entryId: next.id,
-            source: lyrics.source,
-            lines: lyrics.lines.length,
+    if (!this.videoMode)
+      void this.loadLyrics(next).then((lyrics) => {
+        if (this.current !== next || this.videoMode) return;
+        captureAnalytics(lyrics ? "lyrics.available" : "lyrics.unavailable", {
+          distinctId: next.automatic
+            ? undefined
+            : next.requesterId || undefined,
+          sessionId: this.id,
+          properties: {
+            trackId: next.id,
+            sourceId: next.sourceId,
+            origin: next.automatic ? "autoplay" : "manual",
+            ...(lyrics
+              ? { source: lyrics.source, lines: lyrics.lines.length }
+              : {}),
           },
-          "Track lyrics loaded",
-        );
-        this.sendMedia({ type: "lyrics", entryId: next.id, ...lyrics });
-      } else this.sendMedia({ type: "lyrics_unavailable", entryId: next.id });
-    });
+        });
+        if (lyrics) {
+          this.log.info(
+            {
+              event: "lyrics_loaded",
+              entryId: next.id,
+              source: lyrics.source,
+              lines: lyrics.lines.length,
+            },
+            "Track lyrics loaded",
+          );
+          this.sendMedia({ type: "lyrics", entryId: next.id, ...lyrics });
+        } else this.sendMedia({ type: "lyrics_unavailable", entryId: next.id });
+      });
     this.syncPreloads();
     await this.render();
     this.refreshIdle();
@@ -3400,10 +3737,21 @@ export class Coordinator {
       (await Bun.file(embeddedArtworkPath(entry.filePath)).exists())
         ? this.mediaArtworkUrl(entry)
         : undefined;
+    // In video mode a prepared video shows on the screen share, with its
+    // captions for when they are on.
+    const shown =
+      this.videoMode &&
+      entry.filePath &&
+      (entry.form === "video" || entry.form === "music_video");
+    const captions =
+      shown && (await Bun.file(captionsPath(entry.filePath!)).exists())
+        ? resolvePath(captionsPath(entry.filePath!))
+        : undefined;
     return {
       type: "play",
       entryId: entry.id,
       url: this.mediaUrl(entry),
+      ...(shown ? { video: captions ? { subtitles: captions } : {} } : {}),
       title: entry.title,
       artist: entry.artist,
       album: entry.album,
@@ -3429,7 +3777,7 @@ export class Coordinator {
         Boolean(entry?.filePath) &&
         all.findIndex((other) => other?.id === entry?.id) === index,
     );
-    if (next) void this.loadLyrics(next);
+    if (next && !this.videoMode) void this.loadLyrics(next);
     this.sendMedia({
       type: "preload",
       nextEntryId: next?.id,
@@ -3456,12 +3804,24 @@ export class Coordinator {
     return entry.automatic ? -1_000_000 : -this.queue.indexOf(entry);
   }
 
-  private prepared(entry: Entry, filePath: string) {
+  private prepared(
+    entry: Entry,
+    media: PreparedMedia & { videoChecked?: boolean },
+  ) {
+    const { filePath, form } = media;
     const transition = this.tracks.transition?.(filePath);
-    Object.assign(entry, { filePath, status: "ready", ...transition });
-    this.store.setTrack(entry.id, {
-      status: "ready",
+    this.loadChapters(entry, filePath);
+    Object.assign(entry, {
       filePath,
+      form,
+      videoChecked: media.videoChecked,
+      status: entry === this.current ? entry.status : "ready",
+      ...transition,
+    });
+    this.store.setTrack(entry.id, {
+      ...(entry === this.current ? {} : { status: "ready" }),
+      filePath,
+      form,
       title: entry.title,
       artist: entry.artist,
       album: entry.album ?? null,
@@ -3469,6 +3829,135 @@ export class Coordinator {
       artwork: entry.artwork ?? null,
       ...transition,
     });
+    // The mode changed while it was being prepared.
+    if (!this.formFits(entry)) this.reprepare(entry);
+  }
+
+  // Reads a prepared video's chapters onto its entry, for Jump to.
+  private loadChapters(entry: Entry, filePath: string) {
+    entry.chapters = undefined;
+    void readChapters(filePath).then((chapters) => {
+      if (entry.filePath === filePath) entry.chapters = chapters;
+    });
+  }
+
+  // Whether a prepared track suits the mode: music plays a song, not its
+  // video; video mode wants a video's picture, and a song's video once it
+  // has been looked for.
+  private formFits(entry: Entry) {
+    if (!entry.filePath) return true;
+    if (!this.videoMode) return entry.form !== "music_video";
+    if (entry.videoChecked) return true;
+    return trackKind(entry) === "video"
+      ? entry.form === "video"
+      : entry.form === "music_video";
+  }
+
+  // Prepares the playing and queued tracks again for the mode, where they
+  // were prepared for the other one.
+  private syncForms() {
+    // Queued tracks still preparing take the mode when they finish.
+    const prepared = [
+      ...(this.current ? [this.current] : []),
+      ...this.queue.filter((entry) => entry.status === "ready"),
+    ];
+    for (const entry of prepared)
+      if (!this.formFits(entry)) this.reprepare(entry);
+  }
+
+  /**
+   * Prepares a track again for the mode it is now in, keeping what it has
+   * until that is ready. The playing track then carries on in the new form:
+   * where it was when the source is the same, from the top when a song
+   * became its video or went back.
+   */
+  private reprepare(entry: Entry) {
+    if (this.reprepares.has(entry.id) || this.preparations.has(entry.id))
+      return;
+    const controller = new AbortController();
+    this.reprepares.set(entry.id, controller);
+    const mode = this.mediaMode;
+    const done = () => {
+      if (this.reprepares.get(entry.id) === controller)
+        this.reprepares.delete(entry.id);
+    };
+    void this.download(entry, controller).then(
+      (media) =>
+        this.enqueue(async () => {
+          done();
+          const wanted = this.current === entry || this.queue.includes(entry);
+          if (
+            controller.signal.aborted ||
+            this.inactive() ||
+            mode !== this.mediaMode ||
+            !wanted
+          ) {
+            await this.discardMedia(media.filePath);
+            return;
+          }
+          const previous = { filePath: entry.filePath, form: entry.form };
+          const sameSource =
+            previous.form !== "music_video" && media.form !== "music_video";
+          this.prepared(entry, media);
+          if (media.fellBack) await this.videoFellBack(entry);
+          if (this.current === entry) {
+            if (!sameSource) {
+              this.playbackSeconds = 0;
+              this.store.setSession(this.id, { playbackSeconds: 0 });
+            }
+            await this.sendCurrent(entry);
+            this.startScrobbling(entry);
+            await this.markWatched(entry);
+          } else this.syncPreloads();
+          if (previous.filePath && previous.filePath !== media.filePath)
+            await this.discardMedia(previous.filePath);
+          this.log.info(
+            {
+              event: "track_reprepared",
+              entryId: entry.id,
+              form: media.form,
+              mode,
+            },
+            "Track prepared again for the mode",
+          );
+          this.queueRender();
+        }),
+      (error) =>
+        this.enqueue(async () => {
+          done();
+          if (controller.signal.aborted || this.inactive()) return;
+          this.logTrackFailure(
+            {
+              event: "track_reprepare_failed",
+              entryId: entry.id,
+              sourceId: entry.sourceId,
+              mode,
+            },
+            error,
+            "Could not prepare the track again for the mode",
+          );
+          if (mode !== this.mediaMode) return;
+          // It plays as it is rather than not at all, and is not tried again.
+          entry.videoChecked = this.videoMode || undefined;
+          if (
+            this.videoMode &&
+            trackKind(entry) === "video" &&
+            (this.current === entry || this.queue.includes(entry))
+          )
+            await this.videoNotice(
+              entry,
+              `Couldn’t load the video for ${entry.title}, so it will play as audio.`,
+            );
+        }),
+    );
+  }
+
+  // Removes a prepared file once no track uses it.
+  private async discardMedia(filePath: string) {
+    const used = [this.current, ...this.queue, ...this.history].some(
+      (other) => other?.filePath === filePath,
+    );
+    if (!used) await removePreparedMedia(filePath);
   }
 
   private async advance(reason = "played", expectedId?: string) {
@@ -3493,7 +3982,7 @@ export class Coordinator {
         this.autoplayDiscoveryInterval = autoplayDiscoveryEvery;
       if (natural && end) {
         this.playbackScrobbling?.position(end);
-        this.listenedSeconds += Math.max(0, end - this.playbackSeconds);
+        this.countTime(end - this.playbackSeconds);
       }
       if (natural && this.loopMode === "track") {
         this.playbackScrobbling?.finish();
@@ -3513,7 +4002,7 @@ export class Coordinator {
           entryId: this.current.id,
           introSeconds: this.current.introSeconds ?? 0,
         });
-        this.playbackScrobbling?.start(this.current, this.participants);
+        this.startScrobbling(this.current, 0);
         this.notifyTrack("track.started", this.current);
         await this.render();
         return;
@@ -3603,7 +4092,10 @@ export class Coordinator {
         this.queueChanged();
       }
     }
-    this.store.setSession(this.id, { listenedSeconds: this.listenedSeconds });
+    this.store.setSession(this.id, {
+      listenedSeconds: this.listenedSeconds,
+      watchedSeconds: this.watchedSeconds,
+    });
     this.current = undefined;
     await this.startNext();
   }
@@ -3977,15 +4469,26 @@ export class Coordinator {
       await this.require(interaction, "add");
       return;
     }
-    const recent = this.store.recentTracks(
-      interaction.userId,
-      recentTrackLimit,
-    );
-    const recommended = this.recommendations?.userRecommendations(
-      interaction.userId,
-      this.sessionExclusions(),
-    );
     this.prefetchRecommendations(interaction.userId);
+    await this.slack.modal(
+      interaction.triggerId,
+      await this.addView(interaction.userId),
+    );
+  }
+
+  // The add dialog, with the video hint under the search when it holds a
+  // video link in music mode. Video mode searches YouTube, and leaves out the
+  // music recommendations and recent songs.
+  private async addView(userId: string, videoHint = false) {
+    const recent = this.videoMode
+      ? []
+      : this.store.recentTracks(userId, recentTrackLimit);
+    const recommended = this.videoMode
+      ? undefined
+      : this.recommendations?.userRecommendations(
+          userId,
+          this.sessionExclusions(),
+        );
     const recommendedGroups = [
       { label: "Your favourites", tracks: recommended?.favourites ?? [] },
       { label: "Discover", tracks: recommended?.discover ?? [] },
@@ -3994,11 +4497,11 @@ export class Coordinator {
       .map((group) => ({
         label: plain(group.label),
         options: group.tracks.map((track) => ({
-          text: plain(`${track.title} — ${track.artist}`.slice(0, 75)),
+          text: plain(shorten(`${track.title} — ${track.artist}`, 75)),
           value: track.id,
         })),
       }));
-    await this.slack.modal(interaction.triggerId, {
+    return {
       type: "modal",
       callback_id: "add_track_to_queue",
       private_metadata: JSON.stringify({ sessionId: this.id }),
@@ -4006,18 +4509,28 @@ export class Coordinator {
       submit: plain("Add"),
       close: plain("Cancel"),
       blocks: [
-        input(
-          "track",
-          "Song, album, playlist, or link",
-          {
-            type: "external_select",
-            action_id: "selection",
-            placeholder: plain("Search or paste a link"),
-            min_query_length: 3,
-            focus_on_load: true,
-          },
-          { optional: Boolean(recent.length || recommendedGroups.length) },
-        ),
+        {
+          ...input(
+            "track",
+            this.videoMode ? "Video or link" : "Song, album, playlist, or link",
+            {
+              type: "external_select",
+              action_id: "selection",
+              placeholder: plain(
+                this.videoMode
+                  ? "Search YouTube or paste a link"
+                  : "Search or paste a link",
+              ),
+              min_query_length: 3,
+              focus_on_load: true,
+            },
+            { optional: Boolean(recent.length || recommendedGroups.length) },
+          ),
+          // Music mode looks at what was picked, to offer video mode for a
+          // video link.
+          ...(this.videoMode ? {} : { dispatch_action: true }),
+        },
+        ...when(videoHint, ...this.videoHintBlocks(userId)),
         ...when(
           recommendedGroups.length,
           input(
@@ -4042,7 +4555,7 @@ export class Coordinator {
               action_id: "selection",
               placeholder: plain("Choose a recent song"),
               options: recent.map((track) => ({
-                text: plain(`${track.title} — ${track.artist}`.slice(0, 75)),
+                text: plain(shorten(`${track.title} — ${track.artist}`, 75)),
                 value: track.id,
               })),
             },
@@ -4050,16 +4563,17 @@ export class Coordinator {
           ),
         ),
         ...when(
-          this.can(interaction.userId, "add-bulk"),
+          this.can(userId, "add-bulk"),
           actions("bulk_add", [button("open_bulk_add", plain("Add in bulk"))]),
         ),
       ],
-    });
+    };
   }
 
   private async openBulkAdd(interaction: Interaction) {
     if (!interaction.viewId) return;
     if (!(await this.require(interaction, "add-bulk"))) return;
+    this.hintedViews.delete(interaction.viewId);
     await this.slack.updateModal(
       interaction.viewId,
       interaction.viewHash,
@@ -4067,7 +4581,9 @@ export class Coordinator {
     );
   }
 
-  private bulkAddView() {
+  // The bulk add dialog, with the video hint for `hintFor` when its links
+  // hold a video in music mode.
+  private bulkAddView(hintFor?: string) {
     return {
       type: "modal",
       callback_id: "bulk_add_to_queue",
@@ -4076,22 +4592,35 @@ export class Coordinator {
       submit: plain("Add"),
       close: plain("Cancel"),
       blocks: [
-        input(
-          "links",
-          "Track links",
-          {
-            type: "plain_text_input",
-            action_id: "text",
-            multiline: true,
-            focus_on_load: true,
-            placeholder: plain(
-              "https://example.com/a.mp3\nhttps://example.com/b.mp3",
-            ),
-          },
-          {
-            hint: "One HTTP(S) link per line. Blank lines and # comments are ignored.",
-          },
-        ),
+        {
+          ...input(
+            "links",
+            "Track links",
+            {
+              type: "plain_text_input",
+              action_id: "text",
+              multiline: true,
+              focus_on_load: true,
+              placeholder: plain(
+                "https://example.com/a.mp3\nhttps://example.com/b.mp3",
+              ),
+              // Music mode looks at the links as they arrive, to offer video
+              // mode for a video.
+              ...(this.videoMode
+                ? {}
+                : {
+                    dispatch_action_config: {
+                      trigger_actions_on: ["on_character_entered"],
+                    },
+                  }),
+            },
+            {
+              hint: "One HTTP(S) link per line. Blank lines and # comments are ignored.",
+            },
+          ),
+          ...(this.videoMode ? {} : { dispatch_action: true }),
+        },
+        ...when(hintFor, ...this.videoHintBlocks(hintFor ?? "")),
       ],
     };
   }
@@ -4148,7 +4677,7 @@ export class Coordinator {
     const tracks: TrackMetadata[] = [];
     for (const link of links.slice(0, capacity)) {
       try {
-        tracks.push(await this.tracks.resolveUrl(link));
+        tracks.push(await this.tracks.resolveUrl(link, this.videoMode));
       } catch (error) {
         return this.notice(
           interaction.userId,
@@ -4521,6 +5050,7 @@ export class Coordinator {
       },
       session: {
         hostId: this.hostId,
+        mediaMode: this.mediaMode,
         volume: this.volume,
         displayMode: this.displayMode,
         autoplayMode: this.autoplayMode,
@@ -4988,6 +5518,18 @@ export class Coordinator {
       this.setPermissions(
         chosen.map((option) => option.value).filter(Boolean) as string[],
       );
+    // Switching mode last, so it starts from the settings just saved.
+    const mode = admin
+      ? selected(state.media_mode?.mode, mediaModes)
+      : undefined;
+    if (mode && mode !== this.mediaMode) {
+      const blocked = await this.switchMediaMode(
+        interaction.userId,
+        mode,
+        "modal",
+      );
+      if (blocked) await this.notice(interaction.userId, blocked);
+    }
     if (nextHost) this.setHost(nextHost);
     if (this.scrobbling) {
       try {
@@ -5087,14 +5629,13 @@ export class Coordinator {
     anchorEnabled?: boolean;
   }) {
     const changed: string[] = [];
-    const {
-      displayMode,
-      autoplayMode,
-      loopMode,
-      transitionMode,
-      duckingMode,
-      anchorEnabled,
-    } = patch;
+    const { loopMode, anchorEnabled } = patch;
+    // Video mode does not show the music's own settings, and leaves them
+    // as they are.
+    const { displayMode, autoplayMode, transitionMode, duckingMode } = this
+      .videoMode
+      ? {}
+      : patch;
     if (displayMode !== undefined && displayMode !== this.displayMode) {
       this.displayMode = displayMode;
       this.sendMedia({ type: "display_mode", mode: displayMode });
@@ -5257,6 +5798,9 @@ export class Coordinator {
   private setHost(hostId: string | undefined) {
     this.hostId = hostId;
     this.store.setSession(this.id, { hostId: hostId ?? null });
+    // A request asked the host before, who is no longer the one to answer.
+    if (this.videoRequest && this.videoRequest.hostId !== hostId)
+      void this.closeVideoRequest("You are no longer the host.");
   }
 
   private async takeHost(userId: string) {
@@ -5762,17 +6306,26 @@ export class Coordinator {
       {
         type: "container",
         block_id: `player_${id}`,
-        title: plain(current?.title ?? "Nothing playing"),
+        title: plain(current ? displayTitle(current) : "Nothing playing"),
         subtitle: plain(
           current
             ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}`
-            : "Ready for music",
+            : this.videoMode
+              ? "Ready to watch"
+              : "Ready for music",
         ),
         ...artworkIcon(current),
         child_blocks: [
           ...(current
             ? [
-                context(`current_status_${id}`, addedBy(current)),
+                context(
+                  `current_status_${id}`,
+                  // A video's title can be cut short, so it is a click away.
+                  trackKind(current) === "video" &&
+                    /^https?:\/\//.test(current.canonicalUrl)
+                    ? `${addedBy(current)} · <${escape(current.canonicalUrl).replaceAll("|", "%7C")}|Open video>`
+                    : addedBy(current),
+                ),
                 actions(`playback_${id}`, [
                   button("previous_track", icon(":ms-skip-back:"), { value }),
                   button(
@@ -5789,13 +6342,17 @@ export class Coordinator {
                   button("volume_up", icon(":ms-speaker-loud-volume:"), {
                     value,
                   }),
-                  // Carries the entry rather than the session: a click can
-                  // land after the song has rolled over, and it should like
-                  // the song they were listening to rather than whatever is
-                  // playing by the time it arrives.
-                  button("like_track", icon(":ms-sparkling-heart:"), {
-                    value: current.id,
-                  }),
+                  // Likes feed music recommendations, so video mode puts
+                  // Jump to in their place.
+                  this.videoMode
+                    ? button("open_jump_to", plain("Jump to"), { value })
+                    : // Carries the entry rather than the session: a click
+                      // can land after the song has rolled over, and it
+                      // should like the song they were listening to rather
+                      // than whatever is playing by the time it arrives.
+                      button("like_track", icon(":ms-sparkling-heart:"), {
+                        value: current.id,
+                      }),
                 ]),
                 actions(`seek_${id}`, [
                   button("seek_back", icon(":ms-rewind:"), { value }),
@@ -5804,15 +6361,26 @@ export class Coordinator {
                   button("save_track", icon(":ms-floppy-disk:"), {
                     value: current.id,
                   }),
+                  ...when(
+                    this.videoMode,
+                    button("toggle_captions", plain("CC"), {
+                      value,
+                      ...(this.captions ? { style: "primary" } : {}),
+                    }),
+                  ),
                 ]),
               ]
             : when(
                 idle,
                 actions(`play_something_${id}`, [
-                  button("play_something", plain("Play something"), {
-                    style: "primary",
-                    value,
-                  }),
+                  // Play something picks songs, which is music mode's.
+                  ...when(
+                    !this.videoMode,
+                    button("play_something", plain("Play something"), {
+                      style: "primary",
+                      value,
+                    }),
+                  ),
                   // Shown whether or not there are saves, since the player
                   // is the same for everyone and each sees only some saves.
                   button("open_load_session", plain("Load saved session"), {
@@ -5822,7 +6390,7 @@ export class Coordinator {
               )),
           context(
             `volume_status_${id}`,
-            `Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
+            `${this.videoMode ? "Video mode · " : ""}Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
               this.integrations.size
                 ? ` · Controlling: ${[...this.integrations.keys()].map((id) => `<@${id}>`).join(", ")}`
                 : ""
@@ -5835,7 +6403,7 @@ export class Coordinator {
         block_id: `next_${id}`,
         title: plain(
           next
-            ? `Next: ${next.title}`
+            ? `Next: ${displayTitle(next)}`
             : findingAutoplay
               ? "Finding next song"
               : "Nothing queued",
@@ -5845,7 +6413,9 @@ export class Coordinator {
             ? `${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}`
             : findingAutoplay
               ? "Autoplay is picking a recommendation"
-              : "Add a song to keep the music going",
+              : this.videoMode
+                ? "Add a video to keep watching"
+                : "Add a song to keep the music going",
         ),
         ...artworkIcon(next),
         child_blocks: [
@@ -5879,6 +6449,502 @@ export class Coordinator {
           ...footerContext(this.config.footer, `footer_${id}`),
         ],
       },
+    ];
+  }
+
+  // Time played counts as watching while a video shows, and as listening
+  // otherwise.
+  private countTime(seconds: number) {
+    if (!(seconds > 0)) return;
+    if (this.current?.isVideo) this.watchedSeconds += seconds;
+    else this.listenedSeconds += seconds;
+  }
+
+  // Scrobbling follows the music, so video mode leaves it be.
+  private startScrobbling(entry: Entry, position = this.playbackSeconds) {
+    if (this.videoMode) {
+      this.playbackScrobbling?.finish();
+      return;
+    }
+    this.playbackScrobbling?.start(
+      entry,
+      this.participants,
+      this.state === "playing",
+      position,
+    );
+  }
+
+  // A track watched as a video counts as one, not as a song.
+  private async markWatched(entry: Entry) {
+    const isVideo = this.videoMode && entry.form === "video";
+    if (Boolean(entry.isVideo) === isVideo) return;
+    entry.isVideo = isVideo;
+    this.store.setTrack(entry.id, { isVideo });
+  }
+
+  private cancelReprepares() {
+    for (const controller of this.reprepares.values()) controller.abort();
+    this.reprepares.clear();
+  }
+
+  // A private word to whoever added a track, or to the host for a track
+  // nobody added.
+  private async videoNotice(entry: Entry | undefined, text: string) {
+    const userId =
+      entry && !entry.automatic && entry.requesterId !== this.botUserId
+        ? entry.requesterId
+        : this.hostId;
+    if (userId) await this.notice(userId, text);
+  }
+
+  // The screen share or a video's picture failed, and media is showing the
+  // card and playing the sound instead.
+  private async videoFailed(type: string, entryId?: string) {
+    if (!this.videoMode || this.inactive()) return;
+    const entry =
+      [this.current, ...this.queue].find((item) => item?.id === entryId) ??
+      this.current;
+    this.log.warn(
+      { event: type, entryId: entry?.id },
+      type === "share_failed"
+        ? "Screen share failed; playing as audio"
+        : "Video could not be shown; playing as audio",
+    );
+    await this.videoNotice(
+      entry,
+      type === "share_failed"
+        ? "Couldn’t share the screen in the huddle, so videos will play as audio for now."
+        : `Couldn’t show the video for ${entry?.title ?? "this track"}, so it’s playing as audio.`,
+    );
+  }
+
+  // Why video mode cannot start now, if it cannot.
+  private videoModeBlocked() {
+    const limit = this.config.video?.sessionLimit ?? 2;
+    if (limit <= 0) return "Video mode is turned off on this server.";
+    const others = this.videoSessions() - (this.videoMode ? 1 : 0);
+    if (others >= limit)
+      return `Video mode is in use in ${others} other huddle${others === 1 ? "" : "s"}, the limit on this server.`;
+    if (this.contentShares >= screenShareSlots)
+      return "Two people are already sharing their screens, and Slack allows only two at once. Try again when one of them stops.";
+  }
+
+  /**
+   * Switches between music and video mode, for the host. The queue carries
+   * across, each track prepared again for the new mode where it needs to be,
+   * and the music settings stay as they were for when music comes back.
+   * Returns why it could not, if it could not.
+   */
+  private async switchMediaMode(
+    userId: string,
+    mode: MediaMode,
+    source: string,
+  ): Promise<string | undefined> {
+    if (mode === this.mediaMode) return;
+    if (!this.settingsAdmin(userId))
+      return "Only the host can switch between music and video mode.";
+    if (mode === "video") {
+      const blocked = this.videoModeBlocked();
+      if (blocked) return blocked;
+    }
+    const previous = this.mediaMode;
+    this.mediaMode = mode;
+    this.store.setSession(this.id, { mediaMode: mode });
+    this.audit.record("session.mode_changed", userId, {
+      sessionId: this.id,
+      source,
+      previous,
+      mode,
+    });
+    this.log.info(
+      { event: "media_mode_changed", mode, source, userId },
+      "Media mode changed",
+    );
+    this.cancelReprepares();
+    if (mode === "video") {
+      this.cancelAutoplay();
+      await this.closeVideoRequest("Video mode is on.");
+    }
+    this.sendMediaSettings();
+    const current = this.current;
+    if (current) {
+      if (this.formFits(current)) {
+        // Same file, now with or without its picture: it carries on.
+        this.sendMedia(await this.playMessage(current));
+        this.sendLyrics(current);
+        this.syncPreloads();
+        await this.markWatched(current);
+      }
+      this.startScrobbling(current);
+    }
+    this.syncForms();
+    this.scheduleAutoplay();
+    await this.render();
+    this.sessionChanged();
+  }
+
+  private async toggleCaptions(interaction: Interaction) {
+    if (!(await this.require(interaction, "pause"))) return;
+    if (!this.videoMode)
+      return this.notice(interaction.userId, "Captions are for video mode.");
+    this.captions = !this.captions;
+    this.store.setSession(this.id, { captions: this.captions });
+    this.sendMedia({ type: "captions", on: this.captions });
+    this.audit.record("playback.captions", interaction.userId, {
+      sessionId: this.id,
+      captions: this.captions,
+    });
+    const current = this.current;
+    if (
+      this.captions &&
+      current &&
+      !(
+        current.filePath &&
+        (current.form === "video" || current.form === "music_video") &&
+        (await Bun.file(captionsPath(current.filePath)).exists())
+      )
+    )
+      await this.notice(interaction.userId, "This video has no captions.");
+    await this.render();
+  }
+
+  private async jumpToModal(interaction: Interaction) {
+    if (!(await this.require(interaction, "skip"))) return;
+    const current = this.current;
+    if (!current || !interaction.triggerId)
+      return this.notice(interaction.userId, "Nothing is playing.");
+    const chapters = current.filePath
+      ? (await readChapters(current.filePath)).slice(0, selectOptionLimit)
+      : [];
+    await this.slack.modal(interaction.triggerId, {
+      type: "modal",
+      callback_id: "jump_to_time",
+      private_metadata: JSON.stringify({
+        sessionId: this.id,
+        entryId: current.id,
+      }),
+      title: plain("Jump to"),
+      submit: plain("Jump"),
+      close: plain("Cancel"),
+      blocks: [
+        ...when(
+          chapters.length,
+          input(
+            "chapter",
+            "Chapter",
+            {
+              type: "static_select",
+              action_id: "start",
+              placeholder: plain("Choose a chapter"),
+              options: chapters.map((chapter) => ({
+                text: plain(
+                  shorten(
+                    `${formatClock(chapter.start)} · ${chapter.title}`,
+                    75,
+                  ),
+                ),
+                value: String(chapter.start),
+              })),
+            },
+            { optional: true },
+          ),
+        ),
+        input(
+          "time",
+          "Time",
+          {
+            type: "plain_text_input",
+            action_id: "value",
+            placeholder: plain("For example, 42:10 or 1:23:45"),
+          },
+          {
+            optional: chapters.length > 0,
+            hint: current.duration
+              ? `The video runs ${formatClock(current.duration)}.`
+              : undefined,
+          },
+        ),
+      ],
+    });
+  }
+
+  private async jumpToSubmission(interaction: Interaction) {
+    const metadata = parseMetadata(interaction.metadata);
+    if (!(await this.require(interaction, "skip"))) return;
+    const current = this.current;
+    if (!current || metadata.entryId !== current.id)
+      return this.notice(
+        interaction.userId,
+        "That is no longer playing; open Jump to again.",
+      );
+    const raw = interaction.state.time?.value?.value?.trim() ?? "";
+    const chapter = Number(
+      interaction.state.chapter?.start?.selected_option?.value,
+    );
+    const seconds = raw
+      ? parseClock(raw)
+      : Number.isFinite(chapter)
+        ? chapter
+        : undefined;
+    if (seconds === undefined)
+      return this.notice(
+        interaction.userId,
+        raw
+          ? "Times look like 42:10 or 1:23:45."
+          : "Choose a chapter or enter a time.",
+      );
+    if (current.duration && seconds >= current.duration)
+      return this.notice(
+        interaction.userId,
+        `That is past the end; it runs ${formatClock(current.duration)}.`,
+      );
+    const previous = this.playbackSeconds;
+    this.playbackSeconds = seconds;
+    this.sendMedia({ type: "seek", seconds });
+    this.audit.record("playback.seeked", interaction.userId, {
+      sessionId: this.id,
+      trackId: current.id,
+      previous,
+      seconds,
+    });
+    this.store.incrementUsage(seconds >= previous ? "forward" : "back");
+  }
+
+  // Video mode for a video link added in music mode: the host switches, and
+  // anyone else asks the host.
+  private async addWithVideoMode(interaction: Interaction) {
+    if (!interaction.viewId) return;
+    const bulk = interaction.state.links?.text?.value !== undefined;
+    if (!(await this.require(interaction, bulk ? "add-bulk" : "add"))) return;
+    const switching = this.settingsAdmin(interaction.userId);
+    let outcome = "Added.";
+    if (this.videoMode) outcome = "Added. Video mode is already on.";
+    else if (switching) {
+      const blocked = await this.switchMediaMode(
+        interaction.userId,
+        "video",
+        "add",
+      );
+      if (blocked) {
+        await this.slack.updateModal(
+          interaction.viewId,
+          interaction.viewHash,
+          this.addResultView(blocked),
+        );
+        return;
+      }
+      outcome = "Added, and switched to video mode.";
+    } else if (!this.hostId)
+      outcome = "Added. There is no host to ask for video mode.";
+    else if (Date.now() < this.videoRequestsPausedUntil)
+      outcome = "Added. The host said not now, so it will play as audio.";
+    else {
+      const selection =
+        interaction.state.track?.selection?.selected_option?.value;
+      await this.requestVideoMode(
+        interaction.userId,
+        bulk ? undefined : this.tracks.referencedTitle(selection ?? ""),
+      );
+      outcome = "Added, and asked the host to switch to video mode.";
+    }
+    await this.slack.updateModal(
+      interaction.viewId,
+      interaction.viewHash,
+      this.addResultView(outcome),
+    );
+    const added = { ...interaction, value: "" };
+    if (bulk) void this.bulkAddLinks(added);
+    else void this.add(added);
+  }
+
+  private addResultView(text: string) {
+    return {
+      type: "modal",
+      callback_id: "add_track_done",
+      private_metadata: JSON.stringify({ sessionId: this.id }),
+      title: plain("Add to queue"),
+      close: plain("Done"),
+      blocks: [section(text)],
+    };
+  }
+
+  /**
+   * Asks the host, in a direct message, to switch to video mode. More asks
+   * while one is open join it rather than sending another.
+   */
+  private async requestVideoMode(userId: string, title?: string) {
+    const hostId = this.hostId;
+    if (!hostId || this.videoMode) return;
+    const request = this.videoRequest;
+    if (request && request.hostId === hostId) {
+      if (!request.userIds.includes(userId)) request.userIds.push(userId);
+      const message = await request.message;
+      if (message)
+        await this.slack
+          .update(
+            message.channelId,
+            message.ts,
+            this.videoRequestText(request),
+            this.videoRequestBlocks(request),
+          )
+          .catch((error) =>
+            this.log.warn(
+              { event: "video_request_update_failed", err: error },
+              "Could not update the video mode request",
+            ),
+          );
+      return;
+    }
+    const next: VideoRequest = { userIds: [userId], title, hostId };
+    this.videoRequest = next;
+    next.message = this.slack
+      .dm(hostId, this.videoRequestText(next), {
+        blocks: this.videoRequestBlocks(next),
+      })
+      .catch((error) => {
+        this.log.warn(
+          { event: "video_request_failed", hostId, err: error },
+          "Could not ask the host for video mode",
+        );
+        if (this.videoRequest === next) this.videoRequest = undefined;
+        return undefined;
+      });
+    this.audit.record("session.video_requested", userId, {
+      sessionId: this.id,
+      hostId,
+    });
+    await next.message;
+  }
+
+  private videoRequestText(request: VideoRequest) {
+    const [first, ...others] = request.userIds;
+    const who = others.length
+      ? `<@${first}> and ${others.length} other${others.length === 1 ? "" : "s"} want`
+      : `<@${first}> wants`;
+    return `${who} to switch to video mode to watch ${request.title ? `“${escape(shorten(request.title, 100))}”` : "a video"}.`;
+  }
+
+  private videoRequestBlocks(request: VideoRequest) {
+    return [
+      section(this.videoRequestText(request)),
+      actions(`video_request_${this.id}`, [
+        button("approve_video_request", plain("Switch to video mode"), {
+          style: "primary",
+          value: this.id,
+        }),
+        button("decline_video_request", plain("Not now"), { value: this.id }),
+      ]),
+    ];
+  }
+
+  // Ends the open request, saying how in the host's message.
+  private async closeVideoRequest(text: string) {
+    const request = this.videoRequest;
+    this.videoRequest = undefined;
+    const message = await request?.message;
+    if (!message) return;
+    await this.slack
+      .update(message.channelId, message.ts, text, [section(text)])
+      .catch((error) =>
+        this.log.warn(
+          { event: "video_request_close_failed", err: error },
+          "Could not update the video mode request",
+        ),
+      );
+  }
+
+  private async answerVideoRequest(interaction: Interaction, approve: boolean) {
+    if (!this.settingsAdmin(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "Only the host can answer that request.",
+      );
+    if (!approve) {
+      this.videoRequestsPausedUntil = Date.now() + videoRequestPauseMs;
+      this.audit.record("session.video_declined", interaction.userId, {
+        sessionId: this.id,
+      });
+      return this.closeVideoRequest(
+        "Not now. Nobody can ask again for 15 minutes.",
+      );
+    }
+    if (this.videoMode) return this.closeVideoRequest("Video mode is on.");
+    // Switching closes the request itself.
+    const blocked = await this.switchMediaMode(
+      interaction.userId,
+      "video",
+      "request",
+    );
+    if (blocked && interaction.responseUrl)
+      await this.slack
+        .replaceOriginal(interaction.responseUrl, blocked, [
+          section(blocked),
+          ...(this.videoRequest
+            ? this.videoRequestBlocks(this.videoRequest).slice(1)
+            : []),
+        ])
+        .catch(() => undefined);
+  }
+
+  /**
+   * In music mode, a video link added as audio gets a hint under it, with a
+   * way to switch, or to ask the host to.
+   */
+  private async videoLinkHint(interaction: Interaction) {
+    if (!interaction.viewId || this.videoMode) return;
+    const bulk = interaction.actionId === "text";
+    const links = bulk
+      ? (interaction.state.links?.text?.value ?? "").split(/\s+/)
+      : [
+          this.tracks.referencedUrl(
+            interaction.state.track?.selection?.selected_option?.value ?? "",
+          ) ?? "",
+        ];
+    const video = links.some((link) => isVideoLink(link));
+    if ((this.hintedViews.get(interaction.viewId) ?? false) === video) return;
+    this.hintedViews.delete(interaction.viewId);
+    this.hintedViews.set(interaction.viewId, video);
+    // Dialogs are let go of in time; they do not say when they close.
+    for (const viewId of this.hintedViews.keys()) {
+      if (this.hintedViews.size <= 100) break;
+      this.hintedViews.delete(viewId);
+    }
+    const view = bulk
+      ? this.bulkAddView(video ? interaction.userId : undefined)
+      : await this.addView(interaction.userId, video);
+    await this.slack.updateModal(
+      interaction.viewId,
+      interaction.viewHash,
+      view,
+    );
+  }
+
+  // The hint under a video link in music mode.
+  private videoHintBlocks(userId: string) {
+    const host = this.settingsAdmin(userId);
+    const ask =
+      !host &&
+      Boolean(this.hostId) &&
+      Date.now() >= this.videoRequestsPausedUntil;
+    return [
+      context(
+        "video_hint",
+        "This looks like a video, so it will play as audio. The host can switch to video mode in Settings to watch it.",
+      ),
+      ...when(
+        (host || ask) && !this.videoModeBlocked(),
+        actions("video_hint_actions", [
+          button(
+            "add_with_video_mode",
+            plain(
+              host
+                ? "Add and switch to video mode"
+                : "Add and ask for video mode",
+            ),
+            { value: this.id },
+          ),
+        ]),
+      ),
     ];
   }
 
@@ -6015,6 +7081,7 @@ export class Coordinator {
     this.cancelAutoplay();
     for (const controller of this.preparations.values()) controller.abort();
     this.preparations.clear();
+    this.cancelReprepares();
     for (const timer of [
       this.idleTimer,
       this.idleWarningTimer,
@@ -6058,6 +7125,7 @@ export class Coordinator {
     this.state = "ended";
     this.playbackScrobbling?.finish();
     this.stopWork();
+    void this.closeVideoRequest("The session ended.");
     clearTimeout(this.queueModalTimer);
     this.queueViews.clear();
     this.store.endSession(
@@ -6166,6 +7234,9 @@ export class Coordinator {
         section(
           [
             `*Listening time:* ${elapsed(this.listenedSeconds)}`,
+            ...(this.watchedSeconds
+              ? [`*Watching time:* ${elapsed(this.watchedSeconds)}`]
+              : []),
             `*Songs played:* ${songs.length}`,
             `*Mix:* ${songs.length - autoplay} requested · ${autoplay} autoplay`,
             `*Autoplay percentage:* ${Math.round((autoplay / songs.length) * 100)}%`,

@@ -478,8 +478,9 @@ test("aggregates all-time canvas stats", () => {
   add("4", "two", "Queued", "Ignored", "U2", false, "ready");
 
   expect(store.canvasStats()).toEqual({
-    sessions: { count: 2, listened: 480, longest: 360, active: 0 },
+    sessions: { count: 2, listened: 480, watched: 0, longest: 360, active: 0 },
     tracks: { count: 3, uniqueTracks: 2, artists: 2, autoplay: 1 },
+    videos: { count: 0 },
     topArtists: [
       { artist: "Artist", count: 2 },
       { artist: "Another", count: 1 },
@@ -488,6 +489,8 @@ test("aggregates all-time canvas stats", () => {
       { title: "Song", artist: "Artist", count: 2 },
       { title: "Other", artist: "Another", count: 1 },
     ],
+    topVideos: [],
+    topVideoChannels: [],
     topChannels: [
       { channelId: "two", count: 2 },
       { channelId: "one", count: 1 },
@@ -1450,5 +1453,51 @@ test("forgetting a user keeps them out of the Huddle mix if they opted out", () 
   store.forgetUser("U2");
   expect(store.getUserScrobbling("U2").huddleMixOptIn).toBe(true);
   expect(store.userData("U2").likes.count).toBe(0);
+  store.close();
+});
+
+test("keeps a session's mode, captions and watching time, and a track's kind and form", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "host",
+    volume: 0.5,
+  });
+  store.setSession("session", {
+    mediaMode: "video",
+    captions: true,
+    watchedSeconds: 75,
+  });
+  store.addTrack({
+    id: "clip",
+    sessionId: "session",
+    requesterId: "host",
+    sourceInput: "https://www.youtube.com/watch?v=abcdefghijk",
+    canonicalUrl: "https://www.youtube.com/watch?v=abcdefghijk",
+    sourceId: "abcdefghijk",
+    title: "Clip",
+    artist: "Channel",
+    kind: "video",
+    status: "ready",
+    isVideo: true,
+  });
+  store.setTrack("clip", { filePath: "clip.video.mkv", form: "video" });
+  const [saved] = store.resumableSessions(Date.now(), 60_000).sessions;
+  expect(saved).toMatchObject({
+    mediaMode: "video",
+    captions: true,
+    watchedSeconds: 75,
+  });
+  expect(saved!.tracks[0]).toMatchObject({
+    kind: "video",
+    form: "video",
+    filePath: "clip.video.mkv",
+  });
+  // A video queued to watch is no one's recent song.
+  expect(store.recentTracks("host")).toEqual([]);
   store.close();
 });

@@ -405,7 +405,7 @@ export class SlackAppAdapter {
       options?.channelId ??
       (await this.web.conversations.open({ users: userId })).channel?.id;
     if (!channelId) throw new Error("conversations.open returned no channel");
-    await this.web.chat.postMessage({
+    const result = await this.web.chat.postMessage({
       channel: channelId,
       text,
       thread_ts: options?.threadTs,
@@ -420,6 +420,7 @@ export class SlackAppAdapter {
       },
       "Slack direct message posted",
     );
+    return result.ts ? { channelId, ts: result.ts } : undefined;
   }
 
   async replaceOriginal(responseUrl: string, text: string, blocks?: unknown[]) {

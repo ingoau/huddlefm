@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
+import { z } from "zod";
+import type { Coordinator } from "./coordinator.ts";
 import {
   agentCommandResult,
   agentConfigured,
+  agentTools,
   isAgentBusy,
   isBareMention,
   stripMentions,
@@ -54,4 +57,34 @@ test("agentCommandResult fails when a coordinator tool reports an error", () => 
       ],
     }),
   ).toEqual({ ok: false, text: "Nothing is playing." });
+});
+
+test("the tools follow the mode, like the player does", () => {
+  const tools = (videoMode: boolean) =>
+    agentTools(
+      { videoMode } as unknown as Coordinator,
+      "U1",
+    ) as unknown as Record<string, { inputSchema: z.ZodObject }>;
+  const fields = (tool: { inputSchema: z.ZodObject }) =>
+    Object.keys(tool.inputSchema.shape);
+  const music = tools(false);
+  expect(music.jump_to).toBeUndefined();
+  expect(music.set_captions).toBeUndefined();
+  expect(fields(music.add_tracks!)).toEqual(["reference", "withVideoMode"]);
+  expect(fields(music.update_settings!)).toContain("autoplayMode");
+  expect(fields(music.update_settings!)).toContain("mode");
+  const video = tools(true);
+  expect(video.jump_to).toBeDefined();
+  expect(video.set_captions).toBeDefined();
+  expect(fields(video.add_tracks!)).toEqual(["reference"]);
+  for (const field of [
+    "displayMode",
+    "autoplay",
+    "autoplayMode",
+    "transitionMode",
+  ])
+    expect(fields(video.update_settings!)).not.toContain(field);
+  expect(fields(video.update_settings!)).toEqual(
+    expect.arrayContaining(["mode", "loopMode", "hostUserId"]),
+  );
 });

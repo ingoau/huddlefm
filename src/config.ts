@@ -80,6 +80,30 @@ export function parseRolePermissions(env: Record<string, string | undefined>) {
   };
 }
 
+/**
+ * What video mode allows, from the VIDEO_* settings. A value that is not a
+ * whole number in range keeps its default.
+ */
+export function parseVideoLimits(env: Record<string, string | undefined>) {
+  return {
+    durationSeconds: parseWholeNumber(
+      env.VIDEO_DURATION_LIMIT_SECONDS,
+      3_600,
+      1,
+    ),
+    downloadBytes: parseWholeNumber(
+      env.VIDEO_DOWNLOAD_LIMIT_BYTES,
+      1_500_000_000,
+      1,
+    ),
+    maxHeight: parseWholeNumber(env.VIDEO_MAX_HEIGHT, 720, 240, 1_080),
+    maxFps: parseWholeNumber(env.VIDEO_MAX_FPS, 30, 5, 30),
+    // 0 turns video mode off.
+    sessionLimit: parseWholeNumber(env.VIDEO_SESSION_LIMIT, 2),
+    cacheBytes: parseWholeNumber(env.VIDEO_CACHE_LIMIT_BYTES, 5_000_000_000),
+  };
+}
+
 export function loadConfig() {
   for (const name of required)
     if (!process.env[name]) throw new Error(`Missing ${name}`);
@@ -126,6 +150,7 @@ export function loadConfig() {
       process.env.MEDIA_CACHE_MAX_AGE_DAYS,
       30,
     ),
+    video: parseVideoLimits(process.env),
     aloneMs: Number(process.env.ALONE_TIMEOUT_MS ?? 120_000),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),

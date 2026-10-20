@@ -870,6 +870,9 @@ test("suspends with a restart notice and restores playback", async () => {
     anchorEnabled: true,
     playbackSeconds: 42,
     listenedSeconds: 84,
+    mediaMode: "music",
+    captions: false,
+    watchedSeconds: 0,
     resumeUntil: 180_000,
     permissions: ["add"],
     tracks: [
@@ -2624,6 +2627,9 @@ test("a restored session keeps its own settings over the channel's defaults", as
     anchorEnabled: false,
     playbackSeconds: 0,
     listenedSeconds: 0,
+    mediaMode: "music",
+    captions: false,
+    watchedSeconds: 0,
     resumeUntil: 180_000,
     permissions: ["add"],
     tracks: [],
@@ -6662,6 +6668,7 @@ test("settings selects offer an initial option Slack can match", async () => {
     .flatMap((view) => view.blocks)
     .filter((block) => block.element?.type === "static_select");
   expect(selects.map((block) => block.block_id)).toEqual([
+    "media_mode",
     "volume",
     "display",
     "autoplay",
@@ -6966,6 +6973,9 @@ test("restores the saved ducking mode and tells the media page", async () => {
     anchorEnabled: false,
     playbackSeconds: 0,
     listenedSeconds: 0,
+    mediaMode: "music",
+    captions: false,
+    watchedSeconds: 0,
     resumeUntil: 180_000,
     permissions: ["add"],
     tracks: [],
@@ -7002,6 +7012,9 @@ test("falls back to the configured ducking mode when none was saved", async () =
     anchorEnabled: false,
     playbackSeconds: 0,
     listenedSeconds: 0,
+    mediaMode: "music",
+    captions: false,
+    watchedSeconds: 0,
     resumeUntil: 180_000,
     permissions: ["add"],
     tracks: [],

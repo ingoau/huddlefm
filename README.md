@@ -19,6 +19,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 - Save whatever is playing: the bot DMs you a link to it, through song.link for YouTube and SoundCloud so you can find it on your streaming service
 - Loop: repeat the current track or cycle the finished queue
 - Auto-duck: lower the music while someone is speaking in the huddle, and bring it back when they stop
+- Video mode: watch YouTube videos together on a screen share in the huddle, with captions and chapters
 - Support for simultaneous huddles
 - End of session recaps & a statistics canvas
 - Auto leave when inactive
@@ -29,6 +30,8 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 Invite the bot to a huddle or ping it in the thread. It will join the huddle and send a UI in the thread to add songs to the queue and control playback. You'll be the host by default. Managers of the huddle's channel and workspace admins can end the session from Settings, even when they aren't in the huddle. On the Channel tab of Settings, channel managers can save the session settings they can see as the defaults every new session in that channel starts with, or clear them, and delete sessions saved to the channel; whoever runs the bot can change how much they may do with `CHANNEL_MANAGER_PERMISSIONS` and `WORKSPACE_ADMIN_PERMISSIONS`. If the UI gets buried by conversation in the thread, mention the bot with nothing else to bring it back to the bottom, or keep it at the bottom by enabling anchor in the settings.
 
 Anyone in the huddle can open Your data from the You tab of Settings to see what HuddleFM keeps about them (sessions saved to their account, the songs they added, heard, liked and skipped, and their scrobbles) and delete any of it, or all of it at once. The audit log is never deleted.
+
+The host can switch the session to video mode on the Session tab of Settings, to watch YouTube videos together. The bot shares its screen in the huddle for as long as video mode is on, so it needs one of Slack's two screen share slots free. Search finds YouTube videos, and songs already queued play as their official video when there surely is one, or as audio with the artwork card when there is not. Autoplay, Huddle mix, lyrics, crossfades, ducking and scrobbling pause until the host switches back to music, and their settings are left as they were. The player gains Jump to (a video's chapters, or a time) in place of 💖, and a CC button for captions, which are off by default. In music mode a YouTube video link still plays as audio; the add dialog says so, and offers the host a button to add it and switch, or anyone else a button to add it and ask the host, who gets a direct message to switch or say not now (which stops asking for 15 minutes).
 
 With `OPENROUTER_API_KEY` set, you can also @mention the bot with a request (for example `@HuddleFM add something by Radiohead`, `@HuddleFM skip`, or `@HuddleFM turn autoplay on`). It uses a cheap AI model through OpenRouter and the same permissions you already have in the player UI. Replies are ephemeral. This also works in the original huddle thread when the session uses a forced companion controls channel (where the bot cannot post publicly).
 
@@ -83,17 +86,17 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Optional Slack behavior
 
-| Variable                      | Default | Purpose                                                                                                                                                  |
-| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                                                                                     |
-| `CHANNEL_MANAGER_PERMISSIONS` | `end`   | What managers of a huddle's channel may do without joining: `none`, `end` the session, or everything a `host` can                                        |
-| `WORKSPACE_ADMIN_PERMISSIONS` | `end`   | The same for Slack workspace admins and owners. Replaces `WORKSPACE_ADMINS_AS_MANAGERS=true`, which still means `host` until it is set                   |
-| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                                              |
-| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                                                                                            |
-| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                                       |
-| `SLACK_CANVAS_ID`             | unset   | Canvas updated with live sessions and all-time listening stats                                                                                           |
-| `CANVAS_SECTIONS`             | all     | Comma-separated canvas sections to show, in order: `summary`, `active sessions`, `top artists`, `top tracks`, `top channels`, `controls`, `integrations` |
-| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                                                                                          |
+| Variable                      | Default | Purpose                                                                                                                                                                                      |
+| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                                                                                                                         |
+| `CHANNEL_MANAGER_PERMISSIONS` | `end`   | What managers of a huddle's channel may do without joining: `none`, `end` the session, or everything a `host` can                                                                            |
+| `WORKSPACE_ADMIN_PERMISSIONS` | `end`   | The same for Slack workspace admins and owners. Replaces `WORKSPACE_ADMINS_AS_MANAGERS=true`, which still means `host` until it is set                                                       |
+| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                                                                                  |
+| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                                                                                                                                |
+| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                                                                           |
+| `SLACK_CANVAS_ID`             | unset   | Canvas updated with live sessions and all-time listening stats                                                                                                                               |
+| `CANVAS_SECTIONS`             | all     | Comma-separated canvas sections to show, in order: `summary`, `active sessions`, `top artists`, `top tracks`, `top videos`, `top video channels`, `top channels`, `controls`, `integrations` |
+| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                                                                                                                              |
 
 #### Optional features
 
@@ -124,6 +127,17 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 | `PAUSED_TIMEOUT_MS`             | `600000`         | Leave when paused for this long                                                           |
 | `CHIME_MEDIA_REGION`            | `ap-southeast-2` | AWS region for Chime media                                                                |
 
+#### Video mode
+
+| Variable                       | Default      | Purpose                                                                                                       |
+| ------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------- |
+| `VIDEO_DURATION_LIMIT_SECONDS` | `3600`       | Longest video allowed                                                                                         |
+| `VIDEO_DOWNLOAD_LIMIT_BYTES`   | `1500000000` | Largest video download                                                                                        |
+| `VIDEO_MAX_HEIGHT`             | `720`        | Height videos are downloaded and shared at, from `240` to `1080`; the share is 16:9                           |
+| `VIDEO_MAX_FPS`                | `30`         | Frame rate videos are downloaded and shared at, up to `30`                                                    |
+| `VIDEO_SESSION_LIMIT`          | `2`          | Huddles that may be in video mode at once; each takes about a CPU core. `0` turns it off                      |
+| `VIDEO_CACHE_LIMIT_BYTES`      | `5000000000` | Disk kept for prepared videos under `data/cache/video`, apart from the song cache; `0` disables and clears it |
+
 #### Runtime and logging
 
 | Variable         | Default                    | Purpose                                                              |
@@ -138,6 +152,8 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 #### Media
 
 HuddleFM joins each Huddle's Chime meeting itself. Each Huddle's media runs in its own Bun process, so a crash ends only that session. The video tile is drawn at 540×540 and 24 fps, with a default and a lyrics layout, syllable-synced lyrics, a moving backdrop while a track plays, and songwriter credits after the last line. Lyrics with no timing fall back to the default layout.
+
+In video mode the bot also joins as its own screen share, the way Chime's content share does, and sends the video and the music there instead of the camera tile; the picture follows the audio's position, and captions are burned in when they are on. If the share cannot start or is lost, the camera tile and the bot's own audio take over, and whoever added the video hears why.
 
 Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`.
 

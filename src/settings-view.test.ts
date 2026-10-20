@@ -29,6 +29,7 @@ function options(
     access: { ...access, volume: true, configure: true },
     session: {
       hostId: "host",
+      mediaMode: "music",
       volume: 0.6,
       displayMode: "default",
       autoplayMode: "off",
@@ -341,4 +342,47 @@ test("a dialog over Settings lets go of a draft too large to carry", () => {
   expect(
     JSON.parse(dialogMetadata("session", { tab: "you", draft: {} })),
   ).toEqual({ sessionId: "session", settings: { tab: "you", draft: {} } });
+});
+
+test("the host picks the mode, and video mode leaves out the music's settings", () => {
+  const music = settingsView(options({ tab: "session" }));
+  expect(block(music, "media_mode")).toBeUndefined();
+  for (const id of ["display", "autoplay", "loop", "transition", "ducking"])
+    expect(block(music, id)).toBeDefined();
+  const host = settingsView(
+    options({
+      tab: "session",
+      access: { ...access, volume: true, configure: true, admin: true },
+    }),
+  );
+  expect(block(host, "media_mode")?.element.initial_option.value).toBe("music");
+  const video = settingsView(
+    options({
+      tab: "session",
+      access: { ...access, volume: true, configure: true, admin: true },
+      session: { ...options().session, mediaMode: "video" },
+    }),
+  );
+  expect(block(video, "media_mode")?.element.initial_option.value).toBe(
+    "video",
+  );
+  for (const id of ["display", "autoplay", "transition", "ducking"])
+    expect(block(video, id)).toBeUndefined();
+  expect(block(video, "loop")).toBeDefined();
+  expect(block(video, "anchor")).toBeDefined();
+  // The Huddle mix is autoplay's.
+  expect(
+    block(settingsView(options({ tab: "you" })), "huddle_mix"),
+  ).toBeDefined();
+  expect(
+    block(
+      settingsView(
+        options({
+          tab: "you",
+          session: { ...options().session, mediaMode: "video" },
+        }),
+      ),
+      "huddle_mix",
+    ),
+  ).toBeUndefined();
 });

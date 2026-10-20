@@ -32,6 +32,7 @@ function setup(accessible = false, restrictionFails = false) {
     channelMembers: async () => ["bot", "host", "stale"],
     dm: async (userId: string, text: string) => {
       dms.push(`${userId}:${text}`);
+      return undefined;
     },
     delete: async (_channelId: string, messageTs: string) => {
       deleted.push(messageTs);
@@ -148,6 +149,7 @@ test("tells a participant when adding them to the companion channel fails", asyn
     {
       dm: async (userId: string, text: string) => {
         dms.push(`${userId}:${text}`);
+        return undefined;
       },
       delete: async () => {},
       channelMembers: async () => ["bot"],
@@ -233,7 +235,7 @@ test("failed delete after activateSession does not restore cleanup", async () =>
     slack,
     {
       channelMembers: async () => ["bot"],
-      dm: async () => {},
+      dm: async () => undefined,
       delete: async () => {
         // Session restored while Slack delete is in flight, then delete fails.
         store.activateSession("session", "playing");
@@ -291,6 +293,7 @@ test("reinvites a participant who rejoins during an in-flight removal", async ()
     {
       dm: async (userId: string, text: string) => {
         dms.push(`${userId}:${text}`);
+        return undefined;
       },
       delete: async () => {},
       channelMembers: async () => [],

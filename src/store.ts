@@ -1,7 +1,7 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { TrackMetadata } from "./tracks.ts";
+import type { MediaForm, TrackKind, TrackMetadata } from "./tracks.ts";
 
 export const capabilities = [
   "add",
@@ -25,6 +25,13 @@ export const permissionPresets = {
   ),
   communism: capabilities,
 };
+
+/** Music, or watching videos together on a screen share. */
+export const mediaModes = ["music", "video"] as const;
+export type MediaMode = (typeof mediaModes)[number];
+
+const mediaForms = ["audio", "video", "music_video"] as const;
+const trackKinds = ["song", "video"] as const;
 
 export const displayModes = ["default", "lyrics", "off"] as const;
 export type DisplayMode = (typeof displayModes)[number];
@@ -224,9 +231,12 @@ type SavedTrack = {
   album?: string;
   duration?: number;
   artwork?: string;
+  kind?: TrackKind;
   automatic?: boolean;
   status: string;
   filePath?: string;
+  /** What the prepared file holds. */
+  form?: MediaForm;
   introSeconds?: number;
   outroSeconds?: number;
   fadeInSeconds?: number;
@@ -270,8 +280,11 @@ export type SavedSession = {
   duckingMode?: DuckingMode;
   displayMode: DisplayMode;
   anchorEnabled: boolean;
+  mediaMode: MediaMode;
+  captions: boolean;
   playbackSeconds: number;
   listenedSeconds: number;
+  watchedSeconds: number;
   resumeUntil: number;
   endText?: string;
   endBlocks?: unknown[];
@@ -339,6 +352,9 @@ const sessionColumns = {
   listenedSeconds: "listened_seconds",
   displayMode: "display_mode",
   anchorEnabled: "anchor_enabled",
+  mediaMode: "media_mode",
+  captions: "captions",
+  watchedSeconds: "watched_seconds",
 };
 
 const trackColumns = {
@@ -355,6 +371,8 @@ const trackColumns = {
   fadeOutSeconds: "fade_out_seconds",
   requesterId: "requester_id",
   automatic: "automatic",
+  form: "media_form",
+  isVideo: "is_video",
 };
 
 const addedColumns = [
@@ -386,6 +404,13 @@ const addedColumns = [
   ["user_scrobbling", "huddle_mix_added", "INTEGER NOT NULL DEFAULT 1"],
   ["user_scrobbling", "huddle_mix_lastfm", "INTEGER NOT NULL DEFAULT 1"],
   ["user_scrobbling", "huddle_mix_listenbrainz", "INTEGER NOT NULL DEFAULT 1"],
+  ["sessions", "media_mode", "TEXT NOT NULL DEFAULT 'music'"],
+  ["sessions", "captions", "INTEGER NOT NULL DEFAULT 0"],
+  ["sessions", "watched_seconds", "REAL NOT NULL DEFAULT 0"],
+  ["tracks", "kind", "TEXT"],
+  ["tracks", "media_form", "TEXT"],
+  // Watched as a video in video mode: kept out of the music stats and taste.
+  ["tracks", "is_video", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -448,9 +473,11 @@ function savedTrack(track: Row) {
     album: text(track.album),
     duration: numeric(track.duration),
     artwork: text(track.artwork),
+    kind: modeOf(trackKinds, track.kind),
     automatic: track.automatic ? true : undefined,
     status: String(track.status),
     filePath: text(track.file_path),
+    form: modeOf(mediaForms, track.media_form),
     introSeconds: numeric(track.intro_seconds),
     outroSeconds: numeric(track.outro_seconds),
     fadeInSeconds: numeric(track.fade_in_seconds),
@@ -947,6 +974,9 @@ export class Store {
       listenedSeconds?: number;
       displayMode?: DisplayMode;
       anchorEnabled?: boolean;
+      mediaMode?: MediaMode;
+      captions?: boolean;
+      watchedSeconds?: number;
     },
   ) {
     const { sql, values } = assignments(sessionColumns, fields);
@@ -1148,22 +1178,26 @@ export class Store {
     const sessions = this.db
       .query(
         `SELECT COUNT(*) AS count, COALESCE(SUM(listened_seconds), 0) AS listened,
-        COALESCE(MAX(listened_seconds), 0) AS longest,
+        COALESCE(SUM(watched_seconds), 0) AS watched,
+        COALESCE(MAX(listened_seconds + watched_seconds), 0) AS longest,
         COALESCE(SUM(CASE WHEN status != 'ended' THEN 1 ELSE 0 END), 0) AS active
         FROM sessions`,
       )
       .get() as {
       count: number;
       listened: number;
+      watched: number;
       longest: number;
       active: number;
     };
+    // Songs, including those played as their music videos; videos watched
+    // for their own sake are counted apart.
     const tracks = this.db
       .query(
         `SELECT COUNT(*) AS count, COUNT(DISTINCT source_id) AS uniqueTracks,
         COUNT(DISTINCT artist) AS artists,
         COALESCE(SUM(CASE WHEN automatic = 1 THEN 1 ELSE 0 END), 0) AS autoplay
-        FROM tracks WHERE status = 'played'`,
+        FROM tracks WHERE status = 'played' AND is_video = 0`,
       )
       .get() as {
       count: number;
@@ -1171,18 +1205,40 @@ export class Store {
       artists: number;
       autoplay: number;
     };
+    const videos = this.db
+      .query(
+        `SELECT COUNT(*) AS count FROM tracks
+        WHERE status = 'played' AND is_video = 1`,
+      )
+      .get() as { count: number };
     const topArtists = this.db
       .query(
-        `SELECT artist, COUNT(*) AS count FROM tracks WHERE status = 'played'
+        `SELECT artist, COUNT(*) AS count FROM tracks
+        WHERE status = 'played' AND is_video = 0
         GROUP BY artist COLLATE NOCASE ORDER BY count DESC, artist COLLATE NOCASE LIMIT 5`,
       )
       .all() as { artist: string; count: number }[];
     const topTracks = this.db
       .query(
-        `SELECT title, artist, COUNT(*) AS count FROM tracks WHERE status = 'played'
+        `SELECT title, artist, COUNT(*) AS count FROM tracks
+        WHERE status = 'played' AND is_video = 0
         GROUP BY source_id, title, artist ORDER BY count DESC, title COLLATE NOCASE LIMIT 5`,
       )
       .all() as { title: string; artist: string; count: number }[];
+    const topVideos = this.db
+      .query(
+        `SELECT title, artist AS channel, COUNT(*) AS count FROM tracks
+        WHERE status = 'played' AND is_video = 1
+        GROUP BY source_id, title, artist ORDER BY count DESC, title COLLATE NOCASE LIMIT 5`,
+      )
+      .all() as { title: string; channel: string; count: number }[];
+    const topVideoChannels = this.db
+      .query(
+        `SELECT artist AS channel, COUNT(*) AS count FROM tracks
+        WHERE status = 'played' AND is_video = 1
+        GROUP BY artist COLLATE NOCASE ORDER BY count DESC, artist COLLATE NOCASE LIMIT 5`,
+      )
+      .all() as { channel: string; count: number }[];
     const topChannels = this.db
       .query(
         `SELECT COALESCE(sessions.source_channel_id, sessions.channel_id) AS channelId, COUNT(*) AS count
@@ -1192,7 +1248,16 @@ export class Store {
         ORDER BY count DESC, channelId LIMIT 5`,
       )
       .all() as { channelId: string; count: number }[];
-    return { sessions, tracks, topArtists, topTracks, topChannels };
+    return {
+      sessions,
+      tracks,
+      videos,
+      topArtists,
+      topTracks,
+      topVideos,
+      topVideoChannels,
+      topChannels,
+    };
   }
 
   incrementUsage(event: UsageKey) {
@@ -1301,8 +1366,11 @@ export class Store {
           duckingMode: modeOf(duckingModes, row.ducking_mode),
           displayMode: modeOf(displayModes, row.display_mode) ?? "default",
           anchorEnabled: Boolean(row.anchor_enabled),
+          mediaMode: modeOf(mediaModes, row.media_mode) ?? "music",
+          captions: Boolean(row.captions),
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
+          watchedSeconds: Number(row.watched_seconds ?? 0),
           resumeUntil: deadline,
           endText: text(row.end_text),
           endBlocks: row.end_blocks
@@ -1554,14 +1622,16 @@ export class Store {
     album?: string;
     duration?: number;
     artwork?: string;
+    kind?: TrackKind;
     automatic?: boolean;
     status: string;
+    isVideo?: boolean;
   }) {
     this.db
       .query(
         `INSERT INTO tracks
-        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, automatic, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, kind, automatic, status, is_video, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         track.id,
@@ -1575,8 +1645,10 @@ export class Store {
         track.album ?? null,
         track.duration ?? null,
         track.artwork ?? null,
+        track.kind ?? null,
         track.automatic ? 1 : 0,
         track.status,
+        track.isVideo ? 1 : 0,
         Date.now(),
       );
   }
@@ -1592,7 +1664,7 @@ export class Store {
           ROW_NUMBER() OVER (
             PARTITION BY source_id ORDER BY created_at DESC, rowid DESC
           ) AS recency
-          FROM tracks WHERE requester_id = ? AND automatic = 0
+          FROM tracks WHERE requester_id = ? AND automatic = 0 AND is_video = 0
         )
         WHERE recency = 1
         ORDER BY created_at DESC, insertionOrder DESC LIMIT ?`,
@@ -1626,7 +1698,7 @@ export class Store {
         source_id AS sourceId, title, artist, album, duration, artwork
         FROM tracks
         WHERE title = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE
-        AND status = 'played'
+        AND status = 'played' AND is_video = 0
         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       )
       .get(title, artist) as RecentTrack | null;
@@ -1953,6 +2025,8 @@ export class Store {
       fadeOutSeconds?: number;
       requesterId?: string;
       automatic?: boolean;
+      form?: MediaForm | null;
+      isVideo?: boolean;
     },
   ) {
     const { sql, values } = assignments(trackColumns, fields);

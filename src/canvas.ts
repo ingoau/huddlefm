@@ -6,6 +6,8 @@ export const canvasSections = [
   "active-sessions",
   "top-artists",
   "top-tracks",
+  "top-videos",
+  "top-video-channels",
   "top-channels",
   "controls",
   "integrations",
@@ -29,6 +31,7 @@ export type ActiveCanvasSession =
 
 const sectionAliases = new Map<string, CanvasSection>([
   ["top-songs", "top-tracks"],
+  ["top-youtube-channels", "top-video-channels"],
   ["active", "active-sessions"],
   ["now-playing", "active-sessions"],
 ]);
@@ -96,9 +99,11 @@ export function canvasMarkdown(
       `| Sessions | ${stats.sessions.count} |`,
       `| Active sessions | ${stats.sessions.active} |`,
       `| Time listened | ${elapsed(stats.sessions.listened)} |`,
+      `| Time watched | ${elapsed(stats.sessions.watched)} |`,
       `| Average listening per session | ${elapsed(average)} |`,
       `| Longest session | ${elapsed(stats.sessions.longest)} |`,
       `| Songs played | ${stats.tracks.count} |`,
+      `| Videos played | ${stats.videos.count} |`,
       `| Unique tracks | ${stats.tracks.uniqueTracks} |`,
       `| Average songs per session | ${stats.sessions.count ? (stats.tracks.count / stats.sessions.count).toFixed(1) : "0"} |`,
       `| Unique artists | ${stats.tracks.artists} |`,
@@ -132,6 +137,22 @@ export function canvasMarkdown(
         stats.topTracks,
         ({ title, artist, count }, index) =>
           `${index + 1}. **${escapeMarkdown(title)}** — ${escapeMarkdown(artist)} · ${plural(count, "play")}`,
+      ),
+    ],
+    "top-videos": () => [
+      "## Top videos",
+      ranking(
+        stats.topVideos,
+        ({ title, channel, count }, index) =>
+          `${index + 1}. **${escapeMarkdown(title)}** — ${escapeMarkdown(channel)} · ${plural(count, "play")}`,
+      ),
+    ],
+    "top-video-channels": () => [
+      "## Top YouTube channels",
+      ranking(
+        stats.topVideoChannels,
+        ({ channel, count }, index) =>
+          `${index + 1}. **${escapeMarkdown(channel)}** — ${plural(count, "video")}`,
       ),
     ],
     "top-channels": () => [

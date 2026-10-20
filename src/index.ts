@@ -604,6 +604,10 @@ async function joinHuddle(
       duckingMode: restored?.duckingMode ?? config.duckingMode,
       lyricsOffsetMs: config.lyricsOffsetMs,
       bridgeToken: crypto.randomUUID(),
+      video: {
+        maxHeight: config.video.maxHeight,
+        maxFps: config.video.maxFps,
+      },
     };
     runtime = {
       sourceChannelId: channelId,
@@ -677,6 +681,9 @@ async function joinHuddle(
       recommendations,
       workspaceAdmins,
       channelManagers,
+      () =>
+        [...runtimes.values()].filter((other) => other.coordinator?.videoMode)
+          .length,
     ));
     try {
       if (restored) await coordinator.resume(resumeActorId);

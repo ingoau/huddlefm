@@ -12,6 +12,8 @@ export type ChimeBootstrap = {
   /** How much later than the audio position the lyrics follow. */
   lyricsOffsetMs: number;
   bridgeToken: string;
+  /** The largest screen share video mode sends. */
+  video?: { maxHeight: number; maxFps: number };
 };
 
 export type JoinedHuddle = {

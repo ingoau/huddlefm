@@ -13,7 +13,7 @@ import {
   senderReport,
 } from "./rtp.ts";
 import { statusCodes } from "./status-codes.ts";
-import { cardSize, videoFps, videoMaxKbps } from "./video-format.ts";
+import { cameraFormat, type VideoFormat } from "./video-format.ts";
 
 export { statusCodes };
 
@@ -33,8 +33,8 @@ const terminalAudioStatus: Record<number, number> = {
 
 const opusProfile =
   "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000";
-const h264Profile =
-  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+const h264Profile = (profileLevelId: string) =>
+  `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${profileLevelId}`;
 /** How long signaling may stay silent; the server sends BITRATES every 4 s. */
 const silenceLimitMs = 15_000;
 /** How long to keep retrying a lost connection before giving up. */
@@ -152,6 +152,8 @@ export class ChimeLink {
     private events: ChimeLinkEvents,
     // Chime is only reachable through TURN; tests connect on loopback.
     private relayOnly = true,
+    /** What the video is: the card's square tile, or a screen share. */
+    private format: VideoFormat = cameraFormat,
   ) {
     this.attendeeId = attendee.AttendeeId;
     this.wantVideo = video;
@@ -397,7 +399,7 @@ export class ChimeLink {
   // again under the same mid replaces the track's description.
   private videoDescription(send: boolean) {
     const video = new Video("1", send ? "SendRecv" : "Inactive");
-    video.addH264Codec(102, h264Profile);
+    video.addH264Codec(102, h264Profile(this.format.profileLevelId));
     if (send) video.addSSRC(this.videoSsrc, "huddlefm", "huddlefm", "video");
     return video;
   }
@@ -460,11 +462,11 @@ export class ChimeLink {
                   track_label: "AmazonChimeExpressVideo",
                   stream_id: 2,
                   group_id: 2,
-                  framerate: videoFps,
-                  max_bitrate_kbps: videoMaxKbps,
+                  framerate: this.format.fps,
+                  max_bitrate_kbps: this.format.maxKbps,
                   attendee_id: this.attendeeId,
-                  width: cardSize,
-                  height: cardSize,
+                  width: this.format.width,
+                  height: this.format.height,
                 },
               ]
             : []),

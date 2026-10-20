@@ -18,6 +18,7 @@ import {
   extractorFailure,
   isExpectedTrackFailure,
   looksLikeFilenameTitle,
+  metadataKind,
   metadataLooksWeak,
   navidromeShare,
   normalizeLoudness,
@@ -26,10 +27,12 @@ import {
   parseNavidromeShareInfo,
   probeEmbeddedMetadata,
   publicArtworkUrl,
+  restrictedVideo,
   shouldProbeEmbeddedMetadata,
   shouldRetainSourceForMetadata,
   TrackCatalog,
   trackFailureDetail,
+  trackKind,
   transitionData,
   type TrackMetadata,
 } from "./tracks.ts";
@@ -848,6 +851,7 @@ test("searchSong prefers an artist match from YouTube Music results", async () =
     album: "OK Computer",
     duration: 261,
     artwork: "art",
+    kind: "song",
   });
 });
 
@@ -1178,6 +1182,7 @@ test("popularTracks combines home quick picks with a featured hits playlist", as
       album: "Hopes and Fears",
       duration: undefined,
       artwork: "https://i.ytimg.com/vi/OZNOBP0B3_I/a.jpg",
+      kind: "song",
     },
     {
       sourceInput: "https://music.youtube.com/watch?v=ic8j13piAhQ",
@@ -1188,6 +1193,7 @@ test("popularTracks combines home quick picks with a featured hits playlist", as
       album: undefined,
       duration: 180,
       artwork: "https://i.ytimg.com/vi/ic8j13piAhQ/hq.jpg",
+      kind: "song",
     },
   ]);
 });
@@ -1264,4 +1270,166 @@ test("normalizeToken keeps marks that are part of the letter", () => {
   // Latin accents still fold, including mid-word ones.
   expect(normalizeToken("Motörhead")).toBe(normalizeToken("Motorhead"));
   expect(normalizeToken("Mylène Farmer")).toBe("mylene farmer");
+});
+
+test("tells a song from a video by its channel and its picture", () => {
+  expect(
+    metadataKind({
+      channel: "Radiohead - Topic",
+      formats: [{ vcodec: "avc1", height: 1080 }],
+    }),
+  ).toBe("song");
+  expect(
+    metadataKind({ channel: "Radiohead", formats: [{ vcodec: "vp9" }] }),
+  ).toBe("video");
+  // A direct file does not name its codecs, only its extension.
+  expect(metadataKind({ formats: [{ vcodec: null, video_ext: "mp4" }] })).toBe(
+    "video",
+  );
+  expect(
+    metadataKind({ formats: [{ vcodec: "none", video_ext: "none" }] }),
+  ).toBe("song");
+  // Tracks saved before kinds were kept.
+  expect(
+    trackKind({ canonicalUrl: "https://www.youtube.com/watch?v=abcdefghijk" }),
+  ).toBe("video");
+  expect(
+    trackKind({
+      canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
+    }),
+  ).toBe("song");
+  expect(trackKind({ canonicalUrl: "https://example.com/a.mp3" })).toBe("song");
+});
+
+test("refuses age-restricted and members-only videos by name", () => {
+  expect(() => restrictedVideo({ age_limit: 18 })).toThrow(
+    "That video is age-restricted",
+  );
+  expect(() => restrictedVideo({ availability: "subscriber_only" })).toThrow(
+    "That video is for channel members only",
+  );
+  expect(() => restrictedVideo({ availability: "public" })).not.toThrow();
+  expect(
+    extractorFailure(
+      "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate for some users.",
+    ).message,
+  ).toBe("That video is age-restricted");
+  expect(
+    extractorFailure(
+      "ERROR: [youtube] abc: Join this channel to get access to members-only content like this video.",
+    ).message,
+  ).toBe("That video is for channel members only");
+});
+
+test("video mode allows longer videos and says how long is too long", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    video: {
+      durationSeconds: 3_600,
+      downloadBytes: 1_500_000_000,
+      maxHeight: 720,
+      maxFps: 30,
+      cacheBytes: 0,
+    },
+  });
+  const long = { ...trackFixture, duration: 2_400 };
+  const remember = (track: TrackMetadata) =>
+    Reflect.apply(Reflect.get(catalog, "remember"), catalog, [track]) as string;
+  await expect(catalog.resolve(remember(long))).rejects.toThrow(
+    "Track exceeds the duration limit",
+  );
+  expect(await catalog.resolve(remember(long), true)).toEqual(long);
+  await expect(
+    catalog.resolve(remember({ ...long, duration: 5_400 }), true),
+  ).rejects.toThrow(
+    "That video is longer than 1 hour, the limit on this server",
+  );
+});
+
+test("names search results' links and titles before resolving them", () => {
+  const catalog = testCatalog();
+  const remember = (value: TrackMetadata | string) =>
+    Reflect.apply(Reflect.get(catalog, "remember"), catalog, [value]) as string;
+  const link = remember("https://youtu.be/abcdefghijk");
+  const track = remember(trackFixture);
+  expect(catalog.referencedUrl(link)).toBe("https://youtu.be/abcdefghijk");
+  expect(catalog.referencedTitle(link)).toBeUndefined();
+  expect(catalog.referencedUrl(track)).toBeUndefined();
+  expect(catalog.referencedTitle(track)).toBe(trackFixture.title);
+});
+
+const trackFixture: TrackMetadata = {
+  sourceInput: "https://www.youtube.com/watch?v=abcdefghijk",
+  canonicalUrl: "https://www.youtube.com/watch?v=abcdefghijk",
+  sourceId: "abcdefghijk",
+  title: "A long video",
+  artist: "Channel",
+  kind: "video",
+};
+
+test("video mode prepares a video as audio when its picture will not come", async () => {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    video: {
+      durationSeconds: 3_600,
+      downloadBytes: 1_500_000_000,
+      maxHeight: 720,
+      maxFps: 30,
+      cacheBytes: 0,
+    },
+  });
+  const audioFor: string[] = [];
+  Reflect.set(
+    catalog,
+    "prepare",
+    async (_track: TrackMetadata, directory: string, id: string) => {
+      audioFor.push(id);
+      return `${directory}/${id}.opus`;
+    },
+  );
+  let failure: Error = new Error("network went away");
+  Reflect.set(catalog, "downloadVideo", async () => {
+    throw failure;
+  });
+  // A video that will not download plays as audio, and says so.
+  expect(await catalog.prepareVideo(trackFixture, "media", "a")).toEqual({
+    filePath: "media/a.opus",
+    form: "audio",
+    fellBack: true,
+  });
+  // What video mode refuses stays refused.
+  failure = extractorFailure("ERROR: [youtube] x: Sign in to confirm your age");
+  await expect(
+    catalog.prepareVideo(trackFixture, "media", "b"),
+  ).rejects.toThrow("That video is age-restricted");
+  // A song with no official video is simply its audio, kept as it was.
+  Reflect.set(catalog, "findMusicVideo", async () => undefined);
+  const song = {
+    ...trackFixture,
+    canonicalUrl: "https://music.youtube.com/watch?v=abcdefghijk",
+    kind: "song" as const,
+  };
+  expect(
+    await catalog.prepareVideo(
+      song,
+      "media",
+      "c",
+      undefined,
+      0,
+      "package.json",
+    ),
+  ).toEqual({ filePath: "package.json", form: "audio" });
+  // A song's video that will not download leaves the song, quietly.
+  Reflect.set(catalog, "findMusicVideo", async () => ({
+    videoId: "zzzzzzzzzzz",
+    title: "Song",
+    artist: "Artist",
+  }));
+  expect(await catalog.prepareVideo(song, "media", "d")).toEqual({
+    filePath: "media/d.opus",
+    form: "audio",
+  });
+  expect(audioFor).toEqual(["a", "d"]);
 });

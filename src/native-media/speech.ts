@@ -1,4 +1,5 @@
 import type { DuckDecision, DuckingController } from "../ducking.ts";
+import { contentSuffix } from "./content-shares.ts";
 import type { SignalFrame } from "./signaling.ts";
 
 // DefaultVolumeIndicatorAdapter in amazon-chime-sdk-js maps a volume
@@ -16,7 +17,8 @@ export function normalizedVolume(attenuation: number) {
 /**
  * Turns Chime's per-attendee audio metadata into ducking decisions, like the
  * JS SDK's volume indicator and attendee presence callbacks do in the media
- * page. The bot's own attendee is the music, so it never counts as speech.
+ * page. The bot's own attendee is the music, so it never counts as speech,
+ * and neither does its screen share, which carries the music in video mode.
  */
 export class SpeechSignals {
   private streams = new Map<number, string>();
@@ -26,6 +28,13 @@ export class SpeechSignals {
     private ducking: DuckingController,
     private apply: (decision: DuckDecision | undefined) => void,
   ) {}
+
+  private isSelf(attendeeId: string) {
+    return (
+      attendeeId === this.selfId ||
+      attendeeId === `${this.selfId}${contentSuffix}`
+    );
+  }
 
   handle(frame: SignalFrame, now = Date.now()) {
     for (const stream of frame.audio_stream_id_info?.streams ?? [])
@@ -37,7 +46,7 @@ export class SpeechSignals {
   /** Forgets everyone, for a rebuilt connection that will resend presence. */
   reset(now = Date.now()) {
     for (const attendeeId of new Set(this.streams.values()))
-      if (attendeeId !== this.selfId)
+      if (!this.isSelf(attendeeId))
         this.apply(this.ducking.leave(attendeeId, now));
     this.streams.clear();
   }
@@ -50,14 +59,14 @@ export class SpeechSignals {
   ) {
     if (stream.attendee_id) {
       this.streams.set(stream.audio_stream_id, stream.attendee_id);
-      if (stream.attendee_id !== this.selfId && stream.muted !== undefined)
+      if (!this.isSelf(stream.attendee_id) && stream.muted !== undefined)
         this.apply(
           this.ducking.volume(stream.attendee_id, null, stream.muted, now),
         );
       return;
     }
     const attendeeId = this.streams.get(stream.audio_stream_id);
-    if (!attendeeId || attendeeId === this.selfId) {
+    if (!attendeeId || this.isSelf(attendeeId)) {
       if (stream.muted === undefined)
         this.streams.delete(stream.audio_stream_id);
       return;
@@ -91,7 +100,7 @@ export class SpeechSignals {
     // which is what lets the duck release.
     if (!carriesVolumes) return;
     for (const attendeeId of new Set(this.streams.values())) {
-      if (attendeeId === this.selfId) continue;
+      if (this.isSelf(attendeeId)) continue;
       this.apply(
         this.ducking.volume(attendeeId, levels.get(attendeeId) ?? 0, null, now),
       );

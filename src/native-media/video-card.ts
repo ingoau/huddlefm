@@ -229,9 +229,13 @@ export class VideoCard {
     this.stageDirty = true;
   }
 
-  reset() {
+  /** Shows the idle card, saying `idle` or that it is ready for music. */
+  reset(idle?: { title: string; subtitle: string }) {
     this.artworkRequest++;
-    this.setTrack("Ready for music", "Waiting for the next track");
+    this.setTrack(
+      idle?.title ?? "Ready for music",
+      idle?.subtitle ?? "Waiting for the next track",
+    );
   }
 
   setDisplayMode(mode: DisplayMode) {
