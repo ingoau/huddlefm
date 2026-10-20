@@ -4801,6 +4801,68 @@ test("agent can enable and disable session scrobbling when configured", async ()
   userStore.close();
 });
 
+test("asks listeners about each track in ask-for-every-track mode", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setListenBrainzToken("host", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("host", true);
+  userStore.setScrobblingMode("host", "ask_track");
+  const tracks = {
+    resolve: async () => ({
+      sourceInput: "https://example.com/track",
+      canonicalUrl: "https://example.com/track",
+      sourceId: "track",
+      title: "Track <1>",
+      artist: "Artist",
+    }),
+    prepare: async () => "track.opus",
+  } as unknown as TrackCatalog;
+  const test = setup(
+    tracks,
+    undefined,
+    undefined,
+    new ScrobbleDispatcher(userStore, {}, (async () =>
+      Response.json({ status: "ok" })) as unknown as typeof fetch),
+    userStore,
+  );
+  await test.coordinator.start();
+  // Unlike "ask", nothing is asked about the Huddle as a whole.
+  expect(test.ephemeralCalls.some((call) => call[1] === "host")).toBeFalse();
+
+  await test.coordinator.action(
+    interaction(test.coordinator, "add_track_to_queue", "track"),
+  );
+  await until(() =>
+    test.ephemeral.includes("Scrobble *Track &lt;1&gt;* — Artist?"),
+  );
+  const prompt = JSON.stringify(
+    test.ephemeralCalls.find((call) => call[1] === "host")?.[4],
+  );
+  const value = /"action_id":"scrobble_track".*?"value":"([^"]+)"/.exec(
+    prompt,
+  )?.[1];
+  expect(value).toStartWith(`${test.coordinator.id}:`);
+  expect(prompt).toContain('"action_id":"toggle_session_scrobbling"');
+
+  // The button comes from an ephemeral message, not the player.
+  const confirm = {
+    ...interaction(test.coordinator, "scrobble_track", value),
+    messageTs: "2",
+  };
+  expect(test.coordinator.handles(confirm)).toBeTrue();
+  await test.coordinator.action(confirm);
+  expect(test.ephemeral).toContain("Scrobbling this track.");
+
+  await test.coordinator.action({
+    ...confirm,
+    value: `${test.coordinator.id}:gone`,
+  });
+  expect(test.ephemeral).toContain(
+    "That track finished a while ago, so it can't be scrobbled now.",
+  );
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
 test("agentAdd aborts before queue mutation when signal is aborted", async () => {
   let resolveUrl!: (value: unknown) => void;
   const tracks = {

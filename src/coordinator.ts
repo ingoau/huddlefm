@@ -33,7 +33,11 @@ import {
   type SessionSaveTrack,
   type TransitionMode,
 } from "./store.ts";
-import { type PlaybackScrobbler, ScrobbleDispatcher } from "./scrobbling.ts";
+import {
+  type PlaybackScrobbler,
+  ScrobbleDispatcher,
+  type ScrobbleTrack,
+} from "./scrobbling.ts";
 import {
   embeddedArtworkPath,
   isExpectedTrackFailure,
@@ -380,7 +384,11 @@ export class Coordinator {
       huddleId: room.huddleId,
       channelId: room.uiChannelId,
     });
-    this.playbackScrobbling = scrobbling?.playback(this.id, botUserId);
+    this.playbackScrobbling = scrobbling?.playback(
+      this.id,
+      botUserId,
+      (userId, track) => void this.promptTrackScrobbling(userId, track),
+    );
     const requestedHost = restored?.hostId ?? hostId;
     this.hostId = this.isExcluded(requestedHost)
       ? room.participantIds.find(
@@ -645,6 +653,7 @@ export class Coordinator {
     )
       return true;
     if (interaction.value === this.id) return true;
+    if (this.promptedTrackId(interaction.value)) return true;
     const action = parseIntegrationActionValue(interaction.value);
     if (action?.sessionId === this.id) return true;
     return parseMetadata(interaction.metadata).sessionId === this.id;
@@ -713,7 +722,8 @@ export class Coordinator {
       if (
         interaction.messageTs &&
         interaction.messageTs !== this.uiTs &&
-        interaction.actionId !== "toggle_session_scrobbling"
+        interaction.actionId !== "toggle_session_scrobbling" &&
+        interaction.actionId !== "scrobble_track"
       )
         return this.settingsNotice(
           interaction.userId,
@@ -769,6 +779,7 @@ export class Coordinator {
         delete_all_data: () => this.deleteYourData(interaction, "all"),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
+        scrobble_track: () => this.scrobbleTrack(interaction),
         delete_channel_save: () => this.deleteChannelSave(interaction),
         apply_permission_preset: () => this.applyPermissionPreset(interaction),
         ...Object.fromEntries(
@@ -4894,6 +4905,33 @@ export class Coordinator {
       );
   }
 
+  private async scrobbleTrack(interaction: Interaction) {
+    const trackId = this.promptedTrackId(interaction.value);
+    if (!this.playbackScrobbling || !trackId) return;
+    const confirmed = this.playbackScrobbling.confirm(
+      interaction.userId,
+      trackId,
+    );
+    if (confirmed) {
+      this.audit.record("track.scrobble_confirmed", interaction.userId, {
+        sessionId: this.id,
+        entryId: trackId,
+      });
+      captureAnalytics("scrobbling.track_confirmed", {
+        distinctId: interaction.userId,
+        sessionId: this.id,
+      });
+    }
+    if (interaction.responseUrl)
+      await this.slack.deleteOriginal(interaction.responseUrl);
+    await this.notice(
+      interaction.userId,
+      confirmed
+        ? "Scrobbling this track."
+        : "That track finished a while ago, so it can't be scrobbled now.",
+    );
+  }
+
   /** The session settings, as recorded in audit and analytics events. */
   private settingsSnapshot(): Settings {
     return {
@@ -5918,6 +5956,42 @@ export class Coordinator {
         this.log.warn(
           { event: "scrobbling_prompt_failed", userId, err: error },
           "Could not send scrobbling prompt",
+        ),
+      );
+  }
+
+  // The track a "Scrobble this track" button from this session names.
+  private promptedTrackId(value: string | undefined) {
+    const prefix = `${this.id}:`;
+    return value?.startsWith(prefix) ? value.slice(prefix.length) : undefined;
+  }
+
+  private async promptTrackScrobbling(userId: string, track: ScrobbleTrack) {
+    const text = `Scrobble *${escape(track.title)}* — ${escape(track.artist)}?`;
+    await this.slack
+      .ephemeral(this.room.uiChannelId, userId, text, this.room.uiThreadTs, [
+        section(text),
+        actions("track_scrobbling_prompt", [
+          button("scrobble_track", plain("Scrobble this track"), {
+            style: "primary",
+            value: `${this.id}:${track.id}`,
+          }),
+          button(
+            "toggle_session_scrobbling",
+            plain("Scrobble everything in this Huddle"),
+            { value: this.id },
+          ),
+        ]),
+      ])
+      .catch((error) =>
+        this.log.warn(
+          {
+            event: "track_scrobbling_prompt_failed",
+            userId,
+            trackId: track.id,
+            err: error,
+          },
+          "Could not send track scrobbling prompt",
         ),
       );
   }

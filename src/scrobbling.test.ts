@@ -307,6 +307,78 @@ async function until(predicate: () => boolean) {
   expect(predicate()).toBeTrue();
 }
 
+test("ask-for-every-track mode asks about each track and scrobbles only confirmed ones", async () => {
+  const calls: string[] = [];
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "user",
+    hostId: "user",
+    volume: 0.6,
+  });
+  store.setListenBrainzToken("user", "lb-token", "lb-user");
+  store.setListenBrainzEnabled("user", true);
+  const dispatcher = new ScrobbleDispatcher(store, {}, (async (input) => {
+    calls.push(String(input));
+    return Response.json({ status: "ok" });
+  }) as typeof fetch);
+  dispatcher.setMode("user", "ask_track");
+  const asked: string[] = [];
+  const playback = dispatcher.playback("session", "bot", (userId, track) =>
+    asked.push(`${userId}:${track.id}`),
+  );
+  const track = (id: string) => ({
+    id,
+    requesterId: "user",
+    title: "Title",
+    artist: "Artist",
+    duration: 40,
+  });
+  const sent = () =>
+    (
+      store.db
+        .query("SELECT track_id FROM scrobbles WHERE status = 'sent'")
+        .all() as { track_id: string }[]
+    ).map((row) => row.track_id);
+
+  playback.start(track("first"), ["user", "bot"]);
+  expect(asked).toEqual(["user:first"]);
+  for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+  await Bun.sleep(0);
+  expect(calls).toHaveLength(0);
+
+  // Confirming after the threshold sends the listen straight away.
+  expect(playback.confirm("user", "first")).toBeTrue();
+  await until(() => sent().includes("first"));
+
+  // An unanswered track is never scrobbled, and nobody without a service is
+  // asked.
+  playback.start(track("second"), ["user"]);
+  playback.memberJoined("guest");
+  expect(asked).toEqual(["user:first", "user:second"]);
+  for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+
+  // Confirming before the threshold scrobbles once it is reached.
+  playback.start(track("third"), ["user"]);
+  expect(playback.confirm("user", "third")).toBeTrue();
+  for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+  await until(() => sent().includes("third"));
+  expect(sent()).not.toContain("second");
+
+  // Only the current and previous tracks can still be confirmed.
+  expect(playback.confirm("user", "first")).toBeFalse();
+
+  // With the whole Huddle enabled there is nothing to ask.
+  dispatcher.setSessionEnabled("session", "user", true);
+  playback.start(track("fourth"), ["user"]);
+  expect(asked).toEqual(["user:first", "user:second", "user:third"]);
+  store.close();
+});
+
 test("remembers a real listen for the Huddle mix, scrobbler or not", () => {
   const store = new Store(":memory:");
   const dispatcher = new ScrobbleDispatcher(store, {});
