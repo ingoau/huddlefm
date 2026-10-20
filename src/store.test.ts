@@ -1583,3 +1583,35 @@ test("keeps each user's linked Jellyfin servers, once per server", () => {
   expect(store.jellyfinServers("U1")).toEqual([]);
   store.close();
 });
+
+test("a live stream picked from Recent plays live again", () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "session",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "host",
+    volume: 0.5,
+  });
+  store.addTrack({
+    id: "radio",
+    sessionId: "session",
+    requesterId: "host",
+    sourceInput: "https://www.youtube.com/watch?v=jfKfPfyJRdk",
+    canonicalUrl: "https://www.youtube.com/watch?v=jfKfPfyJRdk",
+    sourceId: "jfKfPfyJRdk",
+    title: "lofi radio",
+    artist: "Lofi Girl",
+    kind: "song",
+    live: true,
+    status: "played",
+  });
+  expect(store.recentTracks("host")[0]).toMatchObject({
+    sourceId: "jfKfPfyJRdk",
+    kind: "song",
+    live: true,
+  });
+  store.close();
+});

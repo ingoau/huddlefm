@@ -262,6 +262,8 @@ type RecentTrack = Pick<
   | "album"
   | "duration"
   | "artwork"
+  | "kind"
+  | "live"
 >;
 
 export type SavedSession = {
@@ -1708,10 +1710,10 @@ export class Store {
   recentTracks(userId: string, limit = recentTrackLimit) {
     return this.db
       .query(
-        `SELECT id, sourceInput, canonicalUrl, sourceId, title, artist, album, duration, artwork
+        `SELECT id, sourceInput, canonicalUrl, sourceId, title, artist, album, duration, artwork, kind, live
         FROM (
           SELECT id, source_input AS sourceInput, canonical_url AS canonicalUrl,
-          source_id AS sourceId, title, artist, album, duration, artwork, created_at,
+          source_id AS sourceId, title, artist, album, duration, artwork, kind, live, created_at,
           rowid AS insertionOrder,
           ROW_NUMBER() OVER (
             PARTITION BY source_id ORDER BY created_at DESC, rowid DESC
@@ -1721,7 +1723,16 @@ export class Store {
         WHERE recency = 1
         ORDER BY created_at DESC, insertionOrder DESC LIMIT ?`,
       )
-      .all(userId, limit) as RecentTrack[];
+      .all(userId, limit)
+      .map((row) => {
+        const { kind, live, ...track } = row as Row;
+        // A live stream picked again plays live again.
+        return compact({
+          ...track,
+          kind: modeOf(trackKinds, kind),
+          live: live ? true : undefined,
+        }) as RecentTrack;
+      });
   }
 
   // Tracks autoplay has queued recently, across every session. Listeners

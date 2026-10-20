@@ -562,3 +562,17 @@ test("someone else's Jellyfin item is no longer available once unlinked", async 
     ),
   );
 });
+
+test("nothing crossfades in ahead of a stream that plays next", async () => {
+  const result = await setup();
+  await queue(result, song);
+  await until(() => result.plays().length === 1);
+  await queue(result, radio);
+  await queue(result, { ...song, sourceId: "songsong222", title: "Later" });
+  await until(() => result.liveCalls.length === 1);
+  await Bun.sleep(20);
+  const preload = result.media
+    .filter((message) => message.type === "preload")
+    .at(-1);
+  expect(preload.nextEntryId).toBeUndefined();
+});

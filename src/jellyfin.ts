@@ -220,9 +220,12 @@ export class JellyfinError extends Error {
     this.name = "JellyfinError";
   }
 
-  /** The server no longer takes the token. */
+  /**
+   * The server no longer takes the token. A 403 is only this item being
+   * off limits to the account, such as by parental controls.
+   */
   get unauthorized() {
-    return this.status === 401 || this.status === 403;
+    return this.status === 401;
   }
 }
 
@@ -776,6 +779,8 @@ export class Jellyfin {
     },
   ): Promise<{
     url: string;
+    /** The picture's own address, when it is not the same one. */
+    videoUrl?: string;
     audioStream?: number;
     playback: JellyfinPlayback;
     form: MediaForm;
@@ -827,6 +832,7 @@ export class Jellyfin {
       ...(info?.PlaySessionId ? { playSessionId: info.PlaySessionId } : {}),
     });
     let url: string;
+    let videoUrl: string | undefined;
     if (method === "DirectStream") {
       query.set("static", "true");
       url = `${base}/${picture ? "Videos" : "Audio"}/${item.Id}/stream?${query}`;
@@ -848,9 +854,21 @@ export class Jellyfin {
       }))
         query.set(key, value);
       url = `${base}/Videos/${item.Id}/master.m3u8?${query}`;
+      // The sound and the picture are read apart, and a server runs one
+      // conversion per play session, which two readers far apart in it
+      // would keep restarting. The picture gets a session of its own.
+      if (options.video && picture) {
+        const video = new URLSearchParams(query);
+        video.set(
+          "playSessionId",
+          `${info?.PlaySessionId ?? crypto.randomUUID().replaceAll("-", "")}v`,
+        );
+        videoUrl = `${base}/Videos/${item.Id}/master.m3u8?${video}`;
+      }
     }
     return {
       url,
+      ...(videoUrl ? { videoUrl } : {}),
       // The file itself has every language in it; the converted stream
       // only the one asked for.
       ...(method === "DirectStream" && audioStreamIndex !== undefined

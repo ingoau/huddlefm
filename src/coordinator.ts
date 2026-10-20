@@ -170,6 +170,8 @@ const searchDebounceMs = 300;
 const videoRequestPauseMs = 15 * 60_000;
 // Slack allows this many screen shares at once in a huddle.
 const screenShareSlots = 2;
+// A stream playing this long after it was picked up again has recovered.
+const streamRecoveredMs = 2 * 60_000;
 // The most options a Slack select menu takes.
 const selectOptionLimit = 100;
 
@@ -200,6 +202,7 @@ type Entry = TrackMetadata & {
   liveSince?: number;
   /** Times the playing stream has been picked up again after failing. */
   streamRetries?: number;
+  streamRetriedAt?: number;
   /** Where to start playing, when not from the top: a resumed item. */
   startAt?: number;
   /** The audio and captions picked for a Jellyfin item. */
@@ -1019,12 +1022,21 @@ export class Coordinator {
       this.countTime(details.seconds - this.playbackSeconds);
       this.playbackSeconds = details.seconds;
       this.playbackScrobbling?.position(details.seconds);
-      if (this.current)
+      const current = this.current;
+      if (current) {
         this.jellyfinUi?.playing(
-          this.current,
+          current,
           details.seconds,
           this.state === "paused",
         );
+        // A stream that has played on well since it was picked up again
+        // gets its retries back, for the next drop.
+        if (
+          current.streamRetries &&
+          Date.now() - (current.streamRetriedAt ?? 0) > streamRecoveredMs
+        )
+          current.streamRetries = 0;
+      }
       this.store.setSession(this.id, {
         playbackSeconds: details.seconds,
         listenedSeconds: this.listenedSeconds,
@@ -3973,7 +3985,14 @@ export class Coordinator {
             }),
           }
         : {}),
-      ...(shown ? { video: captions ? { subtitles: captions } : {} } : {}),
+      ...(shown
+        ? {
+            video: defined({
+              subtitles: captions,
+              url: entry.stream?.videoUrl,
+            }),
+          }
+        : {}),
       title: entry.title,
       artist: entry.artist,
       album: entry.album,
@@ -3988,12 +4007,13 @@ export class Coordinator {
   }
 
   private syncPreloads() {
-    const next =
+    const first =
       this.loopMode === "track"
         ? undefined
-        : this.queue.find(
-            (entry) => entry.status === "ready" && entry.filePath,
-          );
+        : this.queue.find((entry) => entry.status === "ready");
+    // A stream is never preloaded, and nothing past it is either: it plays
+    // next, so nothing may crossfade in ahead of it.
+    const next = first?.filePath ? first : undefined;
     const entries = [next, this.history.at(-1)].filter(
       (entry, index, all): entry is Entry =>
         Boolean(entry?.filePath) &&
@@ -4283,7 +4303,8 @@ export class Coordinator {
         natural &&
         this.loopMode === "queue" &&
         played &&
-        this.current.filePath
+        // A Jellyfin item streams again; a live stream that ended is gone.
+        (this.current.filePath || (this.current.stream && !this.current.live))
       ) {
         const finished = this.current;
         const transition = defined({
@@ -4314,7 +4335,14 @@ export class Coordinator {
               })
             : {}),
           status: "ready",
-          filePath: finished.filePath,
+          ...defined({
+            filePath: finished.filePath,
+            stream: finished.stream,
+            form: finished.form,
+            kind: finished.kind,
+            chapters: finished.chapters,
+            videoChecked: finished.videoChecked,
+          }),
           ...transition,
         };
         this.queue.push(looping);
@@ -4325,7 +4353,7 @@ export class Coordinator {
         });
         this.store.setTrack(looping.id, {
           status: "ready",
-          filePath: looping.filePath,
+          ...(looping.filePath ? { filePath: looping.filePath } : {}),
           ...transition,
         });
         this.queueChanged();
@@ -4364,6 +4392,7 @@ export class Coordinator {
     };
     if ((entry.streamRetries ?? 0) >= 2) return skip();
     entry.streamRetries = (entry.streamRetries ?? 0) + 1;
+    entry.streamRetriedAt = Date.now();
     this.log.warn(
       {
         event: "stream_retry",

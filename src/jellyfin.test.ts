@@ -481,3 +481,25 @@ test("reports playback against the item and its play session", async () => {
     },
   ]);
 });
+
+test("a converted stream gives the picture a play session of its own", async () => {
+  const { jellyfin } = playbackServer(2160);
+  const play = await jellyfin.playback(server, movie, { video: true });
+  const sound = new URL(play.url).searchParams.get("playSessionId");
+  const picture = new URL(play.videoUrl!).searchParams.get("playSessionId");
+  expect(sound).toBe("play1");
+  expect(picture).toBe("play1v");
+  // A file played as it is can be read twice as it is.
+  expect(
+    (
+      await playbackServer(720).jellyfin.playback(server, movie, {
+        video: true,
+      })
+    ).videoUrl,
+  ).toBeUndefined();
+});
+
+test("only a 401 means the token is gone", () => {
+  expect(new JellyfinError("x", 401).unauthorized).toBeTrue();
+  expect(new JellyfinError("x", 403).unauthorized).toBeFalse();
+});

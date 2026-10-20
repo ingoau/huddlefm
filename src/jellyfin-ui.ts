@@ -45,6 +45,8 @@ import { formatClock, shorten, vttToSrt, type Chapter } from "./videos.ts";
 export const jellyfinCallback = "jellyfin";
 /** The audio and captions picker, which is submitted. */
 export const jellyfinTracksCallback = "jellyfin_tracks";
+/** The server address form, which is submitted. */
+export const jellyfinAddressCallback = "jellyfin_address_form";
 
 // A Quick Connect code lives this long on the server.
 const linkTimeoutMs = 10 * 60_000;
@@ -235,6 +237,8 @@ export class JellyfinUi {
     playback: JellyfinPlayback;
     at: number;
     paused: boolean;
+    /** Where it last was, for a stop no one gave a position for. */
+    position: number;
   };
 
   constructor(
@@ -300,10 +304,11 @@ export class JellyfinUi {
 
   /** Whether an action or dialog is one of these. */
   handles(interaction: Interaction) {
+    if (interaction.type === "view_submission")
+      return interaction.actionId === jellyfinAddressCallback;
     return (
-      interaction.type !== "view_submission" &&
-      (interaction.actionId.startsWith("jellyfin_") ||
-        interaction.actionId === jellyfinCallback)
+      interaction.actionId.startsWith("jellyfin_") ||
+      interaction.actionId === jellyfinCallback
     );
   }
 
@@ -314,12 +319,13 @@ export class JellyfinUi {
       return;
     }
     if (!this.host.canUse(interaction.userId)) return;
+    if (interaction.type === "view_submission")
+      return this.submitAddressForm(interaction);
     const handlers: Record<string, () => Promise<void>> = {
       jellyfin_open_link: () => this.openAddress(interaction),
       jellyfin_view_servers: () => this.openServers(interaction),
       jellyfin_link_another: () => this.showAddress(interaction),
       jellyfin_address: () => this.submitAddress(interaction),
-      jellyfin_continue: () => this.submitAddress(interaction),
       jellyfin_new_code: () => this.newCode(interaction),
       jellyfin_unlink: () => this.unlink(interaction),
       jellyfin_season: () => this.chooseSeason(interaction),
@@ -462,18 +468,14 @@ export class JellyfinUi {
           ),
           dispatch_action: true,
         },
-        actions("jellyfin_address_actions", [
-          button("jellyfin_continue", plain("Continue"), {
-            style: "primary",
-            value: this.id,
-          }),
-        ]),
         context(
           "jellyfin_about",
           "HuddleFM signs in with Quick Connect, so your password never goes through Slack. Only you can use what you link, and you can unlink it any time.",
         ),
       ],
       state,
+      // Slack only shows a form with an input when it can be submitted.
+      { callback_id: jellyfinAddressCallback, submit: plain("Continue") },
     );
   }
 
@@ -520,6 +522,23 @@ export class JellyfinUi {
       interaction.viewId,
       this.addressView(readState(interaction)),
     );
+  }
+
+  // Continue closes the form, so linking carries on in a dialog of its own.
+  private async submitAddressForm(interaction: Interaction) {
+    if (!interaction.triggerId) return;
+    const view = await this.host.slack
+      .pushModal(
+        interaction.triggerId,
+        this.messageView(
+          "Finding the server…",
+          readState(interaction),
+          "Link Jellyfin",
+        ),
+      )
+      .catch(() => undefined);
+    if (!view?.id) return;
+    await this.submitAddress({ ...interaction, viewId: view.id });
   }
 
   private async submitAddress(interaction: Interaction) {
@@ -922,6 +941,15 @@ export class JellyfinUi {
     error: unknown,
     notice?: string,
   ) {
+    if (error instanceof JellyfinError && error.status === 403) {
+      await this.update(
+        viewId,
+        this.messageView(
+          `${notice ? `${notice}, but your` : "Your"} Jellyfin account isn’t allowed to play that.`,
+        ),
+      );
+      return;
+    }
     if (error instanceof JellyfinError && error.unauthorized) {
       this.host.store.revokeJellyfinServer(server.userId, server.serverId);
       await this.update(
@@ -1156,7 +1184,7 @@ export class JellyfinUi {
         server,
         state.seriesId,
         interaction.value,
-        added ? `Added ${episodes.length} episodes to the queue.` : undefined,
+        added ? "Added the season to the queue." : undefined,
       );
     } catch (error) {
       await this.failed(interaction.viewId, server, error);
@@ -1303,6 +1331,7 @@ export class JellyfinUi {
       await mkdir(options.directory, { recursive: true });
       const stream: MediaStream = {
         url: play.url,
+        ...(play.videoUrl ? { videoUrl: play.videoUrl } : {}),
         ...(play.audioStream === undefined
           ? {}
           : { audioStream: play.audioStream }),
@@ -1347,7 +1376,10 @@ export class JellyfinUi {
         this.host.store.revokeJellyfinServer(server.userId, server.serverId);
         throw new TrackError("No longer available");
       }
-      if (error instanceof JellyfinError && error.status === 404)
+      if (
+        error instanceof JellyfinError &&
+        (error.status === 404 || error.status === 403)
+      )
         throw new TrackError("No longer available");
       if (error instanceof JellyfinError)
         throw new TrackError(`${server.name} stopped responding`, {
@@ -1369,18 +1401,17 @@ export class JellyfinUi {
   ) {
     const playback = entry.stream?.jellyfin;
     const reported = this.reported;
-    if (!playback) {
-      if (reported) this.stopped(reported.entryId, position);
-      return;
-    }
+    // Something else took over, without the item being stopped: it stopped
+    // where it last was, not where the new one starts.
     if (
       reported &&
       (reported.entryId !== entry.id || reported.playback !== playback)
     )
       this.stopped(
         reported.entryId,
-        reported.entryId === entry.id ? position : undefined,
+        reported.entryId === entry.id ? position : reported.position,
       );
+    if (!playback) return;
     const server = this.host.store.jellyfinServer(
       entry.requesterId,
       playback.serverId,
@@ -1389,10 +1420,18 @@ export class JellyfinUi {
     const now = Date.now();
     const current = this.reported;
     if (!current) {
-      this.reported = { entryId: entry.id, server, playback, at: now, paused };
+      this.reported = {
+        entryId: entry.id,
+        server,
+        playback,
+        at: now,
+        paused,
+        position,
+      };
       this.send(server, "start", playback, position, paused);
       return;
     }
+    current.position = position;
     if (
       !force &&
       current.paused === paused &&
@@ -1409,7 +1448,13 @@ export class JellyfinUi {
     const reported = this.reported;
     if (!reported || reported.entryId !== entryId) return;
     this.reported = undefined;
-    this.send(reported.server, "stop", reported.playback, position ?? 0, false);
+    this.send(
+      reported.server,
+      "stop",
+      reported.playback,
+      position ?? reported.position,
+      false,
+    );
   }
 
   private send(

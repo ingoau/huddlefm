@@ -549,25 +549,26 @@ test("the You tab links a server by address and lists it to unlink", async () =>
   );
   expect(text("V1")).toContain("Server address");
   await ui.action(
-    interaction("jellyfin_continue", {
+    interaction("jellyfin_address_form", {
+      type: "view_submission",
       viewId: "V1",
       metadata: JSON.parse(views.get("V1")!.private_metadata),
       state: { jellyfin_address: { jellyfin_address: { value: "1.1.1.1" } } },
     }),
   );
-  expect(text("V1")).toContain("Linked Home ✓");
-  expect(text("V1")).toContain("jellyfin_unlink");
+  expect(text("V2")).toContain("Linked Home ✓");
+  expect(text("V2")).toContain("jellyfin_unlink");
   expect(refreshed).toEqual(["S1"]);
   expect(store.jellyfinServers("U1")).toHaveLength(1);
   await ui.action(
     interaction("jellyfin_unlink", {
-      viewId: "V1",
+      viewId: "V2",
       value: serverId,
-      metadata: JSON.parse(views.get("V1")!.private_metadata),
+      metadata: JSON.parse(views.get("V2")!.private_metadata),
     }),
   );
   expect(store.jellyfinServers("U1")).toEqual([]);
-  expect(text("V1")).toContain("Unlinked Home.");
+  expect(text("V2")).toContain("Unlinked Home.");
   expect(refreshed).toEqual(["S1", "S1"]);
 });
 
@@ -575,11 +576,73 @@ test("an address that is not a server says so", async () => {
   const { ui, text, views } = setup();
   await ui.action(interaction("jellyfin_open_link", { viewId: "S1" }));
   await ui.action(
-    interaction("jellyfin_continue", {
+    interaction("jellyfin_address", {
       viewId: "V1",
       metadata: JSON.parse(views.get("V1")!.private_metadata),
       state: { jellyfin_address: { jellyfin_address: { value: "  " } } },
     }),
   );
   expect(text("V1")).toContain("Type the address you open Jellyfin at.");
+});
+
+test("an item replaced without stopping is reported stopped where it was", async () => {
+  const { ui, store, reports } = setup();
+  linked(store);
+  const playback = (itemId: string) => ({
+    serverId,
+    itemId,
+    mediaSourceId: "source1",
+    playMethod: "DirectStream" as const,
+    audioTracks: [],
+    subtitleTracks: [],
+  });
+  ui.playing(
+    {
+      id: "a",
+      requesterId: "U1",
+      stream: { url: "x", jellyfin: playback(movieId) },
+    },
+    0,
+    false,
+    true,
+  );
+  ui.playing(
+    {
+      id: "a",
+      requesterId: "U1",
+      stream: { url: "x", jellyfin: playback(movieId) },
+    },
+    3600,
+    false,
+  );
+  // Previous brings back something else, which starts from the top.
+  ui.playing({ id: "b", requesterId: "U1" }, 0, false, true);
+  await until(() => reports.some((report) => report.path === "stop"));
+  expect(
+    reports.find((report) => report.path === "stop")!.body.PositionTicks,
+  ).toBe(3600 * 10_000_000);
+});
+
+test("an item the account may not play leaves the link alone", async () => {
+  const { ui, store, text } = setup();
+  linked(store);
+  // Nothing at that route answers 403 here, so make one.
+  (ui as any).host.jellyfin.item = async () => {
+    const { JellyfinError } = await import("./jellyfin.ts");
+    throw new JellyfinError("forbidden", 403);
+  };
+  await ui.choose(
+    interaction("add_track_to_queue"),
+    itemValue("open", serverId, movieId),
+  );
+  expect(text("V1")).toContain("isn’t allowed to play that");
+  expect(store.jellyfinServer("U1", serverId)?.revoked).toBeUndefined();
+});
+
+test("the address form can be submitted, as Slack requires of a form", async () => {
+  const { ui, views } = setup();
+  await ui.action(interaction("jellyfin_open_link", { viewId: "S1" }));
+  const view = views.get("V1") as any;
+  expect(view.submit.text).toBe("Continue");
+  expect(view.callback_id).toBe("jellyfin_address_form");
 });

@@ -399,6 +399,8 @@ export type PreparedMedia = {
  */
 export type MediaStream = {
   url: string;
+  /** Where the picture is read from, when not `url`. */
+  videoUrl?: string;
   live?: boolean;
   /** Headers the source asks for. */
   headers?: Record<string, string>;
