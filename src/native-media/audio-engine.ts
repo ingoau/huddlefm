@@ -23,6 +23,14 @@ const readyFrames = sampleRate;
 const preloadedFrames = sampleRate * 3;
 /** Continuous underrun that counts as a stalled track. */
 const stallFrames = sampleRate * 10;
+/** A loudness gain measured after its track started glides in this slowly. */
+const trimGlideFrames = sampleRate * 3;
+
+/** A gain in decibels as a factor, with none as no change. */
+function decibels(value: unknown) {
+  const db = Number(value);
+  return value === undefined || !Number.isFinite(db) ? 1 : 10 ** (db / 20);
+}
 
 type Fade = { start: number; length: number; direction: "in" | "out" };
 
@@ -44,6 +52,8 @@ class Deck {
   duration: number | undefined;
   /** Stops the duration probe when the deck goes. */
   readonly probing = new AbortController();
+  /** What its loudness is turned by, apart from fades. */
+  private trim: Ramp = { from: 1, to: 1, start: 0, length: 0 };
 
   constructor(
     readonly entryId: string,
@@ -98,6 +108,18 @@ class Deck {
     this.level = level;
   }
 
+  trimAt(sample: number) {
+    const { from, to, start, length } = this.trim;
+    if (length <= 0 || sample >= start + length) return to;
+    return from + ((to - from) * Math.max(0, sample - start)) / length;
+  }
+
+  /** Turns its loudness to `gain`, gliding over `length` samples from `at`. */
+  setTrim(gain: number, at: number, length = 0) {
+    if (gain === this.trim.to) return;
+    this.trim = { from: this.trimAt(at), to: gain, start: at, length };
+  }
+
   close() {
     this.decoder.close();
     this.probing.abort();
@@ -110,6 +132,7 @@ type NextEntry = {
   introSeconds: number;
   fadeInSeconds: number;
   stream?: StreamInput;
+  gainDb?: number;
 };
 
 type Ramp = { from: number; to: number; start: number; length: number };
@@ -274,6 +297,17 @@ export class AudioEngine {
       case "stop":
         this.stop();
         return true;
+      case "gain": {
+        // A playing track's loudness, measured once it had started, glides
+        // in rather than jumps.
+        const deck = this.decks.get(message.entryId);
+        deck?.setTrim(
+          decibels(message.gainDb),
+          this.clock,
+          deck.playing ? trimGlideFrames : 0,
+        );
+        return true;
+      }
       case "volume":
         this.setVolume(Number(message.value));
         return true;
@@ -327,7 +361,10 @@ export class AudioEngine {
         this.transitionMode !== "none"
           ? Number(entry.introSeconds) || 0
           : 0;
-      this.deck(entry.entryId, entry.url, start, entry.stream);
+      this.deck(entry.entryId, entry.url, start, entry.stream).setTrim(
+        decibels(entry.gainDb),
+        this.clock,
+      );
     }
     for (const [entryId, deck] of this.decks)
       if (!keep.has(entryId)) {
@@ -366,6 +403,7 @@ export class AudioEngine {
       0,
       message.stream as StreamInput | undefined,
     );
+    deck.setTrim(decibels(message.gainDb), this.clock);
     if (!alreadyPlaying) {
       if (deck.position !== 0 || deck.decoder.error || deck.stalledSent)
         deck.seek(0);
@@ -461,6 +499,7 @@ export class AudioEngine {
     const previousId = this.currentId!;
     const previous = this.decks.get(previousId)!;
     const deck = this.deck(next.entryId, next.url, 0, next.stream);
+    deck.setTrim(decibels(next.gainDb), this.clock);
     const seconds = this.crossfadeSeconds();
     this.transitioning = true;
     const intro = Number(next.introSeconds) || 0;
@@ -565,7 +604,8 @@ export class AudioEngine {
     }
     const read = decoder.read(this.scratch, frames);
     for (let index = 0; index < read; index++) {
-      const gain = deck.gainAt(this.clock + index);
+      const sample = this.clock + index;
+      const gain = deck.gainAt(sample) * deck.trimAt(sample);
       out[index * 2] = out[index * 2]! + this.scratch[index * 2]! * gain;
       out[index * 2 + 1] =
         out[index * 2 + 1]! + this.scratch[index * 2 + 1]! * gain;

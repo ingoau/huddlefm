@@ -124,7 +124,7 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 | `INITIAL_VOLUME`                | `0.5`            | Starting volume as a fraction of max                                                      |
 | `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                              |
 | `LYRICS_OFFSET_MS`              | `0`              | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio |
-| `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to enable -14 LUFS normalization                                            |
+| `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to level songs and videos to -14 LUFS                                       |
 | `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all Huddles                                |
 | `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`     | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache |
 | `MEDIA_CACHE_MAX_AGE_DAYS`      | `30`             | Re-download cached tracks older than this; `0` keeps them until evicted for space         |
@@ -162,7 +162,9 @@ HuddleFM joins each Huddle's Chime meeting itself. Each Huddle's media runs in i
 
 In video mode the bot also joins as its own screen share, the way Chime's content share does, and sends the video and the music there instead of the camera tile; the picture follows the audio's position, and captions are burned in when they are on. If the share cannot start or is lost, the camera tile and the bot's own audio take over, and whoever added the video hears why.
 
-Live streams and Jellyfin items are not downloaded: the media process reads them as they arrive, through the same public-network proxy as every download, and lines up a live stream's picture with its sound by the timestamps each joined at.
+Live streams, YouTube videos in video mode, and Jellyfin items are not downloaded first: the media process reads them as they arrive, through the same public-network proxy as every download, and lines up a live stream's picture with its sound by the timestamps each joined at. A YouTube video starts within seconds however long it is, and downloads into the video cache behind it, so it plays from disk the next time.
+
+With `LOUDNESS_NORMALIZATION` on, songs are re-encoded at -14 LUFS as they download. Videos are not: their loudness is measured instead, from the sound alone for a streamed video, and the bot turns them to the same level as they play (lifting a quiet one by at most 6 dB). A video waits up to 3 seconds for its measurement, and one that takes longer starts as it is and glides to its level when the measurement arrives. Each video's loudness is kept for good, so it is levelled from its first second every time after that, even once its file has left the cache.
 
 Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`.
 

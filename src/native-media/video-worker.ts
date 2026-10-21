@@ -3,7 +3,7 @@
 // messages.
 import { UnitRing } from "./unit-ring.ts";
 import { VideoCard } from "./video-card.ts";
-import { VideoFeed, cardInput } from "./video-feed.ts";
+import { VideoFeed, wideCardInput } from "./video-feed.ts";
 import { FfmpegFrameDecoder, VideoPlayer } from "./video-player.ts";
 import type { FromVideoWorker, ToVideoWorker } from "./video-thread.ts";
 
@@ -12,7 +12,8 @@ declare const self: Worker;
 /** How often the share checks whether to show the video or the card. */
 const shareCheckMs = 100;
 
-let card: VideoCard | undefined;
+/** The camera tile's square card, and the screen share's wide one. */
+let cards: VideoCard[] = [];
 let feed: VideoFeed | undefined;
 let share: Share | undefined;
 
@@ -36,9 +37,9 @@ function sink(units: UnitRing, stream: string) {
 
 /**
  * The screen share's picture: the playing video when there is one with a
- * frame decoded, and otherwise the card, scaled into the 16:9 frame. Each has
- * its own encoder, since their raw frames differ, and they take turns on one
- * stream with one timestamp base.
+ * frame decoded, and otherwise the wide card, which fills the 16:9 frame.
+ * Each has its own encoder, since their raw frames differ, and they take
+ * turns on one stream with one timestamp base.
  */
 class Share {
   private on = false;
@@ -89,23 +90,17 @@ class Share {
       write,
       failed,
       encoder,
-      { input: cardInput, format, epoch },
+      { input: wideCardInput, format, epoch },
     );
-    this.videoFeed = new VideoFeed(
-      () => this.player.frame(this.position(), this.key(), this.audioStart()),
-      write,
-      failed,
-      encoder,
-      {
-        input: {
-          width: format.width,
-          height: format.height,
-          pixelFormat: "yuv420p",
-        },
-        format,
-        epoch,
+    this.videoFeed = new VideoFeed(() => this.frame(), write, failed, encoder, {
+      input: {
+        width: format.width,
+        height: format.height,
+        pixelFormat: "yuv420p",
       },
-    );
+      format,
+      epoch,
+    });
   }
 
   setOn(on: boolean) {
@@ -147,12 +142,19 @@ class Share {
     return Number.isNaN(start) ? undefined : start;
   }
 
+  /**
+   * The video's frame for where the audio is. A live stream's picture is
+   * only lined up, and so only shown, by where the audio's timestamps start.
+   */
+  private frame() {
+    return this.player.frame(this.position(), this.key(), this.audioStart());
+  }
+
   // Keeps the decoder going while the card is up, so the video can take over
   // as soon as its first frame is ready.
   private check() {
     if (!this.on) return;
-    if (this.player.key !== undefined && this.showing !== "video")
-      this.player.frame(this.position(), this.key());
+    if (this.player.key !== undefined && this.showing !== "video") this.frame();
     const video =
       this.player.ready &&
       this.player.key !== undefined &&
@@ -174,24 +176,27 @@ self.addEventListener("message", (event) => {
   const message = (event as MessageEvent<ToVideoWorker>).data;
   if (message.type === "init") {
     const clock = new Float64Array(message.clock);
-    const videoCard = new VideoCard(
-      () =>
-        Number.isNaN(clock[0]!)
-          ? undefined
-          : {
-              position: clock[0]!,
-              duration: Number.isNaN(clock[1]!) ? undefined : clock[1],
-            },
-      (error) =>
-        send({
-          type: "log",
-          event: "native_artwork_failed",
-          message: "Artwork failed to load",
-          error,
-        }),
-      { lyricsOffset: message.lyricsOffset },
-    );
-    card = videoCard;
+    const card = (wide: boolean) =>
+      new VideoCard(
+        () =>
+          Number.isNaN(clock[0]!)
+            ? undefined
+            : {
+                position: clock[0]!,
+                duration: Number.isNaN(clock[1]!) ? undefined : clock[1],
+              },
+        (error) =>
+          send({
+            type: "log",
+            event: "native_artwork_failed",
+            message: "Artwork failed to load",
+            error,
+          }),
+        { lyricsOffset: message.lyricsOffset, wide },
+      );
+    const videoCard = card(false);
+    const shareCard = card(true);
+    cards = [videoCard, shareCard];
     feed = new VideoFeed(
       () => videoCard.rgba(),
       sink(new UnitRing(message.units), "camera"),
@@ -207,7 +212,7 @@ self.addEventListener("message", (event) => {
     share = new Share(
       message.share,
       clock,
-      videoCard,
+      shareCard,
       new UnitRing(message.shareUnits),
     );
     return;
@@ -218,20 +223,27 @@ self.addEventListener("message", (event) => {
     send({ type: "stopped" });
     return;
   }
-  if (!card || !feed || !share) return;
+  if (!cards.length || !feed || !share) return;
   switch (message.type) {
     case "begin_change":
-      return card.beginChange(message.artwork);
+      for (const card of cards) card.beginChange(message.artwork);
+      return;
     case "track":
-      return card.setTrack(message.title, message.artist, message.artwork);
+      for (const card of cards)
+        card.setTrack(message.title, message.artist, message.artwork);
+      return;
     case "reset":
-      return card.reset(message.idle);
+      for (const card of cards) card.reset(message.idle);
+      return;
     case "display_mode":
-      return card.setDisplayMode(message.mode);
+      for (const card of cards) card.setDisplayMode(message.mode);
+      return;
     case "lyrics":
-      return card.setLyrics(message.lines, message.credits);
+      for (const card of cards) card.setLyrics(message.lines, message.credits);
+      return;
     case "lyrics_unavailable":
-      return card.setLyricsUnavailable();
+      for (const card of cards) card.setLyricsUnavailable();
+      return;
     case "video":
       return message.on ? feed.start() : feed.stop();
     case "keyframe":

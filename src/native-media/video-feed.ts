@@ -1,5 +1,10 @@
 import { AnnexBSplitter } from "./rtp.ts";
-import { cameraFormat, cardSize, type VideoFormat } from "./video-format.ts";
+import {
+  cameraFormat,
+  cardSize,
+  wideCardWidth,
+  type VideoFormat,
+} from "./video-format.ts";
 /** An unchanged frame is skipped, but one still goes out this often. */
 const keepAliveMs = 500;
 /** Seconds between keyframes, so a new viewer gets a picture quickly. */
@@ -17,6 +22,13 @@ export type FeedInput = {
 /** The card's frames, as the camera tile sends them. */
 export const cardInput: FeedInput = {
   width: cardSize,
+  height: cardSize,
+  pixelFormat: "rgba",
+};
+
+/** The wide card's frames, as the screen share sends them. */
+export const wideCardInput: FeedInput = {
+  width: wideCardWidth,
   height: cardSize,
   pixelFormat: "rgba",
 };

@@ -99,6 +99,9 @@ async function setup() {
   const liveCalls: boolean[] = [];
   const references = new Map<string, TrackMetadata>();
   let liveFailure: Error | undefined;
+  let videoPreparation:
+    ((id: string, stream: boolean) => Promise<PreparedMedia>) | undefined;
+  let cachedVideo: string | undefined;
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
@@ -131,7 +134,12 @@ async function setup() {
       _track: TrackMetadata,
       _dir: string,
       id: string,
+      _signal?: AbortSignal,
+      _priority?: number,
+      _audio?: string,
+      stream = true,
     ): Promise<PreparedMedia> => {
+      if (videoPreparation) return videoPreparation(id, stream);
       const path = `${directory}/${id}.opus`;
       await writeFile(path, "media");
       return { filePath: path, form: "audio" };
@@ -151,6 +159,7 @@ async function setup() {
         form: video ? "video" : "audio",
       };
     },
+    cachedStream: async () => cachedVideo,
     resolve: async (reference: string) => references.get(reference)!,
     suggestions: async () => [],
     transition: () => undefined,
@@ -221,6 +230,14 @@ async function setup() {
     directory,
     failLive(error: Error | undefined) {
       liveFailure = error;
+    },
+    prepareVideoWith(
+      prepare: (id: string, stream: boolean) => Promise<PreparedMedia>,
+    ) {
+      videoPreparation = prepare;
+    },
+    cacheVideo(path: string | undefined) {
+      cachedVideo = path;
     },
     player() {
       return [
@@ -575,4 +592,132 @@ test("nothing crossfades in ahead of a stream that plays next", async () => {
     .filter((message) => message.type === "preload")
     .at(-1);
   expect(preload.nextEntryId).toBeUndefined();
+});
+
+const talk: TrackMetadata = {
+  sourceInput: "https://www.youtube.com/watch?v=3OshsLm3_OQ",
+  canonicalUrl: "https://www.youtube.com/watch?v=3OshsLm3_OQ",
+  sourceId: "3OshsLm3_OQ",
+  title: "A talk",
+  artist: "Channel",
+  duration: 1_873,
+  kind: "video",
+};
+
+async function videoMode(result: Setup) {
+  await press(result.coordinator, "save_settings", {
+    type: "view_submission",
+    state: { media_mode: { mode: { selected_option: { value: "video" } } } },
+  });
+}
+
+/** A YouTube video as the catalog streams it. */
+function streamed(extra: Partial<PreparedMedia> = {}): PreparedMedia {
+  return {
+    stream: {
+      url: "https://93.184.216.34/sound",
+      videoUrl: "https://93.184.216.34/picture",
+      headers: { "User-Agent": "yt-dlp" },
+      cacheKey: "cachekey",
+    },
+    form: "video",
+    ...extra,
+  };
+}
+
+test("video mode streams a YouTube video, its sound and picture apart, levelled", async () => {
+  const result = await setup();
+  await videoMode(result);
+  result.prepareVideoWith(async () => streamed({ gainDb: -4 }));
+  await queue(result, talk);
+  await until(() => result.plays().length === 1);
+  const play = result.plays()[0];
+  expect(play).toMatchObject({
+    url: "https://93.184.216.34/sound",
+    gainDb: -4,
+    stream: {
+      proxy: "http://127.0.0.1:4000",
+      headers: { "User-Agent": "yt-dlp" },
+    },
+    video: { url: "https://93.184.216.34/picture" },
+  });
+  // It can be sought, unlike a live stream.
+  expect(play.stream.live).toBeUndefined();
+  expect(buttons(result.player())).toContain("open_jump_to");
+});
+
+test("a video's loudness measured after it started glides in, and is kept", async () => {
+  const result = await setup();
+  await videoMode(result);
+  let level = (_gainDb: number) => {};
+  const leveling = new Promise<number | undefined>(
+    (resolve) => (level = resolve),
+  );
+  result.prepareVideoWith(async () => streamed({ leveling }));
+  await queue(result, talk);
+  await until(() => result.plays().length === 1);
+  const { entryId } = result.plays()[0];
+  expect(result.plays()[0].gainDb).toBeUndefined();
+  level(-3);
+  await until(() => result.media.some((message) => message.type === "gain"));
+  expect(result.media.find((message) => message.type === "gain")).toEqual({
+    type: "gain",
+    entryId,
+    gainDb: -3,
+  });
+  expect(
+    result.store.db
+      .query("SELECT gain_db FROM tracks WHERE id = ?")
+      .get(entryId),
+  ).toEqual({ gain_db: -3 });
+});
+
+test("a streamed video cached by the time it plays plays from the file", async () => {
+  const result = await setup();
+  await videoMode(result);
+  result.prepareVideoWith(async () => streamed({ gainDb: 2 }));
+  await queue(result, talk);
+  await queue(result, { ...talk, sourceId: "otherotherx", title: "Another" });
+  await until(() => result.plays().length === 1);
+  await until(() =>
+    (Reflect.get(result.coordinator, "queue") as { status: string }[]).some(
+      (entry) => entry.status === "ready",
+    ),
+  );
+  const cached = `${result.directory}/cached.video.mkv`;
+  await writeFile(cached, "video");
+  result.cacheVideo(cached);
+  result.coordinator.mediaEvent("track_ended", {
+    entryId: result.plays()[0].entryId,
+  });
+  await until(() => result.plays().length === 2);
+  const play = result.plays()[1];
+  expect(play.title).toBe("Another");
+  expect(play.url).toStartWith("http://127.0.0.1:3210/audio/");
+  expect(play.stream).toBeUndefined();
+  // Its gain is the video's, wherever it plays from.
+  expect(play.gainDb).toBe(2);
+});
+
+test("a video YouTube keeps failing to stream is downloaded for its last try", async () => {
+  const result = await setup();
+  await videoMode(result);
+  const tries: boolean[] = [];
+  result.prepareVideoWith(async (id, stream) => {
+    tries.push(stream);
+    if (stream) return streamed();
+    const path = `${result.directory}/${id}.video.mkv`;
+    await writeFile(path, "video");
+    return { filePath: path, form: "video" };
+  });
+  await queue(result, talk);
+  await until(() => result.plays().length === 1);
+  const { entryId } = result.plays()[0];
+  result.coordinator.mediaEvent("track_error", { entryId });
+  await until(() => result.plays().length === 2);
+  result.coordinator.mediaEvent("track_error", { entryId });
+  await until(() => result.plays().length === 3);
+  expect(tries).toEqual([true, true, false]);
+  expect(result.plays()[2]).toMatchObject({ entryId, title: "A talk" });
+  expect(result.plays()[2].url).toStartWith("http://127.0.0.1:3210/audio/");
 });

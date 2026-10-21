@@ -5,7 +5,7 @@ import { buildTimedRomanization } from "../timed-romanization.ts";
 import { LyricsView } from "./lyrics-view.ts";
 import { cubicBezier, Spring, spring, Tween } from "./motion.ts";
 import { VideoCard } from "./video-card.ts";
-import { cardSize } from "./video-format.ts";
+import { cardSize, wideCardWidth } from "./video-format.ts";
 
 const part = (
   words: string,
@@ -312,13 +312,13 @@ describe("motion", () => {
 });
 
 describe("video card", () => {
-  function card() {
+  function card(wide = false) {
     let now = 0;
     let position = 5;
     const value = new VideoCard(
       () => ({ position, duration: 30 }),
       () => {},
-      { now: () => now },
+      { now: () => now, wide },
     );
     return {
       card: value,
@@ -373,6 +373,67 @@ describe("video card", () => {
   test("draws at the card's size", () => {
     const { card: value } = card();
     expect(value.rgba().length).toBe(cardSize * cardSize * 4);
+  });
+
+  test("the screen share's wide card fills 16:9, with no lyrics", () => {
+    const { card: value, step } = card(true);
+    expect(value.rgba().length).toBe(wideCardWidth * cardSize * 4);
+    step(1, false);
+    const still = Buffer.from(value.rgba());
+    value.setDisplayMode("lyrics");
+    value.setLyrics(song);
+    step(1, false);
+    expect(value.rgba().equals(still)).toBeTrue();
+  });
+
+  test("the wide card's timeline is only for a track with a length", () => {
+    let now = 0;
+    let position = 5;
+    let duration: number | undefined = 30;
+    const value = new VideoCard(
+      () => ({ position, duration }),
+      () => {},
+      { now: () => now, wide: true },
+    );
+    const step = (seconds: number) => {
+      for (let frame = 0; frame < seconds * 30; frame++) {
+        now += 1_000 / 30;
+        position += 1 / 30;
+        value.rgba();
+      }
+    };
+    step(1);
+    const playing = value.rgba();
+    step(2);
+    // A song without a picture: its time moves on.
+    expect(value.rgba()).not.toBe(playing);
+    // A live stream has no length, so nothing moves.
+    duration = undefined;
+    step(1);
+    const live = value.rgba();
+    step(2);
+    expect(value.rgba()).toBe(live);
+  });
+
+  test("the wide card says it is idle in the middle", () => {
+    const pixels = (wide: boolean) => {
+      const { card: value, step } = card(wide);
+      value.reset({
+        title: "Video mode",
+        subtitle: "Queue something to watch",
+      });
+      step(1, false);
+      return { frame: value.rgba(), width: wide ? wideCardWidth : cardSize };
+    };
+    // How bright the middle of the frame is, where centred words would be.
+    const middle = ({ frame, width }: { frame: Buffer; width: number }) => {
+      let total = 0;
+      for (let y = cardSize / 2 - 30; y < cardSize / 2; y++)
+        for (let x = width / 2 - 40; x < width / 2 + 40; x++)
+          total += frame[(y * width + x) * 4]!;
+      return total;
+    };
+    expect(middle(pixels(true))).toBeGreaterThan(middle(pixels(false)) * 4);
   });
 
   test("the lyrics offset delays the lyrics against the audio", () => {

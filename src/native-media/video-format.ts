@@ -3,6 +3,8 @@
 
 /** The card is drawn and sent at this size, about half the cost of 720. */
 export const cardSize = 540;
+/** The card as the screen share shows it: 16:9 at the card's height. */
+export const wideCardWidth = 960;
 /**
  * Smooth enough for the lyrics and the layout swaps, and a fifth cheaper than
  * the page's 30.

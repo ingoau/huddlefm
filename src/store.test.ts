@@ -1615,3 +1615,14 @@ test("a live stream picked from Recent plays live again", () => {
   });
   store.close();
 });
+
+test("keeps a video's measured loudness by source, and updates it", () => {
+  const store = new Store(":memory:");
+  expect(store.loudness("youtube:abcdefghijk")).toBeUndefined();
+  store.setLoudness("youtube:abcdefghijk", -18.5);
+  store.setLoudness("https://example.com/video.mp4", -9);
+  expect(store.loudness("youtube:abcdefghijk")).toBe(-18.5);
+  store.setLoudness("youtube:abcdefghijk", -17);
+  expect(store.loudness("youtube:abcdefghijk")).toBe(-17);
+  expect(store.loudness("https://example.com/video.mp4")).toBe(-9);
+});
