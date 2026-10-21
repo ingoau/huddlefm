@@ -138,3 +138,15 @@ test("parses the ranges ffmpeg sends", () => {
   expect(parseRange("bytes=20-10", 100)).toBeUndefined();
   expect(parseRange("items=0-1", 100)).toBeUndefined();
 });
+
+test("a full relay keeps what it has, and the new stream is read directly", async () => {
+  const { relay: value } = relay();
+  const first = value.register(youtube)!;
+  for (let index = 1; index < 1024; index++)
+    expect(value.register(youtube)).toBeDefined();
+  expect(value.register(youtube)).toBeUndefined();
+  // The oldest still plays.
+  expect(await bytes(value.handle(new Request(first), token(first)))).toEqual(
+    content,
+  );
+});

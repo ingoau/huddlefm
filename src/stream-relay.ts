@@ -11,7 +11,8 @@ const retryDelayMs = 500;
 const chunkTimeoutMs = 20_000;
 /** YouTube's addresses last about six hours; nothing is kept past this. */
 const keepMs = 8 * 60 * 60_000;
-const maxStreams = 256;
+/** Two for each video: plenty for every queue, and small kept. */
+const maxStreams = 1024;
 
 type Upstream = {
   url: string;
@@ -52,13 +53,22 @@ export class StreamRelay {
 
   /**
    * The loopback address a YouTube stream plays from, or nothing when its
-   * length is not in the address, which the relay needs to answer seeks.
+   * length is not in the address, which the relay needs to answer seeks, or
+   * when the relay is full. Either way it is then read directly.
    */
   register(url: string, headers: Record<string, string> = {}) {
     const parsed = new URL(url);
     const size = Number(parsed.searchParams.get("clen"));
     if (!Number.isSafeInteger(size) || size <= 0) return undefined;
     this.prune();
+    // A stream still queued or playing is never dropped for a new one.
+    if (this.streams.size >= maxStreams) {
+      log.warn(
+        { event: "relay_full", streams: this.streams.size },
+        "Reading the stream directly; the relay is full",
+      );
+      return undefined;
+    }
     const token = crypto.randomUUID().replaceAll("-", "");
     this.streams.set(token, {
       url,
@@ -183,8 +193,7 @@ export class StreamRelay {
   private prune() {
     const now = Date.now();
     for (const [token, upstream] of this.streams)
-      if (upstream.expiresAt <= now || this.streams.size >= maxStreams)
-        this.streams.delete(token);
+      if (upstream.expiresAt <= now) this.streams.delete(token);
   }
 }
 
