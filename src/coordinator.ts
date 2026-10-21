@@ -8,6 +8,7 @@ import {
   type SlackAppAdapter,
 } from "./slack-app.ts";
 import { LyricsCatalog, type LyricsPayload } from "./lyrics.ts";
+import { rm } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import {
   capabilities,
@@ -203,6 +204,8 @@ type Entry = TrackMetadata & {
   /** Times the playing stream has been picked up again after failing. */
   streamRetries?: number;
   streamRetriedAt?: number;
+  /** A video YouTube kept failing to stream, so it is downloaded instead. */
+  download?: boolean;
   /** Where to start playing, when not from the top: a resumed item. */
   startAt?: number;
   /** The audio and captions picked for a Jellyfin item. */
@@ -211,6 +214,8 @@ type Entry = TrackMetadata & {
   form?: MediaForm;
   /** Prepared in video mode, so a song's video has been looked for. */
   videoChecked?: boolean;
+  /** What a video's sound is turned by to reach the loudness target. */
+  gainDb?: number;
   /** Watched as a video, which keeps it out of the music stats. */
   isVideo?: boolean;
   /** A prepared video's chapters, once read. */
@@ -402,6 +407,8 @@ export class Coordinator {
   private allowed = new Set<string>(permissionPresets.default);
   private serial = Promise.resolve();
   private preparations = new Map<string, AbortController>();
+  /** What was playing before a restart, which plays first once it is back. */
+  private interrupted?: Entry;
   private anchorTimer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setTimeout>;
   private idleWarningTimer?: ReturnType<typeof setTimeout>;
@@ -648,12 +655,20 @@ export class Coordinator {
       )
     ).filter((entry): entry is Entry => Boolean(entry));
     if (this.current && missingEntries.includes(this.current)) {
-      // A stream is fetched again, and a Jellyfin item goes on from where
-      // it was; anything else that had to be prepared again starts over.
-      if (parseJellyfinSource(this.current.sourceId))
+      // A stream is fetched again, and a Jellyfin item or a video goes on
+      // from where it was; anything else that had to be prepared again
+      // starts over.
+      if (
+        parseJellyfinSource(this.current.sourceId) ||
+        (this.videoMode &&
+          !this.current.live &&
+          (this.current.form === "video" ||
+            this.current.form === "music_video"))
+      )
         this.current.startAt = this.playbackSeconds;
       this.current.status = "preparing";
       this.queue.unshift(this.current);
+      this.interrupted = this.current;
       this.current = undefined;
     }
     for (const entry of missingEntries) {
@@ -3286,6 +3301,7 @@ export class Coordinator {
           controller.signal,
           priority,
           entry.form === "audio" ? entry.filePath : undefined,
+          !entry.download,
         )),
         videoChecked: true,
       };
@@ -3775,11 +3791,30 @@ export class Coordinator {
         .map((entry) => entry.filePath)
         .filter((filePath): filePath is string => Boolean(filePath)),
     );
-    if (!paths.size) return;
+    const subtitles = new Set(
+      dropped
+        .map((entry) => entry.stream?.subtitles)
+        .filter((path): path is string => Boolean(path)),
+    );
+    if (!paths.size && !subtitles.size) return;
     for (const entry of [this.current, ...this.queue, ...this.history])
-      if (entry && entry.filePath && !dropped.includes(entry))
-        paths.delete(entry.filePath);
-    await Promise.all([...paths].map((path) => removePreparedMedia(path)));
+      if (entry && !dropped.includes(entry)) {
+        if (entry.filePath) paths.delete(entry.filePath);
+        if (entry.stream?.subtitles) subtitles.delete(entry.stream.subtitles);
+      }
+    await Promise.all([
+      ...[...paths].map((path) => removePreparedMedia(path)),
+      ...[...subtitles].map((path) => rm(path, { force: true })),
+    ]);
+  }
+
+  // A stream's captions file, once the entry plays something else and no
+  // other entry shares it.
+  private async releaseSubtitles(path: string) {
+    const used = [this.current, ...this.queue, ...this.history].some(
+      (entry) => entry?.stream?.subtitles === path,
+    );
+    if (!used) await rm(path, { force: true });
   }
 
   private async destroyQueuedAutoplay(automatic: Entry[]) {
@@ -3816,6 +3851,12 @@ export class Coordinator {
   }
 
   private async startNext() {
+    // After a restart, what was playing goes on first once it is ready
+    // again, not whatever else was ready sooner.
+    const interrupted = this.interrupted;
+    if (interrupted?.status === "preparing" && this.queue.includes(interrupted))
+      return this.render();
+    this.interrupted = undefined;
     const next = this.queue.find((track) => track.status === "ready");
     if (!next) {
       this.playbackScrobbling?.finish();
@@ -3837,6 +3878,7 @@ export class Coordinator {
     next.status = "playing";
     next.streamRetries = 0;
     if (next.live) next.liveSince = Date.now();
+    await this.useCachedVideo(next);
     // An autoplay pick only counts towards fairness and discovery cadence
     // once it actually plays; a queued pick can still be displaced by a
     // manual add, and Previous can bring a played one back.
@@ -3993,6 +4035,7 @@ export class Coordinator {
             }),
           }
         : {}),
+      ...(entry.gainDb !== undefined ? { gainDb: entry.gainDb } : {}),
       title: entry.title,
       artist: entry.artist,
       album: entry.album,
@@ -4028,6 +4071,7 @@ export class Coordinator {
         url: this.mediaUrl(entry),
         introSeconds: entry.introSeconds ?? 0,
         fadeInSeconds: entry.fadeInSeconds ?? 0,
+        ...(entry.gainDb !== undefined ? { gainDb: entry.gainDb } : {}),
       })),
     });
   }
@@ -4050,7 +4094,8 @@ export class Coordinator {
     entry: Entry,
     media: PreparedMedia & { videoChecked?: boolean },
   ) {
-    const { filePath, stream, form } = media;
+    const { filePath, stream, form, gainDb } = media;
+    const previousSubtitles = entry.stream?.subtitles;
     const transition = filePath
       ? this.tracks.transition?.(filePath)
       : undefined;
@@ -4060,14 +4105,19 @@ export class Coordinator {
       filePath,
       stream,
       form,
+      gainDb,
       videoChecked: media.videoChecked,
       status: entry === this.current ? entry.status : "ready",
       ...transition,
     });
+    if (media.leveling) void this.levelLater(entry, media);
+    if (previousSubtitles && previousSubtitles !== stream?.subtitles)
+      void this.releaseSubtitles(previousSubtitles);
     this.store.setTrack(entry.id, {
       ...(entry === this.current ? {} : { status: "ready" }),
       filePath: filePath ?? null,
       form,
+      gainDb: gainDb ?? null,
       title: entry.title,
       artist: entry.artist,
       album: entry.album ?? null,
@@ -4077,6 +4127,45 @@ export class Coordinator {
     });
     // The mode changed while it was being prepared.
     if (!this.formFits(entry)) this.reprepare(entry);
+  }
+
+  // Turns a video to its loudness once that has been measured, which
+  // glides in when it is already playing.
+  private async levelLater(entry: Entry, media: PreparedMedia) {
+    const gainDb = await media.leveling;
+    if (gainDb === undefined) return;
+    await this.enqueue(() => {
+      // Prepared again since as something else, such as its audio for music.
+      if (this.inactive() || entry.form !== media.form) return;
+      entry.gainDb = gainDb;
+      this.store.setTrack(entry.id, { gainDb });
+      if (this.current === entry)
+        this.sendMedia({ type: "gain", entryId: entry.id, gainDb });
+      else this.syncPreloads();
+    });
+  }
+
+  // A streamed video whose download behind it has finished plays from the
+  // file, rather than from an address that may since have expired.
+  private async useCachedVideo(entry: Entry) {
+    const stream = entry.stream;
+    if (!stream?.cacheKey) return;
+    const filePath = await this.tracks
+      .cachedStream(stream, `data/media/${this.id}`, entry.id)
+      .catch((error) => {
+        this.log.warn(
+          { event: "cached_video_failed", entryId: entry.id, err: error },
+          "Streaming the video again instead of playing it from the cache",
+        );
+        return undefined;
+      });
+    if (!filePath || entry.stream !== stream) return;
+    this.prepared(entry, {
+      filePath,
+      form: entry.form ?? "video",
+      videoChecked: entry.videoChecked,
+      gainDb: entry.gainDb,
+    });
   }
 
   // Reads a prepared video's chapters onto its entry, for Jump to.
@@ -4342,6 +4431,7 @@ export class Coordinator {
             kind: finished.kind,
             chapters: finished.chapters,
             videoChecked: finished.videoChecked,
+            gainDb: finished.gainDb,
           }),
           ...transition,
         };
@@ -4354,6 +4444,7 @@ export class Coordinator {
         this.store.setTrack(looping.id, {
           status: "ready",
           ...(looping.filePath ? { filePath: looping.filePath } : {}),
+          ...(looping.gainDb !== undefined ? { gainDb: looping.gainDb } : {}),
           ...transition,
         });
         this.queueChanged();
@@ -4393,6 +4484,10 @@ export class Coordinator {
     if ((entry.streamRetries ?? 0) >= 2) return skip();
     entry.streamRetries = (entry.streamRetries ?? 0) + 1;
     entry.streamRetriedAt = Date.now();
+    // A video that would not stream twice is downloaded for its last try,
+    // with the download's own retries and its fallback to the sound.
+    if (entry.streamRetries === 2 && !entry.live && !entry.stream.jellyfin)
+      entry.download = true;
     this.log.warn(
       {
         event: "stream_retry",
@@ -4408,6 +4503,7 @@ export class Coordinator {
         this.enqueue(async () => {
           if (this.current !== entry || this.inactive()) return;
           this.prepared(entry, media);
+          if (media.fellBack) await this.videoFellBack(entry);
           await this.sendCurrent(entry);
         }),
       (error) => this.enqueue(() => skip(error)),
@@ -4630,6 +4726,8 @@ export class Coordinator {
     this.store.incrementUsage("removed");
     this.queueChanged(interaction);
     await this.releaseMedia(entry);
+    // The rest were held back for it.
+    if (entry === this.interrupted && !this.current) return this.startNext();
     await this.render();
     this.syncPreloads();
     this.refreshIdle();

@@ -213,61 +213,43 @@ export async function normalizeLoudness(
 }
 
 /**
- * Like normalizeLoudness, for a video: the picture is copied as it is and
- * only the audio is levelled.
+ * A file's integrated loudness in LUFS, measured without re-encoding it, or
+ * nothing when it has no sound to measure.
  */
-export async function normalizeVideoLoudness(
-  filePath: string,
-  entryId: string,
-  maxBytes: number,
-  signal?: AbortSignal,
-) {
-  const normalizedPath = filePath.replace(/\.[^.]+$/, ".normalized.mkv");
-  try {
-    await run(
-      [
-        "ffmpeg",
-        "-hide_banner",
-        "-y",
-        "-i",
-        filePath,
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0",
-        "-c:v",
-        "copy",
-        "-af",
-        "loudnorm=I=-14:LRA=11:TP=-1",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "160k",
-        "-f",
-        "matroska",
-        normalizedPath,
-      ],
-      600_000,
-      signal,
-    );
-    if ((await stat(normalizedPath)).size > maxBytes)
-      throw new Error("Normalized video exceeds the download limit");
-    await rename(normalizedPath, filePath);
-    return true;
-  } catch (error) {
-    await rm(normalizedPath, { force: true });
-    if (signal?.aborted) throw error;
-    log.warn(
-      {
-        event: "video_loudness_normalization_failed",
-        entryId,
-        detail: trackFailureDetail(error),
-        err: error,
-      },
-      "Playing video without loudness normalization",
-    );
-    return false;
-  }
+export async function measureLoudness(filePath: string, signal?: AbortSignal) {
+  const { stderr } = await run(
+    [
+      "ffmpeg",
+      "-hide_banner",
+      "-nostats",
+      "-i",
+      filePath,
+      "-map",
+      "0:a:0",
+      "-af",
+      "ebur128=framelog=quiet",
+      "-f",
+      "null",
+      "-",
+    ],
+    120_000,
+    signal,
+  );
+  return integratedLoudness(stderr);
+}
+
+/** The integrated loudness from ebur128's summary. */
+export function integratedLoudness(output: string) {
+  const summary = output.slice(output.lastIndexOf("Integrated loudness:"));
+  const lufs = Number(summary.match(/I:\s+(-?[\d.]+) LUFS/)?.[1]);
+  // Silence reads as the meter's floor, which no gain should chase.
+  return Number.isFinite(lufs) && lufs > -70 ? lufs : undefined;
+}
+
+/** The gain that brings a loudness to the target, within its bounds. */
+export function levelingGain(lufs: number) {
+  const gain = loudnessTarget - lufs;
+  return Math.round(Math.max(-maxCutDb, Math.min(maxBoostDb, gain)) * 10) / 10;
 }
 
 /** Gives a video with no sound a silent track as long as its picture. */
@@ -390,11 +372,35 @@ export type PreparedMedia = {
   fellBack?: boolean;
   /** Chapters known without a file to read them from. */
   chapters?: Chapter[];
+  /** What a video's sound is turned by to reach the loudness target. */
+  gainDb?: number;
+  /** The gain, when it was still being measured as the media came back. */
+  leveling?: Promise<number | undefined>;
 };
 
 /**
+ * Where measured loudness is kept, by source, so it outlives the cached
+ * file and levels a video from its first second every time after the first.
+ */
+export type LoudnessStore = {
+  loudness(source: string): number | undefined;
+  setLoudness(source: string, lufs: number): void;
+};
+
+/** The loudness tracks are levelled to, as loudnorm's target was. */
+const loudnessTarget = -14;
+/** A quiet video is lifted by at most this much, so its noise is not. */
+const maxBoostDb = 6;
+const maxCutDb = 24;
+/** How long a video waits for its loudness before playing unlevelled. */
+const levelingWaitMs = 3_000;
+/** The longest a streamed video's download into the cache may take. */
+const cachingDeadlineMs = 15 * 60_000;
+const stillMeasuring = Symbol("still measuring");
+
+/**
  * A source played as it arrives rather than downloaded first: a live stream,
- * or an item on a Jellyfin server. Its URL can carry a credential, so it only
+ * a YouTube video, or an item on a Jellyfin server. Its URL can carry a credential, so it only
  * ever goes to the media process, never to Slack or the logs.
  */
 export type MediaStream = {
@@ -412,6 +418,11 @@ export type MediaStream = {
   cover?: string;
   /** How a Jellyfin item is playing, for progress and track choices. */
   jellyfin?: JellyfinPlayback;
+  /**
+   * A streamed video being downloaded into the video cache under this key,
+   * to play from there once it is in.
+   */
+  cacheKey?: string;
 };
 
 /** What video mode allows; see the VIDEO_* settings. */
@@ -479,10 +490,20 @@ export class TrackCatalog {
   private extractions = new Map<string, { info: string; expiresAt: number }>();
   private cache: MediaCache;
   private videoCache: MediaCache;
+  /** Where streamed videos' sound and cache downloads are fetched to. */
+  private videoStaging: string;
+  /** Loudness being measured, by source, so each is measured once. */
+  private measuring = new Map<string, Promise<number | undefined>>();
+  /** Streamed videos downloading into the video cache, by cache key. */
+  private caching = new Map<string, Promise<void>>();
+  private cachingQueue: Promise<unknown> = Promise.resolve();
+  private levelingWait = levelingWaitMs;
+  /** Stops background work, which no session waits on, at shutdown. */
+  private closing = new AbortController();
   private preparationQueue: {
     priority: number;
-    run: () => Promise<string>;
-    resolve: (path: string) => void;
+    run: () => Promise<unknown>;
+    resolve: (value: unknown) => void;
     reject: (error: unknown) => void;
   }[] = [];
 
@@ -498,6 +519,7 @@ export class TrackCatalog {
       video?: VideoLimits;
       videoCacheDirectory?: string;
     },
+    private loudness?: LoudnessStore,
   ) {
     this.cache = new MediaCache(
       limits.mediaCacheDirectory ?? "data/cache/media",
@@ -506,8 +528,11 @@ export class TrackCatalog {
         maxAgeMs: (limits.mediaCacheMaxAgeDays ?? 0) * 86_400_000,
       },
     );
+    const videoCacheDirectory =
+      limits.videoCacheDirectory ?? "data/cache/video";
+    this.videoStaging = `${videoCacheDirectory}-staging`;
     this.videoCache = new MediaCache(
-      limits.videoCacheDirectory ?? "data/cache/video",
+      videoCacheDirectory,
       {
         maxBytes: this.video.cacheBytes,
         maxAgeMs: (limits.mediaCacheMaxAgeDays ?? 0) * 86_400_000,
@@ -540,6 +565,8 @@ export class TrackCatalog {
           "Preparing videos without reading the video cache",
         ),
       );
+    // What a restart interrupted is never finished.
+    await rm(this.videoStaging, { recursive: true, force: true });
     this.proxy = await PublicNetworkProxy.start();
     try {
       await this.music.initialize();
@@ -554,6 +581,7 @@ export class TrackCatalog {
   }
 
   async close() {
+    this.closing.abort();
     await this.proxy?.close();
     this.proxy = undefined;
     log.info({ event: "closed" }, "Track catalog closed");
@@ -1179,6 +1207,8 @@ export class TrackCatalog {
     priority = 0,
     /** The track's audio, already prepared, to fall back on as it is. */
     preparedAudio?: string,
+    /** Whether YouTube may stream it, rather than download it first. */
+    stream = true,
   ): Promise<PreparedMedia> {
     const audio = async (): Promise<PreparedMedia> => ({
       filePath:
@@ -1216,18 +1246,49 @@ export class TrackCatalog {
     }
     if (!source) return audio();
     const key = this.videoCacheKey(source);
+    // Extracting and measuring wait their turn with other preparations.
+    const queued =
+      <T>(work: () => Promise<T>) =>
+      () =>
+        this.queuePreparation(priority, entryId, track, work);
     if (this.videoCache.enabled) {
       const cached = await this.restoreVideo(key, directory, entryId, signal);
-      if (cached) return { filePath: cached, form: source.form };
+      if (cached)
+        return {
+          filePath: cached,
+          form: source.form,
+          ...(await this.level(
+            source,
+            queued(() => measureLoudness(cached)),
+          )),
+        };
     }
     try {
+      // YouTube plays as it arrives, which a long video would otherwise
+      // keep everyone waiting for.
+      if (stream && streamable(source))
+        return await this.streamVideo(
+          source,
+          key,
+          directory,
+          entryId,
+          queued,
+          signal,
+        );
       const filePath = await this.queuePreparation(
         priority,
         entryId,
         track,
         () => this.downloadVideo(source, key, directory, entryId, signal),
       );
-      return { filePath, form: source.form };
+      return {
+        filePath,
+        form: source.form,
+        ...(await this.level(
+          source,
+          queued(() => measureLoudness(filePath)),
+        )),
+      };
     } catch (error) {
       if (signal?.aborted) throw error;
       // What video mode refuses stays refused; anything else that stops the
@@ -1267,8 +1328,19 @@ export class TrackCatalog {
     const startedAt = Date.now();
     if (signal?.aborted) throw new TrackError("Track preparation cancelled");
     const { maxHeight, maxFps } = this.video;
+    const within = `[height<=?${maxHeight}][fps<=?${maxFps}]`;
     const format = video
-      ? `b[height<=?${maxHeight}][fps<=?${maxFps}]/b[height<=?${maxHeight}]/w`
+      ? // YouTube serves a stream's picture and sound apart, where other
+        // sites mostly send them together. The sound alone, with the card,
+        // is the last resort.
+        [
+          `b${within}`,
+          `bv*${within}+ba`,
+          `b[height<=?${maxHeight}]`,
+          `bv*[height<=?${maxHeight}]+ba`,
+          "w",
+          "ba",
+        ].join("/")
       : // Live sites rarely have audio on its own; a small picture with the
         // sound costs least.
         "ba/b[height<=?360]/w";
@@ -1297,23 +1369,10 @@ export class TrackCatalog {
     if (!(metadata.is_live || metadata.live_status === "is_live"))
       throw new TrackError("That live stream has ended");
     restrictedVideo(metadata);
-    const address = typeof metadata.url === "string" ? metadata.url : "";
-    const url = parseHttpUrl(address);
-    if (!url)
-      throw new TrackError("That live stream can't be played", {
-        expected: false,
-        detail: "The extractor gave no single stream URL",
-      });
-    await assertPublicUrl(url);
-    const headers = Object.fromEntries(
-      Object.entries(record(metadata.http_headers)).filter(
-        (pair): pair is [string, string] => typeof pair[1] === "string",
-      ),
+    const { url, videoUrl, headers, picture } = await streamAddresses(
+      metadata,
+      "That live stream can't be played",
     );
-    const picture =
-      typeof metadata.vcodec === "string"
-        ? metadata.vcodec !== "none"
-        : Boolean(metadata.width || metadata.height);
     log.info(
       {
         event: "live_stream_resolved",
@@ -1325,9 +1384,247 @@ export class TrackCatalog {
       "Live stream resolved",
     );
     return {
-      stream: { url: url.href, live: true, headers },
+      stream: { url, ...(videoUrl ? { videoUrl } : {}), live: true, headers },
       form: video && picture ? "video" : "audio",
     };
+  }
+
+  /**
+   * Plays a YouTube video as it arrives, its picture and sound apart as
+   * YouTube serves them, and downloads it into the video cache behind it
+   * for the next time.
+   */
+  private async streamVideo(
+    source: { url: string; sourceId: string; form: MediaForm },
+    key: string,
+    directory: string,
+    entryId: string,
+    queued: <T>(work: () => Promise<T>) => () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<PreparedMedia> {
+    const startedAt = Date.now();
+    const metadata = await queued(() => this.extractVideo(source, signal))();
+    const { url, videoUrl, headers } = await streamAddresses(
+      metadata,
+      "That video can't be played",
+    );
+    // Measured from the sound alone, which downloads in seconds.
+    const leveled = this.level(
+      source,
+      queued(() => this.measureStreamed(metadata, source.sourceId)),
+    );
+    const captions = await this.fetchCaptions(metadata, entryId, signal);
+    let subtitles: string | undefined;
+    if (captions) {
+      await mkdir(directory, { recursive: true });
+      subtitles = `${directory}/${entryId}.stream.srt`;
+      await writeFile(subtitles, captions);
+    }
+    const leveling = await leveled;
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+    // After the measurement, which would otherwise share the bandwidth.
+    if (this.videoCache.enabled)
+      this.cacheStreamed(source, key, leveling.leveling);
+    log.info(
+      {
+        event: "video_stream_resolved",
+        entryId,
+        sourceId: source.sourceId,
+        separate: Boolean(videoUrl),
+        gainDb: leveling.gainDb,
+        leveling: Boolean(leveling.leveling),
+        durationMs: Date.now() - startedAt,
+      },
+      "Video stream resolved",
+    );
+    return {
+      stream: {
+        url,
+        ...(videoUrl ? { videoUrl } : {}),
+        headers,
+        ...(subtitles ? { subtitles } : {}),
+        ...(this.videoCache.enabled ? { cacheKey: key } : {}),
+      },
+      form: source.form,
+      chapters: chaptersFrom(metadata),
+      ...leveling,
+    };
+  }
+
+  /**
+   * Links a streamed video into place from the video cache, once its
+   * download behind the stream has finished. Nothing when it is not in.
+   */
+  async cachedStream(stream: MediaStream, directory: string, entryId: string) {
+    if (!stream.cacheKey || !this.videoCache.enabled) return;
+    return this.restoreVideo(stream.cacheKey, directory, entryId);
+  }
+
+  /**
+   * A video's gain: the one stored for it, or one measured now and waited
+   * on briefly. One still being measured comes as `leveling` instead, for
+   * the player to glide to when it arrives.
+   */
+  private async level(
+    source: { url: string; sourceId: string },
+    measure: () => Promise<number | undefined>,
+  ): Promise<Pick<PreparedMedia, "gainDb" | "leveling">> {
+    if (!this.limits.loudnessNormalization) return {};
+    const leveling = this.measured(source, measure).then((lufs) =>
+      lufs === undefined ? undefined : levelingGain(lufs),
+    );
+    const waited = await Promise.race([
+      leveling,
+      Bun.sleep(this.levelingWait).then(
+        (): typeof stillMeasuring => stillMeasuring,
+      ),
+    ]);
+    if (waited === stillMeasuring) return { leveling };
+    return waited === undefined ? {} : { gainDb: waited };
+  }
+
+  /** A video's loudness, stored or measured once however many ask. */
+  private measured(
+    source: { url: string; sourceId: string },
+    measure: () => Promise<number | undefined>,
+  ) {
+    const id = videoSourceId(source);
+    const known = this.loudness?.loudness(id);
+    if (known !== undefined) return Promise.resolve(known);
+    let measuring = this.measuring.get(id);
+    if (!measuring) {
+      const startedAt = Date.now();
+      measuring = measure()
+        .then(
+          (lufs) => {
+            try {
+              if (lufs !== undefined) this.loudness?.setLoudness(id, lufs);
+            } catch (error) {
+              // Only the next play is unlevelled for it.
+              log.warn(
+                {
+                  event: "loudness_store_failed",
+                  sourceId: source.sourceId,
+                  err: error,
+                },
+                "Could not keep the video's loudness",
+              );
+            }
+            log.info(
+              {
+                event: "loudness_measured",
+                sourceId: source.sourceId,
+                lufs,
+                durationMs: Date.now() - startedAt,
+              },
+              "Video loudness measured",
+            );
+            return lufs;
+          },
+          (error) => {
+            log.warn(
+              {
+                event: "loudness_measurement_failed",
+                sourceId: source.sourceId,
+                detail: trackFailureDetail(error),
+                err: error,
+              },
+              "Playing the video without levelling it",
+            );
+            return undefined;
+          },
+        )
+        .finally(() => this.measuring.delete(id));
+      this.measuring.set(id, measuring);
+    }
+    return measuring;
+  }
+
+  /** Downloads a video's sound alone, from its extraction, to measure it. */
+  private async measureStreamed(
+    metadata: Record<string, unknown>,
+    sourceId: string,
+  ) {
+    const directory = `${this.videoStaging}/${crypto.randomUUID()}`;
+    try {
+      await mkdir(directory, { recursive: true });
+      const infoPath = `${directory}/extraction.json`;
+      await writeFile(infoPath, JSON.stringify(metadata));
+      const { stdout } = await run(
+        [
+          ...this.extractor(),
+          "--load-info-json",
+          infoPath,
+          "--format",
+          "ba/w",
+          "--max-filesize",
+          String(this.video.downloadBytes),
+          "--print",
+          "after_move:filepath",
+          "--output",
+          `${directory}/sound.%(ext)s`,
+        ],
+        300_000,
+        this.closing.signal,
+      );
+      const filePath = stdout.trim().split("\n").at(-1);
+      if (!filePath) throw new Error(`No sound downloaded for ${sourceId}`);
+      return await measureLoudness(filePath, this.closing.signal);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Downloads a streamed video into the video cache, one at a time and
+   * after `after`, so the next time it plays it plays from a file.
+   */
+  private cacheStreamed(
+    source: { url: string; sourceId: string },
+    key: string,
+    after?: Promise<unknown>,
+  ) {
+    if (this.caching.has(key)) return;
+    const id = crypto.randomUUID();
+    const directory = `${this.videoStaging}/${id}`;
+    const job = Promise.all([this.cachingQueue, after])
+      .then(async () => {
+        // One that hangs would hold up every one behind it.
+        const signal = AbortSignal.any([
+          this.closing.signal,
+          AbortSignal.timeout(cachingDeadlineMs),
+        ]);
+        const filePath = await this.downloadVideo(
+          source,
+          key,
+          directory,
+          id,
+          signal,
+        );
+        // Kept in the cache, not played from here.
+        this.transitions.delete(filePath);
+        // A video the stream could not measure is measured from the file.
+        if (this.limits.loudnessNormalization)
+          await this.measured(source, () => measureLoudness(filePath, signal));
+      })
+      .catch((error) => {
+        if (this.closing.signal.aborted) return;
+        log.warn(
+          {
+            event: "video_caching_failed",
+            sourceId: source.sourceId,
+            detail: trackFailureDetail(error),
+            err: error,
+          },
+          "Could not cache the streamed video",
+        );
+      })
+      .finally(async () => {
+        await rm(directory, { recursive: true, force: true });
+        this.caching.delete(key);
+      });
+    this.caching.set(key, job);
+    this.cachingQueue = job;
   }
 
   /** The public network proxy, for media that streams through it. */
@@ -1335,17 +1632,17 @@ export class TrackCatalog {
     return this.proxyUrl;
   }
 
-  private queuePreparation(
+  private queuePreparation<T>(
     priority: number,
     entryId: string,
     track: TrackMetadata,
-    run: () => Promise<string>,
+    run: () => Promise<T>,
   ) {
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       this.preparationQueue.push({
         priority,
         run,
-        resolve,
+        resolve: (value) => resolve(value as T),
         reject,
       });
       this.preparationQueue.sort((a, b) => b.priority - a.priority);
@@ -1757,25 +2054,13 @@ export class TrackCatalog {
   }
 
   /**
-   * Downloads a video, capped to the video limits, with its captions and
-   * chapters next to it. Extracts first, to refuse what video mode does not
-   * play before downloading any of it.
+   * Extracts a video in video mode's format, refusing what video mode does
+   * not play before any of it is downloaded or streamed.
    */
-  private async downloadVideo(
+  private async extractVideo(
     source: { url: string; sourceId: string },
-    key: string,
-    directory: string,
-    entryId: string,
     signal?: AbortSignal,
   ) {
-    const startedAt = Date.now();
-    log.info(
-      { event: "video_download_started", entryId, sourceId: source.sourceId },
-      "Video download started",
-    );
-    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
-    await mkdir(directory, { recursive: true });
-    const format = this.videoFormat();
     const metadata = record(
       JSON.parse(
         (
@@ -1786,7 +2071,7 @@ export class TrackCatalog {
               "--skip-download",
               "--no-playlist",
               "--format",
-              format,
+              this.videoFormat(),
               "--socket-timeout",
               "10",
               "--",
@@ -1808,6 +2093,31 @@ export class TrackCatalog {
       throw new TrackError(
         `That video is longer than ${formatLimit(this.video.durationSeconds)}, the limit on this server`,
       );
+    return metadata;
+  }
+
+  /**
+   * Downloads a video, capped to the video limits, with its captions and
+   * chapters next to it. Extracts first, to refuse what video mode does not
+   * play before downloading any of it. Its sound is left as it is: the
+   * player levels it by its measured loudness.
+   */
+  private async downloadVideo(
+    source: { url: string; sourceId: string },
+    key: string,
+    directory: string,
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
+    const startedAt = Date.now();
+    log.info(
+      { event: "video_download_started", entryId, sourceId: source.sourceId },
+      "Video download started",
+    );
+    if (signal?.aborted) throw new TrackError("Track preparation cancelled");
+    await mkdir(directory, { recursive: true });
+    const format = this.videoFormat();
+    const metadata = await this.extractVideo(source, signal);
     if (
       Number(metadata.filesize ?? metadata.filesize_approx ?? 0) >
       this.video.downloadBytes
@@ -1913,21 +2223,13 @@ export class TrackCatalog {
       );
       if (!streams.includes("video"))
         throw new NoVideoError("The download has no video");
-      let complete = true;
       // Playback runs on the sound, so a silent video gets silence to run on.
       if (!streams.includes("audio")) await addSilence(filePath, signal);
-      else if (this.limits.loudnessNormalization)
-        complete = await normalizeVideoLoudness(
-          filePath,
-          entryId,
-          this.video.downloadBytes,
-          signal,
-        );
       const chapters = chaptersFrom(metadata);
       const captions = await this.fetchCaptions(metadata, entryId, signal);
       await writeVideoExtras(filePath, chapters, captions);
       this.transitions.set(filePath, wholeTrack(duration));
-      if (this.videoCache.enabled && complete)
+      if (this.videoCache.enabled)
         await this.videoCache.store(
           key,
           filePath,
@@ -1996,14 +2298,11 @@ export class TrackCatalog {
   }
 
   private videoCacheKey(source: { url: string; sourceId: string }) {
-    const id =
-      isYoutubeVideoId(source.sourceId) && youtubeUrl(source.url)
-        ? `youtube:${source.sourceId}`
-        : source.url;
-    const variant = this.limits.loudnessNormalization ? "normalized" : "source";
+    // Videos are kept as they came, levelled as they play: those kept
+    // normalized once are left to age out.
     return new Bun.CryptoHasher("sha256")
       .update(
-        `video\n${variant}\n${this.video.maxHeight}p${this.video.maxFps}\n${id}`,
+        `video\nsource\n${this.video.maxHeight}p${this.video.maxFps}\n${videoSourceId(source)}`,
       )
       .digest("hex")
       .slice(0, 32);
@@ -2139,6 +2438,69 @@ export function restrictedVideo(metadata: Record<string, unknown>) {
     throw new TrackError("That video is for channel members only");
   if (availability === "needs_auth")
     throw new TrackError("Track is not available");
+}
+
+/** A video that plays as it arrives: YouTube's, which can be resumed anywhere. */
+function streamable(source: { url: string; sourceId: string }) {
+  return isYoutubeVideoId(source.sourceId) && Boolean(youtubeUrl(source.url));
+}
+
+/** Who a video is, by its ID where several URLs reach the same one. */
+function videoSourceId(source: { url: string; sourceId: string }) {
+  return streamable(source) ? `youtube:${source.sourceId}` : source.url;
+}
+
+/**
+ * Where an extraction plays from: one address with picture and sound, or,
+ * as YouTube serves them, the sound and the picture apart.
+ */
+export async function streamAddresses(
+  metadata: Record<string, unknown>,
+  failure: string,
+) {
+  const formats = asArray(metadata.requested_formats).map(record);
+  const sound = formats.find(
+    (format) => format.vcodec === "none" && format.acodec !== "none",
+  );
+  const picture = formats.find(
+    (format) => typeof format.vcodec === "string" && format.vcodec !== "none",
+  );
+  const single = formats.length ? undefined : metadata;
+  const address = async (value: unknown) => {
+    const url = parseHttpUrl(typeof value === "string" ? value : "");
+    if (!url)
+      throw new TrackError(failure, {
+        expected: false,
+        detail: "The extractor gave no stream URL",
+      });
+    await assertPublicUrl(url);
+    return url.href;
+  };
+  const headers = Object.fromEntries(
+    Object.entries(
+      record((single ?? sound)?.http_headers ?? metadata.http_headers),
+    ).filter((pair): pair is [string, string] => typeof pair[1] === "string"),
+  );
+  if (single)
+    return {
+      url: await address(single.url),
+      headers,
+      picture:
+        typeof single.vcodec === "string"
+          ? single.vcodec !== "none"
+          : Boolean(single.width || single.height),
+    };
+  if (!sound || !picture)
+    throw new TrackError(failure, {
+      expected: false,
+      detail: "The extractor gave no separate sound and picture",
+    });
+  return {
+    url: await address(sound.url),
+    videoUrl: await address(picture.url),
+    headers,
+    picture: true,
+  };
 }
 
 function hasVideoFormats(metadata: Record<string, unknown>) {

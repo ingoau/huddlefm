@@ -248,6 +248,7 @@ type SavedTrack = {
   outroSeconds?: number;
   fadeInSeconds?: number;
   fadeOutSeconds?: number;
+  gainDb?: number;
   queuePosition?: number;
 };
 
@@ -385,6 +386,7 @@ const trackColumns = {
   automatic: "automatic",
   form: "media_form",
   isVideo: "is_video",
+  gainDb: "gain_db",
 };
 
 const addedColumns = [
@@ -425,6 +427,8 @@ const addedColumns = [
   // Watched as a video in video mode: kept out of the music stats and taste.
   ["tracks", "is_video", "INTEGER NOT NULL DEFAULT 0"],
   ["tracks", "live", "INTEGER NOT NULL DEFAULT 0"],
+  // What a video's sound is turned by to reach the loudness target.
+  ["tracks", "gain_db", "REAL"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -512,6 +516,7 @@ function savedTrack(track: Row) {
     outroSeconds: numeric(track.outro_seconds),
     fadeInSeconds: numeric(track.fade_in_seconds),
     fadeOutSeconds: numeric(track.fade_out_seconds),
+    gainDb: numeric(track.gain_db),
     queuePosition: numeric(track.queue_position),
   } satisfies SavedTrack);
 }
@@ -847,6 +852,13 @@ export class Store {
         linked_at INTEGER NOT NULL,
         revoked INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, server_id)
+      );
+      -- Videos' measured loudness, by source, kept after their files are
+      -- evicted so each is levelled from its first second when it is back.
+      CREATE TABLE IF NOT EXISTS media_loudness (
+        source TEXT PRIMARY KEY,
+        lufs REAL NOT NULL,
+        measured_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
@@ -2086,6 +2098,23 @@ export class Store {
     ).map(linkedServer);
   }
 
+  /** A video's measured loudness in LUFS, if it has been measured. */
+  loudness(source: string) {
+    return this.scalar<number>(
+      "SELECT lufs FROM media_loudness WHERE source = ?",
+      source,
+    );
+  }
+
+  setLoudness(source: string, lufs: number) {
+    this.db
+      .query(
+        `INSERT INTO media_loudness (source, lufs, measured_at) VALUES (?, ?, ?)
+         ON CONFLICT (source) DO UPDATE SET lufs = excluded.lufs, measured_at = excluded.measured_at`,
+      )
+      .run(source, lufs, Date.now());
+  }
+
   jellyfinServer(userId: string, serverId: string) {
     const row = this.db
       .query(
@@ -2160,6 +2189,7 @@ export class Store {
       automatic?: boolean;
       form?: MediaForm | null;
       isVideo?: boolean;
+      gainDb?: number | null;
     },
   ) {
     const { sql, values } = assignments(trackColumns, fields);
