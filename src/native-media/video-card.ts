@@ -7,7 +7,7 @@ import {
 } from "@napi-rs/canvas";
 import type { Lyric } from "@braccato/core";
 import { fonts } from "./fonts.ts";
-import { cardSize } from "./video-format.ts";
+import { cardSize, wideCardWidth } from "./video-format.ts";
 import { LyricsView, type LyricsCredits } from "./lyrics-view.ts";
 import { clamp, ease, easeOut, lerp, motion, Tween } from "./motion.ts";
 
@@ -28,6 +28,8 @@ const headerDefault = { x: 7 * unit, y: 73 * unit };
 // above the middle of the artwork beside them; 10vh centres them.
 const headerLyrics = { x: 26 * unit, y: 10 * unit };
 const headerWidth = 66 * unit;
+/** The wide card's viewport is as tall as the square one, and 16:9. */
+const wideLayoutWidth = (layoutSize * wideCardWidth) / cardSize;
 const frame = {
   x: 7 * unit,
   y: 29 * unit,
@@ -100,6 +102,12 @@ export type VideoCardOptions = {
   now?: () => number;
   /** Seconds the lyrics trail the audio position, to match what is heard. */
   lyricsOffset?: number;
+  /**
+   * 16:9 for the screen share, filling it with the artwork: always the
+   * default layout, the idle words in the middle, and a timeline only for
+   * a track with a length, which a live stream does not have.
+   */
+  wide?: boolean;
 };
 
 type Track = {
@@ -111,6 +119,8 @@ type Track = {
   view?: LyricsView;
   /** Waiting for setTrack() after beginChange(): nothing to draw yet. */
   pending?: boolean;
+  /** The idle card's words, rather than a track. */
+  idle?: boolean;
   enteredAt: number;
   coverAt?: number;
   artworkAt?: number;
@@ -127,12 +137,17 @@ type Outgoing = Track & { leftAt: number };
  * moves; otherwise the last one is handed out again.
  */
 export class VideoCard {
-  private canvas = createCanvas(cardSize, cardSize);
-  private context = this.canvas.getContext("2d");
+  private wide: boolean;
+  /** The card's size as it is drawn, and its viewport's width. */
+  private width: number;
+  private height = cardSize;
+  private layoutWidth: number;
+  private canvas: Canvas;
+  private context: SKRSContext2D;
   /** The background and foreground together, as the lyrics go over them. */
-  private stage = createCanvas(cardSize, cardSize);
+  private stage: Canvas;
   /** The covers, the shade and the header, which only move on a change. */
-  private foreground = createCanvas(cardSize, cardSize);
+  private foreground: Canvas;
   private flow = createCanvas(flowSize, flowSize);
   private flowGraded = createCanvas(flowSize, flowSize);
   private flowTime = 0;
@@ -175,6 +190,13 @@ export class VideoCard {
   ) {
     this.now = options.now ?? (() => performance.now());
     this.lyricsOffset = options.lyricsOffset ?? 0;
+    this.wide = options.wide ?? false;
+    this.width = this.wide ? wideCardWidth : cardSize;
+    this.layoutWidth = this.wide ? wideLayoutWidth : layoutSize;
+    this.canvas = createCanvas(this.width, this.height);
+    this.context = this.canvas.getContext("2d");
+    this.stage = createCanvas(this.width, this.height);
+    this.foreground = createCanvas(this.width, this.height);
   }
 
   /**
@@ -241,6 +263,7 @@ export class VideoCard {
       idle?.title ?? "Ready for music",
       idle?.subtitle ?? "Waiting for the next track",
     );
+    this.track.idle = true;
   }
 
   setDisplayMode(mode: DisplayMode) {
@@ -301,7 +324,11 @@ export class VideoCard {
     const backgroundDue =
       this.backgroundMoving(now) && now - this.backgroundAt >= 1 / backdropFps;
     const stageMoving = foregroundMoving || backgroundDue;
-    const key = `${formatTime(position)}|${formatTime(duration)}|${Math.round(amount * 528 * ratio)}`;
+    const timeline = !this.wide || (!this.track.idle && duration > 0);
+    // With no timeline, the time changes nothing.
+    const key = timeline
+      ? `${formatTime(position)}|${formatTime(duration)}|${Math.round(amount * 528 * ratio)}`
+      : "";
     if (
       this.frame &&
       key === this.frameKey &&
@@ -322,16 +349,16 @@ export class VideoCard {
       const band =
         !foregroundMoving && this.layout.value(now) >= 1
           ? Math.ceil(foregroundBand * ratio)
-          : cardSize;
+          : this.height;
       stage.drawImage(
         this.foreground,
         0,
         0,
-        cardSize,
+        this.width,
         band,
         0,
         0,
-        cardSize,
+        this.width,
         band,
       );
       this.backgroundAt = now;
@@ -340,7 +367,7 @@ export class VideoCard {
     context.drawImage(this.stage, 0, 0);
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     if (lyricsAlpha > 0.001) this.drawLyrics(now, lyricsAlpha);
-    this.drawTimeline(context, position, duration, amount);
+    if (timeline) this.drawTimeline(context, position, duration, amount);
     // A copy of the pixels, RGBA and premultiplied, which is the same thing
     // for an opaque card. Five times quicker than getImageData().
     this.frame = this.canvas.data();
@@ -417,7 +444,9 @@ export class VideoCard {
 
   private applyMode() {
     const lyrics =
-      this.preferredMode === "lyrics" && this.lyricsAvailable !== false;
+      !this.wide &&
+      this.preferredMode === "lyrics" &&
+      this.lyricsAvailable !== false;
     const now = this.seconds();
     const { duration, easing } = motion.layout;
     const target = lyrics ? 1 : 0;
@@ -515,15 +544,16 @@ export class VideoCard {
     return loadImage(bytes);
   }
 
-  /** background-size: cover, done once so each frame draws a small square. */
+  /** background-size: cover, done once so each frame draws it as it is. */
   private croppedCover(image: Image) {
-    const canvas = createCanvas(cardSize, cardSize);
+    const { width, height } = this;
+    const canvas = createCanvas(width, height);
     const context = canvas.getContext("2d");
-    const fit = Math.max(cardSize / image.width, cardSize / image.height);
+    const fit = Math.max(width / image.width, height / image.height);
     context.drawImage(
       image,
-      (cardSize - image.width * fit) / 2,
-      (cardSize - image.height * fit) / 2,
+      (width - image.width * fit) / 2,
+      (height - image.height * fit) / 2,
       image.width * fit,
       image.height * fit,
     );
@@ -600,8 +630,8 @@ export class VideoCard {
       flowSize - inset * 2,
       0,
       0,
-      cardSize,
-      cardSize,
+      this.width,
+      this.height,
     );
     context.restore();
   }
@@ -627,7 +657,7 @@ export class VideoCard {
   private drawForeground(now: number) {
     const context = this.foreground.getContext("2d");
     context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, cardSize, cardSize);
+    context.clearRect(0, 0, this.width, this.height);
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     const size = layoutSize;
     const layout = this.layout.value(now);
@@ -667,7 +697,7 @@ export class VideoCard {
       gradient.addColorStop(1, "rgba(0, 0, 0, 0.82)");
       context.globalAlpha = shade;
       context.fillStyle = gradient;
-      context.fillRect(0, 0, size, size);
+      context.fillRect(0, 0, this.layoutWidth, size);
       context.globalAlpha = 1;
     }
 
@@ -709,16 +739,25 @@ export class VideoCard {
     artistAlpha: number,
     artistShift: number,
   ) {
-    const left = lerp(headerDefault.x, headerLyrics.x, layout);
-    const top = lerp(headerDefault.y, headerLyrics.y, layout);
+    // The wide card says it is idle in the middle of the screen.
+    const centred = this.wide && track.idle;
+    const width = this.wide
+      ? this.layoutWidth - headerDefault.x * 2
+      : headerWidth;
+    const left = centred
+      ? this.layoutWidth / 2
+      : lerp(headerDefault.x, headerLyrics.x, layout);
+    const top = centred
+      ? layoutSize / 2 - 40
+      : lerp(headerDefault.y, headerLyrics.y, layout);
     context.textBaseline = "top";
-    context.textAlign = "left";
+    context.textAlign = centred ? "center" : "left";
     if (titleAlpha > 0.001) {
       context.globalAlpha = titleAlpha;
       context.fillStyle = "#ffffff";
       context.font = `700 34px ${fonts()}`;
       context.fillText(
-        ellipsize(context, track.title, headerWidth),
+        ellipsize(context, track.title, width),
         left,
         top + 2 + titleShift,
       );
@@ -728,7 +767,7 @@ export class VideoCard {
       context.fillStyle = `rgba(255, 255, 255, ${lerp(0.76, 0.58, clamp(layout)).toFixed(3)})`;
       context.font = `600 20px ${fonts()}`;
       context.fillText(
-        ellipsize(context, track.artist, headerWidth),
+        ellipsize(context, track.artist, width),
         left,
         top + 45 + artistShift,
       );
@@ -748,9 +787,12 @@ export class VideoCard {
     if (alpha <= 0.001) return;
     const size = layoutSize;
     const scale = lerp(1, coverSmall.scale, layout);
-    const side = size * scale * grow;
-    const x = lerp(0, coverSmall.x, layout) + (size * scale - side) / 2;
-    const y = lerp(0, coverSmall.y, layout) + (size * scale - side) / 2;
+    // Full bleed fills the viewport, which is only wider for the wide card.
+    const across = this.layoutWidth * scale;
+    const width = across * grow;
+    const height = size * scale * grow;
+    const x = lerp(0, coverSmall.x, layout) + (across - width) / 2;
+    const y = lerp(0, coverSmall.y, layout) + (size * scale - height) / 2;
     const radius = coverRadius * this.rounding.value(now) * scale * grow;
     context.save();
     context.globalAlpha = alpha;
@@ -761,7 +803,7 @@ export class VideoCard {
       context.shadowOffsetY = 40 * scale * ratio;
     }
     context.beginPath();
-    context.roundRect(x, y, side, side, Math.max(0, radius));
+    context.roundRect(x, y, width, height, Math.max(0, radius));
     const artworkIn =
       track.artworkAt === undefined
         ? 1
@@ -774,7 +816,7 @@ export class VideoCard {
     if (cover) {
       context.clip();
       context.globalAlpha = alpha * artworkIn;
-      context.drawImage(cover, x, y, side, side);
+      context.drawImage(cover, x, y, width, height);
     }
     context.restore();
   }
@@ -809,10 +851,10 @@ export class VideoCard {
     duration: number,
     amount: number,
   ) {
-    const size = layoutSize;
-    const centre = size - 82 - 9;
+    const across = this.layoutWidth;
+    const centre = layoutSize - 82 - 9;
     const barLeft = 48 + 36 + 12;
-    const barRight = size - 48 - 36 - 12;
+    const barRight = across - 48 - 36 - 12;
     const barWidth = barRight - barLeft;
     context.fillStyle = "rgba(255, 255, 255, 0.76)";
     context.font = `600 14px ${fonts()}`;
@@ -820,7 +862,7 @@ export class VideoCard {
     context.textAlign = "left";
     context.fillText(formatTime(position), 48, centre);
     context.textAlign = "right";
-    context.fillText(formatTime(duration), size - 48, centre);
+    context.fillText(formatTime(duration), across - 48, centre);
     context.fillStyle = "rgba(255, 255, 255, 0.16)";
     context.beginPath();
     context.roundRect(barLeft, centre - 1.5, barWidth, 3, 1.5);
