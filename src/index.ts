@@ -37,6 +37,7 @@ import {
 } from "./integration.ts";
 import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
+import { StreamRelay } from "./stream-relay.ts";
 import { TrackCatalog } from "./tracks.ts";
 import { Jellyfin } from "./jellyfin.ts";
 import { likeWindowMs, RecommendationCatalog } from "./recommendations.ts";
@@ -105,7 +106,18 @@ log.info(
   "Loaded resumable sessions",
 );
 await Promise.all(saved.expiredIds.map(removeMediaFiles));
-const catalog = new TrackCatalog(config, store);
+// YouTube videos stream through the bot, which fetches them in pieces.
+const relay = new StreamRelay({
+  origin: () => `http://127.0.0.1:${config.port}`,
+  proxy: (): string | undefined => {
+    try {
+      return catalog.streamProxy;
+    } catch {
+      return undefined;
+    }
+  },
+});
+const catalog = new TrackCatalog(config, store, relay);
 const jellyfin = config.jellyfin
   ? new Jellyfin({
       // Jellyfin is only reached through the catalog's public network proxy,
@@ -1332,7 +1344,7 @@ const server = Bun.serve({
       },
     },
   },
-  async fetch(request) {
+  async fetch(request, server) {
     const url = new URL(request.url);
     const token = url.searchParams.get("token") ?? "";
     const runtime = runtimeForToken(token);
@@ -1344,6 +1356,12 @@ const server = Bun.serve({
       return path && (await Bun.file(path).exists())
         ? fileResponse(Bun.file(path), request, { "cache-control": "no-store" })
         : notFound();
+    }
+    if (url.pathname.startsWith("/stream/")) {
+      // ffmpeg stops reading for a while once it is far enough ahead, which
+      // is not a dead connection.
+      server.timeout(request, 0);
+      return relay.handle(request, url.pathname.slice(8));
     }
     if (url.pathname.startsWith("/artwork/")) {
       const path = runtime?.coordinator?.artworkPath(

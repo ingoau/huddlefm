@@ -11,6 +11,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertPublicUrl } from "./public-proxy.ts";
+import { StreamRelay } from "./stream-relay.ts";
 import {
   applyEmbeddedMetadata,
   embeddedArtworkPath,
@@ -1723,6 +1724,79 @@ test("caching a streamed video measures nothing when normalization is off", asyn
     );
     expect(cached).toBe(1);
     expect(measured).toBe(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a streamed video goes through the relay when its length is known", async () => {
+  const withLength = (format: Record<string, unknown>, size: number) => ({
+    ...format,
+    url: `${format.url}?clen=${size}`,
+  });
+  const { catalog, directory } = await extracting({
+    duration: 1_873,
+    requested_formats: [withLength(picture, 78), withLength(sound, 32)],
+  });
+  const registered: string[] = [];
+  Reflect.set(
+    catalog,
+    "relay",
+    new StreamRelay({
+      origin: () => "http://127.0.0.1:3210",
+      proxy: () => undefined,
+    }),
+  );
+  const relay = Reflect.get(catalog, "relay") as StreamRelay;
+  const register = relay.register.bind(relay);
+  relay.register = (url, headers) => (
+    registered.push(url),
+    register(url, headers)
+  );
+  try {
+    const { stream } = await catalog.prepareVideo(
+      { ...trackFixture, duration: 1_873 },
+      join(directory, "media"),
+      "entry",
+    );
+    expect(registered).toEqual([
+      "https://93.184.216.34/sound?clen=32",
+      "https://93.184.216.34/picture?clen=78",
+    ]);
+    expect(stream).toMatchObject({ local: true });
+    expect(stream!.url).toStartWith("http://127.0.0.1:3210/stream/");
+    expect(stream!.videoUrl).toStartWith("http://127.0.0.1:3210/stream/");
+    // The relay sends YouTube's headers itself.
+    expect(stream!.headers).toBeUndefined();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a streamed video without a known length is read directly", async () => {
+  const { catalog, directory } = await extracting({
+    duration: 1_873,
+    requested_formats: [picture, sound],
+  });
+  Reflect.set(
+    catalog,
+    "relay",
+    new StreamRelay({
+      origin: () => "http://127.0.0.1:3210",
+      proxy: () => undefined,
+    }),
+  );
+  try {
+    const { stream } = await catalog.prepareVideo(
+      { ...trackFixture, duration: 1_873 },
+      join(directory, "media"),
+      "entry",
+    );
+    expect(stream).toMatchObject({
+      url: "https://93.184.216.34/sound",
+      videoUrl: "https://93.184.216.34/picture",
+    });
+    expect(stream!.local).toBeUndefined();
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

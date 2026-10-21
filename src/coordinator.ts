@@ -4020,7 +4020,7 @@ export class Coordinator {
       ...(entry.stream
         ? {
             stream: defined({
-              proxy: this.tracks.streamProxy,
+              proxy: entry.stream.local ? undefined : this.tracks.streamProxy,
               headers: entry.stream.headers,
               live: entry.stream.live,
               audioStream: entry.stream.audioStream,

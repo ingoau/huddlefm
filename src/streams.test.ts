@@ -721,3 +721,23 @@ test("a video YouTube keeps failing to stream is downloaded for its last try", a
   expect(result.plays()[2]).toMatchObject({ entryId, title: "A talk" });
   expect(result.plays()[2].url).toStartWith("http://127.0.0.1:3210/audio/");
 });
+
+test("a video the bot relays itself is read without the proxy", async () => {
+  const result = await setup();
+  await videoMode(result);
+  result.prepareVideoWith(async () => ({
+    stream: {
+      url: "http://127.0.0.1:3210/stream/sound",
+      videoUrl: "http://127.0.0.1:3210/stream/picture",
+      local: true,
+    },
+    form: "video",
+  }));
+  await queue(result, talk);
+  await until(() => result.plays().length === 1);
+  expect(result.plays()[0]).toMatchObject({
+    url: "http://127.0.0.1:3210/stream/sound",
+    video: { url: "http://127.0.0.1:3210/stream/picture" },
+  });
+  expect(result.plays()[0].stream.proxy).toBeUndefined();
+});
