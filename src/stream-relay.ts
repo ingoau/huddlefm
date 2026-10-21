@@ -81,10 +81,20 @@ export class StreamRelay {
     return `${this.options.origin()}/stream/${token}`;
   }
 
-  /** Answers ffmpeg's request for `/stream/<token>`, ranges included. */
-  handle(request: Request, token: string) {
+  /** Whether `token` is a stream the relay holds. */
+  has(token: string) {
     const upstream = this.streams.get(token);
-    if (!upstream || upstream.expiresAt <= Date.now())
+    return Boolean(upstream && upstream.expiresAt > Date.now());
+  }
+
+  /**
+   * Answers ffmpeg's request for `/stream/<token>`, ranges included. It
+   * waits for the first piece, so a stream YouTube refuses gets an error
+   * ffmpeg gives up on, rather than a dropped connection it keeps retrying.
+   */
+  async handle(request: Request, token: string) {
+    const upstream = this.streams.get(token);
+    if (!upstream || !this.has(token))
       return new Response("Not found", { status: 404 });
     const range = parseRange(request.headers.get("range"), upstream.size);
     if (!range)
@@ -92,29 +102,41 @@ export class StreamRelay {
         status: 416,
         headers: { "content-range": `bytes */${upstream.size}` },
       });
+    const partial = request.headers.has("range");
+    const status = partial ? 206 : 200;
     const headers = {
       "accept-ranges": "bytes",
       "cache-control": "no-store",
       "content-type": upstream.contentType,
       "content-length": String(range.end - range.start + 1),
+      ...(partial
+        ? {
+            "content-range": `bytes ${range.start}-${range.end}/${upstream.size}`,
+          }
+        : {}),
     };
     if (request.method === "HEAD")
-      return new Response(null, { status: 200, headers });
-    return new Response(this.body(upstream, range.start, range.end), {
-      status: request.headers.has("range") ? 206 : 200,
-      headers: {
-        ...headers,
-        ...(request.headers.has("range")
-          ? {
-              "content-range": `bytes ${range.start}-${range.end}/${upstream.size}`,
-            }
-          : {}),
-      },
-    });
+      return new Response(null, { status, headers });
+    let body: ReadableStream<Uint8Array>;
+    try {
+      body = await this.body(upstream, range.start, range.end);
+    } catch (error) {
+      log.warn(
+        { event: "stream_refused", from: range.start, err: error },
+        "YouTube would not send the stream",
+      );
+      return new Response("YouTube would not send the stream", {
+        status: 502,
+      });
+    }
+    return new Response(body, { status, headers });
   }
 
-  /** Bytes `start` to `end` of the stream, a piece ahead of the reader. */
-  private body(upstream: Upstream, start: number, end: number) {
+  /**
+   * Bytes `start` to `end` of the stream, a piece ahead of the reader, once
+   * the first piece is in.
+   */
+  private async body(upstream: Upstream, start: number, end: number) {
     const abort = new AbortController();
     const first = this.options.firstChunkBytes ?? firstChunkBytes;
     const size = this.options.chunkBytes ?? chunkBytes;
@@ -126,11 +148,24 @@ export class StreamRelay {
       next = to + 1;
       return this.piece(upstream, from, to, abort.signal);
     };
+    const opening = piece()!;
     let ahead = piece();
     // Nobody may be waiting on it when the reader goes.
     ahead?.catch(() => {});
+    let pending: Uint8Array | undefined;
+    try {
+      pending = await opening;
+    } catch (error) {
+      abort.abort();
+      throw error;
+    }
     return new ReadableStream<Uint8Array>({
       pull: async (controller) => {
+        if (pending) {
+          controller.enqueue(pending);
+          pending = undefined;
+          return;
+        }
         const current = ahead;
         if (!current) return controller.close();
         ahead = piece();
@@ -155,13 +190,16 @@ export class StreamRelay {
     signal: AbortSignal,
   ) {
     const fetcher = this.options.fetch ?? fetch;
+    // Nothing goes to YouTube but through the public network proxy.
+    const proxy = this.options.proxy();
+    if (!proxy) throw new Error("No proxy to fetch the stream through");
     let failure: unknown;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       if (signal.aborted) throw new Error("Stream closed");
       try {
         const response = await fetcher(`${upstream.url}&range=${from}-${to}`, {
           headers: upstream.headers,
-          proxy: this.options.proxy(),
+          proxy,
           signal: AbortSignal.any([
             signal,
             AbortSignal.timeout(chunkTimeoutMs),

@@ -46,7 +46,7 @@ test("relays a YouTube stream in pieces, through the proxy, with its headers", a
   const { relay: value, requests } = relay();
   const url = value.register(youtube, { "User-Agent": "yt-dlp" })!;
   expect(url).toStartWith("http://127.0.0.1:3210/stream/");
-  const response = value.handle(new Request(url), token(url));
+  const response = await value.handle(new Request(url), token(url));
   expect(response.status).toBe(200);
   expect(response.headers.get("content-length")).toBe(String(size));
   expect(response.headers.get("content-type")).toBe("audio/webm");
@@ -67,19 +67,19 @@ test("relays a YouTube stream in pieces, through the proxy, with its headers", a
 test("answers ffmpeg's seeks with the range it asked for", async () => {
   const { relay: value } = relay();
   const url = value.register(youtube)!;
-  const seek = value.handle(
+  const seek = await value.handle(
     new Request(url, { headers: { range: "bytes=20-" } }),
     token(url),
   );
   expect(seek.status).toBe(206);
   expect(seek.headers.get("content-range")).toBe(`bytes 20-49/${size}`);
   expect(await bytes(seek)).toEqual(content.slice(20));
-  const tail = value.handle(
+  const tail = await value.handle(
     new Request(url, { headers: { range: "bytes=-5" } }),
     token(url),
   );
   expect(await bytes(tail)).toEqual(content.slice(45));
-  const past = value.handle(
+  const past = await value.handle(
     new Request(url, { headers: { range: "bytes=60-" } }),
     token(url),
   );
@@ -92,7 +92,7 @@ test("a piece YouTube refuses is fetched again", async () => {
     from === 14 && attempt < 3 ? 403 : undefined,
   );
   const url = value.register(youtube)!;
-  expect(await bytes(value.handle(new Request(url), token(url)))).toEqual(
+  expect(await bytes(await value.handle(new Request(url), token(url)))).toEqual(
     content,
   );
   expect(requests.filter(({ from }) => from === 14)).toHaveLength(3);
@@ -102,14 +102,16 @@ test("a piece that keeps failing ends the stream, for the player to retry", asyn
   const { relay: value } = relay((from) => (from === 14 ? 403 : undefined));
   const url = value.register(youtube)!;
   await expect(
-    value.handle(new Request(url), token(url)).arrayBuffer(),
+    (await value.handle(new Request(url), token(url))).arrayBuffer(),
   ).rejects.toThrow("YouTube HTTP 403");
 });
 
 test("closing the connection stops fetching", async () => {
   const { relay: value, requests } = relay();
   const url = value.register(youtube)!;
-  const reader = value.handle(new Request(url), token(url)).body!.getReader();
+  const reader = (
+    await value.handle(new Request(url), token(url))
+  ).body!.getReader();
   await reader.read();
   await reader.cancel();
   await Bun.sleep(5);
@@ -118,13 +120,13 @@ test("closing the connection stops fetching", async () => {
   expect(requests.at(-1)!.init.signal!.aborted).toBeTrue();
 });
 
-test("only relays what it registered, and only with a known length", () => {
+test("only relays what it registered, and only with a known length", async () => {
   const { relay: value } = relay();
   expect(
     value.register("https://rr1---sn.googlevideo.com/videoplayback?id=x"),
   ).toBeUndefined();
   expect(
-    value.handle(new Request("http://127.0.0.1/stream/x"), "x").status,
+    (await value.handle(new Request("http://127.0.0.1/stream/x"), "x")).status,
   ).toBe(404);
 });
 
@@ -146,7 +148,49 @@ test("a full relay keeps what it has, and the new stream is read directly", asyn
     expect(value.register(youtube)).toBeDefined();
   expect(value.register(youtube)).toBeUndefined();
   // The oldest still plays.
-  expect(await bytes(value.handle(new Request(first), token(first)))).toEqual(
-    content,
+  expect(
+    await bytes(await value.handle(new Request(first), token(first))),
+  ).toEqual(content);
+});
+
+test("a stream YouTube refuses from the start gets an error, not a dropped connection", async () => {
+  const { relay: value } = relay((from) => (from === 20 ? 403 : undefined));
+  const url = value.register(youtube)!;
+  const refused = await value.handle(
+    new Request(url, { headers: { range: "bytes=20-" } }),
+    token(url),
   );
+  expect(refused.status).toBe(502);
+});
+
+test("nothing goes to YouTube without the proxy", async () => {
+  const requests: string[] = [];
+  const value = new StreamRelay({
+    origin: () => "http://127.0.0.1:3210",
+    proxy: () => undefined,
+    fetch: async (url) => (requests.push(url), new Response(content)),
+  });
+  const url = value.register(youtube)!;
+  expect((await value.handle(new Request(url), token(url))).status).toBe(502);
+  expect(requests).toEqual([]);
+});
+
+test("HEAD describes the range it was asked for", async () => {
+  const { relay: value, requests } = relay();
+  const url = value.register(youtube)!;
+  const head = await value.handle(
+    new Request(url, { method: "HEAD", headers: { range: "bytes=10-" } }),
+    token(url),
+  );
+  expect(head.status).toBe(206);
+  expect(head.headers.get("content-range")).toBe(`bytes 10-49/${size}`);
+  expect(head.headers.get("content-length")).toBe("40");
+  expect(requests).toEqual([]);
+});
+
+test("knows which streams it holds", () => {
+  const { relay: value } = relay();
+  const url = value.register(youtube)!;
+  expect(value.has(token(url))).toBeTrue();
+  expect(value.has("unknown")).toBeFalse();
 });

@@ -1358,10 +1358,11 @@ const server = Bun.serve({
         : notFound();
     }
     if (url.pathname.startsWith("/stream/")) {
+      const stream = url.pathname.slice(8);
       // ffmpeg stops reading for a while once it is far enough ahead, which
-      // is not a dead connection.
-      server.timeout(request, 0);
-      return relay.handle(request, url.pathname.slice(8));
+      // is not a dead connection; nothing else is let off the timeout.
+      if (relay.has(stream)) server.timeout(request, 0);
+      return relay.handle(request, stream);
     }
     if (url.pathname.startsWith("/artwork/")) {
       const path = runtime?.coordinator?.artworkPath(
