@@ -4,6 +4,7 @@ import { basename, dirname } from "node:path";
 import { logger } from "./logger.ts";
 import { type CachedMedia, MediaCache } from "./media-cache.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
+import type { StreamRelay } from "./stream-relay.ts";
 import {
   captionsPath,
   chaptersFrom,
@@ -423,6 +424,11 @@ export type MediaStream = {
    * to play from there once it is in.
    */
   cacheKey?: string;
+  /**
+   * Served by the bot itself over loopback (see StreamRelay), which the
+   * public network proxy refuses, so it is read without it.
+   */
+  local?: boolean;
 };
 
 /** What video mode allows; see the VIDEO_* settings. */
@@ -520,6 +526,7 @@ export class TrackCatalog {
       videoCacheDirectory?: string;
     },
     private loudness?: LoudnessStore,
+    private relay?: StreamRelay,
   ) {
     this.cache = new MediaCache(
       limits.mediaCacheDirectory ?? "data/cache/media",
@@ -1425,12 +1432,17 @@ export class TrackCatalog {
     // After the measurement, which would otherwise share the bandwidth.
     if (this.videoCache.enabled)
       this.cacheStreamed(source, key, leveling.leveling);
+    // Through the relay, which fetches it in pieces, wherever it can be.
+    const sound = this.relay?.register(url, headers);
+    const picture = videoUrl && this.relay?.register(videoUrl, headers);
+    const relayed = Boolean(sound && (!videoUrl || picture));
     log.info(
       {
         event: "video_stream_resolved",
         entryId,
         sourceId: source.sourceId,
         separate: Boolean(videoUrl),
+        relayed,
         gainDb: leveling.gainDb,
         leveling: Boolean(leveling.leveling),
         durationMs: Date.now() - startedAt,
@@ -1439,9 +1451,13 @@ export class TrackCatalog {
     );
     return {
       stream: {
-        url,
-        ...(videoUrl ? { videoUrl } : {}),
-        headers,
+        ...(relayed
+          ? {
+              url: sound!,
+              ...(picture ? { videoUrl: picture } : {}),
+              local: true,
+            }
+          : { url, ...(videoUrl ? { videoUrl } : {}), headers }),
         ...(subtitles ? { subtitles } : {}),
         ...(this.videoCache.enabled ? { cacheKey: key } : {}),
       },

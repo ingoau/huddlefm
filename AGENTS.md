@@ -69,6 +69,7 @@ The coordinator talks to the process with JSON lines over stdin/stdout. Audio fi
 #### Additional services include:
 
 - `src/media-cache.ts`: keeps prepared tracks on disk, keyed by source, so a repeated song is hardlinked into its session instead of downloaded again.
+- `src/stream-relay.ts`: serves a streamed YouTube video's sound and picture to the media process over a token-protected loopback URL, fetched from YouTube in retried pieces like yt-dlp, since ffmpeg reading YouTube directly is throttled and sometimes refused.
 - `src/jellyfin.ts` and `src/jellyfin-ui.ts`: Jellyfin servers users link with Quick Connect: the client (through the public proxy), its dialogs for linking, searching and browsing, streaming items and reporting progress back.
 - `src/videos.ts`: video mode's helpers: YouTube search results, a song's official video, captions, chapters and video titles. Video mode itself lives in the coordinator, which prepares each track again for the mode it is in.
 - `src/lyrics.ts`: queries multiple lyric providers concurrently and selects the best synchronized result.
