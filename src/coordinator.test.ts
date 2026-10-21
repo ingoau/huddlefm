@@ -8114,3 +8114,75 @@ test("songs whose adder took their name off them name nobody", async () => {
   expect(recap).toContain("*Most frequent requester:* <@guest>");
   await result.coordinator.endFromSlack();
 });
+
+test("after a restart, the video that was playing goes on first, from where it was", async () => {
+  let finish = () => {};
+  const tracks = {
+    prepareVideo: async (_track: unknown, _directory: string, id: string) => {
+      if (id === "interrupted") await new Promise<void>((r) => (finish = r));
+      return { stream: { url: `https://93.184.216.34/${id}` }, form: "video" };
+    },
+    transition: () => undefined,
+    streamProxy: "http://127.0.0.1:4000",
+  } as unknown as TrackCatalog;
+  const video = (id: string, title: string) => ({
+    id,
+    requesterId: "host",
+    sourceInput: `https://www.youtube.com/watch?v=${id}`,
+    canonicalUrl: `https://www.youtube.com/watch?v=${id}`,
+    sourceId: id,
+    title,
+    artist: "Channel",
+    kind: "video" as const,
+    form: "video" as const,
+  });
+  const restored: SavedSession = {
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    uiTs: "player",
+    revision: 2,
+    creatorId: "creator",
+    hostId: "host",
+    state: "playing",
+    volume: 0.4,
+    autoplay: "off",
+    loopMode: "off",
+    transitionMode: "none",
+    displayMode: "default",
+    anchorEnabled: false,
+    playbackSeconds: 42,
+    listenedSeconds: 0,
+    mediaMode: "video",
+    captions: false,
+    watchedSeconds: 0,
+    resumeUntil: 180_000,
+    permissions: ["add"],
+    tracks: [
+      // Streamed, so it has to be fetched again.
+      { ...video("interrupted", "Interrupted"), status: "playing" },
+      // Downloaded, so it is ready at once.
+      {
+        ...video("downloaded", "Downloaded"),
+        status: "ready",
+        filePath: "package.json",
+      },
+    ],
+  };
+  const result = setup(tracks, undefined, restored);
+  await result.coordinator.resume("restorer");
+  const plays = () =>
+    result.media.filter((message: any) => message.type === "play");
+  await Bun.sleep(20);
+  expect(plays()).toEqual([]);
+  finish();
+  for (let index = 0; index < 300 && !plays().length; index++)
+    await Bun.sleep(2);
+  expect(plays().map((message: any) => message.entryId)).toEqual([
+    "interrupted",
+  ]);
+  expect(result.media).toContainEqual({ type: "seek", seconds: 42 });
+  await result.coordinator.endFromSlack();
+});

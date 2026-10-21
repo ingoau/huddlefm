@@ -1473,7 +1473,10 @@ test("reads integrated loudness and turns it into a bounded gain", () => {
 /** A catalog whose extractor prints `metadata`, writing its arguments down. */
 async function extracting(
   metadata: Record<string, unknown>,
-  options: { loudnessNormalization?: boolean } = {},
+  options: {
+    loudnessNormalization?: boolean;
+    preparationConcurrency?: number;
+  } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "huddlefm-extract-"));
   await writeFile(join(directory, "info.json"), JSON.stringify(metadata));
@@ -1663,4 +1666,64 @@ test("videos are not levelled when loudness normalization is off", async () => {
     ])) as object,
   ).toEqual({});
   expect(measured).toBe(0);
+});
+
+test("a streamed video is extracted and measured in turn with other preparations", async () => {
+  const { catalog, directory } = await extracting(
+    { duration: 1_873, requested_formats: [picture, sound] },
+    { loudnessNormalization: true, preparationConcurrency: 1 },
+  );
+  let measuring: number | undefined;
+  Reflect.set(catalog, "measureStreamed", async () => {
+    measuring = Reflect.get(catalog, "activePreparations") as number;
+    return -20;
+  });
+  // Something else is preparing, and holds the only slot.
+  let release = () => {};
+  const busy = Reflect.apply(
+    Reflect.get(catalog, "queuePreparation"),
+    catalog,
+    [0, "other", trackFixture, () => new Promise<void>((r) => (release = r))],
+  ) as Promise<void>;
+  try {
+    const preparing = catalog.prepareVideo(
+      { ...trackFixture, duration: 1_873 },
+      join(directory, "media"),
+      "entry",
+    );
+    await Bun.sleep(50);
+    // Not even extracted while the slot is taken.
+    expect(await Bun.file(join(directory, "args")).exists()).toBeFalse();
+    release();
+    await busy;
+    const prepared = await preparing;
+    expect(prepared.stream).toBeDefined();
+    expect(prepared.gainDb).toBe(6);
+    // Measured in a slot of its own.
+    expect(measuring).toBe(1);
+  } finally {
+    release();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("caching a streamed video measures nothing when normalization is off", async () => {
+  const { catalog, directory } = await extracting({});
+  let measured = 0;
+  Reflect.set(catalog, "measured", async () => (measured++, -20));
+  let cached = 0;
+  Reflect.set(catalog, "downloadVideo", async () => (cached++, "video.mkv"));
+  try {
+    Reflect.apply(Reflect.get(catalog, "cacheStreamed"), catalog, [
+      trackFixture,
+      "key",
+    ]);
+    await (Reflect.get(catalog, "caching") as Map<string, Promise<void>>).get(
+      "key",
+    );
+    expect(cached).toBe(1);
+    expect(measured).toBe(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

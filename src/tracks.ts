@@ -394,6 +394,8 @@ const maxBoostDb = 6;
 const maxCutDb = 24;
 /** How long a video waits for its loudness before playing unlevelled. */
 const levelingWaitMs = 3_000;
+/** The longest a streamed video's download into the cache may take. */
+const cachingDeadlineMs = 15 * 60_000;
 const stillMeasuring = Symbol("still measuring");
 
 /**
@@ -496,10 +498,12 @@ export class TrackCatalog {
   private caching = new Map<string, Promise<void>>();
   private cachingQueue: Promise<unknown> = Promise.resolve();
   private levelingWait = levelingWaitMs;
+  /** Stops background work, which no session waits on, at shutdown. */
+  private closing = new AbortController();
   private preparationQueue: {
     priority: number;
-    run: () => Promise<string>;
-    resolve: (path: string) => void;
+    run: () => Promise<unknown>;
+    resolve: (value: unknown) => void;
     reject: (error: unknown) => void;
   }[] = [];
 
@@ -577,6 +581,7 @@ export class TrackCatalog {
   }
 
   async close() {
+    this.closing.abort();
     await this.proxy?.close();
     this.proxy = undefined;
     log.info({ event: "closed" }, "Track catalog closed");
@@ -1202,6 +1207,8 @@ export class TrackCatalog {
     priority = 0,
     /** The track's audio, already prepared, to fall back on as it is. */
     preparedAudio?: string,
+    /** Whether YouTube may stream it, rather than download it first. */
+    stream = true,
   ): Promise<PreparedMedia> {
     const audio = async (): Promise<PreparedMedia> => ({
       filePath:
@@ -1239,20 +1246,35 @@ export class TrackCatalog {
     }
     if (!source) return audio();
     const key = this.videoCacheKey(source);
+    // Extracting and measuring wait their turn with other preparations.
+    const queued =
+      <T>(work: () => Promise<T>) =>
+      () =>
+        this.queuePreparation(priority, entryId, track, work);
     if (this.videoCache.enabled) {
       const cached = await this.restoreVideo(key, directory, entryId, signal);
       if (cached)
         return {
           filePath: cached,
           form: source.form,
-          ...(await this.level(source, () => measureLoudness(cached))),
+          ...(await this.level(
+            source,
+            queued(() => measureLoudness(cached)),
+          )),
         };
     }
     try {
       // YouTube plays as it arrives, which a long video would otherwise
       // keep everyone waiting for.
-      if (streamable(source))
-        return await this.streamVideo(source, key, directory, entryId, signal);
+      if (stream && streamable(source))
+        return await this.streamVideo(
+          source,
+          key,
+          directory,
+          entryId,
+          queued,
+          signal,
+        );
       const filePath = await this.queuePreparation(
         priority,
         entryId,
@@ -1262,7 +1284,10 @@ export class TrackCatalog {
       return {
         filePath,
         form: source.form,
-        ...(await this.level(source, () => measureLoudness(filePath))),
+        ...(await this.level(
+          source,
+          queued(() => measureLoudness(filePath)),
+        )),
       };
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -1374,17 +1399,19 @@ export class TrackCatalog {
     key: string,
     directory: string,
     entryId: string,
+    queued: <T>(work: () => Promise<T>) => () => Promise<T>,
     signal?: AbortSignal,
   ): Promise<PreparedMedia> {
     const startedAt = Date.now();
-    const metadata = await this.extractVideo(source, signal);
+    const metadata = await queued(() => this.extractVideo(source, signal))();
     const { url, videoUrl, headers } = await streamAddresses(
       metadata,
       "That video can't be played",
     );
     // Measured from the sound alone, which downloads in seconds.
-    const leveled = this.level(source, () =>
-      this.measureStreamed(metadata, source.sourceId),
+    const leveled = this.level(
+      source,
+      queued(() => this.measureStreamed(metadata, source.sourceId)),
     );
     const captions = await this.fetchCaptions(metadata, entryId, signal);
     let subtitles: string | undefined;
@@ -1470,7 +1497,19 @@ export class TrackCatalog {
       measuring = measure()
         .then(
           (lufs) => {
-            if (lufs !== undefined) this.loudness?.setLoudness(id, lufs);
+            try {
+              if (lufs !== undefined) this.loudness?.setLoudness(id, lufs);
+            } catch (error) {
+              // Only the next play is unlevelled for it.
+              log.warn(
+                {
+                  event: "loudness_store_failed",
+                  sourceId: source.sourceId,
+                  err: error,
+                },
+                "Could not keep the video's loudness",
+              );
+            }
             log.info(
               {
                 event: "loudness_measured",
@@ -1526,10 +1565,11 @@ export class TrackCatalog {
           `${directory}/sound.%(ext)s`,
         ],
         300_000,
+        this.closing.signal,
       );
       const filePath = stdout.trim().split("\n").at(-1);
       if (!filePath) throw new Error(`No sound downloaded for ${sourceId}`);
-      return await measureLoudness(filePath);
+      return await measureLoudness(filePath, this.closing.signal);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -1549,11 +1589,26 @@ export class TrackCatalog {
     const directory = `${this.videoStaging}/${id}`;
     const job = Promise.all([this.cachingQueue, after])
       .then(async () => {
-        const filePath = await this.downloadVideo(source, key, directory, id);
+        // One that hangs would hold up every one behind it.
+        const signal = AbortSignal.any([
+          this.closing.signal,
+          AbortSignal.timeout(cachingDeadlineMs),
+        ]);
+        const filePath = await this.downloadVideo(
+          source,
+          key,
+          directory,
+          id,
+          signal,
+        );
+        // Kept in the cache, not played from here.
+        this.transitions.delete(filePath);
         // A video the stream could not measure is measured from the file.
-        await this.measured(source, () => measureLoudness(filePath));
+        if (this.limits.loudnessNormalization)
+          await this.measured(source, () => measureLoudness(filePath, signal));
       })
-      .catch((error) =>
+      .catch((error) => {
+        if (this.closing.signal.aborted) return;
         log.warn(
           {
             event: "video_caching_failed",
@@ -1562,8 +1617,8 @@ export class TrackCatalog {
             err: error,
           },
           "Could not cache the streamed video",
-        ),
-      )
+        );
+      })
       .finally(async () => {
         await rm(directory, { recursive: true, force: true });
         this.caching.delete(key);
@@ -1577,17 +1632,17 @@ export class TrackCatalog {
     return this.proxyUrl;
   }
 
-  private queuePreparation(
+  private queuePreparation<T>(
     priority: number,
     entryId: string,
     track: TrackMetadata,
-    run: () => Promise<string>,
+    run: () => Promise<T>,
   ) {
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       this.preparationQueue.push({
         priority,
         run,
-        resolve,
+        resolve: (value) => resolve(value as T),
         reject,
       });
       this.preparationQueue.sort((a, b) => b.priority - a.priority);
