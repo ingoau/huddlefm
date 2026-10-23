@@ -383,6 +383,8 @@ export class Coordinator {
   // settings as they are and only stops applying them.
   private mediaMode: MediaMode = "music";
   private captions = false;
+  // The bar along the bottom of a playing video, in video mode.
+  private progressBar = true;
   private watchedSeconds = 0;
   // Other people's screen shares in the huddle, as media last counted them.
   private contentShares = 0;
@@ -568,6 +570,7 @@ export class Coordinator {
       this.anchorEnabled = restored.anchorEnabled;
       this.mediaMode = restored.mediaMode ?? "music";
       this.captions = restored.captions ?? false;
+      this.progressBar = restored.progressBar ?? true;
       this.watchedSeconds = restored.watchedSeconds ?? 0;
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
@@ -622,6 +625,7 @@ export class Coordinator {
         transitionMode: this.transitionMode,
         displayMode: this.displayMode,
         anchorEnabled: this.anchorEnabled,
+        progressBar: this.progressBar,
       });
       this.setPermissions(this.allowed);
       // Media joined with the configured volume and ducking, and its own
@@ -727,6 +731,7 @@ export class Coordinator {
     this.transitionMode = defaults.transitionMode ?? this.transitionMode;
     this.duckingMode = defaults.duckingMode ?? this.duckingMode;
     this.anchorEnabled = defaults.anchorEnabled ?? this.anchorEnabled;
+    this.progressBar = defaults.progressBar ?? this.progressBar;
     if (defaults.permissions) this.allowed = new Set(defaults.permissions);
     this.channelDefaultsApplied = true;
     this.log.info(
@@ -758,6 +763,7 @@ export class Coordinator {
       mode: this.videoMode ? "off" : this.duckingMode,
     });
     this.sendMedia({ type: "captions", on: this.captions });
+    this.sendMedia({ type: "progress_bar", on: this.progressBar });
     this.sendMedia({ type: "video_mode", on: this.videoMode });
   }
 
@@ -1142,6 +1148,7 @@ export class Coordinator {
       ...(this.videoMode
         ? {
             captions: this.captions,
+            progressBar: this.progressBar,
             autoplay: this.videoAutoplay ? "related videos" : "off",
             videoRequest: "not needed, video mode is on",
           }
@@ -5624,6 +5631,7 @@ export class Coordinator {
         transitionMode: this.transitionMode,
         duckingMode: this.duckingMode,
         anchorEnabled: this.anchorEnabled,
+        progressBar: this.progressBar,
         allowed: this.allowed,
       },
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
@@ -6055,6 +6063,7 @@ export class Coordinator {
       transitionMode: this.transitionMode,
       duckingMode: this.duckingMode,
       anchorEnabled: this.anchorEnabled,
+      progressBar: this.progressBar,
       permissions: [...this.allowed].sort(),
     };
   }
@@ -6130,6 +6139,7 @@ export class Coordinator {
         transitionMode: selected(state.transition?.mode, transitionModes),
         duckingMode: selected(state.ducking?.mode, duckingModes),
         anchorEnabled: checked(state.anchor?.enabled),
+        progressBar: checked(state.progress_bar?.enabled),
       });
     // A preset only fills in the checkboxes, so they are all that is saved.
     const chosen = admin
@@ -6252,9 +6262,10 @@ export class Coordinator {
     transitionMode?: TransitionMode;
     duckingMode?: DuckingMode;
     anchorEnabled?: boolean;
+    progressBar?: boolean;
   }) {
     const changed: string[] = [];
-    const { loopMode, anchorEnabled } = patch;
+    const { loopMode, anchorEnabled, progressBar } = patch;
     // Video mode does not show the music's own settings, and leaves them
     // as they are, and music mode does the same with video's autoplay.
     const { displayMode, autoplayMode, transitionMode, duckingMode } = this
@@ -6305,6 +6316,12 @@ export class Coordinator {
       this.store.setSession(this.id, { anchorEnabled });
       changed.push(`anchorEnabled=${anchorEnabled}`);
     }
+    if (progressBar !== undefined && progressBar !== this.progressBar) {
+      this.progressBar = progressBar;
+      this.sendMedia({ type: "progress_bar", on: progressBar });
+      this.store.setSession(this.id, { progressBar });
+      changed.push(`progressBar=${progressBar}`);
+    }
     return changed;
   }
 
@@ -6354,6 +6371,8 @@ export class Coordinator {
         selected(state.ducking?.mode, duckingModes) ?? this.duckingMode;
       defaults.anchorEnabled =
         checked(state.anchor?.enabled) ?? this.anchorEnabled;
+      defaults.progressBar =
+        checked(state.progress_bar?.enabled) ?? this.progressBar;
     }
     if (fields.includes("permissions")) {
       const chosen = state.permissions?.selected?.selected_options

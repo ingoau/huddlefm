@@ -237,6 +237,11 @@ export class VideoPlayer {
     return this.source?.key;
   }
 
+  /** The source is a live stream, which has no end to measure against. */
+  get live() {
+    return Boolean(this.source?.input?.live);
+  }
+
   setSource(source: VideoSource | undefined) {
     if (
       source?.key === this.source?.key &&

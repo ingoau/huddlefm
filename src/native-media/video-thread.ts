@@ -29,6 +29,7 @@ export type ToVideoWorker =
   | { type: "share"; on: boolean }
   | { type: "share_source"; source: VideoSource | undefined }
   | { type: "captions"; on: boolean }
+  | { type: "progress_bar"; on: boolean }
   | { type: "share_keyframe" }
   | { type: "stop" };
 
@@ -86,7 +87,8 @@ export class VideoThread {
     share: boolean;
     source?: VideoSource;
     captions: boolean;
-  } = { video: false, share: false, captions: false };
+    progressBar: boolean;
+  } = { video: false, share: false, captions: false, progressBar: true };
 
   constructor(
     private lyricsOffset: number,
@@ -180,6 +182,13 @@ export class VideoThread {
     this.send({ type: "captions", on });
   }
 
+  /** Shows or hides the bar along the bottom of a playing video. */
+  setProgressBar(on: boolean) {
+    if (on === this.state.progressBar) return;
+    this.state.progressBar = on;
+    this.send({ type: "progress_bar", on });
+  }
+
   requestShareKeyframe() {
     this.send({ type: "share_keyframe" });
   }
@@ -229,13 +238,23 @@ export class VideoThread {
       lyricsOffset: this.lyricsOffset,
     } satisfies ToVideoWorker);
     // A replacement picks up where the last one was.
-    const { mode, track, lyrics, idle, video, share, source, captions } =
-      this.state;
+    const {
+      mode,
+      track,
+      lyrics,
+      idle,
+      video,
+      share,
+      source,
+      captions,
+      progressBar,
+    } = this.state;
     if (mode) worker.postMessage({ type: "display_mode", mode });
     if (track) worker.postMessage(track);
     else if (idle) worker.postMessage({ type: "reset", idle });
     if (track && lyrics) worker.postMessage(lyrics);
     if (captions) worker.postMessage({ type: "captions", on: true });
+    if (!progressBar) worker.postMessage({ type: "progress_bar", on: false });
     if (source) worker.postMessage({ type: "share_source", source });
     if (video) worker.postMessage({ type: "video", on: true });
     if (share) worker.postMessage({ type: "share", on: true });
