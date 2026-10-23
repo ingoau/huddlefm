@@ -288,6 +288,7 @@ async function handleIntegrationDm(event: {
   text: string;
 }) {
   if (event.userId === botUserId) return;
+  if (config.excludedUserIds.has(event.userId)) return;
   if (!isAllowlisted(config.integrationUserIds, event.userId, event.botId))
     return;
   const reply = (body: Record<string, unknown>) =>
