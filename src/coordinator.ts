@@ -4894,7 +4894,7 @@ export class Coordinator {
   }
 
   private async shuffleQueue(interaction: Interaction) {
-    // The player message carries no view metadata; the full queue dialog does.
+    // Older player messages carry no view metadata; the queue dialog does.
     if (interaction.metadata && !this.validQueueView(interaction))
       return this.notice(
         interaction.userId,
@@ -5356,7 +5356,7 @@ export class Coordinator {
             ...when(
               (manages && this.shufflableCount() > 1) ||
                 this.can(userId, "clear"),
-              actions("queue_shuffle", [
+              actions("queue_tools", [
                 ...when(
                   manages && this.shufflableCount() > 1,
                   button("shuffle_queue", plain("Shuffle"), {
