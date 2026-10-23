@@ -14,6 +14,7 @@ import {
   formatClock,
   formatLimit,
   musicVideoMatch,
+  parseYouTubeNext,
   parseYouTubeSearch,
   pickSubtitles,
   shorten,
@@ -1025,6 +1026,53 @@ export class TrackCatalog {
         kind: "video" as const,
       }));
     }
+  }
+
+  /**
+   * What YouTube would play after a video, for video mode's autoplay: its
+   * related videos from the web player's watch-next, in its order, leaving
+   * out any too long for video mode.
+   */
+  async relatedVideos(videoId: string): Promise<TrackMetadata[]> {
+    if (!isYoutubeVideoId(videoId)) return [];
+    const response = await fetch(
+      "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+      {
+        method: "POST",
+        proxy: this.proxyUrl,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: "WEB",
+              clientVersion: "2.20250101.00.00",
+              hl: "en",
+              gl: "US",
+            },
+          },
+          videoId,
+        }),
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`YouTube watch-next HTTP ${response.status}`);
+    return parseYouTubeNext(await response.json())
+      .filter(
+        (video) =>
+          video.videoId !== videoId &&
+          (!video.duration || video.duration <= this.video.durationSeconds),
+      )
+      .map((video) => ({
+        sourceInput: `https://www.youtube.com/watch?v=${video.videoId}`,
+        canonicalUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
+        sourceId: video.videoId,
+        title: video.title,
+        artist: video.channel,
+        duration: video.duration,
+        artwork: video.thumbnail,
+        kind: "video" as const,
+      }));
   }
 
   /**

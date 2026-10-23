@@ -437,3 +437,118 @@ function searchedVideo(renderer: Record<string, unknown>) {
         : undefined,
   } satisfies SearchedVideo;
 }
+
+/**
+ * The videos YouTube's web player would offer next after a video, from a
+ * watch-next response: its own autoplay pick first, then the related videos
+ * in order, leaving out the same things a search does.
+ */
+export function parseYouTubeNext(response: unknown): SearchedVideo[] {
+  const videos: SearchedVideo[] = [];
+  let autoplayId: string | undefined;
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    const record = node as Record<string, unknown>;
+    if (record.lockupViewModel) {
+      const video = lockupVideo(
+        record.lockupViewModel as Record<string, unknown>,
+      );
+      if (video) videos.push(video);
+      return;
+    }
+    if (record.compactVideoRenderer) {
+      const video = searchedVideo(
+        record.compactVideoRenderer as Record<string, unknown>,
+      );
+      if (video) videos.push(video);
+      return;
+    }
+    if (record.autoplayVideo) {
+      const id = (
+        record.autoplayVideo as { watchEndpoint?: { videoId?: unknown } }
+      ).watchEndpoint?.videoId;
+      if (typeof id === "string") autoplayId ??= id;
+    }
+    for (const value of Object.values(record)) visit(value);
+  };
+  visit(response);
+  const unique = videos.filter(
+    (video, index) =>
+      videos.findIndex((other) => other.videoId === video.videoId) === index,
+  );
+  const pick = unique.findIndex((video) => video.videoId === autoplayId);
+  if (pick > 0) unique.unshift(...unique.splice(pick, 1));
+  return unique;
+}
+
+// The newer card YouTube uses for related videos.
+function lockupVideo(lockup: Record<string, unknown>) {
+  const videoId = lockup.contentId;
+  if (
+    lockup.contentType !== "LOCKUP_CONTENT_TYPE_VIDEO" ||
+    typeof videoId !== "string" ||
+    !/^[\w-]{11}$/.test(videoId)
+  )
+    return;
+  const text = JSON.stringify(lockup).toLowerCase();
+  if (
+    text.includes("badge_style_live") ||
+    text.includes("members only") ||
+    text.includes("members_only")
+  )
+    return;
+  const image = (lockup.contentImage ?? {}) as {
+    thumbnailViewModel?: {
+      overlays?: {
+        thumbnailBottomOverlayViewModel?: {
+          badges?: { thumbnailBadgeViewModel?: { text?: unknown } }[];
+        };
+        thumbnailOverlayBadgeViewModel?: {
+          thumbnailBadges?: { thumbnailBadgeViewModel?: { text?: unknown } }[];
+        };
+      }[];
+    };
+  };
+  const badges = (image.thumbnailViewModel?.overlays ?? []).flatMap(
+    (overlay) => [
+      ...(overlay.thumbnailBottomOverlayViewModel?.badges ?? []),
+      ...(overlay.thumbnailOverlayBadgeViewModel?.thumbnailBadges ?? []),
+    ],
+  );
+  // Live and upcoming streams, and playlists, have no length.
+  const duration = badges
+    .map((badge) => badge.thumbnailBadgeViewModel?.text)
+    .map((value) => (typeof value === "string" ? parseClock(value) : undefined))
+    .find((value) => value !== undefined);
+  if (duration === undefined) return;
+  const metadata = ((lockup.metadata ?? {}) as Record<string, unknown>)
+    .lockupMetadataViewModel as
+    | {
+        title?: { content?: unknown };
+        metadata?: {
+          contentMetadataViewModel?: {
+            metadataRows?: {
+              metadataParts?: { text?: { content?: unknown } }[];
+            }[];
+          };
+        };
+      }
+    | undefined;
+  const title = String(metadata?.title?.content ?? "").trim();
+  if (!title) return;
+  const channel = String(
+    metadata?.metadata?.contentMetadataViewModel?.metadataRows?.[0]
+      ?.metadataParts?.[0]?.text?.content ?? "",
+  ).trim();
+  return {
+    videoId,
+    title: cleanVideoTitle(title, channel),
+    channel: channel || "Unknown channel",
+    duration,
+    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+  } satisfies SearchedVideo;
+}
