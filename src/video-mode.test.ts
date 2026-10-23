@@ -860,3 +860,33 @@ test("the assistant turns video mode's autoplay on", async () => {
   });
   await result.coordinator.endFromSlack();
 });
+
+test("the assistant switches to video mode with its autoplay on", async () => {
+  const result = await setup();
+  expect(
+    await result.coordinator.agentUpdateSettings("host", {
+      mode: "video",
+      autoplay: true,
+    }),
+  ).toMatchObject({
+    ok: true,
+    changed: ["mode=video", "videoAutoplay=true"],
+  });
+  expect(Reflect.get(result.coordinator, "autoplayMode")).toBe("off");
+  await result.coordinator.endFromSlack();
+});
+
+test("a related video keeps its origin across a restart", async () => {
+  const result = await setup();
+  result.related.set(clip.sourceId, [relatedClip]);
+  await saveMode(result.coordinator, "video");
+  await saveVideoAutoplay(result.coordinator, "related");
+  await queue(result, clip);
+  await until(() => queued(result).some((entry) => entry.automatic));
+  expect(
+    Reflect.get(result.store, "db")
+      .query("SELECT related_video FROM tracks WHERE source_id = ?")
+      .get("relatedclip"),
+  ).toEqual({ related_video: 1 });
+  await result.coordinator.endFromSlack();
+});

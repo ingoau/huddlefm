@@ -243,6 +243,8 @@ type SavedTrack = {
   kind?: TrackKind;
   live?: boolean;
   automatic?: boolean;
+  // Video mode's autoplay picked it from YouTube's related videos.
+  relatedVideo?: boolean;
   status: string;
   filePath?: string;
   /** What the prepared file holds. */
@@ -437,6 +439,7 @@ const addedColumns = [
   // What a video's sound is turned by to reach the loudness target.
   ["tracks", "gain_db", "REAL"],
   ["sessions", "video_autoplay", "INTEGER NOT NULL DEFAULT 0"],
+  ["tracks", "related_video", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -517,6 +520,7 @@ function savedTrack(track: Row) {
     kind: modeOf(trackKinds, track.kind),
     live: track.live ? true : undefined,
     automatic: track.automatic ? true : undefined,
+    relatedVideo: track.related_video ? true : undefined,
     status: String(track.status),
     filePath: text(track.file_path),
     form: modeOf(mediaForms, track.media_form),
@@ -1699,14 +1703,15 @@ export class Store {
     kind?: TrackKind;
     live?: boolean;
     automatic?: boolean;
+    relatedVideo?: boolean;
     status: string;
     isVideo?: boolean;
   }) {
     this.db
       .query(
         `INSERT INTO tracks
-        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, kind, live, automatic, status, is_video, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, session_id, requester_id, source_input, canonical_url, source_id, title, artist, album, duration, artwork, kind, live, automatic, related_video, status, is_video, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         track.id,
@@ -1723,6 +1728,7 @@ export class Store {
         track.kind ?? null,
         track.live ? 1 : 0,
         track.automatic ? 1 : 0,
+        track.relatedVideo ? 1 : 0,
         track.status,
         track.isVideo ? 1 : 0,
         Date.now(),

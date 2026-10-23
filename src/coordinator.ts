@@ -191,6 +191,8 @@ type Entry = TrackMetadata & {
   id: string;
   requesterId: string;
   automatic?: boolean;
+  // Video mode's autoplay picked it from YouTube's related videos.
+  relatedVideo?: boolean;
   // Autoplay provenance; not persisted.
   autoplayMode?: AutoplayMode;
   discovery?: boolean;
@@ -1766,10 +1768,13 @@ export class Coordinator {
           ok: false as const,
           error: "Only the host can switch between music and video mode.",
         };
-      // Autoplay in video mode is its related videos, on or off.
-      const video = this.videoMode && patch.mode !== "music";
+      // Autoplay in video mode is its related videos, on or off, including
+      // when this switches to video mode.
+      const video =
+        (this.videoMode && patch.mode !== "music") || patch.mode === "video";
       if (
-        video &&
+        this.videoMode &&
+        patch.mode !== "music" &&
         (patch.displayMode !== undefined ||
           patch.autoplayMode !== undefined ||
           patch.transitionMode !== undefined ||
@@ -1858,6 +1863,10 @@ export class Coordinator {
         const blocked = await this.switchMediaMode(userId, "video", "agent");
         if (blocked) return { ok: false as const, error: blocked };
         changed.push("mode=video");
+        // Video's autoplay applies only once video mode is on.
+        changed.push(
+          ...(await this.applySettings({ videoAutoplay: patch.autoplay })),
+        );
       } else if (patch.mode === "music") changed.push("mode=music");
       if (permissionPreset) {
         this.setPermissions(permissionPreset);
@@ -2846,7 +2855,7 @@ export class Coordinator {
       skipped.sourceId,
     ].slice(-20);
     // A related video says nothing about anyone's taste in music.
-    if (skipped.autoplaySources?.includes(relatedVideosSource)) return;
+    if (skipped.relatedVideo) return;
     this.rejectAutoplayArtist(skipped.artist);
     this.recommendations?.penalize(userId, skipped);
     if (skipped.automatic) this.rememberSkip(skipped, userId);
@@ -3690,6 +3699,9 @@ export class Coordinator {
           autoplayMode: mode,
           discovery,
           autoplaySources,
+          ...(autoplaySources?.includes(relatedVideosSource)
+            ? { relatedVideo: true }
+            : {}),
           listenerIds,
           status: "preparing",
         };
