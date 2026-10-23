@@ -246,16 +246,22 @@ export function agentTools(coordinator: Coordinator, userId: string) {
     }),
     update_settings: tool({
       description: video
-        ? "Change session settings the user is allowed to configure (mode, loop, keep-player-at-bottom, permission preset, or host). Autoplay, display, transitions and ducking are paused in video mode."
+        ? "Change session settings the user is allowed to configure (mode, autoplay of related videos, loop, keep-player-at-bottom, permission preset, or host). Display, transitions and ducking are paused in video mode."
         : "Change session settings the user is allowed to configure (mode, display, autoplay, loop, transitions, keep-player-at-bottom, permission preset, or host).",
       // Video mode leaves the music's own settings out of the schema.
       inputSchema: video
-        ? (settingsSchema.omit({
-            displayMode: true,
-            autoplay: true,
-            autoplayMode: true,
-            transitionMode: true,
-          }) as unknown as typeof settingsSchema)
+        ? (settingsSchema
+            .omit({
+              displayMode: true,
+              autoplayMode: true,
+              transitionMode: true,
+            })
+            .extend({
+              autoplay: z
+                .boolean()
+                .optional()
+                .describe("Play a related video when the queue is empty"),
+            }) as unknown as typeof settingsSchema)
         : settingsSchema,
       execute: async (input, { abortSignal }) =>
         coordinator.agentUpdateSettings(userId, input, abortSignal),

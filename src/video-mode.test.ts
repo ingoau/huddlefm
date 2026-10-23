@@ -53,6 +53,8 @@ async function setup(
   const audit: unknown[][] = [];
   const prepared: { id: string; video: boolean }[] = [];
   const references = new Map<string, TrackMetadata | string>();
+  // What YouTube would play after each video, by video ID.
+  const related = new Map<string, TrackMetadata[]>();
   let post = 0;
   const slack = {
     post: async (...args: unknown[]) => (posted.push(args), String(++post)),
@@ -139,6 +141,7 @@ async function setup(
       canonicalUrl: url,
     }),
     suggestions: async () => [],
+    relatedVideos: async (videoId: string) => related.get(videoId) ?? [],
     transition: () => undefined,
     referencedUrl: (reference: string) => {
       const stored = references.get(reference);
@@ -217,6 +220,7 @@ async function setup(
     audit,
     prepared,
     references,
+    related,
     /** The player as last drawn. */
     player() {
       const last = [
@@ -521,7 +525,7 @@ test("a song playing in music mode becomes its video from the top in video mode"
   await result.coordinator.endFromSlack();
 });
 
-test("video mode leaves autoplay and the music settings out of Settings", async () => {
+test("video mode leaves the music's autoplay and settings out of Settings", async () => {
   const result = await setup();
   await press(result.coordinator, "open_settings");
   const music = (result.modals.at(-1)![1] as { blocks: Block[] }).blocks.map(
@@ -542,8 +546,10 @@ test("video mode leaves autoplay and the music settings out of Settings", async 
   const video = (result.modals.at(-1)![1] as { blocks: Block[] }).blocks.map(
     (block) => block.block_id,
   );
+  expect(music).not.toContain("video_autoplay");
   expect(video).toContain("media_mode");
   expect(video).toContain("loop");
+  expect(video).toContain("video_autoplay");
   for (const hidden of ["display", "autoplay", "transition", "ducking"])
     expect(video).not.toContain(hidden);
   await result.coordinator.endFromSlack();
@@ -775,6 +781,82 @@ test("the assistant jumps to a chapter by name", async () => {
     mode: "video",
     captions: false,
     nowPlaying: { playingAs: "video", kind: "video" },
+  });
+  await result.coordinator.endFromSlack();
+});
+
+const relatedClip: TrackMetadata = {
+  sourceInput: "https://www.youtube.com/watch?v=relatedclip",
+  canonicalUrl: "https://www.youtube.com/watch?v=relatedclip",
+  sourceId: "relatedclip",
+  title: "A related clip",
+  artist: "Other channel",
+  duration: 300,
+  kind: "video",
+};
+
+async function saveVideoAutoplay(coordinator: Coordinator, mode: string) {
+  await press(coordinator, "save_settings", {
+    type: "view_submission",
+    state: { video_autoplay: { mode: { selected_option: { value: mode } } } },
+  });
+}
+
+const queued = (result: Awaited<ReturnType<typeof setup>>) =>
+  Reflect.get(result.coordinator, "queue") as {
+    sourceId: string;
+    automatic?: boolean;
+    autoplaySources?: string[];
+  }[];
+
+test("video mode's autoplay queues a related video, and leaves the music's alone", async () => {
+  const result = await setup();
+  result.related.set(clip.sourceId, [clip, relatedClip]);
+  await saveMode(result.coordinator, "video");
+  await saveVideoAutoplay(result.coordinator, "related");
+  expect(Reflect.get(result.coordinator, "videoAutoplay")).toBeTrue();
+  expect(Reflect.get(result.coordinator, "autoplayMode")).toBe("off");
+  expect(
+    Reflect.get(result.store, "db")
+      .query("SELECT video_autoplay FROM sessions WHERE id = ?")
+      .get(result.coordinator.id),
+  ).toEqual({ video_autoplay: 1 });
+  await queue(result, clip);
+  await until(() => queued(result).some((entry) => entry.automatic));
+  // What is playing is never picked again.
+  expect(queued(result)).toEqual([
+    expect.objectContaining({
+      sourceId: "relatedclip",
+      automatic: true,
+      autoplaySources: ["related_videos"],
+    }),
+  ]);
+  await saveVideoAutoplay(result.coordinator, "off");
+  expect(queued(result)).toEqual([]);
+  await result.coordinator.endFromSlack();
+});
+
+test("switching modes drops the other mode's autoplay pick", async () => {
+  const result = await setup();
+  result.related.set(clip.sourceId, [relatedClip]);
+  await saveMode(result.coordinator, "video");
+  await saveVideoAutoplay(result.coordinator, "related");
+  await queue(result, clip);
+  await until(() => queued(result).some((entry) => entry.automatic));
+  await saveMode(result.coordinator, "music");
+  expect(queued(result)).toEqual([]);
+  await result.coordinator.endFromSlack();
+});
+
+test("the assistant turns video mode's autoplay on", async () => {
+  const result = await setup();
+  await saveMode(result.coordinator, "video");
+  expect(
+    await result.coordinator.agentUpdateSettings("host", { autoplay: true }),
+  ).toMatchObject({ ok: true, changed: ["videoAutoplay=true"] });
+  expect(Reflect.get(result.coordinator, "autoplayMode")).toBe("off");
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    autoplay: "related videos",
   });
   await result.coordinator.endFromSlack();
 });

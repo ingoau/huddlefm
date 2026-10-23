@@ -77,14 +77,10 @@ test("the tools follow the mode, like the player does", () => {
   expect(video.jump_to).toBeDefined();
   expect(video.set_captions).toBeDefined();
   expect(fields(video.add_tracks!)).toEqual(["reference"]);
-  for (const field of [
-    "displayMode",
-    "autoplay",
-    "autoplayMode",
-    "transitionMode",
-  ])
+  for (const field of ["displayMode", "autoplayMode", "transitionMode"])
     expect(fields(video.update_settings!)).not.toContain(field);
+  // Autoplay in video mode is related videos, on or off.
   expect(fields(video.update_settings!)).toEqual(
-    expect.arrayContaining(["mode", "loopMode", "hostUserId"]),
+    expect.arrayContaining(["mode", "autoplay", "loopMode", "hostUserId"]),
   );
 });

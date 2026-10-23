@@ -78,6 +78,7 @@ export function usableHuddleMixSources(
 export type ChannelDefaults = {
   volume?: number;
   autoplay?: AutoplayMode;
+  videoAutoplay?: boolean;
   loopMode?: LoopMode;
   displayMode?: DisplayMode;
   transitionMode?: TransitionMode;
@@ -97,6 +98,8 @@ export function parseChannelDefaults(
     defaults.volume = volume;
   const autoplay = modeOf(autoplayModes, saved.autoplay);
   if (autoplay) defaults.autoplay = autoplay;
+  if (typeof saved.videoAutoplay === "boolean")
+    defaults.videoAutoplay = saved.videoAutoplay;
   const loopMode = modeOf(loopModes, saved.loopMode);
   if (loopMode) defaults.loopMode = loopMode;
   const displayMode = modeOf(displayModes, saved.displayMode);
@@ -283,6 +286,9 @@ export type SavedSession = {
   state: string;
   volume: number;
   autoplay: AutoplayMode;
+  // Video mode's own autoplay: related videos, or nothing. Absent on
+  // sessions saved before it existed.
+  videoAutoplay?: boolean;
   loopMode: LoopMode;
   transitionMode: TransitionMode;
   // Absent on sessions saved before ducking existed, and on any session that
@@ -358,6 +364,7 @@ const sessionColumns = {
   hostId: "host_id",
   volume: "volume",
   autoplay: "autoplay",
+  videoAutoplay: "video_autoplay",
   loopMode: "loop_mode",
   transitionMode: "transition_mode",
   duckingMode: "ducking_mode",
@@ -429,6 +436,7 @@ const addedColumns = [
   ["tracks", "live", "INTEGER NOT NULL DEFAULT 0"],
   // What a video's sound is turned by to reach the loudness target.
   ["tracks", "gain_db", "REAL"],
+  ["sessions", "video_autoplay", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -1031,6 +1039,7 @@ export class Store {
       hostId?: string | null;
       volume?: number;
       autoplay?: AutoplayMode;
+      videoAutoplay?: boolean;
       loopMode?: LoopMode;
       transitionMode?: TransitionMode;
       duckingMode?: DuckingMode;
@@ -1424,6 +1433,7 @@ export class Store {
           state: String(row.resume_state ?? row.status),
           volume: Number(row.volume),
           autoplay: parseAutoplayMode(row.autoplay),
+          videoAutoplay: Boolean(row.video_autoplay),
           loopMode: parseLoopMode(row.loop_mode),
           transitionMode:
             modeOf(transitionModes, row.transition_mode) ?? "none",

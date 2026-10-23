@@ -8,6 +8,7 @@ import {
   isVideoLink,
   musicVideoMatch,
   parseClock,
+  parseYouTubeNext,
   parseYouTubeSearch,
   pickSubtitles,
   shorten,
@@ -244,6 +245,99 @@ test("reads videos from a YouTube search, leaving out live and members-only ones
       channel: "Channel",
       duration: 3723,
       thumbnail: "https://i.ytimg.com/a.jpg",
+    },
+  ]);
+});
+
+test("reads YouTube's next videos, its autoplay pick first", () => {
+  const lockup = (
+    contentId: string,
+    badge: { text: string; badgeStyle?: string },
+    contentType = "LOCKUP_CONTENT_TYPE_VIDEO",
+  ) => ({
+    lockupViewModel: {
+      contentId,
+      contentType,
+      contentImage: {
+        thumbnailViewModel: {
+          overlays: [
+            {
+              thumbnailBottomOverlayViewModel: {
+                badges: [
+                  {
+                    thumbnailBadgeViewModel: {
+                      badgeStyle: "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT",
+                      ...badge,
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      metadata: {
+        lockupMetadataViewModel: {
+          title: { content: `Video ${contentId} #shorts` },
+          metadata: {
+            contentMetadataViewModel: {
+              metadataRows: [
+                { metadataParts: [{ text: { content: "Channel" } }] },
+                { metadataParts: [{ text: { content: "1M views" } }] },
+              ],
+            },
+          },
+        },
+      },
+    },
+  });
+  const response = {
+    contents: {
+      twoColumnWatchNextResults: {
+        secondaryResults: {
+          secondaryResults: {
+            results: [
+              lockup("aaaaaaaaaaa", { text: "4:05" }),
+              lockup("bbbbbbbbbbb", {
+                text: "LIVE",
+                badgeStyle: "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE",
+              }),
+              lockup(
+                "PLccccccccc",
+                { text: "12 videos" },
+                "LOCKUP_CONTENT_TYPE_PLAYLIST",
+              ),
+              lockup("ddddddddddd", { text: "1:02:03" }),
+              lockup("aaaaaaaaaaa", { text: "4:05" }),
+            ],
+          },
+        },
+      },
+    },
+    playerOverlays: {
+      playerOverlayRenderer: {
+        autoplay: {
+          playerOverlayAutoplayRenderer: {
+            autoplayVideo: { watchEndpoint: { videoId: "ddddddddddd" } },
+          },
+        },
+      },
+    },
+  };
+  expect(parseYouTubeNext(response)).toEqual([
+    {
+      videoId: "ddddddddddd",
+      title: "Video ddddddddddd",
+      channel: "Channel",
+      duration: 3723,
+      thumbnail: "https://i.ytimg.com/vi/ddddddddddd/hqdefault.jpg",
+    },
+    {
+      videoId: "aaaaaaaaaaa",
+      title: "Video aaaaaaaaaaa",
+      channel: "Channel",
+      duration: 245,
+      thumbnail: "https://i.ytimg.com/vi/aaaaaaaaaaa/hqdefault.jpg",
     },
   ]);
 });

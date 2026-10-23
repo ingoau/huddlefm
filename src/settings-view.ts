@@ -48,6 +48,18 @@ const autoplayDescriptions: Record<AutoplayMode, string> = {
   related: "Continue from songs requested in this huddle",
   huddle: "Mix what people in this huddle listen to",
 };
+// Video mode's autoplay is on or off: it only ever follows on with related
+// videos.
+const videoAutoplayModes = ["off", "related"] as const;
+type VideoAutoplayMode = (typeof videoAutoplayModes)[number];
+const videoAutoplayLabels: Record<VideoAutoplayMode, string> = {
+  off: "Off",
+  related: "Related videos",
+};
+const videoAutoplayDescriptions: Record<VideoAutoplayMode, string> = {
+  off: "Do not queue videos",
+  related: "Play a video related to what people queued",
+};
 const loopDescriptions: Record<LoopMode, string> = {
   off: "Do not repeat",
   track: "Restart the current song when it ends",
@@ -84,6 +96,13 @@ export function selected<Mode extends string>(
 ) {
   const value = state?.selected_option?.value as Mode | undefined;
   return value && modes.includes(value) ? value : undefined;
+}
+
+// Whether video mode's autoplay select is on, or undefined when it was not
+// part of the submission.
+export function videoAutoplaySelected(state: InputState | undefined) {
+  const mode = selected(state, videoAutoplayModes);
+  return mode && mode !== "off";
 }
 
 // Whether a single-option checkbox block is ticked, or undefined when the
@@ -361,6 +380,7 @@ export type SettingsViewOptions = {
     volume: number;
     displayMode: DisplayMode;
     autoplayMode: AutoplayMode;
+    videoAutoplay?: boolean;
     loopMode: LoopMode;
     transitionMode: TransitionMode;
     duckingMode: DuckingMode;
@@ -519,6 +539,24 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
         {
           optional: true,
           hint: "Play recommendations when the queue is empty",
+        },
+      ),
+    ),
+    ...when(
+      access.configure && !music,
+      input(
+        "video_autoplay",
+        "Autoplay",
+        modeSelect(
+          videoAutoplayModes,
+          selected(form.video_autoplay?.mode, videoAutoplayModes) ??
+            (session.videoAutoplay ? "related" : "off"),
+          (mode) => videoAutoplayLabels[mode],
+          videoAutoplayDescriptions,
+        ),
+        {
+          optional: true,
+          hint: "Play related videos when the queue is empty",
         },
       ),
     ),

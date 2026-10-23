@@ -2291,6 +2291,7 @@ test("the configured manager can save and clear the channel's defaults", async (
   expect(store.channelDefaults("channel")).toEqual({
     volume: 0.6,
     autoplay: "huddle",
+    videoAutoplay: false,
     loopMode: "off",
     displayMode: "default",
     transitionMode: "none",

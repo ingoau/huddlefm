@@ -45,6 +45,7 @@ import {
 import {
   embeddedArtworkPath,
   isExpectedTrackFailure,
+  isYoutubeVideoId,
   removePreparedMedia,
   parseBulkLinkList,
   normalizeToken,
@@ -136,6 +137,7 @@ import {
   settingsView,
   submittedHuddleMixSources,
   submittedScrobbleServices,
+  videoAutoplaySelected,
   withoutUserForm,
   yourDataView,
   type FormState,
@@ -312,6 +314,8 @@ const autoplayCreditWindow = 10;
 const autoplayRecentWindow = 100;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
+// Where video mode's autoplay picks come from, as recorded on each pick.
+const relatedVideosSource = "related_videos";
 
 // A track's title for the player: a video's long title is cut short at a
 // word, which a song's never needs.
@@ -367,6 +371,9 @@ export class Coordinator {
   private volume: number;
   private displayMode: DisplayMode = "default";
   private autoplayMode: AutoplayMode = "off";
+  // Video mode's own autoplay, of related videos; the music's is left as it
+  // is for when music comes back.
+  private videoAutoplay = false;
   private loopMode: LoopMode = "off";
   private transitionMode: TransitionMode = "none";
   private duckingMode: DuckingMode;
@@ -552,6 +559,7 @@ export class Coordinator {
       this.playbackSeconds = restored.playbackSeconds;
       this.listenedSeconds = restored.listenedSeconds ?? 0;
       this.autoplayMode = restored.autoplay;
+      this.videoAutoplay = restored.videoAutoplay ?? false;
       this.loopMode = restored.loopMode;
       this.transitionMode = restored.transitionMode;
       this.displayMode = restored.displayMode;
@@ -607,6 +615,7 @@ export class Coordinator {
     if (this.channelDefaultsApplied) {
       this.store.setSession(this.id, {
         autoplay: this.autoplayMode,
+        videoAutoplay: this.videoAutoplay,
         loopMode: this.loopMode,
         transitionMode: this.transitionMode,
         displayMode: this.displayMode,
@@ -710,6 +719,7 @@ export class Coordinator {
   private applyChannelDefaults(defaults: ChannelDefaults) {
     this.volume = defaults.volume ?? this.volume;
     this.autoplayMode = defaults.autoplay ?? this.autoplayMode;
+    this.videoAutoplay = defaults.videoAutoplay ?? this.videoAutoplay;
     this.loopMode = defaults.loopMode ?? this.loopMode;
     this.displayMode = defaults.displayMode ?? this.displayMode;
     this.transitionMode = defaults.transitionMode ?? this.transitionMode;
@@ -1130,6 +1140,7 @@ export class Coordinator {
       ...(this.videoMode
         ? {
             captions: this.captions,
+            autoplay: this.videoAutoplay ? "related videos" : "off",
             videoRequest: "not needed, video mode is on",
           }
         : {
@@ -1755,11 +1766,11 @@ export class Coordinator {
           ok: false as const,
           error: "Only the host can switch between music and video mode.",
         };
+      // Autoplay in video mode is its related videos, on or off.
+      const video = this.videoMode && patch.mode !== "music";
       if (
-        this.videoMode &&
-        patch.mode !== "music" &&
+        video &&
         (patch.displayMode !== undefined ||
-          patch.autoplay !== undefined ||
           patch.autoplayMode !== undefined ||
           patch.transitionMode !== undefined ||
           patch.duckingMode !== undefined)
@@ -1838,9 +1849,10 @@ export class Coordinator {
         ...patch,
         autoplayMode:
           patch.autoplayMode ??
-          (patch.autoplay === undefined
+          (patch.autoplay === undefined || video
             ? undefined
             : parseAutoplayMode(patch.autoplay)),
+        videoAutoplay: video ? patch.autoplay : undefined,
       });
       if (patch.mode === "video" && !this.videoMode) {
         const blocked = await this.switchMediaMode(userId, "video", "agent");
@@ -1873,6 +1885,7 @@ export class Coordinator {
         mode: this.mediaMode,
         displayMode: this.displayMode,
         autoplay: this.autoplayMode,
+        videoAutoplay: this.videoAutoplay,
         loopMode: this.loopMode,
         transitionMode: this.transitionMode,
         duckingMode: this.duckingMode,
@@ -2767,11 +2780,12 @@ export class Coordinator {
     return this.config.excludedUserIds.has(userId);
   }
 
-  // Video mode plays only what people queue.
+  // Video mode has its own autoplay, of related videos.
   // A live stream never ends, so autoplay waits for it to.
   private autoplayOn() {
     return (
-      !this.videoMode && this.autoplayMode !== "off" && !this.current?.live
+      (this.videoMode ? this.videoAutoplay : this.autoplayMode !== "off") &&
+      !this.current?.live
     );
   }
 
@@ -2831,6 +2845,8 @@ export class Coordinator {
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
     ].slice(-20);
+    // A related video says nothing about anyone's taste in music.
+    if (skipped.autoplaySources?.includes(relatedVideosSource)) return;
     this.rejectAutoplayArtist(skipped.artist);
     this.recommendations?.penalize(userId, skipped);
     if (skipped.automatic) this.rememberSkip(skipped, userId);
@@ -3375,8 +3391,19 @@ export class Coordinator {
       !this.autoplayHasRoom()
     )
       return;
-    if (this.autoplayMode === "related" && (!context || !seeds.length)) return;
-    if (this.autoplayMode === "huddle" && !this.recommendations) return;
+    if (this.videoMode && (!context || !seeds.some(isYoutubeVideoId))) return;
+    if (
+      !this.videoMode &&
+      this.autoplayMode === "related" &&
+      (!context || !seeds.length)
+    )
+      return;
+    if (
+      !this.videoMode &&
+      this.autoplayMode === "huddle" &&
+      !this.recommendations
+    )
+      return;
     const generation = this.autoplayGeneration;
     this.autoplayPending = true;
     this.queueRender();
@@ -3412,12 +3439,14 @@ export class Coordinator {
   ): Promise<boolean> {
     const startedAt = Date.now();
     // Settings can change the mode while a pick resolves; log the one that
-    // found it.
-    const mode = this.autoplayMode;
+    // found it. Video mode's related videos are its related mode.
+    const video = this.videoMode;
+    const mode = video ? "related" : this.autoplayMode;
     this.log.debug(
       {
         event: "autoplay_recommendation_started",
         mode,
+        video,
         seeds: seeds.length,
       },
       "Finding autoplay recommendation",
@@ -3455,7 +3484,26 @@ export class Coordinator {
           metadata?: TrackMetadata;
         }
       >();
-      if (mode === "related") {
+      if (video) {
+        const recommendations = await Promise.all(
+          seeds
+            .filter(isYoutubeVideoId)
+            .map((seed) => this.tracks.relatedVideos(seed).catch(() => [])),
+        );
+        for (const videos of recommendations)
+          videos.forEach((metadata, rank) => {
+            const candidate = ranked.get(metadata.sourceId) ?? {
+              id: metadata.sourceId,
+              seedCount: 0,
+              score: 0,
+              sources: [relatedVideosSource],
+              metadata,
+            };
+            candidate.seedCount++;
+            candidate.score += 1 / (rank + 1);
+            ranked.set(metadata.sourceId, candidate);
+          });
+      } else if (mode === "related") {
         const recommendations = await Promise.all(
           seeds.map((seed) => this.tracks.upNextIds(seed).catch(() => [])),
         );
@@ -5559,6 +5607,7 @@ export class Coordinator {
         volume: this.volume,
         displayMode: this.displayMode,
         autoplayMode: this.autoplayMode,
+        videoAutoplay: this.videoAutoplay,
         loopMode: this.loopMode,
         transitionMode: this.transitionMode,
         duckingMode: this.duckingMode,
@@ -5988,6 +6037,7 @@ export class Coordinator {
       hostId: this.hostId ?? null,
       volume: this.volume,
       autoplay: this.autoplayMode,
+      videoAutoplay: this.videoAutoplay,
       loopMode: this.loopMode,
       displayMode: this.displayMode,
       transitionMode: this.transitionMode,
@@ -6063,6 +6113,7 @@ export class Coordinator {
       await this.applySettings({
         displayMode: selected(state.display?.mode, displayModes),
         autoplayMode: selected(state.autoplay?.mode, autoplayModes),
+        videoAutoplay: videoAutoplaySelected(state.video_autoplay?.mode),
         loopMode: selected(state.loop?.mode, loopModes),
         transitionMode: selected(state.transition?.mode, transitionModes),
         duckingMode: selected(state.ducking?.mode, duckingModes),
@@ -6184,6 +6235,7 @@ export class Coordinator {
   private async applySettings(patch: {
     displayMode?: DisplayMode;
     autoplayMode?: AutoplayMode;
+    videoAutoplay?: boolean;
     loopMode?: LoopMode;
     transitionMode?: TransitionMode;
     duckingMode?: DuckingMode;
@@ -6192,11 +6244,12 @@ export class Coordinator {
     const changed: string[] = [];
     const { loopMode, anchorEnabled } = patch;
     // Video mode does not show the music's own settings, and leaves them
-    // as they are.
+    // as they are, and music mode does the same with video's autoplay.
     const { displayMode, autoplayMode, transitionMode, duckingMode } = this
       .videoMode
       ? {}
       : patch;
+    const { videoAutoplay } = this.videoMode ? patch : {};
     if (displayMode !== undefined && displayMode !== this.displayMode) {
       this.displayMode = displayMode;
       this.sendMedia({ type: "display_mode", mode: displayMode });
@@ -6208,6 +6261,12 @@ export class Coordinator {
       this.store.setSession(this.id, { autoplay: autoplayMode });
       if (autoplayMode === "off") await this.removeQueuedAutoplay();
       changed.push(`autoplay=${autoplayMode}`);
+    }
+    if (videoAutoplay !== undefined && videoAutoplay !== this.videoAutoplay) {
+      this.videoAutoplay = videoAutoplay;
+      this.store.setSession(this.id, { videoAutoplay });
+      if (!videoAutoplay) await this.removeQueuedAutoplay();
+      changed.push(`videoAutoplay=${videoAutoplay}`);
     }
     if (loopMode !== undefined && loopMode !== this.loopMode) {
       this.loopMode = loopMode;
@@ -6270,6 +6329,8 @@ export class Coordinator {
     if (fields.includes("settings")) {
       defaults.autoplay =
         selected(state.autoplay?.mode, autoplayModes) ?? this.autoplayMode;
+      defaults.videoAutoplay =
+        videoAutoplaySelected(state.video_autoplay?.mode) ?? this.videoAutoplay;
       defaults.loopMode =
         selected(state.loop?.mode, loopModes) ?? this.loopMode;
       defaults.displayMode =
@@ -6373,7 +6434,8 @@ export class Coordinator {
   // The idle player's one button: turn on Huddle mix and let it pick, with
   // a popular song as the backstop when the mix has nothing to draw on.
   private async playSomething(interaction: Interaction) {
-    // Video mode has no autoplay; it suggests from the user's Jellyfin.
+    // Video mode's autoplay needs a video to follow; this suggests from the
+    // user's Jellyfin instead.
     if (this.videoMode) {
       if (!(await this.require(interaction, "add"))) return;
       if (this.jellyfinUi?.hasServers(interaction.userId))
@@ -7169,10 +7231,9 @@ export class Coordinator {
       "Media mode changed",
     );
     this.cancelReprepares();
-    if (mode === "video") {
-      this.cancelAutoplay();
-      await this.closeVideoRequest("Video mode is on.");
-    }
+    // Each mode's autoplay picks for itself, so the other's queued pick goes.
+    await this.removeQueuedAutoplay();
+    if (mode === "video") await this.closeVideoRequest("Video mode is on.");
     this.sendMediaSettings();
     const current = this.current;
     if (current) {
