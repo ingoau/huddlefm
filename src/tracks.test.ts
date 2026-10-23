@@ -17,6 +17,7 @@ import {
   embeddedArtworkPath,
   extractEmbeddedArtwork,
   extractorFailure,
+  isBotCheck,
   integratedLoudness as summaryLoudness,
   isExpectedTrackFailure,
   levelingGain,
@@ -463,6 +464,20 @@ test("says a video needs a login, but not for YouTube's bot check", () => {
   );
   expect(bot.message).not.toBe("That video needs a login");
   expect(isExpectedTrackFailure(bot)).toBe(false);
+});
+
+test("knows YouTube's bot check, to retry it", () => {
+  expect(
+    isBotCheck(
+      extractorFailure(
+        "ERROR: [youtube] xD-IQaxHcE4: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication.",
+      ),
+    ),
+  ).toBe(true);
+  expect(
+    isBotCheck(extractorFailure("ERROR: [youtube] abc: Video unavailable")),
+  ).toBe(false);
+  expect(isBotCheck(new Error("not a bot"))).toBe(false);
 });
 
 test("still reports unexpected extractor faults, without the source ID", () => {

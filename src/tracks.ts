@@ -3129,7 +3129,41 @@ async function runJson(command: string[]) {
   return JSON.parse(stdout);
 }
 
+// YouTube's bot check is passing: the same request a moment later mostly gets
+// through, so an extraction it stops is tried again before it fails.
+const botCheckRetries = 2;
+const botCheckPause = 1_500;
+
 async function run(command: string[], timeout: number, signal?: AbortSignal) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await runOnce(command, timeout, signal);
+    } catch (error) {
+      if (
+        signal?.aborted ||
+        command[0] !== "yt-dlp" ||
+        attempt >= botCheckRetries ||
+        !isBotCheck(error)
+      )
+        throw error;
+      log.warn(
+        { event: "bot_check_retry", attempt: attempt + 1 },
+        "Retrying extraction after YouTube's bot check",
+      );
+      await Bun.sleep(botCheckPause * (attempt + 1));
+    }
+  }
+}
+
+export function isBotCheck(error: unknown) {
+  return /not a bot/i.test(trackFailureDetail(error) ?? "");
+}
+
+async function runOnce(
+  command: string[],
+  timeout: number,
+  signal?: AbortSignal,
+) {
   if (signal?.aborted) throw new TrackError("Track preparation cancelled");
   const process = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => process.kill(), timeout);
