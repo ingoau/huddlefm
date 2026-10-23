@@ -807,10 +807,8 @@ test("a shuffled queue survives a restore", async () => {
 test("offers shuffle only when there is something to shuffle", async () => {
   const result = setup();
   await result.coordinator.start();
-  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
 
   Reflect.set(result.coordinator, "queue", [queued("a")]);
-  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
   expect(queueDialog(result.coordinator, "host")).not.toContain(
     "shuffle_queue",
   );
@@ -820,15 +818,19 @@ test("offers shuffle only when there is something to shuffle", async () => {
     queued("a"),
     queued("auto", { automatic: true }),
   ]);
-  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+  expect(queueDialog(result.coordinator, "host")).not.toContain(
+    "shuffle_queue",
+  );
 
   Reflect.set(result.coordinator, "queue", [queued("a"), queued("b")]);
-  expect(playerBlocks(result.coordinator)).toContain("shuffle_queue");
   expect(queueDialog(result.coordinator, "host")).toContain("shuffle_queue");
-  // The dialog gates its controls on the capability; the player does not.
+  expect(queueDialog(result.coordinator, "host")).toContain("clear_queue");
   expect(queueDialog(result.coordinator, "guest")).not.toContain(
     "shuffle_queue",
   );
+  // Shuffle and clear live only in the queue dialog.
+  expect(playerBlocks(result.coordinator)).not.toContain("shuffle_queue");
+  expect(playerBlocks(result.coordinator)).not.toContain("clear_queue");
   await result.coordinator.endFromSlack();
 });
 

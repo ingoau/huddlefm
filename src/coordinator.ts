@@ -4894,7 +4894,7 @@ export class Coordinator {
   }
 
   private async shuffleQueue(interaction: Interaction) {
-    // The player message carries no view metadata; the full queue dialog does.
+    // Older player messages carry no view metadata; the queue dialog does.
     if (interaction.metadata && !this.validQueueView(interaction))
       return this.notice(
         interaction.userId,
@@ -4940,11 +4940,16 @@ export class Coordinator {
   }
 
   private async clear(interaction: Interaction) {
+    if (interaction.metadata && !this.validQueueView(interaction))
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
     if (!(await this.require(interaction, "clear"))) return;
-    await this.clearQueue(interaction.userId);
+    await this.clearQueue(interaction.userId, interaction);
   }
 
-  private async clearQueue(userId: string) {
+  private async clearQueue(userId: string, interaction?: Interaction) {
     this.cancelAutoplay();
     const cleared = this.queue;
     const count = cleared.length;
@@ -4954,7 +4959,7 @@ export class Coordinator {
       this.store.removeTrack(entry.id);
     }
     await this.releaseMedia(...cleared);
-    this.queueChanged();
+    this.queueChanged(interaction);
     this.audit.record("queue.cleared", userId, { sessionId: this.id, count });
     this.notifyIntegrations("queue.cleared", { count });
     this.store.incrementUsage("cleared");
@@ -5349,9 +5354,26 @@ export class Coordinator {
       blocks: this.queue.length
         ? [
             ...when(
-              manages && this.shufflableCount() > 1,
-              actions("queue_shuffle", [
-                button("shuffle_queue", plain("Shuffle"), { value: this.id }),
+              (manages && this.shufflableCount() > 1) ||
+                this.can(userId, "clear"),
+              actions("queue_tools", [
+                ...when(
+                  manages && this.shufflableCount() > 1,
+                  button("shuffle_queue", plain("Shuffle"), {
+                    value: this.id,
+                  }),
+                ),
+                ...when(
+                  this.can(userId, "clear"),
+                  button("clear_queue", plain("Clear"), {
+                    value: this.id,
+                    confirm: confirm(
+                      "Clear queue?",
+                      "This removes every upcoming track.",
+                      "Clear",
+                    ),
+                  }),
+                ),
               ]),
             ),
             ...this.queue.flatMap((track, index) => {
@@ -7115,18 +7137,6 @@ export class Coordinator {
           ]),
           actions(`actions_${id}`, [
             button("view_full_queue", plain("Queue"), { value }),
-            ...when(
-              this.shufflableCount() > 1,
-              button("shuffle_queue", plain("Shuffle"), { value }),
-            ),
-            button("clear_queue", plain("Clear"), {
-              value,
-              confirm: confirm(
-                "Clear queue?",
-                "This removes every upcoming track.",
-                "Clear",
-              ),
-            }),
             ...when(
               !this.hostId,
               button("claim_host", plain("Take over"), { value }),
