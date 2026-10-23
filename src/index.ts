@@ -247,10 +247,12 @@ function canvasIntegrations() {
   if (!config.canvasSections.includes("integrations"))
     return Promise.resolve([]);
   return Promise.all(
-    [...config.integrationUserIds].map(async (id) => ({
-      id,
-      name: await slackApp.userName(id),
-    })),
+    [...config.integrationUserIds]
+      .filter((id) => id !== "*")
+      .map(async (id) => ({
+        id,
+        name: await slackApp.userName(id),
+      })),
   );
 }
 

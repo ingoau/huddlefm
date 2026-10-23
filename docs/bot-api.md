@@ -2,9 +2,9 @@
 
 Allowlisted Slack users and bots can control a HuddleFM session by sending JSON in a DM to the HuddleFM **user**. The session host must approve each request. Other Slack apps must be able to DM that user.
 
-Set `INTEGRATION_USER_IDS` to a comma- or space-separated list of Slack user IDs. Senders who are not on the list are ignored with no reply.
+Set `INTEGRATION_USER_IDS` to a comma- or space-separated list of Slack user IDs. Senders who are not on the list are ignored with no reply. Set it to `*` to let any Slack user or app integrate; the host still approves each request.
 
-When `SLACK_CANVAS_ID` is also set, the stats canvas lists each integration by name and user ID, without mentioning it. Leave `integrations` out of `CANVAS_SECTIONS` to hide the list.
+When `SLACK_CANVAS_ID` is also set, the stats canvas lists each integration by name and user ID, without mentioning it (a `*` entry is not listed). Leave `integrations` out of `CANVAS_SECTIONS` to hide the list.
 
 ## Request control
 

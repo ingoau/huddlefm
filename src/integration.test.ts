@@ -157,6 +157,11 @@ test("allowlists user or bot ids", () => {
   expect(isAllowlisted(allowed, "U999", "B000")).toBe(false);
 });
 
+test("allowlists every sender with a wildcard", () => {
+  expect(isAllowlisted(new Set(["*"]), "U999")).toBe(true);
+  expect(isAllowlisted(new Set(["*"]), "U999", "B000")).toBe(true);
+});
+
 test("maps agent errors and event groups", () => {
   expect(mapAgentError("Join the huddle before using the player.")).toBe(
     "not_granted",
