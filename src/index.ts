@@ -247,10 +247,12 @@ function canvasIntegrations() {
   if (!config.canvasSections.includes("integrations"))
     return Promise.resolve([]);
   return Promise.all(
-    [...config.integrationUserIds].map(async (id) => ({
-      id,
-      name: await slackApp.userName(id),
-    })),
+    [...config.integrationUserIds]
+      .filter((id) => id !== "*")
+      .map(async (id) => ({
+        id,
+        name: await slackApp.userName(id),
+      })),
   );
 }
 
@@ -286,6 +288,7 @@ async function handleIntegrationDm(event: {
   text: string;
 }) {
   if (event.userId === botUserId) return;
+  if (config.excludedUserIds.has(event.userId)) return;
   if (!isAllowlisted(config.integrationUserIds, event.userId, event.botId))
     return;
   const reply = (body: Record<string, unknown>) =>

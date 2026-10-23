@@ -89,7 +89,11 @@ export function isAllowlisted(
   userId: string,
   botId?: string,
 ) {
-  return allowed.has(userId) || Boolean(botId && allowed.has(botId));
+  return (
+    allowed.has("*") ||
+    allowed.has(userId) ||
+    Boolean(botId && allowed.has(botId))
+  );
 }
 
 export function sessionMatchesChannel(
