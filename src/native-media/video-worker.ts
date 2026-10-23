@@ -173,6 +173,8 @@ class Share {
       !frame ||
       !this.progressBar ||
       this.player.live ||
+      // The clock can reach the next entry before its video does.
+      this.player.key !== this.key() ||
       position === undefined ||
       !duration
     )
