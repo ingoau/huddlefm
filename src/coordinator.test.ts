@@ -2296,6 +2296,7 @@ test("the configured manager can save and clear the channel's defaults", async (
     transitionMode: "none",
     duckingMode: "gentle",
     anchorEnabled: true,
+    progressBar: true,
     permissions: ["add", "remove-own"],
   });
   expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });

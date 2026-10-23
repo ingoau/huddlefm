@@ -83,6 +83,7 @@ export type ChannelDefaults = {
   transitionMode?: TransitionMode;
   duckingMode?: DuckingMode;
   anchorEnabled?: boolean;
+  progressBar?: boolean;
   permissions?: Capability[];
 };
 
@@ -107,6 +108,8 @@ export function parseChannelDefaults(
   if (duckingMode) defaults.duckingMode = duckingMode;
   if (typeof saved.anchorEnabled === "boolean")
     defaults.anchorEnabled = saved.anchorEnabled;
+  if (typeof saved.progressBar === "boolean")
+    defaults.progressBar = saved.progressBar;
   if (Array.isArray(saved.permissions))
     defaults.permissions = capabilities.filter((capability) =>
       (saved.permissions as unknown[]).includes(capability),
@@ -292,6 +295,7 @@ export type SavedSession = {
   anchorEnabled: boolean;
   mediaMode: MediaMode;
   captions: boolean;
+  progressBar?: boolean;
   playbackSeconds: number;
   listenedSeconds: number;
   watchedSeconds: number;
@@ -367,6 +371,7 @@ const sessionColumns = {
   anchorEnabled: "anchor_enabled",
   mediaMode: "media_mode",
   captions: "captions",
+  progressBar: "progress_bar",
   watchedSeconds: "watched_seconds",
 };
 
@@ -429,6 +434,7 @@ const addedColumns = [
   ["tracks", "live", "INTEGER NOT NULL DEFAULT 0"],
   // What a video's sound is turned by to reach the loudness target.
   ["tracks", "gain_db", "REAL"],
+  ["sessions", "progress_bar", "INTEGER NOT NULL DEFAULT 1"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -1040,6 +1046,7 @@ export class Store {
       anchorEnabled?: boolean;
       mediaMode?: MediaMode;
       captions?: boolean;
+      progressBar?: boolean;
       watchedSeconds?: number;
     },
   ) {
@@ -1432,6 +1439,7 @@ export class Store {
           anchorEnabled: Boolean(row.anchor_enabled),
           mediaMode: modeOf(mediaModes, row.media_mode) ?? "music",
           captions: Boolean(row.captions),
+          progressBar: Boolean(row.progress_bar ?? 1),
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
           watchedSeconds: Number(row.watched_seconds ?? 0),

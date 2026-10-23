@@ -434,6 +434,24 @@ test("captions are off by default, last the session, and say when a video has no
   await result.coordinator.endFromSlack();
 });
 
+test("the progress bar is on by default, and Settings turns it off for the session", async () => {
+  const result = await setup();
+  await saveMode(result.coordinator, "video");
+  expect(result.media).toContainEqual({ type: "progress_bar", on: true });
+  await press(result.coordinator, "open_settings");
+  const view = result.modals.at(-1)![1] as { blocks: Block[] };
+  expect(view.blocks.map((block) => block.block_id)).toContain("progress_bar");
+  await press(result.coordinator, "save_settings", {
+    type: "view_submission",
+    state: { progress_bar: { enabled: { selected_options: [] } } },
+  });
+  expect(result.media.at(-1)).toEqual({ type: "progress_bar", on: false });
+  expect(
+    result.store.resumableSessions(Date.now(), 60_000).sessions[0],
+  ).toMatchObject({ progressBar: false });
+  await result.coordinator.endFromSlack();
+});
+
 test("Jump to offers the video's chapters and a time, and seeks there", async () => {
   const result = await setup();
   await saveMode(result.coordinator, "video");

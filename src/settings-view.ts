@@ -365,6 +365,7 @@ export type SettingsViewOptions = {
     transitionMode: TransitionMode;
     duckingMode: DuckingMode;
     anchorEnabled: boolean;
+    progressBar: boolean;
     allowed: ReadonlySet<string>;
   };
   user: UserSettingsView;
@@ -566,6 +567,19 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
           duckingDescriptions,
         ),
         { hint: "Lower the music while someone is speaking" },
+      ),
+    ),
+    ...when(
+      access.configure && !music,
+      input(
+        "progress_bar",
+        "Progress bar",
+        toggle(
+          "enabled",
+          "Show a progress bar on videos",
+          checked(form.progress_bar?.enabled) ?? session.progressBar,
+        ),
+        { optional: true },
       ),
     ),
     ...when(

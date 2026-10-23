@@ -1,6 +1,7 @@
 // The video card, the screen share and their encoders, off the audio thread.
 // VideoThread in video-thread.ts starts this worker and describes the
 // messages.
+import { ProgressBarOverlay } from "./progress-bar.ts";
 import { UnitRing } from "./unit-ring.ts";
 import { VideoCard } from "./video-card.ts";
 import { VideoFeed, wideCardInput } from "./video-feed.ts";
@@ -43,6 +44,8 @@ function sink(units: UnitRing, stream: string) {
  */
 class Share {
   private on = false;
+  private progressBar = true;
+  private overlay: ProgressBarOverlay;
   private showing: "card" | "video" | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   readonly player: VideoPlayer;
@@ -56,6 +59,7 @@ class Share {
     units: UnitRing,
   ) {
     const epoch = performance.now();
+    this.overlay = new ProgressBarOverlay(format);
     const write = sink(units, "share");
     const failed = (error: string) =>
       send({
@@ -114,7 +118,12 @@ class Share {
     } else {
       this.show(undefined);
       this.player.release();
+      this.overlay.clear();
     }
+  }
+
+  setProgressBar(on: boolean) {
+    this.progressBar = on;
   }
 
   requestKeyframe() {
@@ -137,6 +146,11 @@ class Share {
     return Number.isNaN(key) ? undefined : key;
   }
 
+  private duration() {
+    const duration = this.clock[1]!;
+    return Number.isNaN(duration) ? undefined : duration;
+  }
+
   private audioStart() {
     const start = this.clock[3]!;
     return Number.isNaN(start) ? undefined : start;
@@ -146,15 +160,32 @@ class Share {
    * The video's frame for where the audio is. A live stream's picture is
    * only lined up, and so only shown, by where the audio's timestamps start.
    */
-  private frame() {
+  private videoFrame() {
     return this.player.frame(this.position(), this.key(), this.audioStart());
+  }
+
+  /** The video's frame, with the progress bar over it when that is on. */
+  private frame() {
+    const frame = this.videoFrame();
+    const position = this.position();
+    const duration = this.duration();
+    if (
+      !frame ||
+      !this.progressBar ||
+      this.player.live ||
+      position === undefined ||
+      !duration
+    )
+      return frame;
+    return this.overlay.over(frame, position / duration);
   }
 
   // Keeps the decoder going while the card is up, so the video can take over
   // as soon as its first frame is ready.
   private check() {
     if (!this.on) return;
-    if (this.player.key !== undefined && this.showing !== "video") this.frame();
+    if (this.player.key !== undefined && this.showing !== "video")
+      this.videoFrame();
     const video =
       this.player.ready &&
       this.player.key !== undefined &&
@@ -254,6 +285,8 @@ self.addEventListener("message", (event) => {
       return share.player.setSource(message.source);
     case "captions":
       return share.player.setCaptions(message.on);
+    case "progress_bar":
+      return share.setProgressBar(message.on);
     case "share_keyframe":
       return share.requestKeyframe();
   }

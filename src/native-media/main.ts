@@ -342,6 +342,10 @@ function handle(message: Record<string, any>) {
     card?.setCaptions(Boolean(message.on));
     return;
   }
+  if (message.type === "progress_bar") {
+    card?.setProgressBar(message.on !== false);
+    return;
+  }
   if (message.type === "lyrics") {
     handleLyrics(message);
     return;
