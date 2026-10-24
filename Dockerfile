@@ -1,11 +1,14 @@
+# syntax=docker/dockerfile:1
 FROM denoland/deno:bin AS deno
 
 # The BgUtils proof-of-origin token server, built on the same base as the app
 # so its native canvas module matches the runtime's libraries.
 FROM oven/bun:debian AS pot-server
+# Changing the version needs the release tarball's new checksum below.
 ARG BGUTIL_VERSION=2.0.2
 COPY --from=deno /deno /usr/local/bin/deno
-ADD https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/${BGUTIL_VERSION}.tar.gz /tmp/bgutil.tar.gz
+ADD --checksum=sha256:1f2ae9ec39405b8e80397dfc2551f58deed09d8dff4b2b8fbc314df8e091c0a1 \
+  https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/${BGUTIL_VERSION}.tar.gz /tmp/bgutil.tar.gz
 RUN mkdir /bgutil \
   && tar -xzf /tmp/bgutil.tar.gz -C /bgutil --strip-components=1 \
   && cd /bgutil/server \

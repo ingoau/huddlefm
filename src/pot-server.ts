@@ -52,12 +52,35 @@ export class PoTokenServer {
     await child.exited;
   }
 
+  /** Runs the server until it exits, then schedules the next start. */
   private async launch() {
     if (this.closing) return;
+    const startedAt = Date.now();
+    try {
+      const code = await this.run(startedAt);
+      if (this.closing) return;
+      log.warn(
+        { event: "exited", code, restartInMs: this.restartDelay },
+        "Proof-of-origin token server exited; restarting",
+      );
+    } catch (error) {
+      // Not even started, as when deno or the server is missing.
+      if (this.closing) return;
+      log.error(
+        { event: "start_failed", err: error, restartInMs: this.restartDelay },
+        "Could not start proof-of-origin token server; retrying",
+      );
+    }
+    if (Date.now() - startedAt > healthyMs)
+      this.restartDelay = firstRestartDelayMs;
+    this.restartTimer = setTimeout(() => void this.launch(), this.restartDelay);
+    this.restartDelay = Math.min(this.restartDelay * 2, maxRestartDelayMs);
+  }
+
+  private async run(startedAt: number) {
     // A fresh port each time, in case another process took the last one.
     this.port = await freePort();
     if (this.closing) return;
-    const startedAt = Date.now();
     const child = Bun.spawn(
       [
         "deno",
@@ -92,15 +115,7 @@ export class PoTokenServer {
     void this.waitForReady(child, startedAt);
     const code = await child.exited;
     if (this.process === child) this.process = undefined;
-    if (this.closing) return;
-    if (Date.now() - startedAt > healthyMs)
-      this.restartDelay = firstRestartDelayMs;
-    log.warn(
-      { event: "exited", code, restartInMs: this.restartDelay },
-      "Proof-of-origin token server exited; restarting",
-    );
-    this.restartTimer = setTimeout(() => void this.launch(), this.restartDelay);
-    this.restartDelay = Math.min(this.restartDelay * 2, maxRestartDelayMs);
+    return code;
   }
 
   private async waitForReady(

@@ -17,10 +17,25 @@ const header = "# Netscape HTTP Cookie File\n";
  * them are dropped rather than kept and sent back.
  */
 export function accountCookies(text: string) {
-  const lines = text
-    .split(/\r?\n/)
-    .filter((line) => accountDomain.test(line.split("\t")[0] ?? ""));
-  return lines.length ? `${header}${lines.join("\n")}\n` : undefined;
+  return serialize(parse(text));
+}
+
+/** A cookies file's YouTube and Google lines, by domain, path and name. */
+function parse(text: string) {
+  const cookies = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const fields = line.split("\t");
+    if (fields.length < 7 || !accountDomain.test(fields[0]!)) continue;
+    const domain = fields[0]!.replace(/^#HttpOnly_/i, "").toLowerCase();
+    cookies.set([domain, fields[2], fields[5]].join("\t"), line);
+  }
+  return cookies;
+}
+
+function serialize(cookies: Map<string, string>) {
+  return cookies.size
+    ? `${header}${[...cookies.values()].join("\n")}\n`
+    : undefined;
 }
 
 /**
@@ -85,16 +100,29 @@ export class YouTubeCookies {
     }
   }
 
+  /**
+   * Applies what one run changed to the latest cookies, rather than replacing
+   * them with its copy: a long download finishing after shorter runs must not
+   * bring back cookies YouTube has since rotated.
+   */
   private async keep(file: string, before: string) {
-    let after: string | undefined;
+    let after: Map<string, string>;
     try {
-      after = accountCookies(await Bun.file(file).text());
+      after = parse(await Bun.file(file).text());
     } catch {
       return;
     }
-    if (!after || after === before) return;
-    this.text = after;
-    this.saving = this.saving.then(() => this.save());
+    const started = parse(before);
+    const latest = parse(this.text ?? "");
+    for (const [key, line] of after)
+      if (started.get(key) !== line) latest.set(key, line);
+    for (const key of started.keys()) if (!after.has(key)) latest.delete(key);
+    const text = serialize(latest);
+    // A run that lost every cookie, as when yt-dlp failed to write them,
+    // leaves the account as it was.
+    if (!text || text === this.text) return;
+    this.text = text;
+    this.saving = this.saving.then(() => this.save()).catch(() => {});
     await this.saving;
   }
 
@@ -108,7 +136,7 @@ export class YouTubeCookies {
       await rename(temporary, this.path);
       return;
     } catch {
-      await rm(temporary, { force: true });
+      await rm(temporary, { force: true }).catch(() => {});
     }
     // A file mounted on its own cannot be replaced, only written.
     try {
