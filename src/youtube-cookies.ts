@@ -32,6 +32,15 @@ function parse(text: string) {
   return cookies;
 }
 
+/**
+ * Whether two lines hold the same cookie. yt-dlp drops the `#HttpOnly_`
+ * prefix when it saves, which changes nothing it sends.
+ */
+function same(a: string | undefined, b: string | undefined) {
+  const plain = (line?: string) => line?.replace(/^#HttpOnly_/i, "");
+  return plain(a) === plain(b);
+}
+
 function serialize(cookies: Map<string, string>) {
   return cookies.size
     ? `${header}${[...cookies.values()].join("\n")}\n`
@@ -114,9 +123,13 @@ export class YouTubeCookies {
     }
     const started = parse(before);
     const latest = parse(this.text ?? "");
+    // Only where no other run has changed the cookie since this one started.
+    const untouched = (key: string) => same(latest.get(key), started.get(key));
     for (const [key, line] of after)
-      if (started.get(key) !== line) latest.set(key, line);
-    for (const key of started.keys()) if (!after.has(key)) latest.delete(key);
+      if (!same(line, started.get(key)) && untouched(key))
+        latest.set(key, line);
+    for (const key of started.keys())
+      if (!after.has(key) && untouched(key)) latest.delete(key);
     const text = serialize(latest);
     // A run that lost every cookie, as when yt-dlp failed to write them,
     // leaves the account as it was.

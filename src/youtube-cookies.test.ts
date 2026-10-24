@@ -126,3 +126,29 @@ test("a run finishing late keeps cookies rotated meanwhile", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a run that only drops HttpOnly prefixes changes nothing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cookies-test-"));
+  try {
+    const path = join(directory, "cookies.txt");
+    await Bun.write(path, line("#HttpOnly_.youtube.com", "SID", "old"));
+    const cookies = new YouTubeCookies(path);
+    await cookies.initialize();
+    let finishStale!: () => void;
+    const stale = cookies.use(async (args) => {
+      await new Promise<void>((resolve) => (finishStale = resolve));
+      await Bun.write(args[1]!, line(".youtube.com", "SID", "old"));
+      return { stderr: "" };
+    });
+    while (!finishStale) await Bun.sleep(1);
+    await cookies.use(async (args) => {
+      await Bun.write(args[1]!, line(".youtube.com", "SID", "new"));
+      return { stderr: "" };
+    });
+    finishStale();
+    await stale;
+    expect(await Bun.file(path).text()).toContain("\tSID\tnew");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

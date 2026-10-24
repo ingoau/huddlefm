@@ -172,7 +172,7 @@ Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`.
 
 YouTube sometimes stops downloads with "Sign in to confirm you're not a bot", more often from datacenter addresses. The image includes the [BgUtils](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) proof-of-origin token server, which the bot starts once and keeps running, so yt-dlp's requests carry the tokens a browser's would. It reaches YouTube only through the bot's public-network proxy. Set `BGUTIL_SERVER_HOME` empty to turn it off.
 
-If the bot check keeps coming back, or to play age-restricted videos, sign yt-dlp in to a YouTube account with its cookies:
+If the bot check keeps coming back, sign yt-dlp in to a YouTube account with its cookies:
 
 1. Use a separate Google account made for the bot, not your own: Google can lock accounts used for automated downloads.
 2. In a private browser window, sign in to that account on youtube.com, then open `https://www.youtube.com/robots.txt` in the same tab.
