@@ -3,8 +3,10 @@ import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { logger } from "./logger.ts";
 import { type CachedMedia, MediaCache } from "./media-cache.ts";
+import { PoTokenServer } from "./pot-server.ts";
 import { assertPublicUrl, PublicNetworkProxy } from "./public-proxy.ts";
 import type { StreamRelay } from "./stream-relay.ts";
+import { YouTubeCookies } from "./youtube-cookies.ts";
 import {
   captionsPath,
   chaptersFrom,
@@ -492,6 +494,8 @@ export class TrackCatalog {
     TrackMetadata | CollectionReference | string
   >();
   private proxy?: PublicNetworkProxy;
+  private tokens?: PoTokenServer;
+  private cookies?: YouTubeCookies;
   private activePreparations = 0;
   private transitions = new Map<string, TransitionData>();
   private extractions = new Map<string, { info: string; expiresAt: number }>();
@@ -525,6 +529,10 @@ export class TrackCatalog {
       mediaCacheDirectory?: string;
       video?: VideoLimits;
       videoCacheDirectory?: string;
+      /** BgUtils' `server` directory, to run its token server from. */
+      potServerHome?: string;
+      /** A YouTube account's cookies, to sign yt-dlp in with. */
+      youtubeCookiesFile?: string;
     },
     private loudness?: LoudnessStore,
     private relay?: StreamRelay,
@@ -547,6 +555,10 @@ export class TrackCatalog {
       },
       "mkv",
     );
+    if (limits.potServerHome)
+      this.tokens = new PoTokenServer(limits.potServerHome);
+    if (limits.youtubeCookiesFile)
+      this.cookies = new YouTubeCookies(limits.youtubeCookiesFile);
   }
 
   /** What video mode allows. */
@@ -576,6 +588,9 @@ export class TrackCatalog {
     // What a restart interrupted is never finished.
     await rm(this.videoStaging, { recursive: true, force: true });
     this.proxy = await PublicNetworkProxy.start();
+    // Extractions run without tokens until the server is up.
+    this.tokens?.start();
+    await this.cookies?.initialize();
     try {
       await this.music.initialize();
       log.info(
@@ -590,6 +605,7 @@ export class TrackCatalog {
 
   async close() {
     this.closing.abort();
+    await this.tokens?.close();
     await this.proxy?.close();
     this.proxy = undefined;
     log.info({ event: "closed" }, "Track catalog closed");
@@ -786,8 +802,7 @@ export class TrackCatalog {
       this.validate(tracks[0]!, video);
       return urlResolved(tracks[0]!, startedAt);
     }
-    const metadata = await runJson([
-      ...this.extractor(),
+    const metadata = await this.extractJson([
       "--dump-single-json",
       "--skip-download",
       "--no-playlist",
@@ -1402,9 +1417,8 @@ export class TrackCatalog {
     const metadata = record(
       JSON.parse(
         (
-          await run(
+          await this.extract(
             [
-              ...this.extractor(),
               "--dump-single-json",
               "--skip-download",
               "--no-playlist",
@@ -1614,9 +1628,8 @@ export class TrackCatalog {
       await mkdir(directory, { recursive: true });
       const infoPath = `${directory}/extraction.json`;
       await writeFile(infoPath, JSON.stringify(metadata));
-      const { stdout } = await run(
+      const { stdout } = await this.extract(
         [
-          ...this.extractor(),
           "--load-info-json",
           infoPath,
           "--format",
@@ -1845,8 +1858,8 @@ export class TrackCatalog {
     if (!result) {
       try {
         result = await timed("download", () =>
-          run(
-            [...this.extractor(), ...download, "--", track.canonicalUrl],
+          this.extract(
+            [...download, "--", track.canonicalUrl],
             180_000,
             signal,
           ),
@@ -1860,9 +1873,8 @@ export class TrackCatalog {
           "Retrying track download with embedded player",
         );
         result = await timed("download_retry", () =>
-          run(
+          this.extract(
             [
-              ...this.extractor(),
               "--extractor-args",
               "youtube:player_client=web_embedded",
               ...download,
@@ -2028,8 +2040,8 @@ export class TrackCatalog {
     const infoPath = `${directory}/extraction-${entryId}.json`;
     try {
       await writeFile(infoPath, info);
-      return await run(
-        [...this.extractor(), "--load-info-json", infoPath, ...download],
+      return await this.extract(
+        ["--load-info-json", infoPath, ...download],
         180_000,
         signal,
       );
@@ -2128,9 +2140,8 @@ export class TrackCatalog {
     const metadata = record(
       JSON.parse(
         (
-          await run(
+          await this.extract(
             [
-              ...this.extractor(),
               "--dump-single-json",
               "--skip-download",
               "--no-playlist",
@@ -2207,8 +2218,8 @@ export class TrackCatalog {
     let result: { stdout: string } | undefined;
     try {
       await writeFile(infoPath, JSON.stringify(metadata));
-      result = await run(
-        [...this.extractor(), "--load-info-json", infoPath, ...download],
+      result = await this.extract(
+        ["--load-info-json", infoPath, ...download],
         600_000,
         signal,
       );
@@ -2228,8 +2239,8 @@ export class TrackCatalog {
     }
     if (!result)
       try {
-        result = await run(
-          [...this.extractor(), ...download, "--", source.url],
+        result = await this.extract(
+          [...download, "--", source.url],
           600_000,
           signal,
         );
@@ -2241,9 +2252,8 @@ export class TrackCatalog {
           { event: "video_download_retry", entryId },
           "Retrying video download with embedded player",
         );
-        result = await run(
+        result = await this.extract(
           [
-            ...this.extractor(),
             "--extractor-args",
             "youtube:player_client=web_embedded",
             ...download,
@@ -2424,7 +2434,37 @@ export class TrackCatalog {
   }
 
   private extractor() {
-    return ["yt-dlp", "--force-ipv4", "--proxy", this.proxyUrl];
+    return [
+      "yt-dlp",
+      "--force-ipv4",
+      "--proxy",
+      this.proxyUrl,
+      ...this.tokenArguments(),
+    ];
+  }
+
+  /** Runs yt-dlp, signed in to YouTube when there are cookies. */
+  private extract(args: string[], timeout: number, signal?: AbortSignal) {
+    const command = (account: string[]) => [
+      ...this.extractor(),
+      ...account,
+      ...args,
+    ];
+    return this.cookies
+      ? this.cookies.use((account) => run(command(account), timeout, signal))
+      : run(command([]), timeout, signal);
+  }
+
+  private async extractJson(args: string[]) {
+    return JSON.parse((await this.extract(args, 30_000)).stdout);
+  }
+
+  /** Where yt-dlp's BgUtils plugin gets YouTube's proof-of-origin tokens. */
+  private tokenArguments() {
+    const url = this.tokens?.url;
+    return url
+      ? ["--extractor-args", `youtubepot-bgutilhttp:base_url=${url}`]
+      : [];
   }
 
   /** The link a search result stands for, when it is one. */
@@ -3122,11 +3162,6 @@ export function parseNavidromeShareInfo(html: string) {
   } catch {
     return;
   }
-}
-
-async function runJson(command: string[]) {
-  const { stdout } = await run(command, 30_000);
-  return JSON.parse(stdout);
 }
 
 // YouTube's bot check is passing: the same request a moment later mostly gets

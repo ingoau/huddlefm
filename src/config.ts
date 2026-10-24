@@ -153,6 +153,9 @@ export function loadConfig() {
       30,
     ),
     video: parseVideoLimits(process.env),
+    // The image sets this; empty turns proof-of-origin tokens off.
+    potServerHome: optionalText(process.env.BGUTIL_SERVER_HOME),
+    youtubeCookiesFile: optionalText(process.env.YOUTUBE_COOKIES_FILE),
     aloneMs: Number(process.env.ALONE_TIMEOUT_MS ?? 120_000),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
