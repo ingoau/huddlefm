@@ -100,6 +100,11 @@ type LineItem = {
   shown: Spring;
   bright: number;
   active: boolean;
+  /**
+   * When the timed text moves, in ms: syllables sweep, words rise and long
+   * ones glow. Before and after, the line looks the same whatever the time.
+   */
+  moves: { from: number; to: number };
   canvas?: Canvas;
   blurred?: Canvas;
   contentKey?: string;
@@ -195,6 +200,10 @@ export class LyricsView {
   private sprite: Canvas | undefined;
   /** How much of the sprite the last text was drawn into. */
   private spriteUsed = { width: 0, height: 0 };
+  /** Something moved, or snapped, since the last draw. */
+  private moved = true;
+  /** What of the drawing changed with the time at the last draw. */
+  private drawnTimes: string | undefined;
   readonly synced: boolean;
 
   /**
@@ -234,6 +243,15 @@ export class LyricsView {
             item.shown.settled &&
             (item.bright === 0 || item.bright === 1))),
     );
+  }
+
+  /**
+   * Whether drawing now would come out different from the last draw: the
+   * lines are moving, or the time changes what a line or the dots look like.
+   * A line that is all sung, or only lights up as a whole, stays as it was.
+   */
+  get changed() {
+    return this.moved || this.times() !== this.drawnTimes;
   }
 
   /** The line or interlude the view is centred on. */
@@ -280,6 +298,7 @@ export class LyricsView {
       time > this.lastTime + 1_500;
     this.lastTime = time;
     const ahead = time + motion.lead * 1_000;
+    const wasSettled = this.settled;
 
     let focus = -1;
     let latest = -1;
@@ -345,6 +364,8 @@ export class LyricsView {
           item.shown.update(delta);
         }
       }
+    // Settling takes one last small step.
+    if (jumped || !wasSettled || !this.settled) this.moved = true;
   }
 
   /**
@@ -355,6 +376,8 @@ export class LyricsView {
    */
   draw(context: SKRSContext2D, height: number, alpha = 1) {
     const time = this.lastTime ?? 0;
+    this.moved = false;
+    this.drawnTimes = this.times();
     const focusY = height * focusPosition;
     const fadeAt = (y: number) =>
       clamp(Math.min(y / (height * 0.12), (height - y) / (height * 0.22)));
@@ -416,6 +439,30 @@ export class LyricsView {
       );
       context.restore();
     }
+  }
+
+  /**
+   * The time, for each line and interlude that the time is changing, and
+   * otherwise which side of its motion it is on.
+   */
+  private times() {
+    const time = this.lastTime ?? 0;
+    let times = "";
+    for (const item of this.items) {
+      if (item.kind === "line")
+        times += timeMoves(item) ? `${this.lineTime(item, time)},` : ",";
+      else if (item.kind === "dots")
+        times +=
+          time < item.start ? "<," : time >= item.end ? ">," : `${time},`;
+    }
+    return times;
+  }
+
+  /** What of a line's drawing the time decides; see `moves`. */
+  private lineTime(item: LineItem, time: number) {
+    if (time < item.moves.from) return "<";
+    if (time > item.moves.to) return ">";
+    return `t${time.toFixed(1)}`;
   }
 
   private layoutHeight(item: Item) {
@@ -621,6 +668,13 @@ export class LyricsView {
       ...(backgroundBlock?.syllables ?? []),
       ...(roman?.syllables ?? []),
     ];
+    const moves = { from: Infinity, to: -Infinity };
+    for (const block of [mainBlock, roman, backgroundBlock])
+      if (block?.timed) {
+        const span = blockMoves(block);
+        moves.from = Math.min(moves.from, span.from);
+        moves.to = Math.max(moves.to, span.to);
+      }
     return {
       kind: "line",
       start: line.startTimeMs,
@@ -637,6 +691,7 @@ export class LyricsView {
       shown: new Spring(0, motion.scale),
       bright: 0,
       active: false,
+      moves,
     };
   }
 
@@ -705,12 +760,9 @@ export class LyricsView {
   }
 
   private lineImage(item: LineItem, time: number, blur: number) {
-    const moving =
-      item.bright > 0 || item.shown.position > 0.001 || !item.shown.settled;
-    const contentKey =
-      moving && item.main.timed
-        ? `t${time.toFixed(1)}|${item.bright}|${item.shown.position}`
-        : `${item.bright.toFixed(3)}|${item.shown.position.toFixed(3)}`;
+    const contentKey = timeMoves(item)
+      ? `${this.lineTime(item, time)}|${item.bright}|${item.shown.position}`
+      : `${item.bright.toFixed(3)}|${item.shown.position.toFixed(3)}`;
     const width = Math.ceil((item.right - item.left + bleed * 2) * this.ratio);
     const height = Math.ceil(
       (item.mainHeight + backgroundExtent(item) + bleed * 2) * this.ratio,
@@ -1075,6 +1127,38 @@ export class LyricsView {
     context.restore();
   }
 }
+
+/**
+ * When drawBlock() moves a timed block's text, in ms, with room to spare:
+ * each syllable sweeps from its start to its end, each word rises over at
+ * least a second, and a long held word's letters swell and float from
+ * 400 ms before it.
+ */
+function blockMoves(block: TextBlock) {
+  let from = Infinity;
+  let to = -Infinity;
+  for (const syllable of block.syllables) {
+    from = Math.min(from, syllable.start);
+    to = Math.max(to, syllable.end);
+  }
+  for (const word of block.words) {
+    from = Math.min(from, word.start);
+    to = Math.max(to, word.start + Math.max(1_000, word.end - word.start));
+    const emphasis = word.emphasis;
+    if (!emphasis) continue;
+    from = Math.min(from, word.start - 400);
+    to = Math.max(to, word.start + emphasis.duration * (1 / 2.5 + 1.4));
+  }
+  return { from, to };
+}
+
+/**
+ * A line the time can change at all: one with timed syllables that is lit,
+ * or lighting up. Dim, its sung and unsung parts are the same.
+ */
+const timeMoves = (item: LineItem) =>
+  item.main.timed &&
+  (item.bright > 0 || item.shown.position > 0.001 || !item.shown.settled);
 
 /** The room background vocals take under their line while it is current. */
 const backgroundExtent = (item: LineItem) =>

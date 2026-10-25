@@ -51,6 +51,32 @@ describe("video feed", () => {
   );
 });
 
+test("leaves frames out while the encoder has not taken the last one", async () => {
+  // Far more than a pipe holds, to an encoder that reads nothing for a while.
+  const frame = Buffer.alloc(4_000_000);
+  let asked = 0;
+  const feed = new VideoFeed(
+    () => {
+      asked++;
+      return Buffer.from(frame);
+    },
+    () => {},
+    () => {},
+    undefined,
+    { command: ["sh", "-c", "sleep 0.4; cat > /dev/null"] },
+  );
+  feed.start();
+  try {
+    await Bun.sleep(300);
+    // Ticking at 24 a second, but only the first frame was asked for.
+    expect(asked).toBe(1);
+    await Bun.sleep(400);
+    expect(asked).toBeGreaterThan(1);
+  } finally {
+    feed.stop();
+  }
+});
+
 test("the screen share is 16:9 at the configured height, within Chime's levels", () => {
   expect(shareFormat()).toEqual({
     width: 1280,

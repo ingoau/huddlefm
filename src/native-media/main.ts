@@ -270,8 +270,9 @@ async function startPacer(audio: AudioEngine, chime: ChimeLink) {
     fec: true,
     packetLossPercent: 5,
   });
-  // A still frame of silence for the bot's own attendee while the share
-  // carries the music, encoded once by an encoder of its own.
+  // A still frame of silence, encoded once by an encoder of its own: for the
+  // bot's own attendee while the share carries the music, and for either
+  // while nothing plays.
   const quiet = await createEncoder({
     application: Application.Audio,
     signal: Signal.Music,
@@ -294,9 +295,14 @@ async function startPacer(audio: AudioEngine, chime: ChimeLink) {
     while (sent < target) {
       sent++;
       const samples = audio.render(frameSamples);
-      for (let index = 0; index < samples.length; index++)
-        samples[index] = Math.max(-1, Math.min(1, samples[index]!));
-      const packet = opus.encodeFloat(samples);
+      // Nothing playing: the silence from before goes out again, rather
+      // than the encoder working through zeros at full effort every frame.
+      let packet = silence;
+      if (!audio.resting) {
+        for (let index = 0; index < samples.length; index++)
+          samples[index] = Math.max(-1, Math.min(1, samples[index]!));
+        packet = opus.encodeFloat(samples);
+      }
       const content = shareLive() ? share : undefined;
       if (content) {
         content.sendAudio(packet);

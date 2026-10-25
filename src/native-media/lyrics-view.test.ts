@@ -4,7 +4,7 @@ import { createCanvas } from "@napi-rs/canvas";
 import { buildTimedRomanization } from "../timed-romanization.ts";
 import { LyricsView } from "./lyrics-view.ts";
 import { cubicBezier, Spring, spring, Tween } from "./motion.ts";
-import { VideoCard } from "./video-card.ts";
+import { ArtworkLoader, VideoCard } from "./video-card.ts";
 import { cardSize, wideCardWidth } from "./video-format.ts";
 
 const part = (
@@ -278,6 +278,71 @@ describe("lyrics view", () => {
   });
 });
 
+describe("lyrics view changes", () => {
+  // A word-synced line with a long held, glowing word, long enough to stay
+  // current well after it is sung, then a line-synced one.
+  const held: Lyric[] = [
+    line(0, 12_000, [part("you ", 0, 300), part("mess", 300, 1_500)]),
+    line(12_000, 6_000, undefined, { words: "Only the line is timed" }),
+  ];
+  const settle = (view: LyricsView, seconds: number) => {
+    for (let frame = 0; frame < 60; frame++)
+      view.update(seconds + frame / 30, 1 / 30, 400);
+    expect(view.settled).toBe(true);
+  };
+  const pixels = (view: LyricsView) => {
+    const canvas = createCanvas(600, 400);
+    view.draw(canvas.getContext("2d"), 400);
+    return canvas.data();
+  };
+
+  test("change while a word-synced line is sung", () => {
+    const view = new LyricsView(held, 600);
+    view.update(0, 0, 400);
+    pixels(view);
+    for (let seconds = 1 / 30; seconds < 1.5; seconds += 1 / 30) {
+      view.update(seconds, 1 / 30, 400);
+      expect(view.changed).toBe(true);
+      pixels(view);
+    }
+  });
+
+  test("hold still once the line is sung, as it then looks", () => {
+    const view = new LyricsView(held, 600);
+    view.update(4, 0, 400);
+    settle(view, 4);
+    pixels(view);
+    view.update(6, 0.1, 400);
+    expect(view.changed).toBe(false);
+    const kept = pixels(view);
+    // Drawn afresh at that time, it is the same.
+    const fresh = new LyricsView(held, 600);
+    fresh.update(6, 0, 400);
+    expect(fresh.settled).toBe(true);
+    expect(pixels(fresh).equals(kept)).toBe(true);
+  });
+
+  test("hold still through a line-synced line, until a seek", () => {
+    const view = new LyricsView(held, 600);
+    view.update(13, 0, 400);
+    settle(view, 13);
+    pixels(view);
+    view.update(15, 0.1, 400);
+    expect(view.changed).toBe(false);
+    view.update(11.9, 0, 400);
+    expect(view.changed).toBe(true);
+  });
+
+  test("an interlude's dots keep moving", () => {
+    const view = new LyricsView(song, 600);
+    view.update(12, 0, 400);
+    settle(view, 12);
+    pixels(view);
+    view.update(14.1, 0.1, 400);
+    expect(view.changed).toBe(true);
+  });
+});
+
 describe("motion", () => {
   test("cubic-bezier matches its endpoints and the linear curve", () => {
     const linear = cubicBezier(0.25, 0.25, 0.75, 0.75);
@@ -453,6 +518,49 @@ describe("video card", () => {
     };
     expect(focusAt(0)).toBe(2);
     expect(focusAt(2)).toBe(1);
+  });
+
+  test("cards showing the same artwork fetch it once, scaled for the widest", async () => {
+    const art = createCanvas(1_200, 1_200);
+    const context = art.getContext("2d");
+    context.fillStyle = "#c04080";
+    context.fillRect(0, 0, 1_200, 1_200);
+    const png = art.toBuffer("image/png");
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch() {
+        requests++;
+        return new Response(new Uint8Array(png), {
+          headers: { "content-type": "image/png" },
+        });
+      },
+    });
+    try {
+      const artwork = new ArtworkLoader([
+        { width: cardSize, height: cardSize },
+        { width: wideCardWidth, height: cardSize },
+      ]);
+      const url = `http://127.0.0.1:${server.port}/artwork.png`;
+      for (const wide of [false, true])
+        new VideoCard(
+          () => ({ position: 0 }),
+          () => {},
+          {
+            wide,
+            artwork,
+          },
+        ).setTrack("Title", "Artist", url);
+      const image = await artwork.get(url);
+      expect(requests).toBe(1);
+      expect([image.width, image.height]).toEqual([
+        wideCardWidth,
+        wideCardWidth,
+      ]);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("keeps redrawing while lyrics play", () => {

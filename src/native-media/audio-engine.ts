@@ -164,6 +164,9 @@ export class AudioEngine {
   private clock = 0;
   private compressor = new Compressor(sampleRate);
   private scratch = new Float32Array(0);
+  private rested = false;
+  /** The decks the last preload listed. */
+  private kept = new Set<string>();
 
   constructor(
     private decoderFactory: DecoderFactory,
@@ -371,6 +374,29 @@ export class AudioEngine {
         deck.close();
         this.decks.delete(entryId);
       }
+    this.kept = new Set(entries.map((entry) => entry.entryId));
+    this.rewindKept();
+  }
+
+  /**
+   * Takes a kept deck that is done playing, like the track before this one,
+   * back to the top ahead of time, so going back to it starts at once
+   * instead of decoding from the beginning again first.
+   */
+  private rewindKept() {
+    for (const [entryId, deck] of this.decks) {
+      if (
+        !this.kept.has(entryId) ||
+        entryId === this.currentId ||
+        entryId === this.nextEntry?.entryId ||
+        deck.playing ||
+        (deck.position === 0 && !deck.decoder.error && !deck.stalledSent)
+      )
+        continue;
+      deck.seek(0);
+      deck.pastRestartThreshold = false;
+      deck.lastReportedSecond = -1;
+    }
   }
 
   private play(message: Record<string, any>) {
@@ -549,6 +575,7 @@ export class AudioEngine {
       for (const deck of this.decks.values())
         if (deck.fade?.direction === "in") deck.setLevel(1);
       this.transitioning = false;
+      this.rewindKept();
     }
     const current = this.currentId ? this.decks.get(this.currentId) : undefined;
     if (current && this.transitionDue(current)) this.beginTransition();
@@ -560,10 +587,26 @@ export class AudioEngine {
     return from + ((to - from) * (sample - start)) / length;
   }
 
+  /**
+   * The last render was silence with nothing still to come out of the
+   * limiter, so a ready-made packet of silence can be sent in its place.
+   */
+  get resting() {
+    return this.rested;
+  }
+
   /** Renders the next `frames` stereo frames and advances the clock. */
   render(frames: number) {
     this.runSchedule();
     const out = new Float32Array(frames * 2);
+    // Paused or idle, once the limiter has let go: what follows would only
+    // work out zeros, which `out` already is.
+    this.rested = !this.tone && this.compressor.resting && !this.anyPlaying();
+    if (this.rested) {
+      for (const deck of this.decks.values()) this.reportLoad(deck);
+      this.clock += frames;
+      return out;
+    }
     if (this.scratch.length < frames * 2)
       this.scratch = new Float32Array(frames * 2);
     for (const deck of this.decks.values()) this.renderDeck(deck, out, frames);
@@ -585,6 +628,11 @@ export class AudioEngine {
     this.compressor.process(out);
     this.clock += frames;
     return out;
+  }
+
+  private anyPlaying() {
+    for (const deck of this.decks.values()) if (deck.playing) return true;
+    return false;
   }
 
   private renderDeck(deck: Deck, out: Float32Array, frames: number) {

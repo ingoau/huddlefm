@@ -131,6 +131,7 @@ export class VideoFeed {
   private keyframeTimer?: ReturnType<typeof setTimeout>;
   private sent: Buffer | undefined;
   private sentAt = 0;
+  private command: string[] | undefined;
 
   constructor(
     /** The frame to send now, or undefined to send nothing new. */
@@ -143,8 +144,11 @@ export class VideoFeed {
       input?: FeedInput;
       format?: VideoFormat;
       epoch?: number;
+      /** Run in place of ffmpeg, for tests. */
+      command?: string[];
     } = {},
   ) {
+    this.command = options.command;
     this.input = options.input ?? cardInput;
     this.format = options.format ?? cameraFormat;
     this.epoch = options.epoch ?? performance.now();
@@ -156,7 +160,8 @@ export class VideoFeed {
 
   start() {
     if (this.encoder) return;
-    const encoder = Bun.spawn(encoderArgs(this.input, this.format), {
+    const command = this.command ?? encoderArgs(this.input, this.format);
+    const encoder = Bun.spawn(command, {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -173,7 +178,15 @@ export class VideoFeed {
         stderr.trim().split("\n").at(-1) || `video encoder exited with ${code}`,
       );
     });
+    // ffmpeg stamps a frame when it reads it, so one queued behind a busy
+    // encoder would show late. While the last frame is still going in, the
+    // next is left out rather than queued, and not even drawn.
+    let writing = false;
+    const written = () => {
+      writing = false;
+    };
     const write = () => {
+      if (writing) return;
       try {
         const frame = this.frame();
         if (!frame) return;
@@ -181,8 +194,13 @@ export class VideoFeed {
         if (frame === this.sent && now - this.sentAt < keepAliveMs) return;
         this.sent = frame;
         this.sentAt = now;
-        encoder.stdin.write(frame);
-        void encoder.stdin.flush();
+        // Both hand back a promise only when the pipe is full.
+        const wrote = encoder.stdin.write(frame);
+        const flushed = encoder.stdin.flush();
+        if (wrote instanceof Promise || flushed instanceof Promise) {
+          writing = true;
+          void Promise.all([wrote, flushed]).then(written, written);
+        }
       } catch {}
     };
     // The first frame goes in now rather than a tick later, even if the card

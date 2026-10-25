@@ -81,6 +81,12 @@ export function decoderArgs(
   return [
     "ffmpeg",
     ...ffmpegLogArgs,
+    // A couple of threads keep a 1080p source well ahead of the clock, and
+    // leave the rest of the machine to the encoders and the other sessions.
+    "-threads",
+    "2",
+    "-filter_threads",
+    "1",
     ...inputArgs(url, startSeconds, input),
     "-map",
     "0:v:0",
@@ -112,6 +118,8 @@ export interface FrameDecoder {
   readonly error: string | undefined;
   /** Where the input's timestamps start, once known; see FfmpegLog. */
   readonly streamStart?: number;
+  /** Takes back a frame that is no longer shown, to decode into again. */
+  recycle?(data: Buffer): void;
   close(): void;
 }
 
@@ -132,6 +140,8 @@ export class FfmpegFrameDecoder implements FrameDecoder {
   private process: Bun.Subprocess<"ignore", "pipe", "pipe">;
   private log: FfmpegLog;
   private frameSize: number;
+  /** Memory of frames that were shown and given back, for the next ones. */
+  private spare: ArrayBuffer[] = [];
 
   constructor(
     url: string,
@@ -164,13 +174,36 @@ export class FfmpegFrameDecoder implements FrameDecoder {
     if (this.closed) return;
     this.closed = true;
     this.frames.length = 0;
+    this.spare.length = 0;
     this.process.kill();
     this.onProcess(undefined);
   }
 
+  recycle(data: Buffer) {
+    if (
+      this.closed ||
+      data.byteOffset !== 0 ||
+      data.buffer.byteLength !== this.frameSize ||
+      this.spare.length > aheadFrames
+    )
+      return;
+    this.spare.push(data.buffer as ArrayBuffer);
+  }
+
+  /**
+   * Somewhere to decode the next frame: given-back memory when there is
+   * some, as a new Buffer all the same, so a frame is never the same object
+   * as one before it, which is how the feed and the progress bar tell them
+   * apart.
+   */
+  private nextFrame() {
+    const memory = this.spare.pop() ?? new ArrayBuffer(this.frameSize);
+    return Buffer.from(memory, 0, this.frameSize);
+  }
+
   private async pump() {
     const reader = this.process.stdout.getReader();
-    let frame = Buffer.allocUnsafe(this.frameSize);
+    let frame = this.nextFrame();
     let filled = 0;
     try {
       while (!this.closed) {
@@ -187,7 +220,7 @@ export class FfmpegFrameDecoder implements FrameDecoder {
           offset += take;
           if (filled === this.frameSize) {
             this.frames.push({ index: ++this.decoded, data: frame });
-            frame = Buffer.allocUnsafe(this.frameSize);
+            frame = this.nextFrame();
             filled = 0;
           }
         }
@@ -306,12 +339,7 @@ export class VideoPlayer {
       decoder = this.restart(position);
       return this.current;
     }
-    const frames = decoder.frames;
-    while (frames.length && frames[0]!.index <= target) {
-      const next = frames.shift()!;
-      this.current = next.data;
-      this.shownIndex = next.index;
-    }
+    this.advance(decoder, target);
     return this.current;
   }
 
@@ -336,13 +364,23 @@ export class VideoPlayer {
     const target = Math.floor(
       (position + audioStart - videoStart) * this.format.fps + 1e-6,
     );
+    this.advance(decoder, target);
+    return this.current;
+  }
+
+  /**
+   * Shows the last frame up to `target`, handing the ones it passes back to
+   * the decoder. A frame on its way to the encoder is safe: the feed asks
+   * for no frame while one is still going in.
+   */
+  private advance(decoder: FrameDecoder, target: number) {
     const frames = decoder.frames;
     while (frames.length && frames[0]!.index <= target) {
       const next = frames.shift()!;
+      if (this.current) decoder.recycle?.(this.current);
       this.current = next.data;
       this.shownIndex = next.index;
     }
-    return this.current;
   }
 
   /** Lets the decoder go while nothing shows the video; it starts again. */
