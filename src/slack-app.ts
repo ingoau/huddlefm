@@ -17,6 +17,41 @@ export function slackErrorCode(error: unknown) {
   return String(data.error);
 }
 
+// Slack's answers that a call may work if tried again later.
+const transientErrors = new Set([
+  "ratelimited",
+  "internal_error",
+  "fatal_error",
+  "service_unavailable",
+  "request_timeout",
+]);
+
+/**
+ * How long to wait before trying a failed call again, or nothing when trying
+ * again would not help: Slack refused it outright, or it has failed too
+ * often. A rate limit waits as long as Slack asks.
+ */
+export function slackRetryDelay(error: unknown, attempt: number) {
+  const retryAfter = (error as { retryAfter?: unknown } | undefined)
+    ?.retryAfter;
+  if (typeof retryAfter === "number" && Number.isFinite(retryAfter))
+    return Math.max(1, retryAfter) * 1_000;
+  const code = slackErrorCode(error);
+  if (code && !transientErrors.has(code)) return undefined;
+  if (attempt > 5) return undefined;
+  return Math.min(30_000, 1_000 * 2 ** (attempt - 1));
+}
+
+// Calls made while someone waits on the answer, such as opening a dialog,
+// give up quickly rather than waiting out a rate limit: by then a trigger ID
+// has expired, and the next player update replaces a missed one. A rate limit
+// on this client also leaves the main one, and its other calls, running.
+const interactiveOptions = {
+  retryConfig: { retries: 1, minTimeout: 250, maxTimeout: 500 },
+  rejectRateLimitedCalls: true,
+  timeout: 15_000,
+};
+
 type Body = {
   type?: string;
   value?: string;
@@ -152,6 +187,7 @@ export function normalizeInteraction(body: Body) {
 export class SlackAppAdapter {
   private socket?: WebSocket;
   private web: WebClient;
+  private interactive: WebClient;
   private names = new Map<string, Promise<string>>();
   private publicChannels = new Map<string, Promise<boolean>>();
   private reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -163,6 +199,7 @@ export class SlackAppAdapter {
 
   constructor(private config: { xapp: string; xoxp: string }) {
     this.web = new WebClient(config.xoxp);
+    this.interactive = new WebClient(config.xoxp, interactiveOptions);
   }
 
   async start() {
@@ -204,8 +241,21 @@ export class SlackAppAdapter {
     return result.ts;
   }
 
-  async update(channel: string, ts: string, text: string, blocks: unknown[]) {
-    await this.web.chat.update({ channel, ts, text, blocks: blocks as never });
+  // An interactive update fails fast, for a message a later update replaces,
+  // such as the player.
+  async update(
+    channel: string,
+    ts: string,
+    text: string,
+    blocks: unknown[],
+    options: { interactive?: boolean } = {},
+  ) {
+    await (options.interactive ? this.interactive : this.web).chat.update({
+      channel,
+      ts,
+      text,
+      blocks: blocks as never,
+    });
     log.debug(
       { event: "message_updated", channelId: channel, messageTs: ts },
       "Slack message updated",
@@ -267,7 +317,7 @@ export class SlackAppAdapter {
     threadTs?: string,
     blocks?: unknown[],
   ) {
-    await this.web.chat.postEphemeral({
+    await this.interactive.chat.postEphemeral({
       channel,
       user,
       text,
@@ -281,7 +331,7 @@ export class SlackAppAdapter {
   }
 
   async modal(triggerId: string, view: unknown) {
-    const result = await this.web.views.open({
+    const result = await this.interactive.views.open({
       trigger_id: triggerId,
       view: view as never,
     });
@@ -293,7 +343,7 @@ export class SlackAppAdapter {
   }
 
   async pushModal(triggerId: string, view: unknown) {
-    const result = await this.web.views.push({
+    const result = await this.interactive.views.push({
       trigger_id: triggerId,
       view: view as never,
     });
@@ -318,7 +368,7 @@ export class SlackAppAdapter {
   }
 
   private viewsUpdate(viewId: string, hash: string | undefined, view: unknown) {
-    return this.web.views.update({
+    return this.interactive.views.update({
       view_id: viewId,
       ...(hash ? { hash } : {}),
       view: view as never,
