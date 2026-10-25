@@ -4,6 +4,7 @@ import {
   normalizeInteraction,
   SlackAppAdapter,
   slackErrorCode,
+  slackRetryDelay,
   startHeartbeat,
   type HeartbeatSocket,
 } from "./slack-app.ts";
@@ -40,7 +41,7 @@ function adapterWithViews(
   update: (options: Record<string, unknown>) => unknown,
 ) {
   const adapter = new SlackAppAdapter({ xapp: "xapp-1", xoxp: "xoxp-1" });
-  Reflect.set(adapter, "web", { views: { update } });
+  Reflect.set(adapter, "interactive", { views: { update } });
   return adapter;
 }
 
@@ -48,6 +49,16 @@ test("reads the reason out of a Slack API error", () => {
   expect(slackErrorCode(apiError("hash_conflict"))).toBe("hash_conflict");
   expect(slackErrorCode(new Error("hash_conflict"))).toBeUndefined();
   expect(slackErrorCode(undefined)).toBeUndefined();
+});
+
+test("waits out a rate limit and backs off from passing failures", () => {
+  expect(slackRetryDelay({ retryAfter: 7 }, 1)).toBe(7_000);
+  expect(slackRetryDelay(new Error("socket hang up"), 1)).toBe(1_000);
+  expect(slackRetryDelay(new Error("socket hang up"), 3)).toBe(4_000);
+  expect(slackRetryDelay(apiError("internal_error"), 2)).toBe(2_000);
+  // Trying again would not help.
+  expect(slackRetryDelay(apiError("message_not_found"), 1)).toBeUndefined();
+  expect(slackRetryDelay(new Error("socket hang up"), 6)).toBeUndefined();
 });
 
 test("updates the current view when a modal hash is stale", async () => {

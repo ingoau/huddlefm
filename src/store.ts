@@ -664,6 +664,9 @@ export class Store {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path, { create: true });
     this.db.run("PRAGMA journal_mode = WAL");
+    // WAL stays consistent through a crash without a sync on every commit;
+    // only the last moments of writes can be lost, as on a power cut.
+    this.db.run("PRAGMA synchronous = NORMAL");
     this.db.run("PRAGMA foreign_keys = ON");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
@@ -1694,6 +1697,11 @@ export class Store {
       )
       .run(attempts, nextAttemptAt, channelId, messageTs);
     return result.changes > 0;
+  }
+
+  // Runs several writes as one commit, such as an album's songs arriving.
+  transaction<T>(work: () => T): T {
+    return this.db.transaction(work)();
   }
 
   addTrack(track: {

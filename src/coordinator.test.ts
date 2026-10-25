@@ -118,6 +118,7 @@ function setup(
       setTrack: () => {},
       removeTrack: () => {},
       addTrack: () => {},
+      transaction: <T>(work: () => T) => work(),
       recentTracks: () => [],
       incrementUsage: (event: string) => {
         usage.push(event);
@@ -8189,4 +8190,192 @@ test("after a restart, the video that was playing goes on first, from where it w
   ]);
   expect(result.media).toContainEqual({ type: "seek", seconds: 42 });
   await result.coordinator.endFromSlack();
+});
+
+test("player updates go out beside the queue and collapse while one is in flight", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const sent: unknown[][] = [];
+  const answers: (() => void)[] = [];
+  Reflect.set(
+    Reflect.get(result.coordinator, "slack"),
+    "update",
+    (...args: unknown[]) => {
+      sent.push(args);
+      return new Promise<void>((resolve) => answers.push(resolve));
+    },
+  );
+  const blocks = () =>
+    (Reflect.get(result.coordinator, "blocks") as () => unknown).call(
+      result.coordinator,
+    );
+
+  // Each click is done without waiting on Slack, and the first goes out at
+  // once.
+  for (let index = 0; index < 3; index++)
+    await result.coordinator.action(
+      interaction(result.coordinator, "volume_up"),
+    );
+  expect(sent).toHaveLength(1);
+  // The two made meanwhile collapse into the newest.
+  answers.shift()!();
+  await until(() => sent.length === 2);
+  expect(sent[1]![3]).toEqual(blocks());
+  answers.shift()!();
+  await Bun.sleep(0);
+  expect(sent).toHaveLength(2);
+  await result.coordinator.endFromSlack();
+});
+
+test("a player update Slack turns away is sent again", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const sent: unknown[][] = [];
+  let failures = 1;
+  Reflect.set(
+    Reflect.get(result.coordinator, "slack"),
+    "update",
+    async (...args: unknown[]) => {
+      sent.push(args);
+      if (failures-- > 0)
+        throw Object.assign(new Error("rate limited"), { retryAfter: 30 });
+    },
+  );
+  await result.coordinator.action(interaction(result.coordinator, "volume_up"));
+  await Bun.sleep(0);
+  // Waiting out the rate limit, which settling the player cuts short.
+  expect(sent).toHaveLength(1);
+  await (
+    Reflect.get(result.coordinator, "settlePlayer") as () => Promise<void>
+  ).call(result.coordinator);
+  expect(sent).toHaveLength(2);
+  expect(sent[1]).toEqual(sent[0]!);
+  await result.coordinator.endFromSlack();
+});
+
+test("dialogs open without waiting behind other actions", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  let release!: () => void;
+  const enqueue = Reflect.get(result.coordinator, "enqueue") as (
+    work: () => Promise<void>,
+  ) => Promise<void>;
+  const busy = enqueue.call(
+    result.coordinator,
+    () => new Promise<void>((resolve) => (release = resolve)),
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "view_full_queue"),
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_end_session"),
+  );
+  expect(result.modals).toHaveLength(1);
+  expect(result.pushedModals).toHaveLength(1);
+  release();
+  await busy;
+  await result.coordinator.endFromSlack();
+});
+
+test("searches start at once, keep the newest query, and reuse recent results", async () => {
+  const queries: string[] = [];
+  let finish!: () => void;
+  let hold = false;
+  const tracks = {
+    suggestions: async (query: string) => {
+      queries.push(query);
+      if (hold) await new Promise<void>((resolve) => (finish = resolve));
+      return [{ text: { type: "plain_text", text: query }, value: query }];
+    },
+  } as unknown as TrackCatalog;
+  const test = setup(tracks);
+  await test.coordinator.start();
+  const search = (value: string) =>
+    test.coordinator.suggestions(
+      interaction(test.coordinator, "selection", value),
+    );
+
+  expect(await search("abc")).toEqual([
+    { text: { type: "plain_text", text: "abc" }, value: "abc" },
+  ]);
+  // Typed again, it is not searched again.
+  await search("abc");
+  expect(queries).toEqual(["abc"]);
+
+  hold = true;
+  const running = search("abcd");
+  const passedOver = search("abcde");
+  const newest = search("abcdef");
+  await Bun.sleep(0);
+  hold = false;
+  finish();
+  expect(await running).toHaveLength(1);
+  // Only the newest of those typed meanwhile is searched; Slack still gets
+  // an answer for the others.
+  expect(await passedOver).toEqual([]);
+  expect(await newest).toHaveLength(1);
+  expect(queries).toEqual(["abc", "abcd", "abcdef"]);
+  await test.coordinator.endFromSlack();
+});
+
+test("played tracks before the last few give up their files, and Previous prepares one again", async () => {
+  const directory = `${tmpdir()}/huddlefm-history-${crypto.randomUUID()}`;
+  await mkdir(directory, { recursive: true });
+  const prepared: string[] = [];
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: `https://example.com/${value}`,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: value,
+      title: value,
+      artist: "Artist",
+    }),
+    prepare: async (
+      track: { title: string },
+      _directory: string,
+      id: string,
+    ) => {
+      prepared.push(track.title);
+      const filePath = `${directory}/${id}.opus`;
+      await Bun.write(filePath, "audio");
+      return filePath;
+    },
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  const titles = ["a", "b", "c", "d", "e", "f", "g"];
+  for (const title of titles)
+    await result.coordinator.action(
+      interaction(result.coordinator, "add_track_to_queue", title),
+    );
+  const current = () =>
+    Reflect.get(result.coordinator, "current") as
+      { id: string; title: string; filePath?: string } | undefined;
+  for (let index = 0; index < titles.length - 1; index++)
+    await result.coordinator.mediaEvent("track_ended", {
+      entryId: current()!.id,
+    });
+  await Bun.sleep(10);
+  const history = Reflect.get(result.coordinator, "history") as {
+    title: string;
+    filePath?: string;
+  }[];
+  expect(history.map((entry) => entry.title)).toEqual(titles.slice(0, -1));
+  // The oldest has given up its file; the last five keep theirs.
+  expect(history[0]!.filePath).toBeUndefined();
+  expect(history.slice(1).every((entry) => entry.filePath)).toBeTrue();
+  expect(
+    await Array.fromAsync(new Bun.Glob("*.opus").scan(directory)),
+  ).toHaveLength(titles.length - 1);
+
+  // Going back that far prepares it again, and it plays.
+  for (let index = 0; index < titles.length - 1; index++)
+    await result.coordinator.action(
+      interaction(result.coordinator, "previous_track"),
+    );
+  await until(() => current()?.title === "a");
+  expect(prepared).toEqual([...titles, "a"]);
+  expect(current()!.filePath).toBeDefined();
+  await result.coordinator.endFromSlack();
+  await rm(directory, { recursive: true, force: true });
 });
