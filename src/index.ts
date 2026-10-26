@@ -38,7 +38,7 @@ import {
 import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
 import { StreamRelay } from "./stream-relay.ts";
-import { TrackCatalog } from "./tracks.ts";
+import { forgetPreparedMedia, TrackCatalog } from "./tracks.ts";
 import { Jellyfin } from "./jellyfin.ts";
 import { likeWindowMs, RecommendationCatalog } from "./recommendations.ts";
 import { ChannelManagers } from "./channel-managers.ts";
@@ -388,6 +388,7 @@ async function joinMedia(runtime: Runtime) {
 }
 
 function removeMediaFiles(sessionId: string) {
+  forgetPreparedMedia(`data/media/${sessionId}`);
   return rm(`data/media/${sessionId}`, { recursive: true, force: true });
 }
 
@@ -1456,23 +1457,32 @@ function selectedRuntime(request: Request) {
   );
 }
 
-botUserId = await verifySlackIdentity(config);
-companions = new CompanionChannels(store, slackHuddle, slackApp, botUserId);
-companions.start();
-for (const sessionId of saved.expiredIds) {
-  companions.abandonSession(sessionId);
-}
-await catalog.initialize();
+// Slack's identity, the track catalog and the Slack app's socket need
+// nothing of one another, so they start together. An action that comes in
+// before the rest is ready waits for it; no session runs until then.
+const started = Promise.withResolvers<void>();
 slackApp.onSuggestion = (interaction) =>
   coordinatorFor(interaction)?.suggestions(interaction) ?? Promise.resolve([]);
-slackApp.onAction = (interaction) =>
-  interaction.actionId === "restore_session"
+slackApp.onAction = async (interaction) => {
+  await started.promise;
+  return interaction.actionId === "restore_session"
     ? restoreEndedSession(interaction)
     : interaction.actionId === "unlike_track"
       ? undoLike(interaction)
       : (coordinatorFor(interaction)?.action(interaction) ??
         endedBeforeConfirming(interaction));
-await slackApp.start();
+};
+[botUserId] = await Promise.all([
+  verifySlackIdentity(config),
+  catalog.initialize(),
+  slackApp.start(),
+]);
+companions = new CompanionChannels(store, slackHuddle, slackApp, botUserId);
+companions.start();
+for (const sessionId of saved.expiredIds) {
+  companions.abandonSession(sessionId);
+}
+started.resolve();
 // Huddle member events ride the private realtime gateway, which drops them
 // whenever its socket cycles, so periodically and after every reconnect the
 // tracked participants are reconciled with Slack's actual Huddle membership.

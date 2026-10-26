@@ -3303,7 +3303,8 @@ export class Coordinator {
     controller: AbortController,
   ): Promise<PreparedMedia & { videoChecked?: boolean }> {
     const directory = `data/media/${this.id}`;
-    const priority = this.preparationPriority(entry);
+    // Read when a preparation slot comes free, so it follows the queue.
+    const priority = () => this.preparationPriority(entry);
     if (parseJellyfinSource(entry.sourceId)) {
       if (!this.jellyfinUi) throw new TrackError("No longer available");
       return {
@@ -3332,21 +3333,21 @@ export class Coordinator {
           entry.id,
           controller.signal,
           priority,
-          entry.form === "audio" ? entry.filePath : undefined,
+          entry.form === "audio" && entry.filePath
+            ? { filePath: entry.filePath, gainDb: entry.gainDb }
+            : undefined,
           !entry.download,
         )),
         videoChecked: true,
       };
-    return {
-      filePath: await this.tracks.prepare(
-        entry,
-        directory,
-        entry.id,
-        controller.signal,
-        priority,
-      ),
-      form: "audio",
-    };
+    const filePath = await this.tracks.prepare(
+      entry,
+      directory,
+      entry.id,
+      controller.signal,
+      priority,
+    );
+    return { filePath, form: "audio", gainDb: this.tracks.gain?.(filePath) };
   }
 
   // Takes in a finished download, or discards it when the session no longer
@@ -4153,8 +4154,13 @@ export class Coordinator {
     }));
   }
 
+  // Sooner the sooner it plays: the track playing, being prepared again,
+  // first, then the queue in order. An autoplay pick only fills an empty
+  // queue, so it is what plays next. One no longer wanted comes last.
   private preparationPriority(entry: Entry) {
-    return entry.automatic ? -1_000_000 : -this.queue.indexOf(entry);
+    if (entry === this.current) return 1;
+    const index = this.queue.indexOf(entry);
+    return index < 0 ? -Infinity : -index;
   }
 
   private prepared(
