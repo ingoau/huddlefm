@@ -46,6 +46,18 @@ export type SignalFrame = {
   audio_metadata?: { attendee_states?: AudioAttendeeState[] };
   audio_status?: { audio_status?: number };
   ping_pong?: { type?: string; ping_id?: number };
+  data_message?: { messages?: DataMessagePayload[] };
+};
+
+/** A data message as decoded: `data` is base64, the sender set by Chime. */
+export type DataMessagePayload = {
+  topic?: string;
+  data?: string;
+  lifetime_ms?: number;
+  sender_attendee_id?: string;
+  /** Zero when Chime throttled the message and returned it to its sender. */
+  ingest_time_ns?: number;
+  sender_external_user_id?: string;
 };
 
 export function encodeFrame(
@@ -242,6 +254,15 @@ export class ChimeSignaling {
         },
         audio_session_id: audioSessionId,
         wants_compressed_sdp: false,
+      },
+    });
+  }
+
+  /** Sends a data message to everyone else in the meeting. */
+  sendData(topic: string, data: Uint8Array, lifetimeMs = 0) {
+    return this.send("DATA_MESSAGE", {
+      data_message: {
+        messages: [{ topic, data, lifetime_ms: lifetimeMs }],
       },
     });
   }

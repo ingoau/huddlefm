@@ -175,6 +175,13 @@ export class ChimeLink {
     this.renegotiateVideo();
   }
 
+  /** Sends a data message over signaling, once the connection is up. */
+  sendData(topic: string, data: Uint8Array, lifetimeMs = 0) {
+    const connection = this.connection;
+    if (!connection?.open) return false;
+    return connection.signaling.sendData(topic, data, lifetimeMs);
+  }
+
   /** Sends one Opus frame covering `samples` samples at 48 kHz. */
   sendAudio(payload: Uint8Array, samples = 960) {
     const connection = this.connection;

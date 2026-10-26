@@ -106,13 +106,13 @@ That is enough for a working deploy. Optional features (scrobbling, analytics, A
 
 #### Optional features
 
-| Variable                                  | Default                    | Purpose                                                                                              |
-| ----------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling                                                       |
-| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                          |
-| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                         |
-| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                               |
-| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, and `/tone` routes; leave unset for typical Docker deploys |
+| Variable                                  | Default                    | Purpose                                                                                                               |
+| ----------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling                                                                        |
+| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                                           |
+| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                                          |
+| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                                                |
+| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys |
 
 #### Playback and limits
 

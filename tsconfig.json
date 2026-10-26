@@ -26,5 +26,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  // Client mods build with their own tooling (`$taut` is Taut's).
+  "exclude": ["node_modules", "clients"]
 }
