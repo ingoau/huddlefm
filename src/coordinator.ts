@@ -4,6 +4,7 @@ import { loadFatigue, skipBystanderShare } from "./fatigue.ts";
 import type { JoinedHuddle } from "./slack-huddle.ts";
 import {
   slackErrorCode,
+  slackRetryDelay,
   type Interaction,
   type SlackAppAdapter,
 } from "./slack-app.ts";
@@ -168,7 +169,15 @@ type SettingsChange = {
 };
 
 const endRestoreMs = 2 * 60_000;
+// The longest a search waits for the same user's last one to finish.
 const searchDebounceMs = 300;
+// How long, and how many, search results are kept for the same words typed
+// again.
+const searchCacheMs = 60_000;
+const searchCacheSize = 100;
+// How many of the last played tracks keep their files and lyrics, for
+// Previous; going back further prepares a track again.
+const keptHistory = 5;
 // How long nobody may ask the host for video mode after they said not now.
 const videoRequestPauseMs = 15 * 60_000;
 // Slack allows this many screen shares at once in a huddle.
@@ -230,6 +239,9 @@ type Entry = TrackMetadata & {
   fadeInSeconds?: number;
   fadeOutSeconds?: number;
 };
+
+// A choice in a search's results.
+type SearchOption = { value?: string };
 
 // Actions on messages other than the player, which are not stale for it: the
 // scrobbling prompts, and the host's request for video mode.
@@ -427,12 +439,24 @@ export class Coordinator {
   private pausedTimer?: ReturnType<typeof setTimeout>;
   private pausedWarningTimer?: ReturnType<typeof setTimeout>;
   private renderTimer?: ReturnType<typeof setTimeout>;
+  // The player's newest blocks not yet sent to Slack, and the sending of
+  // them; a retry waiting out a rate limit can be woken.
+  private playerBlocks?: unknown[];
+  private playerSending?: Promise<void>;
+  private playerWake?: () => void;
+  private playerSettling = false;
   private queueModalTimer?: ReturnType<typeof setTimeout>;
   private queueViews = new Map<
     string,
     { userId: string; hash: string | undefined }
   >();
   private lastSearch = new Map<string, number>();
+  // Each user's running search, and recent results by what was typed.
+  private searches = new Map<string, Promise<SearchOption[]>>();
+  private searchCache = new Map<
+    string,
+    { options: SearchOption[]; expiresAt: number }
+  >();
   private playbackScrobbling?: PlaybackScrobbler;
   private log = logger.child({ component: "coordinator" });
   private integrations = new Map<
@@ -659,6 +683,15 @@ export class Coordinator {
   async resume(actorId?: string) {
     const startedAt = Date.now();
     this.log.info({ event: "resume_started" }, "Resuming session");
+    // The player names who added each song; asked now, beside the checks
+    // below, so the first song does not wait on it.
+    for (const entry of [this.current, ...this.queue])
+      if (
+        entry?.requesterId &&
+        !entry.automatic &&
+        entry.requesterId !== this.botUserId
+      )
+        void this.slack.userName(entry.requesterId);
     const missingEntries = (
       await Promise.all(
         [this.current, ...this.queue].map(async (entry) =>
@@ -710,6 +743,7 @@ export class Coordinator {
       this.scheduleAutoplay();
     }
     this.syncForms();
+    void this.releaseHistory();
     for (const entry of missingEntries) void this.prepareRestored(entry);
     this.log.info(
       {
@@ -846,24 +880,70 @@ export class Coordinator {
     }
   }
 
-  async suggestions(interaction: Interaction) {
+  async suggestions(interaction: Interaction): Promise<unknown[]> {
     const allowed = {
       songs: this.can(interaction.userId, "add"),
       bulk: this.can(interaction.userId, "add-bulk"),
     };
     if (!allowed.songs && !allowed.bulk) return [];
-    // Slack sends a request per keystroke; only the newest one per user is
-    // searched, so the result always matches what the user finished typing.
-    const generation = (this.lastSearch.get(interaction.userId) ?? 0) + 1;
-    this.lastSearch.set(interaction.userId, generation);
-    await Bun.sleep(searchDebounceMs);
-    if (this.lastSearch.get(interaction.userId) !== generation) return [];
-    if (
+    const userId = interaction.userId;
+    const jellyfin =
       this.jellyfinUi &&
-      parseMetadata(interaction.metadata).source === "jellyfin"
-    )
-      return this.jellyfinUi.search(interaction.userId, interaction.value);
-    return this.tracks.suggestions(interaction.value, allowed, this.videoMode);
+      parseMetadata(interaction.metadata).source === "jellyfin";
+    // Each user's results are their own: picking one uses it up.
+    const key = JSON.stringify([
+      userId,
+      interaction.value,
+      allowed,
+      this.videoMode,
+    ]);
+    const cached = () => {
+      const hit = jellyfin ? undefined : this.searchCache.get(key);
+      return hit && hit.expiresAt > Date.now() ? hit.options : undefined;
+    };
+    // Slack sends a request per keystroke. A user's search starts at once
+    // when none of theirs is running; one typed while it runs waits for it
+    // to finish, but never longer than the pause searches always used to
+    // wait, and only the newest of those is searched, so the results match
+    // what the user finished typing. Slack shows only the newest answer, so
+    // the ones passed over answer with nothing.
+    const generation = (this.lastSearch.get(userId) ?? 0) + 1;
+    this.lastSearch.set(userId, generation);
+    const known = cached();
+    if (known) return known;
+    const running = this.searches.get(userId);
+    if (running)
+      await Promise.race([
+        running.catch(() => {}),
+        Bun.sleep(searchDebounceMs),
+      ]);
+    if (this.lastSearch.get(userId) !== generation) return [];
+    const ready = cached();
+    if (ready) return ready;
+    const search: Promise<SearchOption[]> = jellyfin
+      ? this.jellyfinUi!.search(userId, interaction.value)
+      : this.tracks.suggestions(interaction.value, allowed, this.videoMode);
+    this.searches.set(userId, search);
+    try {
+      const options = await search;
+      if (!jellyfin) this.cacheSearch(key, options);
+      return options;
+    } finally {
+      if (this.searches.get(userId) === search) this.searches.delete(userId);
+    }
+  }
+
+  // Keeps a search's results a short while, for the same words typed again,
+  // as when deleting back to them.
+  private cacheSearch(key: string, options: SearchOption[]) {
+    this.searchCache.delete(key);
+    this.searchCache.set(key, {
+      options,
+      expiresAt: Date.now() + searchCacheMs,
+    });
+    for (const [stale, { expiresAt }] of this.searchCache)
+      if (this.searchCache.size > searchCacheSize || expiresAt <= Date.now())
+        this.searchCache.delete(stale);
   }
 
   handles(interaction: Interaction) {
@@ -877,6 +957,42 @@ export class Coordinator {
     const action = parseIntegrationActionValue(interaction.value);
     if (action?.sessionId === this.id) return true;
     return parseMetadata(interaction.metadata).sessionId === this.id;
+  }
+
+  // The actions that open a dialog, which only read the session.
+  private dialogOpeners(
+    interaction: Interaction,
+    loading?: { id: string; hash?: string },
+  ): Record<string, () => Promise<void>> {
+    return {
+      open_add_to_queue: () => this.addModal(interaction),
+      open_load_session: () => this.loadModal(interaction),
+      open_jump_to: () => this.jumpToModal(interaction),
+      queue_move_to_position: () => this.queuePositionModal(interaction),
+      view_full_queue: () => this.queueModal(interaction),
+      open_settings: () => this.settingsModal(interaction, loading),
+      open_end_session: () => this.endModal(interaction),
+      connect_lastfm: () => this.lastFmModal(interaction),
+      open_listenbrainz_token: () => this.listenBrainzTokenModal(interaction),
+      open_your_data: () => this.openYourData(interaction),
+    };
+  }
+
+  // Whether the user is neither in the huddle nor allowed in from outside.
+  private outsider(interaction: Interaction, ending: boolean) {
+    return (
+      !this.isParticipantOrManager(interaction.userId) &&
+      !(ending && this.canEndFromOutside(interaction.userId))
+    );
+  }
+
+  // Whether the click came from a player message since replaced.
+  private stalePlayer(interaction: Interaction) {
+    return Boolean(
+      interaction.messageTs &&
+      interaction.messageTs !== this.uiTs &&
+      !offPlayerActions.has(interaction.actionId),
+    );
   }
 
   async action(interaction: Interaction) {
@@ -917,6 +1033,24 @@ export class Coordinator {
       interaction.actionId === "load_session_save"
     )
       return this.loadSubmission(interaction);
+    // A dialog opens with a trigger ID that expires three seconds after the
+    // click, so it opens from the session as it is now rather than waiting
+    // behind other actions; what is done in it goes through the queue.
+    const dialog =
+      interaction.type === "block_actions"
+        ? this.dialogOpeners(interaction, loading)[interaction.actionId]
+        : undefined;
+    if (dialog) {
+      if (this.outsider(interaction, ending))
+        return this.rejectNonParticipant(interaction, loading);
+      if (this.stalePlayer(interaction))
+        return this.settingsNotice(
+          interaction.userId,
+          "That player is stale; use the newest one.",
+          loading,
+        );
+      return dialog();
+    }
     const currentId = this.current?.id;
     return this.enqueue(async () => {
       if (interaction.type === "view_closed") {
@@ -929,10 +1063,7 @@ export class Coordinator {
       }
       if (this.isIntegrationAction(interaction.actionId))
         return this.integrationAction(interaction);
-      if (
-        !this.isParticipantOrManager(interaction.userId) &&
-        !(ending && this.canEndFromOutside(interaction.userId))
-      )
+      if (this.outsider(interaction, ending))
         return this.rejectNonParticipant(interaction, loading);
       if (interaction.type === "view_submission") {
         if (interaction.actionId === "move_queue_track")
@@ -947,28 +1078,21 @@ export class Coordinator {
           return this.jellyfinTracksSubmission(interaction);
         return this.settingsSubmission(interaction);
       }
-      if (
-        interaction.messageTs &&
-        interaction.messageTs !== this.uiTs &&
-        !offPlayerActions.has(interaction.actionId)
-      )
+      if (this.stalePlayer(interaction))
         return this.settingsNotice(
           interaction.userId,
           "That player is stale; use the newest one.",
           loading,
         );
       const handlers: Record<string, () => Promise<void> | void> = {
-        open_add_to_queue: () => this.addModal(interaction),
         open_bulk_add: () => this.openBulkAdd(interaction),
         remove_queue_track: () => this.remove(interaction),
         previous_track: () => this.previous(interaction),
         toggle_playback: () => this.toggle(interaction),
         play_something: () => this.playSomething(interaction),
-        open_load_session: () => this.loadModal(interaction),
         next_track: () => this.next(interaction, currentId),
         seek_back: () => this.seek(interaction, -10),
         seek_forward: () => this.seek(interaction, 10),
-        open_jump_to: () => this.jumpToModal(interaction),
         toggle_captions: () => this.toggleCaptions(interaction),
         // The add dialogs' search and links, which say what was picked or
         // pasted in music mode; nothing else sends these.
@@ -986,25 +1110,18 @@ export class Coordinator {
         queue_move_up: () => this.reorder(interaction, -1),
         queue_move_down: () => this.reorder(interaction, 1),
         queue_play_next: () => this.playNext(interaction),
-        queue_move_to_position: () => this.queuePositionModal(interaction),
         queue_keep_autoplay: () => this.keepAutoplay(interaction),
         shuffle_queue: () => this.shuffleQueue(interaction),
         clear_queue: () => this.clear(interaction),
-        view_full_queue: () => this.queueModal(interaction),
-        open_settings: () => this.settingsModal(interaction, loading),
         end_session: async () => {
           await this.end(interaction.userId, "ended by host");
         },
-        open_end_session: () => this.endModal(interaction),
         save_channel_defaults: () => this.saveChannelDefaults(interaction),
         clear_channel_defaults: () => this.clearChannelDefaults(interaction),
         claim_host: () => this.claimHost(interaction),
-        connect_lastfm: () => this.lastFmModal(interaction),
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
-        open_listenbrainz_token: () => this.listenBrainzTokenModal(interaction),
-        open_your_data: () => this.openYourData(interaction),
         delete_own_save: () => this.deleteYourData(interaction, "own_save"),
         delete_my_channel_save: () =>
           this.deleteYourData(interaction, "channel_save"),
@@ -2117,6 +2234,9 @@ export class Coordinator {
           "Could not post restart notice",
         ),
       );
+      // The player shows what will resume, which the last click may not have
+      // reached Slack with yet.
+      await this.settlePlayer();
       const state = this.state;
       this.state = "suspended";
       this.playbackScrobbling?.pause();
@@ -3069,6 +3189,10 @@ export class Coordinator {
       interaction.state.jellyfin_track?.selection?.selected_option?.value;
     const value = jellyfinValue || searchValue || recommendId || recentId;
     if (!value) return;
+    // A search result works once, so results holding it are searched again.
+    for (const [key, { options }] of this.searchCache)
+      if (options.some((option) => option.value === value))
+        this.searchCache.delete(key);
     const accepted = await this.enqueue(async () => {
       if (this.inactive()) return false;
       if (interaction.messageTs && interaction.messageTs !== this.uiTs) {
@@ -3189,32 +3313,42 @@ export class Coordinator {
   // Puts requested tracks on the queue, recorded and announced, and hands
   // back each with the controller that cancels its preparation.
   private stageEntries(userId: string, items: QueuedItem[]) {
-    return items.map((metadata) => {
-      const entry: Entry = {
-        ...metadata,
-        id: crypto.randomUUID(),
-        requesterId: userId,
-        status: "preparing",
-        // A video queued to watch stays out of the music's history and
-        // taste, even before it plays.
-        ...(this.videoMode && trackKind(metadata) === "video"
-          ? { isVideo: true }
-          : {}),
-      };
+    // The player names who added each song, so the name is looked up while
+    // the songs are prepared rather than when the first starts.
+    if (items.length && userId !== this.botUserId)
+      void this.slack.userName(userId);
+    const entries = items.map((metadata): Entry => ({
+      ...metadata,
+      id: crypto.randomUUID(),
+      requesterId: userId,
+      status: "preparing",
+      // A video queued to watch stays out of the music's history and
+      // taste, even before it plays.
+      ...(this.videoMode && trackKind(metadata) === "video"
+        ? { isVideo: true }
+        : {}),
+    }));
+    // An album or playlist is written in one commit rather than one a song,
+    // and joins the queue only once that commit has gone through.
+    this.store.transaction(() => {
+      for (const entry of entries) {
+        this.store.addTrack({
+          ...entry,
+          sessionId: this.id,
+          status: entry.status,
+        });
+        this.store.incrementUsage("added");
+      }
+    });
+    return entries.map((entry) => {
       const controller = new AbortController();
       this.preparations.set(entry.id, controller);
       this.queue.push(entry);
-      this.store.addTrack({
-        ...entry,
-        sessionId: this.id,
-        status: entry.status,
-      });
       this.audit.record("track.added", userId, {
         sessionId: this.id,
         ...auditTrack(entry),
       });
       this.notifyTrack("queue.added", entry);
-      this.store.incrementUsage("added");
       return { entry, controller };
     });
   }
@@ -3303,7 +3437,8 @@ export class Coordinator {
     controller: AbortController,
   ): Promise<PreparedMedia & { videoChecked?: boolean }> {
     const directory = `data/media/${this.id}`;
-    const priority = this.preparationPriority(entry);
+    // Read when a preparation slot comes free, so it follows the queue.
+    const priority = () => this.preparationPriority(entry);
     if (parseJellyfinSource(entry.sourceId)) {
       if (!this.jellyfinUi) throw new TrackError("No longer available");
       return {
@@ -3332,21 +3467,21 @@ export class Coordinator {
           entry.id,
           controller.signal,
           priority,
-          entry.form === "audio" ? entry.filePath : undefined,
+          entry.form === "audio" && entry.filePath
+            ? { filePath: entry.filePath, gainDb: entry.gainDb }
+            : undefined,
           !entry.download,
         )),
         videoChecked: true,
       };
-    return {
-      filePath: await this.tracks.prepare(
-        entry,
-        directory,
-        entry.id,
-        controller.signal,
-        priority,
-      ),
-      form: "audio",
-    };
+    const filePath = await this.tracks.prepare(
+      entry,
+      directory,
+      entry.id,
+      controller.signal,
+      priority,
+    );
+    return { filePath, form: "audio", gainDb: this.tracks.gain?.(filePath) };
   }
 
   // Takes in a finished download, or discards it when the session no longer
@@ -4153,8 +4288,13 @@ export class Coordinator {
     }));
   }
 
+  // Sooner the sooner it plays: the track playing, being prepared again,
+  // first, then the queue in order. An autoplay pick only fills an empty
+  // queue, so it is what plays next. One no longer wanted comes last.
   private preparationPriority(entry: Entry) {
-    return entry.automatic ? -1_000_000 : -this.queue.indexOf(entry);
+    if (entry === this.current) return 1;
+    const index = this.queue.indexOf(entry);
+    return index < 0 ? -Infinity : -index;
   }
 
   private prepared(
@@ -4358,6 +4498,29 @@ export class Coordinator {
     );
   }
 
+  // Played tracks before the last few give up their files and lyrics, which
+  // would otherwise pile up until the session ends; they keep what they
+  // were, for the history and autoplay.
+  private async releaseHistory() {
+    const released: string[] = [];
+    for (const entry of this.history.slice(0, -keptHistory)) {
+      entry.lyrics = undefined;
+      if (!entry.filePath) continue;
+      released.push(entry.filePath);
+      entry.filePath = undefined;
+      entry.chapters = undefined;
+      this.store.setTrack(entry.id, { filePath: null });
+    }
+    try {
+      for (const filePath of released) await this.discardMedia(filePath);
+    } catch (error) {
+      this.log.warn(
+        { event: "history_release_failed", err: error },
+        "Could not remove a played track's files",
+      );
+    }
+  }
+
   // Removes a prepared file once no track uses it.
   private async discardMedia(filePath: string) {
     const used = [this.current, ...this.queue, ...this.history].some(
@@ -4432,6 +4595,7 @@ export class Coordinator {
       this.current.status = played ? "played" : "failed";
       if (played) this.history.push(this.current);
       this.store.setTrack(this.current.id, { status: this.current.status });
+      if (played) void this.releaseHistory();
       if (natural) {
         this.audit.record("track.finished", undefined, {
           sessionId: this.id,
@@ -4638,7 +4802,18 @@ export class Coordinator {
     this.store.incrementUsage("previous");
     if (this.current) this.requeue(this.current);
     this.current = undefined;
-    this.requeue(prior);
+    if (prior.filePath || prior.stream) this.requeue(prior);
+    else {
+      // Played too long ago to have kept its file, so it is prepared again,
+      // and plays first once it is ready, as after a restart.
+      prior.status = "preparing";
+      this.queue.unshift(prior);
+      this.store.setTrack(prior.id, { status: "preparing" });
+      this.interrupted = prior;
+      this.playbackScrobbling?.finish();
+      this.sendMedia({ type: "stop" });
+      void this.prepareRestored(prior);
+    }
     await this.startNext();
     return { prior };
   }
@@ -4845,6 +5020,7 @@ export class Coordinator {
     if (!entry) return this.queueChanged(interaction);
     entry.automatic = false;
     entry.requesterId = interaction.userId;
+    void this.slack.userName(interaction.userId);
     delete entry.autoplayMode;
     delete entry.discovery;
     delete entry.autoplaySources;
@@ -6642,7 +6818,7 @@ export class Coordinator {
   private async endModal(interaction: Interaction) {
     if (!interaction.triggerId) return;
     if (!this.can(interaction.userId, "end-session")) {
-      await this.end(interaction.userId, "ended by host");
+      await this.enqueue(() => this.end(interaction.userId, "ended by host"));
       return;
     }
     const tracks = this.savableQueue().length;
@@ -6936,16 +7112,72 @@ export class Coordinator {
     await this.takeHost(interaction.userId);
   }
 
-  private async render() {
+  // Draws the player from the session as it is now. Slack is sent it beside
+  // the session's queue of actions, so a click does not wait on the one
+  // before it reaching Slack: one update is in flight at a time, and renders
+  // made meanwhile collapse into the newest.
+  private render() {
     if (!this.uiTs || this.inactive()) return;
     this.revision++;
-    await this.slack.update(
-      this.room.uiChannelId,
-      this.uiTs,
-      "HuddleFM player",
-      this.blocks(),
-    );
     this.store.setUi(this.id, this.uiTs, this.revision);
+    this.playerBlocks = this.blocks();
+    this.playerSending ??= this.sendPlayer();
+  }
+
+  private async sendPlayer() {
+    try {
+      let attempt = 0;
+      while (this.playerBlocks && !this.inactive()) {
+        const blocks = this.playerBlocks;
+        this.playerBlocks = undefined;
+        const ts = this.uiTs;
+        try {
+          await this.slack.update(
+            this.room.uiChannelId,
+            ts,
+            "HuddleFM player",
+            blocks,
+            { interactive: true },
+          );
+          attempt = 0;
+        } catch (error) {
+          // A newer render goes out in its place; otherwise this one is tried
+          // again, after as long as Slack asks when it is rate limited, so
+          // the player never stays behind the session.
+          const delay = this.playerSettling
+            ? undefined
+            : slackRetryDelay(error, ++attempt);
+          this.log.warn(
+            { event: "player_update_failed", messageTs: ts, delay, err: error },
+            "Could not update the player message",
+          );
+          if (delay === undefined || ts !== this.uiTs) continue;
+          this.playerBlocks ??= blocks;
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, delay);
+            this.playerWake = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+          this.playerWake = undefined;
+        }
+      }
+    } finally {
+      this.playerSending = undefined;
+    }
+  }
+
+  // Waits for the player's updates to reach Slack, trying a pending one now
+  // rather than after a rate limit, and once only.
+  private async settlePlayer() {
+    this.playerSettling = true;
+    this.playerWake?.();
+    try {
+      await this.playerSending;
+    } finally {
+      this.playerSettling = false;
+    }
   }
 
   private queueRender() {
@@ -6966,8 +7198,14 @@ export class Coordinator {
       "HuddleFM player",
       this.blocks(),
     );
+    // The new message is drawn from the session as it was posted, which any
+    // update still waiting to be sent to the old one is behind. Until then
+    // that update stays, so a failed post leaves the old message current.
+    this.playerBlocks = undefined;
     this.uiTs = current;
     this.store.setUi(this.id, current, revision);
+    // A render while it was posted went to the old message.
+    if (this.revision !== revision) this.render();
     await this.slack
       .delete(previousChannelId, old)
       .catch((error) =>
@@ -7736,13 +7974,17 @@ export class Coordinator {
     ];
   }
 
+  // A notice is told in passing, often partway through a change to the
+  // session, so one Slack refuses (ephemerals fail fast) never stops it.
   private async notice(user: string, text: string) {
-    await this.slack.ephemeral(
-      this.room.uiChannelId,
-      user,
-      text,
-      this.room.uiThreadTs,
-    );
+    await this.slack
+      .ephemeral(this.room.uiChannelId, user, text, this.room.uiThreadTs)
+      .catch((error) =>
+        this.log.warn(
+          { event: "notice_failed", userId: user, err: error },
+          "Could not send notice",
+        ),
+      );
   }
 
   private async promptScrobbling(userId: string) {
@@ -7977,7 +8219,8 @@ export class Coordinator {
     this.dropIntegrations("session.ended");
     this.sessionChanged();
     this.sendMedia({ type: "leave" });
-    await this.leaveMedia();
+    // An update to the player still on its way would land after the recap.
+    await Promise.all([this.leaveMedia(), this.settlePlayer()]);
     try {
       if (this.uiTs) {
         await this.slack

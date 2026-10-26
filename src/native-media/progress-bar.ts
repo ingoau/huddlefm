@@ -69,12 +69,16 @@ export function drawProgressBar(frame: Buffer, size: Size, amount: number) {
  * Lays the bar over a video's frames. A frame is copied before it is drawn
  * on, since the decoder's frame stays up until the next one, and the same
  * frame with the bar where it was comes back as the same buffer, which the
- * feed then knows not to send again, as while paused.
+ * feed then knows not to send again, as while paused. The copies take turns
+ * in two pieces of memory, the one before last being long sent, but each is
+ * a Buffer of its own, so a new picture is never mistaken for the last.
  */
 export class ProgressBarOverlay {
   private source: Buffer | undefined;
   private played = -1;
   private drawn: Buffer | undefined;
+  private memory: ArrayBuffer[] = [];
+  private turn = 0;
 
   constructor(private size: Size) {}
 
@@ -84,7 +88,11 @@ export class ProgressBarOverlay {
     );
     if (frame === this.source && played === this.played && this.drawn)
       return this.drawn;
-    const drawn = Buffer.allocUnsafe(frame.length);
+    this.turn = 1 - this.turn;
+    let memory = this.memory[this.turn];
+    if (memory?.byteLength !== frame.length)
+      memory = this.memory[this.turn] = new ArrayBuffer(frame.length);
+    const drawn = Buffer.from(memory);
     frame.copy(drawn);
     drawProgressBar(drawn, this.size, played / this.size.width);
     this.source = frame;
@@ -97,5 +105,6 @@ export class ProgressBarOverlay {
     this.source = undefined;
     this.drawn = undefined;
     this.played = -1;
+    this.memory = [];
   }
 }

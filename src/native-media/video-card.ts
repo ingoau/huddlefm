@@ -97,6 +97,70 @@ export type CardProgress = {
   streamStart?: number;
 };
 
+/** Artwork as a card gets it: decoded, and perhaps already scaled down. */
+export type Artwork = Image | Canvas;
+
+/**
+ * Fetches and decodes artwork once for every card that shows it, and scales
+ * it down once, to the most any of them draws it at, so no card decodes it
+ * again or keeps the full-size picture. The last artwork is kept, and a
+ * failure is not: the same artwork is tried again next time.
+ */
+export class ArtworkLoader {
+  private url: string | undefined;
+  private load: Promise<Artwork> | undefined;
+
+  /** @param sizes - What each card covers with the artwork */
+  constructor(private sizes: { width: number; height: number }[]) {}
+
+  get(url: string) {
+    if (url !== this.url || !this.load) {
+      const load = fetchArtwork(url).then((image) => this.fit(image));
+      this.url = url;
+      this.load = load;
+      // Nobody may wait on it if the change is abandoned.
+      load.catch(() => {
+        if (this.load === load) this.load = undefined;
+      });
+    }
+    return this.load;
+  }
+
+  /** Lets the last artwork go, so it is fetched afresh next time. */
+  forget() {
+    this.url = undefined;
+    this.load = undefined;
+  }
+
+  private fit(image: Image): Artwork {
+    const scale = Math.max(
+      ...this.sizes.map(({ width, height }) =>
+        Math.max(width / image.width, height / image.height),
+      ),
+    );
+    if (!(scale < 1)) return image;
+    const canvas = createCanvas(
+      Math.max(1, Math.round(image.width * scale)),
+      Math.max(1, Math.round(image.height * scale)),
+    );
+    const context = canvas.getContext("2d");
+    // One careful scaling here; the cards' own are then small or none.
+    context.imageSmoothingQuality = "high";
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+}
+
+async function fetchArtwork(url: string) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new Error(`Artwork HTTP ${response.status}`);
+  const length = Number(response.headers.get("content-length") ?? 0);
+  if (length > maxArtworkBytes) throw new Error("Artwork is too large");
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > maxArtworkBytes) throw new Error("Artwork is too large");
+  return loadImage(bytes);
+}
+
 export type VideoCardOptions = {
   /** Milliseconds, for animation; a fixed clock lets a test step frames. */
   now?: () => number;
@@ -108,6 +172,8 @@ export type VideoCardOptions = {
    * a track with a length, which a live stream does not have.
    */
   wide?: boolean;
+  /** Shared with the other cards showing the same tracks. */
+  artwork?: ArtworkLoader;
 };
 
 type Track = {
@@ -164,8 +230,7 @@ export class VideoCard {
     at: -Infinity,
   };
   private artworkRequest = 0;
-  private artworkUrl: string | undefined;
-  private artworkLoad: Promise<Image> | undefined;
+  private artwork: ArtworkLoader;
   private frameKey = "";
   private frame: Buffer | undefined;
   private stageDirty = true;
@@ -193,6 +258,9 @@ export class VideoCard {
     this.wide = options.wide ?? false;
     this.width = this.wide ? wideCardWidth : cardSize;
     this.layoutWidth = this.wide ? wideLayoutWidth : layoutSize;
+    this.artwork =
+      options.artwork ??
+      new ArtworkLoader([{ width: this.width, height: this.height }]);
     this.canvas = createCanvas(this.width, this.height);
     this.context = this.canvas.getContext("2d");
     this.stage = createCanvas(this.width, this.height);
@@ -209,7 +277,7 @@ export class VideoCard {
     // The last track's artwork, if still loading, must not land on this one.
     this.artworkRequest++;
     this.track = { title: "", artist: "", pending: true, enteredAt: now };
-    if (artworkUrl) this.fetchArtwork(artworkUrl);
+    if (artworkUrl) void this.artwork.get(artworkUrl);
     this.stageDirty = true;
   }
 
@@ -227,11 +295,12 @@ export class VideoCard {
     this.stageDirty = true;
     const request = ++this.artworkRequest;
     if (!artworkUrl) {
-      this.artworkUrl = undefined;
+      this.artwork.forget();
       this.showCover(track, now);
       return;
     }
-    void this.fetchArtwork(artworkUrl)
+    void this.artwork
+      .get(artworkUrl)
       .then((image) => {
         if (request === this.artworkRequest) this.showArtwork(image);
       })
@@ -242,7 +311,7 @@ export class VideoCard {
   }
 
   /** Shows artwork that is already decoded, skipping the fetch. */
-  showArtwork(image: Image) {
+  showArtwork(image: Artwork) {
     const now = this.seconds();
     const track = this.track;
     track.cover = this.croppedCover(image);
@@ -311,11 +380,12 @@ export class VideoCard {
     const view = this.track.view;
     if (view && lyricsAlpha > 0)
       view.update(songTime - this.lyricsOffset, delta, frame.height);
+    // Only while the lyrics would draw differently: a line-synced line, or
+    // a word-synced one once it is sung, holds still as the song plays.
     const lyricsMoving =
       lyricsAlpha > 0 &&
       ((Boolean(view) &&
-        (this.clockRunning(now) ||
-          !view!.settled ||
+        (view!.changed ||
           progressOf(now, this.track.viewAt, lyricsEnter) < 1)) ||
         Boolean(this.outgoing?.view));
     const foregroundMoving = this.foregroundMoving(now);
@@ -399,20 +469,6 @@ export class VideoCard {
       return;
     this.outgoing = undefined;
     this.stageDirty = true;
-  }
-
-  private fetchArtwork(url: string) {
-    if (url !== this.artworkUrl || !this.artworkLoad) {
-      const load = this.loadArtwork(url);
-      this.artworkUrl = url;
-      this.artworkLoad = load;
-      // Nobody may wait on it if the change is abandoned, and a failure is
-      // not kept: the same artwork is tried again next time.
-      load.catch(() => {
-        if (this.artworkLoad === load) this.artworkLoad = undefined;
-      });
-    }
-    return this.artworkLoad;
   }
 
   private showCover(track: Track, now = this.seconds()) {
@@ -534,18 +590,8 @@ export class VideoCard {
     return clock.shown;
   }
 
-  private async loadArtwork(url: string) {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!response.ok) throw new Error(`Artwork HTTP ${response.status}`);
-    const length = Number(response.headers.get("content-length") ?? 0);
-    if (length > maxArtworkBytes) throw new Error("Artwork is too large");
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > maxArtworkBytes) throw new Error("Artwork is too large");
-    return loadImage(bytes);
-  }
-
   /** background-size: cover, done once so each frame draws it as it is. */
-  private croppedCover(image: Image) {
+  private croppedCover(image: Artwork) {
     const { width, height } = this;
     const canvas = createCanvas(width, height);
     const context = canvas.getContext("2d");
@@ -561,7 +607,7 @@ export class VideoCard {
   }
 
   /** The artwork, small, for the moving backdrop to turn and drift. */
-  private flowSource(image: Image) {
+  private flowSource(image: Artwork) {
     const size = 64;
     const canvas = createCanvas(size, size);
     const scale = Math.max(size / image.width, size / image.height);

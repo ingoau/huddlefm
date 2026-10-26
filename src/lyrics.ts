@@ -82,22 +82,59 @@ function withHints(url: URL, track: TrackMetadata, names: [string, string]) {
   return url;
 }
 
+/** A request's deadline, cut short when `signal` gives up on it first. */
+const deadline = (timeoutMs: number, signal?: AbortSignal) =>
+  signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
+
 async function fetchJson<T>(
   url: string | URL,
   init: RequestInit = {},
   timeoutMs = 10_000,
+  signal?: AbortSignal,
 ) {
   const response = await fetch(url, {
     ...init,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: deadline(timeoutMs, signal),
   });
   return response.ok ? ((await response.json()) as T) : undefined;
 }
 
-async function fetchText(url: string) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+async function fetchText(url: string, signal?: AbortSignal) {
+  const response = await fetch(url, { signal: deadline(10_000, signal) });
   return response.ok ? response.text() : undefined;
 }
+
+/**
+ * The first of `attempts` to find something, in their order, with all of
+ * them run at once: a later one's find waits on the earlier ones, as when
+ * they were tried in turn, and the rest are stopped once one is chosen. An
+ * earlier one's failure fails them all, as it did then.
+ */
+async function firstFound<T>(
+  attempts: ((signal: AbortSignal) => Promise<T | undefined>)[],
+  signal?: AbortSignal,
+) {
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  signal?.addEventListener("abort", stop, { once: true });
+  const running = attempts.map((attempt) => attempt(controller.signal));
+  // Those after the one chosen are dropped, failures and all.
+  for (const work of running) work.catch(() => undefined);
+  try {
+    for (const work of running) {
+      const found = await work;
+      if (found !== undefined) return found;
+    }
+  } finally {
+    controller.abort();
+    signal?.removeEventListener("abort", stop);
+  }
+}
+
+/** Lyrics requests kept, most recently used last. */
+const maxCachedLyrics = 300;
 
 const payload = (
   lines: Lyric[],
@@ -122,8 +159,51 @@ function wordSyncedLines(ttml: string, track: TrackMetadata) {
   return parsed.isWordSynced ? parsed.lyrics : [];
 }
 
+type Provider = {
+  name: string;
+  /**
+   * The best (lowest) priority it ever gives, so it is only waited on while
+   * it could still beat what has been found. Keep in step with its payloads.
+   */
+  best: number;
+  find: (
+    track: TrackMetadata,
+    signal: AbortSignal,
+  ) => Promise<LyricsPayload | undefined>;
+};
+
 export class LyricsCatalog {
+  /** Requests by source, least recently used first. */
   private cache = new Map<string, Promise<LyricsPayload | undefined>>();
+
+  // In the order a tie in priority goes by.
+  private providers: Provider[] = [
+    {
+      name: "better-lyrics",
+      best: 0,
+      find: (track, signal) => this.betterLyrics(track, signal),
+    },
+    {
+      name: "binimum",
+      best: 2,
+      find: (track, signal) => this.binimum(track, signal),
+    },
+    {
+      name: "unison",
+      best: 1,
+      find: (track, signal) => this.unison(track, signal),
+    },
+    {
+      name: "amll",
+      best: 5,
+      find: (track, signal) => this.amll(track, signal),
+    },
+    {
+      name: "lrclib",
+      best: 9,
+      find: (track, signal) => this.lrclib(track, signal),
+    },
+  ];
 
   get(track: TrackMetadata) {
     const cached = this.cache.get(track.sourceId);
@@ -131,41 +211,92 @@ export class LyricsCatalog {
       { event: cached ? "cache_hit" : "cache_miss", sourceId: track.sourceId },
       cached ? "Using cached lyrics request" : "Fetching lyrics",
     );
-    if (cached) return cached;
-    const request = this.fetch(track);
+    if (cached) {
+      this.cache.delete(track.sourceId);
+      this.cache.set(track.sourceId, cached);
+      return cached;
+    }
+    const forget = () => {
+      if (this.cache.get(track.sourceId) === request)
+        this.cache.delete(track.sourceId);
+    };
+    // A failure, or nothing found when a provider failed, may go another
+    // way next time, so neither is kept.
+    const request: Promise<LyricsPayload | undefined> = this.fetch(track).then(
+      ({ selected, failed }) => {
+        if (!selected && failed) forget();
+        return selected;
+      },
+      (error) => {
+        forget();
+        throw error;
+      },
+    );
     this.cache.set(track.sourceId, request);
+    for (const sourceId of this.cache.keys()) {
+      if (this.cache.size <= maxCachedLyrics) break;
+      this.cache.delete(sourceId);
+    }
     return request;
   }
 
+  /**
+   * Asks every provider at once and picks the best priority found, the
+   * earlier provider on a tie. It picks as soon as no provider still
+   * working could give a better one, and stops the rest.
+   */
   private async fetch(track: TrackMetadata) {
     const startedAt = Date.now();
-    const providers: [string, Promise<LyricsPayload | undefined>][] = [
-      ["better-lyrics", this.betterLyrics(track)],
-      ["binimum", this.binimum(track)],
-      ["unison", this.unison(track)],
-      ["amll", this.amll(track)],
-      ["lrclib", this.lrclib(track)],
-    ];
-    const results = await Promise.all(
-      providers.map(async ([provider, work]) => {
-        try {
-          return await work;
-        } catch (error) {
-          log.warn(
-            {
-              event: "provider_failed",
-              provider,
-              sourceId: track.sourceId,
-              err: error,
+    const controller = new AbortController();
+    const results: (LyricsPayload | undefined)[] = [];
+    const settled = new Set<number>();
+    let failed = false;
+    const selected = await new Promise<LyricsPayload | undefined>((resolve) => {
+      const decide = () => {
+        let best: number | undefined;
+        for (const [index, result] of results.entries())
+          if (
+            result &&
+            (best === undefined || result.priority < results[best]!.priority)
+          )
+            best = index;
+        const bestPriority =
+          best === undefined ? Infinity : results[best]!.priority;
+        const couldBeat = this.providers.some(
+          (provider, index) =>
+            !settled.has(index) &&
+            (provider.best < bestPriority ||
+              (provider.best === bestPriority && index < best!)),
+        );
+        if (!couldBeat) resolve(best === undefined ? undefined : results[best]);
+      };
+      for (const [index, provider] of this.providers.entries())
+        void provider
+          .find(track, controller.signal)
+          .then(
+            (result) => {
+              results[index] = result;
             },
-            "Lyrics provider failed",
-          );
-        }
-      }),
-    );
-    const selected = results
-      .flatMap((result) => (result ? [result] : []))
-      .sort((a, b) => a.priority - b.priority)[0];
+            (error) => {
+              if (controller.signal.aborted) return;
+              failed = true;
+              log.warn(
+                {
+                  event: "provider_failed",
+                  provider: provider.name,
+                  sourceId: track.sourceId,
+                  err: error,
+                },
+                "Lyrics provider failed",
+              );
+            },
+          )
+          .finally(() => {
+            settled.add(index);
+            decide();
+          });
+    });
+    controller.abort();
     if (selected) {
       sanitizeInlineLyricRoles(selected.lines);
       await enrichLyricsWithRomanization(selected.lines, {
@@ -183,58 +314,61 @@ export class LyricsCatalog {
       },
       selected ? "Lyrics found" : "Lyrics unavailable",
     );
-    return selected;
+    return { selected, failed };
   }
 
-  private async betterLyrics(track: TrackMetadata) {
-    for (const [title, artist] of variants(track)) {
-      const url = new URL("https://lyrics-api.boidu.dev/getLyrics");
-      url.searchParams.set("s", title);
-      url.searchParams.set("a", artist);
-      const data = await fetchJson<{ ttml?: string }>(
-        withHints(url, track, ["d", "al"]),
-        {
-          headers: { accept: "application/json", "user-agent": "Mozilla/5.0" },
-        },
-        15_000,
-      );
-      if (!data?.ttml) continue;
-      const found = payload(
-        wordSyncedLines(data.ttml, track),
-        "Better Lyrics",
-        0,
-        data.ttml,
-      );
-      if (found) return found;
-    }
+  private betterLyrics(track: TrackMetadata, signal: AbortSignal) {
+    return firstFound(
+      variants(track).map(([title, artist]) => async (signal) => {
+        const url = new URL("https://lyrics-api.boidu.dev/getLyrics");
+        url.searchParams.set("s", title);
+        url.searchParams.set("a", artist);
+        const data = await fetchJson<{ ttml?: string }>(
+          withHints(url, track, ["d", "al"]),
+          {
+            headers: {
+              accept: "application/json",
+              "user-agent": "Mozilla/5.0",
+            },
+          },
+          15_000,
+          signal,
+        );
+        if (!data?.ttml) return;
+        return payload(
+          wordSyncedLines(data.ttml, track),
+          "Better Lyrics",
+          0,
+          data.ttml,
+        );
+      }),
+      signal,
+    );
   }
 
-  private async binimum(track: TrackMetadata) {
-    for (const [title, artist] of variants(track)) {
-      const url = new URL("https://lyrics-api.binimum.org/");
-      url.searchParams.set("track", title);
-      url.searchParams.set("artist", artist);
-      const data = await fetchJson<{
-        results?: { timing_type?: string; lyricsUrl?: string }[];
-      }>(withHints(url, track, ["duration", "album"]));
-      const lyricsUrl = data?.results?.find(
-        (value) => value.timing_type === "word",
-      )?.lyricsUrl;
-      if (!lyricsUrl?.startsWith("https://lyrics-storage.binimum.org/"))
-        continue;
-      const ttml = await fetchText(lyricsUrl);
-      if (!ttml) continue;
-      const found = payload(
-        wordSyncedLines(ttml, track),
-        "BiniLyrics",
-        2,
-        ttml,
-      );
-      if (found) return found;
-    }
+  private binimum(track: TrackMetadata, signal: AbortSignal) {
+    return firstFound(
+      variants(track).map(([title, artist]) => async (signal) => {
+        const url = new URL("https://lyrics-api.binimum.org/");
+        url.searchParams.set("track", title);
+        url.searchParams.set("artist", artist);
+        const data = await fetchJson<{
+          results?: { timing_type?: string; lyricsUrl?: string }[];
+        }>(withHints(url, track, ["duration", "album"]), {}, 10_000, signal);
+        const lyricsUrl = data?.results?.find(
+          (value) => value.timing_type === "word",
+        )?.lyricsUrl;
+        if (!lyricsUrl?.startsWith("https://lyrics-storage.binimum.org/"))
+          return;
+        const ttml = await fetchText(lyricsUrl, signal);
+        if (!ttml) return;
+        return payload(wordSyncedLines(ttml, track), "BiniLyrics", 2, ttml);
+      }),
+      signal,
+    );
   }
 
-  private async unison(track: TrackMetadata) {
+  private async unison(track: TrackMetadata, signal: AbortSignal) {
     const url = new URL("https://unison.boidu.dev/lyrics");
     url.searchParams.set("v", track.sourceId);
     url.searchParams.set("song", track.title);
@@ -242,6 +376,9 @@ export class LyricsCatalog {
     const data = (
       await fetchJson<{ data?: { format?: string; lyrics?: string } }>(
         withHints(url, track, ["duration", "album"]),
+        {},
+        10_000,
+        signal,
       )
     )?.data;
     if (!data?.lyrics) return;
@@ -267,7 +404,7 @@ export class LyricsCatalog {
     return payload(lines, source, data.format === "plain" ? 13 : 7);
   }
 
-  private async amll(track: TrackMetadata) {
+  private async amll(track: TrackMetadata, signal: AbortSignal) {
     const results = await fetchJson<
       {
         file?: string;
@@ -276,11 +413,16 @@ export class LyricsCatalog {
         artist?: string;
         artists?: string[];
       }[]
-    >("https://amlldb.bikonoo.com/api/search-lyrics", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: track.title, type: "title" }),
-    });
+    >(
+      "https://amlldb.bikonoo.com/api/search-lyrics",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: track.title, type: "title" }),
+      },
+      10_000,
+      signal,
+    );
     if (!results) return;
     const normalize = (value: string) =>
       value.toLowerCase().replace(/\s+/g, " ").trim();
@@ -295,19 +437,20 @@ export class LyricsCatalog {
     if (!match?.file) return;
     const ttml = await fetchText(
       `https://amlldb.bikonoo.com/raw-lyrics/${encodeURIComponent(match.file)}`,
+      signal,
     );
     if (!ttml) return;
     return payload(wordSyncedLines(ttml, track), "AMLL TTML DB", 5, ttml);
   }
 
-  private async lrclib(track: TrackMetadata) {
+  private async lrclib(track: TrackMetadata, signal: AbortSignal) {
     const url = new URL("https://lrclib.net/api/get");
     url.searchParams.set("track_name", track.title);
     url.searchParams.set("artist_name", track.artist);
     const data = await fetchJson<{
       syncedLyrics?: string;
       plainLyrics?: string;
-    }>(withHints(url, track, ["duration", "album_name"]));
+    }>(withHints(url, track, ["duration", "album_name"]), {}, 10_000, signal);
     if (!data) return;
     const durationMs = songDurationMs(track);
     const lines = data.syncedLyrics

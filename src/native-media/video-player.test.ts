@@ -29,6 +29,11 @@ class FakeDecoder implements FrameDecoder {
     }
   }
 
+  recycled: Buffer[] = [];
+  recycle(data: Buffer) {
+    this.recycled.push(data);
+  }
+
   close() {
     this.closed = true;
   }
@@ -155,6 +160,27 @@ test("decodes on the audio's timeline so captions line up after a seek", () => {
   ).toContain("passthrough");
 });
 
+test("hands the frames it has passed back to the decoder, never the one up", () => {
+  const { video, decoders } = player();
+  video.setSource({ key: 1, url: "clip.mkv" });
+  video.frame(0, 1);
+  decoders[0]!.decode(10);
+  const first = video.frame(0, 1);
+  expect(decoders[0]!.recycled).toEqual([]);
+  const later = video.frame(0.5, 1);
+  expect(shown(later)).toBe("0:5");
+  // The first frame, and those skipped over on the way to the sixth.
+  expect(decoders[0]!.recycled.map(shown)).toEqual([
+    "0:0",
+    "0:1",
+    "0:2",
+    "0:3",
+    "0:4",
+  ]);
+  expect(decoders[0]!.recycled[0]).toBe(first!);
+  expect(decoders[0]!.recycled).not.toContain(later!);
+});
+
 const hasFfmpeg = Boolean(Bun.which("ffmpeg"));
 
 test.skipIf(!hasFfmpeg)(
@@ -177,6 +203,19 @@ test.skipIf(!hasFfmpeg)(
         await Bun.sleep(10);
       }
       expect(frame?.length).toBe((320 * 180 * 3) / 2);
+      expect(errors).toEqual([]);
+      // Played through, frame after frame: each is a Buffer of its own, in
+      // memory used again once a frame has been shown.
+      const frames = new Set<Buffer>();
+      const memory = new Set<ArrayBufferLike>();
+      for (let position = 1; position < 2.9; position += 0.1) {
+        await Bun.sleep(20);
+        const next = video.frame(position, 1)!;
+        frames.add(next);
+        memory.add(next.buffer);
+      }
+      expect(frames.size).toBeGreaterThan(15);
+      expect(memory.size).toBeLessThan(frames.size);
       expect(errors).toEqual([]);
     } finally {
       video.stop();

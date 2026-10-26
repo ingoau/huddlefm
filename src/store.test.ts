@@ -227,6 +227,47 @@ test("creates indexes for recurring session, track, and scrobble queries", () =>
   store.close();
 });
 
+test("commits several writes together, and syncs WAL only at checkpoints", () => {
+  const directory = mkdtempSync(join(tmpdir(), "huddlefm-store-"));
+  const store = new Store(join(directory, "store.sqlite"));
+  // NORMAL is 1; the default FULL is 2.
+  expect(store.db.query("PRAGMA synchronous").get()).toEqual({
+    synchronous: 1,
+  });
+  createSession(store);
+  const track = (id: string) => ({
+    id,
+    sessionId: "session",
+    requesterId: "user",
+    sourceInput: id,
+    canonicalUrl: id,
+    sourceId: id,
+    title: id,
+    artist: "Artist",
+    status: "preparing",
+  });
+  expect(
+    store.transaction(() => {
+      store.addTrack(track("a"));
+      store.addTrack(track("b"));
+      return "added";
+    }),
+  ).toBe("added");
+  // A failure part way keeps none of it.
+  expect(() =>
+    store.transaction(() => {
+      store.addTrack(track("c"));
+      store.addTrack(track("a"));
+    }),
+  ).toThrow();
+  expect(store.db.query("SELECT id FROM tracks ORDER BY id").all()).toEqual([
+    { id: "a" },
+    { id: "b" },
+  ]);
+  store.close();
+  rmSync(directory, { recursive: true, force: true });
+});
+
 test("updates track display metadata after embedded tags are read", () => {
   const store = new Store(":memory:");
   createSession(store);

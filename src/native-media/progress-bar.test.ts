@@ -55,3 +55,16 @@ test("the overlay draws on a copy, and hands back the same one until the bar mov
   expect(luma(moved, 40, size.height - 1)).toBe(235);
   expect(overlay.over(frameOf(100, 128), 0.75)).not.toBe(moved);
 });
+
+test("the overlay's copies take turns in two buffers, each a new one", () => {
+  const overlay = new ProgressBarOverlay(size);
+  const drawn = [0.2, 0.4, 0.6].map((amount) =>
+    overlay.over(frameOf(100, 128), amount),
+  );
+  expect(new Set(drawn).size).toBe(3);
+  expect(drawn[2]!.buffer).toBe(drawn[0]!.buffer);
+  expect(drawn[1]!.buffer).not.toBe(drawn[0]!.buffer);
+  // The reused memory holds the latest picture.
+  expect(luma(drawn[2]!, 37, size.height - 1)).toBe(235);
+  expect(luma(drawn[2]!, 39, size.height - 1)).not.toBe(235);
+});

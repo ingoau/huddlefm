@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AudioEngine } from "./audio-engine.ts";
+import { Compressor } from "./compressor.ts";
 import { sampleRate, type Decoder, type DurationProbe } from "./decoder.ts";
 
 class FakeDecoder implements Decoder {
@@ -302,6 +303,107 @@ describe("AudioEngine", () => {
     engine.handle({ type: "replay", entryId: "a", introSeconds: 2 });
     expect(engine.progress()!.position).toBe(2);
     expect(of("playing")).toHaveLength(2);
+  });
+
+  test("the track before is rewound once done, so going back starts at once", () => {
+    const { engine, run, decoders } = setup();
+    engine.handle(play("a"));
+    run(3);
+    engine.handle(play("b"));
+    expect(decoders).toHaveLength(2);
+    engine.handle({
+      type: "preload",
+      entries: [{ entryId: "a", url: "http://127.0.0.1/audio/a" }],
+    });
+    expect(decoders[0]!.closed).toBeTrue();
+    expect(decoders).toHaveLength(3);
+    expect(decoders[2]!.start).toBe(0);
+    run(1);
+    engine.handle(play("a"));
+    expect(decoders).toHaveLength(3);
+    run(1);
+    expect(engine.progress()!.position).toBeCloseTo(1, 1);
+  });
+
+  test("a track before that can't be reopened is dropped, and opens again later", () => {
+    let failing = false;
+    const decoders: FakeDecoder[] = [];
+    const engine = new AudioEngine(
+      (url, start) => {
+        if (failing) throw new Error("spawn failed");
+        const decoder = new FakeDecoder(
+          url,
+          start,
+          Math.round((30 - start) * sampleRate),
+        );
+        decoders.push(decoder);
+        return decoder;
+      },
+      () => {},
+    );
+    const run = (seconds: number) => {
+      for (let frame = 0; frame < seconds * 50; frame++) engine.render(960);
+    };
+    engine.handle(play("a"));
+    run(3);
+    engine.handle(play("b"));
+    failing = true;
+    expect(() =>
+      engine.handle({
+        type: "preload",
+        entries: [{ entryId: "a", url: "http://127.0.0.1/audio/a" }],
+      }),
+    ).not.toThrow();
+    // The track playing carries on.
+    expect(() => run(1)).not.toThrow();
+    expect(engine.progress()!.position).toBeCloseTo(1, 1);
+    failing = false;
+    const opened = decoders.length;
+    engine.handle(play("a"));
+    run(1);
+    expect(decoders).toHaveLength(opened + 1);
+    expect(decoders.at(-1)!.start).toBe(0);
+    expect(engine.progress()!.position).toBeCloseTo(1, 1);
+  });
+
+  test("rests on silence once a pause is through the limiter, and wakes at once", () => {
+    const { engine, run } = setup(30, undefined, 0.5);
+    engine.setVolume(1);
+    engine.handle(play("a"));
+    run(2);
+    expect(engine.resting).toBeFalse();
+    engine.handle({ type: "pause" });
+    engine.render(960);
+    // The look-ahead still had the music in it.
+    expect(engine.resting).toBeFalse();
+    run(2);
+    expect(engine.resting).toBeTrue();
+    expect(Math.max(...engine.render(960).map(Math.abs))).toBe(0);
+    engine.handle({ type: "resume" });
+    const resumed = engine.render(960);
+    expect(engine.resting).toBeFalse();
+    expect(Math.max(...resumed.map(Math.abs))).toBeGreaterThan(0.1);
+  });
+
+  test("silence skipped at rest comes back as it would have", () => {
+    const loud = new Float32Array(960 * 2).fill(0.8);
+    const quiet = () => new Float32Array(960 * 2);
+    const run = (restingFrames: number) => {
+      const compressor = new Compressor();
+      for (let frame = 0; frame < 25; frame++) compressor.process(loud.slice());
+      let frames = 0;
+      while (!compressor.resting && frames++ < 500) compressor.process(quiet());
+      expect(compressor.resting).toBeTrue();
+      for (let frame = 0; frame < restingFrames; frame++)
+        expect(
+          compressor.process(quiet()).every((value) => value === 0),
+        ).toBeTrue();
+      return compressor.process(loud.slice());
+    };
+    const skipped = run(0);
+    const processed = run(100);
+    for (let index = 0; index < skipped.length; index++)
+      expect(Math.abs(skipped[index]! - processed[index]!)).toBeLessThan(1e-5);
   });
 
   test("volume and ducking scale the output", () => {

@@ -3,8 +3,9 @@
 // messages.
 import { ProgressBarOverlay } from "./progress-bar.ts";
 import { UnitRing } from "./unit-ring.ts";
-import { VideoCard } from "./video-card.ts";
+import { ArtworkLoader, VideoCard } from "./video-card.ts";
 import { VideoFeed, wideCardInput } from "./video-feed.ts";
+import { cardSize, wideCardWidth } from "./video-format.ts";
 import { FfmpegFrameDecoder, VideoPlayer } from "./video-player.ts";
 import type { FromVideoWorker, ToVideoWorker } from "./video-thread.ts";
 
@@ -209,6 +210,11 @@ self.addEventListener("message", (event) => {
   const message = (event as MessageEvent<ToVideoWorker>).data;
   if (message.type === "init") {
     const clock = new Float64Array(message.clock);
+    // Both cards show the same artwork: it is fetched and decoded once.
+    const artwork = new ArtworkLoader([
+      { width: cardSize, height: cardSize },
+      { width: wideCardWidth, height: cardSize },
+    ]);
     const card = (wide: boolean) =>
       new VideoCard(
         () =>
@@ -225,7 +231,7 @@ self.addEventListener("message", (event) => {
             message: "Artwork failed to load",
             error,
           }),
-        { lyricsOffset: message.lyricsOffset, wide },
+        { lyricsOffset: message.lyricsOffset, wide, artwork },
       );
     const videoCard = card(false);
     const shareCard = card(true);

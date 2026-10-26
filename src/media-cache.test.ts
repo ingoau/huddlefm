@@ -151,6 +151,86 @@ test("reloads its index after a restart and drops expired or partial files", () 
     ).toEqual(media);
   }));
 
+test("keeps songs in Matroska with their gain beside ones cached normalized in Opus", () =>
+  withDirectory(async (directory) => {
+    const cacheDirectory = join(directory, "cache");
+    const limits = { maxBytes: 1_000, maxAgeMs: 0 };
+    const first = new MediaCache(cacheDirectory, limits);
+    await first.initialize();
+    const legacy = join(directory, "legacy.opus");
+    const levelled = join(directory, "levelled.mka");
+    await writeFile(legacy, "normalized");
+    await writeFile(levelled, "as it came");
+    await first.store(key(1), legacy, join(directory, "none.jpg"), media);
+    await first.store(key(2), levelled, join(directory, "none.jpg"), {
+      ...media,
+      format: "mka",
+      gainDb: -4.5,
+    });
+
+    const second = new MediaCache(cacheDirectory, limits);
+    await second.initialize();
+    expect((await readdir(cacheDirectory)).sort()).toEqual([
+      `${key(1)}.json`,
+      `${key(1)}.opus`,
+      `${key(2)}.json`,
+      `${key(2)}.mka`,
+    ]);
+    const named = (stem: string) => (extension: string) =>
+      join(directory, `${stem}.${extension}`);
+    // One cached before levelling plays as it is, with no gain.
+    expect(
+      await second.restore(key(1), named("a"), join(directory, "a.jpg")),
+    ).toEqual(media);
+    expect(await readFile(join(directory, "a.opus"), "utf8")).toBe(
+      "normalized",
+    );
+    expect(
+      await second.restore(key(2), named("b"), join(directory, "b.jpg")),
+    ).toEqual({ ...media, format: "mka", gainDb: -4.5 });
+    expect(await readFile(join(directory, "b.mka"), "utf8")).toBe("as it came");
+    // Prepared again, the old Opus file makes way for the new one.
+    await second.store(key(1), levelled, join(directory, "none.jpg"), {
+      ...media,
+      format: "mka",
+      gainDb: 2,
+    });
+    expect((await readdir(cacheDirectory)).sort()).toEqual([
+      `${key(1)}.json`,
+      `${key(1)}.mka`,
+      `${key(2)}.json`,
+      `${key(2)}.mka`,
+    ]);
+  }));
+
+test("reads a cache larger than one batch of descriptions", () =>
+  withDirectory(async (directory) => {
+    const cacheDirectory = join(directory, "cache");
+    await mkdir(cacheDirectory);
+    const count = 75;
+    for (let index = 1; index <= count; index++) {
+      await writeFile(join(cacheDirectory, `${key(index)}.opus`), "audio");
+      await writeFile(
+        join(cacheDirectory, `${key(index)}.json`),
+        JSON.stringify({ ...media, version: 1, createdAt: Date.now() }),
+      );
+    }
+    const cache = new MediaCache(cacheDirectory, {
+      maxBytes: 1_000,
+      maxAgeMs: 0,
+    });
+    await cache.initialize();
+    expect(await readdir(cacheDirectory)).toHaveLength(count * 2);
+    for (const index of [1, 33, count])
+      expect(
+        await cache.restore(
+          key(index),
+          join(directory, `${index}.opus`),
+          join(directory, `${index}.jpg`),
+        ),
+      ).toEqual(media);
+  }));
+
 test("a disabled cache keeps nothing", () =>
   withDirectory(async (directory) => {
     const cacheDirectory = join(directory, "cache");

@@ -30,7 +30,21 @@ export type CachedMedia = {
   chapters?: Chapter[];
   /** A video's captions, as SRT. */
   captions?: string;
+  /**
+   * The media file's extension, when not the cache's own: songs are kept in
+   * Matroska now, and in Opus before.
+   */
+  format?: string;
+  /**
+   * What the song is turned by as it plays to reach the loudness target.
+   * Absent for one normalized as it was prepared, as every song cached
+   * before levelling was, which plays as it is.
+   */
+  gainDb?: number;
 };
+
+/** Descriptions read at once while the cache is first read. */
+const readConcurrency = 32;
 
 type Stored = CachedMedia & { version: 1; createdAt: number };
 
@@ -67,13 +81,21 @@ export class MediaCache {
       await mkdir(this.directory, { recursive: true });
       const names = await readdir(this.directory);
       const kept = new Set<string>();
-      for (const name of names) {
-        const key = name.match(/^([0-9a-f]{32})\.json$/)?.[1];
-        const entry = key && (await this.read(key));
-        if (!key || !entry) continue;
-        this.entries.set(key, entry);
-        kept.add(name).add(`${key}.${this.extension}`);
-        if (entry.media.cover) kept.add(`${key}.cover.jpg`);
+      const keys = names.flatMap(
+        (name) => name.match(/^([0-9a-f]{32})\.json$/)?.[1] ?? [],
+      );
+      // A few at a time: a large cache reads in a fraction of the time it
+      // took one by one, without opening thousands of files at once.
+      for (let start = 0; start < keys.length; start += readConcurrency) {
+        const batch = keys.slice(start, start + readConcurrency);
+        const read = await Promise.all(batch.map((key) => this.read(key)));
+        for (const [index, entry] of read.entries()) {
+          const key = batch[index]!;
+          if (!entry) continue;
+          this.entries.set(key, entry);
+          kept.add(`${key}.json`).add(this.fileName(key, entry.media));
+          if (entry.media.cover) kept.add(`${key}.cover.jpg`);
+        }
       }
       // Interrupted writes and files whose description is missing or corrupt.
       await Promise.all(
@@ -96,9 +118,14 @@ export class MediaCache {
 
   /**
    * Links a cached track to `audioPath`, and its cover next to it when there
-   * is one, and describes it. Returns nothing on a miss.
+   * is one, and describes it. Returns nothing on a miss. `audioPath` can be
+   * given the file's extension, to name the link for what it holds.
    */
-  restore(key: string, audioPath: string, coverPath: string) {
+  restore(
+    key: string,
+    audioPath: string | ((extension: string) => string),
+    coverPath: string,
+  ) {
     if (!this.enabled) return Promise.resolve(undefined);
     return this.serialized(async (): Promise<CachedMedia | undefined> => {
       const entry = this.entries.get(key);
@@ -107,13 +134,16 @@ export class MediaCache {
         await this.remove(key);
         return;
       }
+      const format = entry.media.format ?? this.extension;
+      const target =
+        typeof audioPath === "string" ? audioPath : audioPath(format);
       try {
-        await linkOrCopy(this.path(`${key}.${this.extension}`), audioPath);
+        await linkOrCopy(this.path(this.fileName(key, entry.media)), target);
         if (entry.media.cover)
           await linkOrCopy(this.path(`${key}.cover.jpg`), coverPath);
       } catch (error) {
         await Promise.all([
-          rm(audioPath, { force: true }),
+          rm(target, { force: true }),
           rm(coverPath, { force: true }),
         ]);
         log.warn(
@@ -128,9 +158,25 @@ export class MediaCache {
       await utimes(this.path(`${key}.json`), usedAt, usedAt).catch(
         () => undefined,
       );
-      const { duration, transition, embedded, cover, chapters, captions } =
-        entry.media;
-      return { duration, transition, embedded, cover, chapters, captions };
+      const {
+        duration,
+        transition,
+        embedded,
+        cover,
+        chapters,
+        captions,
+        gainDb,
+      } = entry.media;
+      return {
+        duration,
+        transition,
+        embedded,
+        cover,
+        chapters,
+        captions,
+        ...(entry.media.format ? { format } : {}),
+        ...(gainDb === undefined ? {} : { gainDb }),
+      };
     });
   }
 
@@ -140,6 +186,8 @@ export class MediaCache {
     return this.serialized(async () => {
       const suffix = crypto.randomUUID();
       const temporary = (name: string) => this.path(`${key}.${suffix}.${name}`);
+      const extension = media.format ?? this.extension;
+      const previous = this.entries.get(key);
       let replacing = false;
       try {
         await mkdir(this.directory, { recursive: true });
@@ -156,16 +204,21 @@ export class MediaCache {
           version: 1,
           createdAt: Date.now(),
         };
-        await linkOrCopy(audioPath, temporary(this.extension));
+        await linkOrCopy(audioPath, temporary(extension));
         if (cover) await linkOrCopy(cover, temporary("cover.jpg"));
         await writeFile(temporary("json"), JSON.stringify(stored));
         // An entry exists once its description does, so that goes last.
         replacing = true;
         await rm(this.path(`${key}.json`), { force: true });
-        await rename(
-          temporary(this.extension),
-          this.path(`${key}.${this.extension}`),
-        );
+        // What it replaces may have been kept in another format.
+        if (
+          previous &&
+          this.fileName(key, previous.media) !== `${key}.${extension}`
+        )
+          await rm(this.path(this.fileName(key, previous.media)), {
+            force: true,
+          });
+        await rename(temporary(extension), this.path(`${key}.${extension}`));
         if (cover)
           await rename(temporary("cover.jpg"), this.path(`${key}.cover.jpg`));
         else await rm(this.path(`${key}.cover.jpg`), { force: true });
@@ -179,13 +232,14 @@ export class MediaCache {
           "Could not cache track",
         );
         await Promise.all(
-          [this.extension, "cover.jpg", "json"].map((name) =>
+          [extension, "cover.jpg", "json"].map((name) =>
             rm(temporary(name), { force: true }),
           ),
         );
         // A replacement that stopped partway leaves neither entry intact, and
         // what it did move would otherwise sit outside the size limit.
         if (replacing) await this.remove(key).catch(() => undefined);
+        await rm(this.path(`${key}.${extension}`), { force: true });
       }
     });
   }
@@ -196,7 +250,7 @@ export class MediaCache {
       const media = JSON.parse(await readFile(description, "utf8")) as Stored;
       if (!validStored(media)) return;
       const [audio, cover, used] = await Promise.all([
-        stat(this.path(`${key}.${this.extension}`)),
+        stat(this.path(this.fileName(key, media))),
         media.cover ? stat(this.path(`${key}.cover.jpg`)) : undefined,
         stat(description),
       ]);
@@ -228,18 +282,28 @@ export class MediaCache {
   }
 
   private async remove(key: string) {
+    const media = this.entries.get(key)?.media;
     this.entries.delete(key);
     // The description goes first so a partial removal reads as no entry.
     await rm(this.path(`${key}.json`), { force: true });
-    // Both go before a failure is reported, so it never leaves the other
+    // All go before a failure is reported, so it never leaves another
     // half-removed behind it.
+    const files = new Set([
+      `${key}.${this.extension}`,
+      ...(media ? [this.fileName(key, media)] : []),
+      `${key}.cover.jpg`,
+    ]);
     const failed = (
-      await Promise.allSettled([
-        rm(this.path(`${key}.${this.extension}`), { force: true }),
-        rm(this.path(`${key}.cover.jpg`), { force: true }),
-      ])
+      await Promise.allSettled(
+        [...files].map((name) => rm(this.path(name), { force: true })),
+      )
     ).find((result) => result.status === "rejected");
     if (failed) throw failed.reason;
+  }
+
+  /** The name of an entry's media file, in the format it was kept in. */
+  private fileName(key: string, media: Pick<CachedMedia, "format">) {
+    return `${key}.${media.format ?? this.extension}`;
   }
 
   private expired(entry: Indexed) {
@@ -267,12 +331,15 @@ export class MediaCache {
 }
 
 function validStored(media: Stored) {
-  const { transition, embedded } = media ?? {};
+  const { transition, embedded, format, gainDb } = media ?? {};
   return (
     media?.version === 1 &&
     media.duration > 0 &&
     typeof media.createdAt === "number" &&
     typeof media.cover === "boolean" &&
+    (format === undefined ||
+      (typeof format === "string" && /^[a-z0-9]{1,8}$/.test(format))) &&
+    (gainDb === undefined || Number.isFinite(gainDb)) &&
     (embedded === undefined ||
       (typeof embedded === "object" && embedded !== null)) &&
     typeof transition === "object" &&

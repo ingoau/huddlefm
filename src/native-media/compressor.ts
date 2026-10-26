@@ -11,6 +11,8 @@ const maxDelayFrames = 1024;
 const detectorReleaseSeconds = 0.0025;
 /** Release speed at 15, 10, 5 and 0 dB of gain still to recover, as a share of the release time. */
 const releaseZones = [0.09, 0.16, 0.42, 0.98] as const;
+/** How close to no reduction the detector and the gain count as let go. */
+const restTolerance = 1e-6;
 
 /**
  * A port of Chromium's DynamicsCompressorKernel with the Web Audio
@@ -29,6 +31,8 @@ export class Compressor {
   private makeup: number;
   private attackFrames: number;
   private detectorReleaseFrames: number;
+  /** The detector's release rate for 2 dB or less, as below the threshold. */
+  private floorReleaseRate: number;
   private release: [number, number, number, number, number];
 
   private left = new Float32Array(maxDelayFrames);
@@ -44,6 +48,8 @@ export class Compressor {
   private divisionFrame = 0;
   private envelopeRate = 1;
   private desiredGain = 1;
+  /** Frames of silence in a row, up to the delay line's length. */
+  private silentFrames = maxDelayFrames;
 
   constructor(
     sampleRate = 48_000,
@@ -66,6 +72,7 @@ export class Compressor {
     this.makeup = (1 / this.saturate(1)) ** 0.6;
     this.attackFrames = Math.max(0.001, attackSeconds) * sampleRate;
     this.detectorReleaseFrames = detectorReleaseSeconds * sampleRate;
+    this.floorReleaseRate = toGain(2 / this.detectorReleaseFrames) - 1;
     // A quartic through the four release zones at x = 0, 1, 2 and 3. The
     // coefficients are Chromium's own, so keep them exactly as they are.
     const [y1, y2, y3, y4] = releaseZones.map(
@@ -104,6 +111,19 @@ export class Compressor {
     return toDecibels(this.saturate(toGain(input)));
   }
 
+  /**
+   * Silence has gone all the way through: the delay line holds nothing and
+   * the gain is back up. Compressing more silence then gives silence and
+   * leaves things as they are, so it can be skipped.
+   */
+  get resting() {
+    return (
+      this.silentFrames >= maxDelayFrames &&
+      1 - this.detectorAverage < restTolerance &&
+      1 - this.compressorGain < restTolerance
+    );
+  }
+
   /** Compresses interleaved stereo samples in place. */
   process(samples: Float32Array) {
     for (let index = 0; index + 1 < samples.length; index += 2) {
@@ -114,15 +134,16 @@ export class Compressor {
       const right = samples[index + 1]!;
       this.left[this.writeIndex] = left;
       this.right[this.writeIndex] = right;
+      if (left === 0 && right === 0) {
+        if (this.silentFrames < maxDelayFrames) this.silentFrames++;
+      } else this.silentFrames = 0;
 
       // The detector reads the undelayed input, so the gain is already down
       // when a peak comes out of the delay line.
       const input = Math.max(Math.abs(left), Math.abs(right));
       const attenuation = input <= 0.0001 ? 1 : this.saturate(input) / input;
-      const attenuationDecibels = Math.max(2, -toDecibels(attenuation));
-      const releaseRate =
-        toGain(attenuationDecibels / this.detectorReleaseFrames) - 1;
-      const rate = attenuation > this.detectorAverage ? releaseRate : 1;
+      const rate =
+        attenuation > this.detectorAverage ? this.releaseRate(attenuation) : 1;
       this.detectorAverage += (attenuation - this.detectorAverage) * rate;
       this.detectorAverage = clean(Math.min(1, this.detectorAverage), 1);
 
@@ -143,6 +164,13 @@ export class Compressor {
       this.writeIndex = (this.writeIndex + 1) % maxDelayFrames;
     }
     return samples;
+  }
+
+  /** How fast the detector lets go, the more the further down it is. */
+  private releaseRate(attenuation: number) {
+    const attenuationDecibels = -toDecibels(attenuation);
+    if (attenuationDecibels <= 2) return this.floorReleaseRate;
+    return toGain(attenuationDecibels / this.detectorReleaseFrames) - 1;
   }
 
   /** Picks the attack or release rate for the next 32 frames. */
