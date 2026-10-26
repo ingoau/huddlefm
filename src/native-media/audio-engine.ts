@@ -396,9 +396,16 @@ export class AudioEngine {
         (deck.position === 0 && !deck.stalledSent)
       )
         continue;
-      deck.seek(0);
-      deck.pastRestartThreshold = false;
-      deck.lastReportedSecond = -1;
+      try {
+        deck.seek(0);
+        deck.pastRestartThreshold = false;
+        deck.lastReportedSecond = -1;
+      } catch {
+        // This runs from the pacer: a decoder that can't be started is
+        // dropped, and going back to the track opens it afresh.
+        deck.close();
+        this.decks.delete(entryId);
+      }
     }
   }
 

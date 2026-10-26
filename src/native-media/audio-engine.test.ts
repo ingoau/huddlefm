@@ -325,6 +325,47 @@ describe("AudioEngine", () => {
     expect(engine.progress()!.position).toBeCloseTo(1, 1);
   });
 
+  test("a track before that can't be reopened is dropped, and opens again later", () => {
+    let failing = false;
+    const decoders: FakeDecoder[] = [];
+    const engine = new AudioEngine(
+      (url, start) => {
+        if (failing) throw new Error("spawn failed");
+        const decoder = new FakeDecoder(
+          url,
+          start,
+          Math.round((30 - start) * sampleRate),
+        );
+        decoders.push(decoder);
+        return decoder;
+      },
+      () => {},
+    );
+    const run = (seconds: number) => {
+      for (let frame = 0; frame < seconds * 50; frame++) engine.render(960);
+    };
+    engine.handle(play("a"));
+    run(3);
+    engine.handle(play("b"));
+    failing = true;
+    expect(() =>
+      engine.handle({
+        type: "preload",
+        entries: [{ entryId: "a", url: "http://127.0.0.1/audio/a" }],
+      }),
+    ).not.toThrow();
+    // The track playing carries on.
+    expect(() => run(1)).not.toThrow();
+    expect(engine.progress()!.position).toBeCloseTo(1, 1);
+    failing = false;
+    const opened = decoders.length;
+    engine.handle(play("a"));
+    run(1);
+    expect(decoders).toHaveLength(opened + 1);
+    expect(decoders.at(-1)!.start).toBe(0);
+    expect(engine.progress()!.position).toBeCloseTo(1, 1);
+  });
+
   test("rests on silence once a pause is through the limiter, and wakes at once", () => {
     const { engine, run } = setup(30, undefined, 0.5);
     engine.setVolume(1);

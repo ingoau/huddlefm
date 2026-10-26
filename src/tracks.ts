@@ -1523,22 +1523,14 @@ export class TrackCatalog {
     stream = true,
   ): Promise<PreparedMedia> {
     const audio = async (): Promise<PreparedMedia> => {
-      const filePath =
-        preparedAudio && (await Bun.file(preparedAudio.filePath).exists())
-          ? preparedAudio.filePath
-          : await this.prepare(
-              track,
-              directory,
-              entryId,
-              signal,
-              priority,
-              true,
-            );
-      // The gain a file was prepared with, or the one it played at before.
-      const gainDb =
-        filePath === preparedAudio?.filePath
-          ? preparedAudio.gainDb
-          : this.gain(filePath);
+      const kept =
+        preparedAudio && (await Bun.file(preparedAudio.filePath).exists());
+      const filePath = kept
+        ? preparedAudio.filePath
+        : await this.prepare(track, directory, entryId, signal, priority, true);
+      // The gain the kept file played at before, or the one a new file was
+      // prepared with, which can differ even at the same path.
+      const gainDb = kept ? preparedAudio.gainDb : this.gain(filePath);
       return {
         filePath,
         form: "audio",
