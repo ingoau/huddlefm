@@ -404,6 +404,44 @@ export async function analyzeAudio(
   };
 }
 
+/**
+ * A prepared file's transition bounds read again as it will play: after
+ * loudnorm, or lifted or cut by its gain, its quiet intro and fade tail sit
+ * where they did when the bounds were read from the normalized file.
+ * Nothing when they can't be read, to keep the bounds already found.
+ */
+export async function levelledTransition(
+  filePath: string,
+  duration: number,
+  gainDb: number,
+  signal?: AbortSignal,
+) {
+  try {
+    const { stderr } = await run(
+      [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        filePath,
+        "-map",
+        "0:a:0",
+        "-af",
+        gainDb ? `volume=${gainDb}dB,${transitionFilters}` : transitionFilters,
+        "-f",
+        "null",
+        "-",
+      ],
+      120_000,
+      signal,
+    );
+    return transitionData(stderr, duration);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return undefined;
+  }
+}
+
 /** Gives a video with no sound a silent track as long as its picture. */
 async function addSilence(filePath: string, signal?: AbortSignal) {
   const silentPath = filePath.replace(/\.[^.]+$/, ".silent.mkv");
@@ -2227,12 +2265,17 @@ export class TrackCatalog {
           "Using untrimmed track boundaries",
         );
       let gainDb: number | undefined;
-      if (leveling && analysis.lufs !== undefined) {
-        gainDb = songGain(
-          analysis.lufs,
-          analysis.truePeak,
-          analysis.loudnessRange,
-        );
+      let { transition } = analysis;
+      // Unread loudness is still levelled by loudnorm, as before.
+      if (leveling && (analysis.lufs !== undefined || !analysis.analyzed)) {
+        gainDb =
+          analysis.lufs === undefined
+            ? undefined
+            : songGain(
+                analysis.lufs,
+                analysis.truePeak,
+                analysis.loudnessRange,
+              );
         if (gainDb === undefined) {
           const normalized = await timed("normalize", () =>
             normalizeLoudness(
@@ -2245,8 +2288,14 @@ export class TrackCatalog {
           if (!normalized) complete = false;
           bytes = (await stat(filePath)).size;
         }
+        const levelled =
+          analysis.analyzed && (gainDb === undefined || gainDb !== 0)
+            ? await timed("levelled_bounds", () =>
+                levelledTransition(filePath, duration, gainDb ?? 0, signal),
+              )
+            : undefined;
+        if (levelled) transition = levelled;
       }
-      const { transition } = analysis;
       preparedFiles.set(filePath, {
         transition,
         ...(gainDb === undefined ? {} : { gainDb }),

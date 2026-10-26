@@ -239,6 +239,7 @@ export class MediaCache {
         // A replacement that stopped partway leaves neither entry intact, and
         // what it did move would otherwise sit outside the size limit.
         if (replacing) await this.remove(key).catch(() => undefined);
+        await rm(this.path(`${key}.${extension}`), { force: true });
       }
     });
   }
