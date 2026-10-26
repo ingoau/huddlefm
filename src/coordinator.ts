@@ -169,6 +169,8 @@ type SettingsChange = {
 };
 
 const endRestoreMs = 2 * 60_000;
+// The longest a search waits for the same user's last one to finish.
+const searchDebounceMs = 300;
 // How long, and how many, search results are kept for the same words typed
 // again.
 const searchCacheMs = 60_000;
@@ -900,16 +902,21 @@ export class Coordinator {
       return hit && hit.expiresAt > Date.now() ? hit.options : undefined;
     };
     // Slack sends a request per keystroke. A user's search starts at once
-    // when none of theirs is running; one typed while it runs waits for it,
-    // and only the newest of those is searched, so the results match what
-    // the user finished typing. Slack shows only the newest answer, so the
-    // ones passed over answer with nothing.
+    // when none of theirs is running; one typed while it runs waits for it
+    // to finish, but never longer than the pause searches always used to
+    // wait, and only the newest of those is searched, so the results match
+    // what the user finished typing. Slack shows only the newest answer, so
+    // the ones passed over answer with nothing.
     const generation = (this.lastSearch.get(userId) ?? 0) + 1;
     this.lastSearch.set(userId, generation);
     const known = cached();
     if (known) return known;
-    while (this.searches.has(userId))
-      await this.searches.get(userId)!.catch(() => {});
+    const running = this.searches.get(userId);
+    if (running)
+      await Promise.race([
+        running.catch(() => {}),
+        Bun.sleep(searchDebounceMs),
+      ]);
     if (this.lastSearch.get(userId) !== generation) return [];
     const ready = cached();
     if (ready) return ready;
@@ -3310,37 +3317,40 @@ export class Coordinator {
     // the songs are prepared rather than when the first starts.
     if (items.length && userId !== this.botUserId)
       void this.slack.userName(userId);
-    // An album or playlist is written in one commit rather than one a song.
-    return this.store.transaction(() =>
-      items.map((metadata) => {
-        const entry: Entry = {
-          ...metadata,
-          id: crypto.randomUUID(),
-          requesterId: userId,
-          status: "preparing",
-          // A video queued to watch stays out of the music's history and
-          // taste, even before it plays.
-          ...(this.videoMode && trackKind(metadata) === "video"
-            ? { isVideo: true }
-            : {}),
-        };
-        const controller = new AbortController();
-        this.preparations.set(entry.id, controller);
-        this.queue.push(entry);
+    const entries = items.map((metadata): Entry => ({
+      ...metadata,
+      id: crypto.randomUUID(),
+      requesterId: userId,
+      status: "preparing",
+      // A video queued to watch stays out of the music's history and
+      // taste, even before it plays.
+      ...(this.videoMode && trackKind(metadata) === "video"
+        ? { isVideo: true }
+        : {}),
+    }));
+    // An album or playlist is written in one commit rather than one a song,
+    // and joins the queue only once that commit has gone through.
+    this.store.transaction(() => {
+      for (const entry of entries) {
         this.store.addTrack({
           ...entry,
           sessionId: this.id,
           status: entry.status,
         });
-        this.audit.record("track.added", userId, {
-          sessionId: this.id,
-          ...auditTrack(entry),
-        });
-        this.notifyTrack("queue.added", entry);
         this.store.incrementUsage("added");
-        return { entry, controller };
-      }),
-    );
+      }
+    });
+    return entries.map((entry) => {
+      const controller = new AbortController();
+      this.preparations.set(entry.id, controller);
+      this.queue.push(entry);
+      this.audit.record("track.added", userId, {
+        sessionId: this.id,
+        ...auditTrack(entry),
+      });
+      this.notifyTrack("queue.added", entry);
+      return { entry, controller };
+    });
   }
 
   // Media that is removed, private, blocked, or cancelled mid-preparation is an
@@ -7182,15 +7192,16 @@ export class Coordinator {
     if (this.inactive()) return;
     const revision = ++this.revision;
     const old = this.uiTs;
-    // The new message is drawn from the session as it is now, which any
-    // update still waiting to be sent to the old one is behind.
-    this.playerBlocks = undefined;
     const current = await this.post(
       this.room.uiChannelId,
       this.room.uiThreadTs,
       "HuddleFM player",
       this.blocks(),
     );
+    // The new message is drawn from the session as it was posted, which any
+    // update still waiting to be sent to the old one is behind. Until then
+    // that update stays, so a failed post leaves the old message current.
+    this.playerBlocks = undefined;
     this.uiTs = current;
     this.store.setUi(this.id, current, revision);
     // A render while it was posted went to the old message.
@@ -7963,13 +7974,17 @@ export class Coordinator {
     ];
   }
 
+  // A notice is told in passing, often partway through a change to the
+  // session, so one Slack refuses (ephemerals fail fast) never stops it.
   private async notice(user: string, text: string) {
-    await this.slack.ephemeral(
-      this.room.uiChannelId,
-      user,
-      text,
-      this.room.uiThreadTs,
-    );
+    await this.slack
+      .ephemeral(this.room.uiChannelId, user, text, this.room.uiThreadTs)
+      .catch((error) =>
+        this.log.warn(
+          { event: "notice_failed", userId: user, err: error },
+          "Could not send notice",
+        ),
+      );
   }
 
   private async promptScrobbling(userId: string) {

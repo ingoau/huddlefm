@@ -390,7 +390,10 @@ export class AudioEngine {
         entryId === this.currentId ||
         entryId === this.nextEntry?.entryId ||
         deck.playing ||
-        (deck.position === 0 && !deck.decoder.error && !deck.stalledSent)
+        // One that failed would only fail again; play() retries it if
+        // someone goes back to it.
+        deck.decoder.error ||
+        (deck.position === 0 && !deck.stalledSent)
       )
         continue;
       deck.seek(0);
