@@ -40,6 +40,9 @@ type DataChannelSubscriber = {
   onShutdownDataChannelSubscriber(): void;
 };
 type HuddlesSdk = {
+  /** set when initialize() starts */
+  options?: unknown;
+  initialize(...args: unknown[]): Promise<void>;
   addDataChannelSubscriber(subscriber: DataChannelSubscriber): void;
 };
 type ConnectionManager = {
@@ -139,6 +142,25 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   private attach(sdk: HuddlesSdk | null) {
     if (!sdk || this.stopped || this.attached.has(sdk)) return;
     this.attached.add(sdk);
+    if (sdk.options) {
+      this.subscribe(sdk);
+      return;
+    }
+    // Slack hands a new session to the manager before initialize(), which
+    // swaps in Slack's own subscriber list, so join that list once it's there
+    const plugin = this;
+    sdk.initialize = function (this: HuddlesSdk, ...args: unknown[]) {
+      // back to the prototype's initialize
+      delete (sdk as Partial<HuddlesSdk>).initialize;
+      // the list is swapped in before initialize's first await
+      const result = sdk.initialize.apply(this, args);
+      plugin.subscribe(sdk);
+      return result;
+    };
+  }
+
+  private subscribe(sdk: HuddlesSdk) {
+    if (this.stopped) return;
     // called straight away if the session is already connected
     sdk.addDataChannelSubscriber({
       onConnectDatachannel: (facade) => {
