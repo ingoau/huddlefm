@@ -13,8 +13,13 @@ import { join } from "node:path";
 import { assertPublicUrl } from "./public-proxy.ts";
 import { StreamRelay } from "./stream-relay.ts";
 import {
+  analyzeAudio,
   applyEmbeddedMetadata,
   embeddedArtworkPath,
+  forgetPreparedMedia,
+  removePreparedMedia,
+  songGain,
+  truePeak,
   extractEmbeddedArtwork,
   extractorFailure,
   isBotCheck,
@@ -609,6 +614,119 @@ test("runs as many preparations at once as configured", async () => {
   expect(started).toEqual(["a", "b", "c", "d"]);
 });
 
+/** A catalog with one preparation slot whose downloads wait to be let go. */
+function gatedCatalog() {
+  const catalog = new TrackCatalog({
+    durationSeconds: 1_200,
+    downloadBytes: 100_000_000,
+    preparationConcurrency: 1,
+  });
+  const gates = new Map<string, () => void>();
+  const started: string[] = [];
+  Reflect.set(
+    catalog,
+    "download",
+    async (_track: unknown, _dir: string, id: string) => {
+      started.push(id);
+      await new Promise<void>((resolve) => gates.set(id, resolve));
+      return id;
+    },
+  );
+  const finish = async (id: string) => {
+    gates.get(id)!();
+    await Bun.sleep(0);
+  };
+  return { catalog, started, finish };
+}
+
+const queuedTrack = {
+  sourceInput: "https://example.com",
+  canonicalUrl: "https://example.com",
+  sourceId: "test",
+  title: "Test",
+  artist: "Artist",
+};
+
+test("a long playlist in one session does not hold up another's next track", async () => {
+  const { catalog, started, finish } = gatedCatalog();
+  // A playlist: each track is wanted later than the one before it.
+  const playlist = Array.from({ length: 5 }, (_, index) =>
+    catalog.prepare(queuedTrack, "media/a", `a${index}`, undefined, -index),
+  );
+  const next = catalog.prepare(queuedTrack, "media/b", "b0", undefined, 0);
+  expect(started).toEqual(["a0"]);
+  await finish("a0");
+  // The other session's next track goes before the rest of the playlist.
+  expect(started).toEqual(["a0", "b0"]);
+  for (const id of ["b0", "a1", "a2", "a3", "a4"]) await finish(id);
+  await Promise.all([...playlist, next]);
+  expect(started).toEqual(["a0", "b0", "a1", "a2", "a3", "a4"]);
+});
+
+test("sessions whose tracks are as urgent take turns", async () => {
+  const { catalog, started, finish } = gatedCatalog();
+  const work = [
+    ...["a0", "a1", "a2"].map((id) =>
+      catalog.prepare(queuedTrack, "media/a", id),
+    ),
+    ...["b0", "b1"].map((id) => catalog.prepare(queuedTrack, "media/b", id)),
+  ];
+  for (const id of ["a0", "b0", "a1", "b1"]) await finish(id);
+  await finish("a2");
+  await Promise.all(work);
+  expect(started).toEqual(["a0", "b0", "a1", "b1", "a2"]);
+});
+
+test("a track moved up the queue is prepared sooner", async () => {
+  const { catalog, started, finish } = gatedCatalog();
+  const positions = new Map([
+    ["a0", 0],
+    ["a1", 1],
+    ["a2", 2],
+  ]);
+  const work = [...positions.keys()].map((id) =>
+    catalog.prepare(
+      queuedTrack,
+      "media/a",
+      id,
+      undefined,
+      () => -positions.get(id)!,
+    ),
+  );
+  expect(started).toEqual(["a0"]);
+  // "Play next" on the last one, after it was queued.
+  positions.set("a2", 1).set("a1", 2);
+  await finish("a0");
+  await finish("a2");
+  await finish("a1");
+  await Promise.all(work);
+  expect(started).toEqual(["a0", "a2", "a1"]);
+});
+
+test("a cancelled preparation leaves the queue without running", async () => {
+  const { catalog, started, finish } = gatedCatalog();
+  const first = catalog.prepare(queuedTrack, "media/a", "a0");
+  const removed = new AbortController();
+  const cancelled = catalog.prepare(
+    queuedTrack,
+    "media/a",
+    "a1",
+    removed.signal,
+  );
+  const kept = catalog.prepare(queuedTrack, "media/a", "a2");
+  removed.abort();
+  await expect(cancelled).rejects.toThrow("Track preparation cancelled");
+  expect(Reflect.get(catalog, "preparationQueue")).toHaveLength(1);
+  // Cancelled before it was queued, it never is.
+  await expect(
+    catalog.prepare(queuedTrack, "media/a", "a3", removed.signal),
+  ).rejects.toThrow("Track preparation cancelled");
+  await finish("a0");
+  await finish("a2");
+  await Promise.all([first, kept]);
+  expect(started).toEqual(["a0", "a2"]);
+});
+
 // Stands in for yt-dlp: logs its arguments, fails a reused extraction when
 // told the stream URLs have gone stale, and otherwise "downloads" the fixture.
 async function fakeExtractor(directory: string, audio: string, stale = false) {
@@ -698,7 +816,7 @@ test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
       expect(
         JSON.parse(await readFile(join(directory, "loaded.json"), "utf8")),
       ).toEqual({ id: "dQw4w9WgXcQ", formats: [{ format_id: "251" }] });
-      expect(await readdir(join(directory, "first"))).toEqual(["a.opus"]);
+      expect(await readdir(join(directory, "first"))).toEqual(["a.mka"]);
 
       // The same video from YouTube Music, in another session.
       const repeat = youtubeTrack(
@@ -746,13 +864,264 @@ test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
       expect(calls[0]).toContain("--load-info-json");
       expect(calls[1]).not.toContain("--load-info-json");
       expect(calls[1]).toEndWith(`-- ${url}`);
-      expect(await readdir(join(directory, "session"))).toEqual(["a.opus"]);
+      expect(await readdir(join(directory, "session"))).toEqual(["a.mka"]);
       expect(await Bun.file(filePath).exists()).toBe(true);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   },
 );
+
+/** Encodes `source`, a lavfi graph, into `name` in `directory`. */
+function encode(
+  directory: string,
+  name: string,
+  source: string,
+  codec: string[],
+) {
+  const path = join(directory, name);
+  const encoded = Bun.spawnSync([
+    "ffmpeg",
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    source,
+    "-t",
+    "6",
+    "-ac",
+    "2",
+    ...codec,
+    path,
+  ]);
+  expect(encoded.exitCode).toBe(0);
+  return path;
+}
+
+const codecOf = (filePath: string) =>
+  Bun.spawnSync([
+    "ffprobe",
+    "-v",
+    "error",
+    "-show_entries",
+    "stream=codec_name",
+    "-of",
+    "default=nw=1:nk=1",
+    filePath,
+  ])
+    .stdout.toString()
+    .trim();
+
+const ebur128Summary = (filePath: string, filter = "") =>
+  Bun.spawnSync([
+    "ffmpeg",
+    "-hide_banner",
+    "-nostats",
+    "-i",
+    filePath,
+    "-af",
+    `${filter}ebur128=framelog=quiet:peak=true`,
+    "-f",
+    "null",
+    "-",
+  ]).stderr.toString();
+
+test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
+  "copies a download's sound and reads its length, bounds and loudness in one pass",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-analyze-"));
+    try {
+      // AAC, as YouTube's m4a is, after a second of silence.
+      const source = encode(
+        directory,
+        "source.m4a",
+        "anoisesrc=color=pink:amplitude=0.2:seed=1,volume='if(lt(t\\,1)\\,0\\,1)':eval=frame",
+        ["-c:a", "aac", "-b:a", "128k"],
+      );
+      const output = join(directory, "entry.mka");
+      const analysis = await analyzeAudio(source, output, true);
+      // Kept as it came, in a container that holds it.
+      expect(codecOf(output)).toBe("aac");
+      expect(analysis.analyzed).toBe(true);
+      expect(analysis.duration).toBeCloseTo(6, 1);
+      expect(analysis.transition.introSeconds).toBeCloseTo(1, 1);
+      expect(analysis.transition.outroSeconds).toBeCloseTo(6, 1);
+      // The same loudness ebur128 reads on its own.
+      const summary = ebur128Summary(source);
+      expect(analysis.lufs).toBe(summaryLoudness(summary)!);
+      expect(analysis.truePeak).toBe(truePeak(summary)!);
+      // Without loudness asked for, none is measured.
+      const plain = await analyzeAudio(source, output, false);
+      expect(plain.lufs).toBeUndefined();
+      expect(plain.transition).toEqual(analysis.transition);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("levels songs by a gain unless only loudnorm keeps their peaks down", () => {
+  expect(songGain(-8.4, -0.2)).toBe(-5.6);
+  // Lifted as far as loudnorm lifted it, not a video's 6 dB.
+  expect(songGain(-30, -18)).toBe(16);
+  expect(songGain(-20, -7)).toBe(6);
+  // Lifting it would push its peaks past -1 dBTP.
+  expect(songGain(-20, -6.5)).toBeUndefined();
+  expect(songGain(-20, undefined)).toBeUndefined();
+  // Turning it down never does.
+  expect(songGain(-10, 1.5)).toBe(-4);
+  expect(truePeak("  True peak:\n    Peak:        -3.2 dBFS")).toBe(-3.2);
+  expect(truePeak("  True peak:\n    Peak:        -inf dBFS")).toBeUndefined();
+});
+
+test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
+  "levels a song as it plays instead of re-encoding it, and keeps the gain in the cache",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-level-"));
+    try {
+      const catalog = new TrackCatalog({
+        durationSeconds: 1_200,
+        downloadBytes: 100_000_000,
+        loudnessNormalization: true,
+        mediaCacheBytes: 100_000_000,
+        mediaCacheDirectory: join(directory, "cache"),
+      });
+      await Reflect.get(catalog, "cache").initialize();
+      // Quiet, with plenty of headroom.
+      const fixture = encode(
+        directory,
+        "fixture.opus",
+        "sine=frequency=440,volume=-30dB",
+        ["-c:a", "libopus", "-b:a", "96k"],
+      );
+      const extractor = await fakeExtractor(directory, fixture);
+      Reflect.set(catalog, "extractor", extractor.command);
+      const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+      const first = await catalog.prepare(
+        youtubeTrack(url),
+        join(directory, "first"),
+        "a",
+      );
+      expect(await readdir(join(directory, "first"))).toEqual(["a.mka"]);
+      // Not re-encoded: the sound is the download's own.
+      expect(codecOf(first)).toBe("opus");
+      const source = summaryLoudness(ebur128Summary(fixture))!;
+      expect(summaryLoudness(ebur128Summary(first))).toBe(source);
+      const gainDb = catalog.gain(first)!;
+      expect(gainDb).toBeCloseTo(-14 - source, 0);
+      // Played at its gain, it is as loud as loudnorm made it.
+      expect(
+        summaryLoudness(ebur128Summary(first, `volume=${gainDb}dB,`))!,
+      ).toBeCloseTo(-14, 0);
+      // From the cache, in another session, with the same gain and bounds.
+      const second = await catalog.prepare(
+        youtubeTrack(url),
+        join(directory, "second"),
+        "b",
+      );
+      expect(await extractor.calls()).toHaveLength(1);
+      expect(second).toEndWith("b.mka");
+      expect(catalog.gain(second)).toBe(gainDb);
+      expect(catalog.transition(second)).toEqual(catalog.transition(first)!);
+      // Forgotten once the files go.
+      await removePreparedMedia(first);
+      expect(catalog.transition(first)).toBeUndefined();
+      forgetPreparedMedia(join(directory, "second"));
+      expect(catalog.gain(second)).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(
+  "normalizes a quiet song with loud peaks as before, and plays it as it is",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-level-"));
+    try {
+      const catalog = new TrackCatalog({
+        durationSeconds: 1_200,
+        downloadBytes: 100_000_000,
+        loudnessNormalization: true,
+      });
+      const fixture = encode(
+        directory,
+        "fixture.opus",
+        "aevalsrc='0.03*sin(2*PI*220*t)+if(lt(mod(t\\,2)\\,0.01)\\,0.95*sin(2*PI*1000*t)\\,0)':s=48000",
+        ["-c:a", "libopus", "-b:a", "96k"],
+      );
+      const extractor = await fakeExtractor(directory, fixture);
+      Reflect.set(catalog, "extractor", extractor.command);
+      const filePath = await catalog.prepare(
+        youtubeTrack("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+        join(directory, "session"),
+        "a",
+      );
+      expect(await readdir(join(directory, "session"))).toEqual(["a.mka"]);
+      expect(catalog.gain(filePath)).toBeUndefined();
+      // Loudnorm turned it up, holding its peaks under -1 dBTP.
+      const before = summaryLoudness(ebur128Summary(fixture))!;
+      const after = ebur128Summary(filePath);
+      expect(summaryLoudness(after)!).toBeGreaterThan(before + 2);
+      expect(truePeak(after)!).toBeLessThan(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!Bun.which("ffmpeg"))(
+  "plays a song cached normalized in Opus as it is",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-legacy-"));
+    try {
+      const catalog = new TrackCatalog({
+        durationSeconds: 1_200,
+        downloadBytes: 100_000_000,
+        loudnessNormalization: true,
+        mediaCacheBytes: 100_000_000,
+        mediaCacheDirectory: join(directory, "cache"),
+      });
+      const cache = Reflect.get(catalog, "cache");
+      await cache.initialize();
+      const track = youtubeTrack("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+      const legacy = await audioFixture(directory);
+      // As the cache kept songs before they were levelled as they play.
+      await cache.store(
+        Reflect.get(catalog, "cacheKey").call(catalog, track),
+        legacy,
+        join(directory, "none.jpg"),
+        {
+          duration: 3,
+          transition: {
+            introSeconds: 0,
+            outroSeconds: 3,
+            fadeInSeconds: 0,
+            fadeOutSeconds: 0,
+          },
+          cover: false,
+        },
+      );
+      const filePath = await catalog.prepare(
+        track,
+        join(directory, "session"),
+        "a",
+      );
+      expect(filePath).toEndWith("a.opus");
+      expect(catalog.gain(filePath)).toBeUndefined();
+      expect(await readFile(filePath)).toEqual(await readFile(legacy));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("runs yt-dlp with its cache on the data volume", () => {
+  const catalog = testCatalog();
+  Reflect.set(catalog, "proxy", { url: "http://127.0.0.1:1" });
+  const command = Reflect.get(catalog, "extractor").call(catalog) as string[];
+  expect(command[command.indexOf("--cache-dir") + 1]).toBe("data/cache/yt-dlp");
+});
 
 test("requests high-resolution YouTube Music artwork", async () => {
   const catalog = testCatalog();
@@ -1447,15 +1816,17 @@ test("video mode prepares a video as audio when its picture will not come", asyn
     kind: "song" as const,
   };
   expect(
-    await catalog.prepareVideo(
-      song,
-      "media",
-      "c",
-      undefined,
-      0,
-      "package.json",
-    ),
+    await catalog.prepareVideo(song, "media", "c", undefined, 0, {
+      filePath: "package.json",
+    }),
   ).toEqual({ filePath: "package.json", form: "audio" });
+  // Kept with the gain it was levelled by.
+  expect(
+    await catalog.prepareVideo(song, "media", "c", undefined, 0, {
+      filePath: "package.json",
+      gainDb: -3.5,
+    }),
+  ).toEqual({ filePath: "package.json", form: "audio", gainDb: -3.5 });
   // A song's video that will not download leaves the song, quietly.
   Reflect.set(catalog, "findMusicVideo", async () => ({
     videoId: "zzzzzzzzzzz",
@@ -1616,6 +1987,55 @@ test("a YouTube video streams in video mode instead of downloading first", async
         { start: 60, title: "Talk" },
       ],
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("video mode streams a link from the extraction that resolved it, once", async () => {
+  const resolved = {
+    duration: 1_873,
+    requested_formats: [picture, sound],
+    chapters: [
+      { start_time: 0, end_time: 60, title: "Intro" },
+      { start_time: 60, end_time: 1_873, title: "Talk" },
+    ],
+  };
+  const { catalog, directory } = await extracting({
+    duration: 1_873,
+    requested_formats: [picture, sound],
+  });
+  const extracted = () => Bun.file(join(directory, "args")).exists();
+  try {
+    // Resolved for music: its format is the audio's, so it is not reused.
+    Reflect.get(catalog, "rememberExtraction").call(
+      catalog,
+      trackFixture.canonicalUrl,
+      resolved,
+    );
+    await catalog.prepareVideo(trackFixture, join(directory, "media"), "a");
+    expect(await extracted()).toBeTrue();
+    await rm(join(directory, "args"));
+    // Resolved in video mode: streamed from that extraction, chapters and all.
+    Reflect.get(catalog, "rememberExtraction").call(
+      catalog,
+      trackFixture.canonicalUrl,
+      resolved,
+      true,
+    );
+    const prepared = await catalog.prepareVideo(
+      trackFixture,
+      join(directory, "media"),
+      "b",
+    );
+    expect(await extracted()).toBeFalse();
+    expect(prepared.chapters).toEqual([
+      { start: 0, title: "Intro" },
+      { start: 60, title: "Talk" },
+    ]);
+    // Prepared again, as after a stream fails, it is extracted afresh.
+    await catalog.prepareVideo(trackFixture, join(directory, "media"), "c");
+    expect(await extracted()).toBeTrue();
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
