@@ -19,6 +19,7 @@ import {
   forgetPreparedMedia,
   removePreparedMedia,
   songGain,
+  loudnessRange,
   truePeak,
   extractEmbeddedArtwork,
   extractorFailure,
@@ -972,6 +973,13 @@ test("levels songs by a gain unless only loudnorm keeps their peaks down", () =>
   expect(songGain(-10, 1.5)).toBe(-4);
   expect(truePeak("  True peak:\n    Peak:        -3.2 dBFS")).toBe(-3.2);
   expect(truePeak("  True peak:\n    Peak:        -inf dBFS")).toBeUndefined();
+  // A range wider than loudnorm's was squeezed by it, so it still is.
+  expect(songGain(-20, -7, 11)).toBe(6);
+  expect(songGain(-20, -7, 14)).toBeUndefined();
+  expect(songGain(-10, 1.5, 14)).toBeUndefined();
+  expect(loudnessRange("  Loudness range:\n    LRA:        14.2 LU")).toBe(
+    14.2,
+  );
 });
 
 test.skipIf(!Bun.which("ffmpeg") || !Bun.which("ffprobe"))(

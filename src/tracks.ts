@@ -265,13 +265,26 @@ export function truePeak(output: string) {
   return Number.isFinite(peak) ? peak : undefined;
 }
 
+/** The loudness range from ebur128's summary, in LU, when it measured one. */
+export function loudnessRange(output: string) {
+  const summary = output.slice(output.lastIndexOf("Loudness range:"));
+  const range = Number(summary.match(/LRA:\s+(-?[\d.]+) LU/)?.[1]);
+  return Number.isFinite(range) ? range : undefined;
+}
+
 /**
  * The gain that levels a song to the target as loudnorm did, played rather
  * than encoded in. Nothing when lifting it that far would push its peaks
- * past loudnorm's ceiling: only loudnorm's limiter levels those without
- * clipping, so they are still normalized the old way.
+ * past loudnorm's ceiling, or when its range is wider than loudnorm's: only
+ * loudnorm levels those as they sounded, so they are still normalized the
+ * old way.
  */
-export function songGain(lufs: number, peak: number | undefined) {
+export function songGain(
+  lufs: number,
+  peak: number | undefined,
+  range?: number,
+) {
+  if (range !== undefined && range > loudnessRangeTarget) return undefined;
   const gain = Math.round(Math.max(-maxCutDb, loudnessTarget - lufs) * 10) / 10;
   if (gain > 0 && (peak === undefined || peak + gain > truePeakCeiling))
     return undefined;
@@ -288,6 +301,8 @@ export type AudioAnalysis = {
   lufs?: number;
   /** True peak in dBTP, measured with the loudness. */
   truePeak?: number;
+  /** Loudness range in LU, measured with the loudness. */
+  loudnessRange?: number;
 };
 
 // Silence, and the level every quarter second, for the transition bounds.
@@ -379,7 +394,13 @@ export async function analyzeAudio(
     duration,
     transition: transitionData(result!.stderr, duration),
     analyzed: true,
-    ...(lufs === undefined ? {} : { lufs, truePeak: truePeak(result!.stderr) }),
+    ...(lufs === undefined
+      ? {}
+      : {
+          lufs,
+          truePeak: truePeak(result!.stderr),
+          loudnessRange: loudnessRange(result!.stderr),
+        }),
   };
 }
 
@@ -528,6 +549,8 @@ const maxCutDb = 24;
  * so a boost never sends the media process's compressor more than it did.
  */
 const truePeakCeiling = -1;
+/** loudnorm's LRA=11: a song wider than this was compressed, not just levelled. */
+const loudnessRangeTarget = 11;
 /** How long a video waits for its loudness before playing unlevelled. */
 const levelingWaitMs = 3_000;
 /** The longest a streamed video's download into the cache may take. */
@@ -2205,7 +2228,11 @@ export class TrackCatalog {
         );
       let gainDb: number | undefined;
       if (leveling && analysis.lufs !== undefined) {
-        gainDb = songGain(analysis.lufs, analysis.truePeak);
+        gainDb = songGain(
+          analysis.lufs,
+          analysis.truePeak,
+          analysis.loudnessRange,
+        );
         if (gainDb === undefined) {
           const normalized = await timed("normalize", () =>
             normalizeLoudness(
@@ -2250,6 +2277,7 @@ export class TrackCatalog {
           ...transition,
           lufs: analysis.lufs,
           truePeak: analysis.truePeak,
+          loudnessRange: analysis.loudnessRange,
           gainDb,
           extractionReused,
           stages,
