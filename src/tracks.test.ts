@@ -2246,32 +2246,35 @@ test("a streamed video without a known length is read directly", async () => {
   }
 });
 
-test("a lifted song's quiet tail is read as it will play", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "huddlefm-levelled-"));
-  try {
-    const path = join(directory, "song.mka");
-    // A tone, then a tail below -60 dB that a 12 dB lift brings above it.
-    await Bun.spawn(
-      [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=f=440:d=6,volume='if(lt(t,3),1,0.005)':eval=frame",
-        "-c:a",
-        "flac",
-        path,
-      ],
-      { stdout: "ignore", stderr: "ignore" },
-    ).exited;
-    const raw = await levelledTransition(path, 6, 0);
-    const lifted = await levelledTransition(path, 6, 12);
-    expect(raw!.outroSeconds).toBeLessThan(3.5);
-    expect(lifted!.outroSeconds).toBe(6);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+test.skipIf(!Bun.which("ffmpeg"))(
+  "a lifted song's quiet tail is read as it will play",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "huddlefm-levelled-"));
+    try {
+      const path = join(directory, "song.mka");
+      // A tone, then a tail below -60 dB that a 12 dB lift brings above it.
+      await Bun.spawn(
+        [
+          "ffmpeg",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "sine=f=440:d=6,volume='if(lt(t,3),1,0.005)':eval=frame",
+          "-c:a",
+          "flac",
+          path,
+        ],
+        { stdout: "ignore", stderr: "ignore" },
+      ).exited;
+      const raw = await levelledTransition(path, 6, 0);
+      const lifted = await levelledTransition(path, 6, 12);
+      expect(raw!.outroSeconds).toBeLessThan(3.5);
+      expect(lifted!.outroSeconds).toBe(6);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
