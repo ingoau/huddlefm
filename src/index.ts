@@ -1333,6 +1333,32 @@ const server = Bun.serve({
         return Response.json({ ok: sent });
       },
     },
+    "/data-message": {
+      POST: async (request: Request) => {
+        const denied = controlDenied(request, config.localControlToken);
+        if (denied) return denied;
+        const runtime = selectedRuntime(request);
+        if (runtime instanceof Response) return runtime;
+        const payload = await request.json().catch(() => undefined);
+        if (
+          !payload ||
+          typeof payload !== "object" ||
+          Array.isArray(payload) ||
+          typeof payload.type !== "string"
+        )
+          return Response.json(
+            { error: "Send a JSON object with a string type" },
+            { status: 400 },
+          );
+        const sent =
+          runtime?.media.send({ type: "data_broadcast", payload }) ?? false;
+        log.debug(
+          { event: "local_data_message_requested", active: sent },
+          "Local control requested a data message",
+        );
+        return Response.json({ ok: sent });
+      },
+    },
     "/leave": {
       POST: async (request: Request) => {
         const denied = controlDenied(request, config.localControlToken);

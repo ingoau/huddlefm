@@ -14,6 +14,7 @@ import {
   type ChimeMeeting,
 } from "./chime-link.ts";
 import { ContentShares, contentSuffix } from "./content-shares.ts";
+import { DataChannel, dataTopic } from "./data-channel.ts";
 import { FfmpegDecoder, probeDuration, sampleRate } from "./decoder.ts";
 import { SpeechSignals } from "./speech.ts";
 import type { LyricsCredits } from "./lyrics-view.ts";
@@ -62,6 +63,8 @@ let share: ChimeLink | undefined;
 let videoMode = false;
 let shareFailures = 0;
 let contentShares: ContentShares | undefined;
+/** HuddleFM's messages with clients over the Chime data channel. */
+let dataChannel: DataChannel | undefined;
 /** Numbers for entries, so the video worker can tell whose clock it has. */
 const entryKeys = new Map<string, number>();
 let nextEntryKey = 1;
@@ -136,8 +139,12 @@ async function start(bootstrap: ChimeBootstrap) {
       onFrame: (frame) => {
         speech?.handle(frame);
         contentShares?.handle(frame);
+        dataChannel?.handle(frame);
       },
-      onConnected: () => syncVideo(),
+      onConnected: () => {
+        syncVideo();
+        dataChannel?.announce();
+      },
       onVideoChanged: () => syncVideo(),
       onPictureLoss: () => card?.requestKeyframe(),
       onTerminal: (code, reason) => {
@@ -153,6 +160,18 @@ async function start(bootstrap: ChimeBootstrap) {
   speech = new SpeechSignals(chime.attendeeId, audio.ducking, audio.applyDuck);
   contentShares = new ContentShares(chime.attendeeId, (count) =>
     emit("content_shares", { count }),
+  );
+  dataChannel = new DataChannel(
+    chime.attendeeId,
+    (data) => chime.sendData(dataTopic, data),
+    ({ payload, attendeeId, userId }) =>
+      log("info", "native_data_message", "Received a data message", {
+        messageType: payload.type,
+        attendeeId,
+        userId,
+      }),
+    () =>
+      log("warn", "native_data_throttled", "Chime throttled a data message"),
   );
   const startedAt = Date.now();
   await chime.start();
@@ -344,6 +363,10 @@ function handle(message: Record<string, any>) {
     if (!shownEntry) card?.reset(currentIdle());
     return;
   }
+  if (message.type === "data_broadcast") {
+    broadcastData(message.payload);
+    return;
+  }
   if (message.type === "captions") {
     card?.setCaptions(Boolean(message.on));
     return;
@@ -410,6 +433,18 @@ function handle(message: Record<string, any>) {
     noLyrics = undefined;
     card?.setShareSource(undefined);
     card?.reset(currentIdle());
+  }
+}
+
+function broadcastData(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+  try {
+    const sent = dataChannel?.broadcast(payload as Record<string, unknown>);
+    log("info", "native_data_broadcast", "Broadcast a data message", {
+      sent: Boolean(sent),
+    });
+  } catch (error) {
+    log("warn", "native_data_broadcast_failed", errorMessage(error));
   }
 }
 

@@ -1,0 +1,53 @@
+name: Taut plugin
+
+on:
+  push:
+    paths:
+      - "clients/taut/**"
+      - ".github/workflows/taut-plugin.yml"
+  pull_request:
+    paths:
+      - "clients/taut/**"
+      - ".github/workflows/taut-plugin.yml"
+  workflow_dispatch:
+
+env:
+  # The Taut commit the plugin is checked and built against. Bump it to pick
+  # up changes to Taut's plugin API or bundler.
+  TAUT_REF: d36f37b2929ce26106f97ce94c460de17269b6da
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: jeremy46231/taut
+          ref: ${{ env.TAUT_REF }}
+          path: taut
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: taut/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: taut
+      # Checked as one of Taut's own plugins, against its types and lint rules.
+      - run: |
+          cp ../clients/taut/HuddleFM.tsx plugins/HuddleFM.tsx
+          npx tsc --noEmit
+          npx biome lint plugins/HuddleFM.tsx
+        working-directory: taut
+      - run: |
+          mkdir -p ../dist
+          npm run build:user-plugin -- ../clients/taut/HuddleFM.tsx ../dist/HuddleFM.js
+        working-directory: taut
+      - uses: actions/upload-artifact@v7
+        with:
+          name: huddlefm-taut-plugin
+          path: dist/HuddleFM.js
+          if-no-files-found: error
