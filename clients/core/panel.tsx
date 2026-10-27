@@ -2097,22 +2097,24 @@ function UserSelect(props: {
   );
   const options = props.participants.map((id) => ({
     value: id,
-    label: names[id] ?? id,
+    label: names[id],
   }));
   return (
     <>
       {props.participants.map((id) => (
         <UserName key={id} platform={props.platform} id={id} report={report} />
       ))}
-      {/* Slack's select keeps the options it opened with, so it's drawn again as names come in */}
-      <props.platform.kit.Select
-        key={options.map((option) => option.label).join("\n")}
-        id={props.id}
-        label="Host"
-        options={options}
-        value={props.value ?? undefined}
-        onChange={props.onChange}
-      />
+      {/* Slack's select keeps the options it opened with, so it's drawn again as they change */}
+      {props.participants.every((id) => id in names) && (
+        <props.platform.kit.Select
+          key={JSON.stringify(options)}
+          id={props.id}
+          label="Host"
+          options={options}
+          value={props.value ?? undefined}
+          onChange={props.onChange}
+        />
+      )}
     </>
   );
 }
