@@ -8379,3 +8379,209 @@ test("played tracks before the last few give up their files, and Previous prepar
   await result.coordinator.endFromSlack();
   await rm(directory, { recursive: true, force: true });
 });
+
+const dataBroadcasts = (media: unknown[]) =>
+  media.flatMap((message) => {
+    const value = message as { type?: string; payload?: Record<string, any> };
+    return value.type === "data_broadcast" && value.payload
+      ? [value.payload]
+      : [];
+  });
+
+async function pluginSetup() {
+  const tracks = {
+    resolve: async (value: string) => ({
+      sourceInput: value,
+      canonicalUrl: value,
+      sourceId: value.includes("b") ? "bbbbbbbbbbb" : "aaaaaaaaaaa",
+      title: value.includes("b") ? "B" : "A",
+      artist: "Artist",
+      album: "Album",
+      artwork: "https://i.example/a.jpg",
+      duration: 100,
+    }),
+    prepare: async (metadata: { sourceId: string }) =>
+      `${metadata.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  await result.coordinator.start();
+  const send = async (userId: string, payload: Record<string, unknown>) => {
+    result.coordinator.dataMessage({
+      userId,
+      attendeeId: `${userId}-attendee`,
+      payload: { v: 1, ...payload },
+    });
+    await Bun.sleep(300);
+  };
+  return { ...result, send };
+}
+
+test("client mods sync the session over the data channel", async () => {
+  const result = await pluginSetup();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://b"),
+  );
+  await Bun.sleep(0);
+  // Nothing goes out before a client asks.
+  expect(dataBroadcasts(result.media)).toEqual([]);
+  await result.send("guest", { type: "sync" });
+  const messages = dataBroadcasts(result.media);
+  const state = messages.findLast((message) => message.type === "state")!;
+  const you = messages.find((message) => message.type === "you")!;
+  expect(state).toMatchObject({
+    type: "state",
+    seq: expect.any(Number),
+    session: {
+      mode: "music",
+      state: "playing",
+      volume: 60,
+      hostId: "host",
+      allowed: ["add", "remove-own"],
+      queueLimit: 50,
+      player: { channel: "channel", ts: "1" },
+    },
+    nowPlaying: {
+      title: "A",
+      artist: "Artist",
+      album: "Album",
+      artwork: "https://i.example/a.jpg",
+      duration: 100,
+      kind: "song",
+      addedBy: "host",
+    },
+    queue: [{ title: "B", status: expect.any(String) }],
+    participants: ["host", "guest"],
+  });
+  expect(
+    (state.settings as { id: string; requires: string }[]).map((field) => [
+      field.id,
+      field.requires,
+    ]),
+  ).toContainEqual(["permissions", "admin"]);
+  expect(you).toEqual({
+    type: "you",
+    to: "guest",
+    capabilities: ["add", "remove-own"],
+    admin: false,
+    settings: [],
+  });
+  await result.coordinator.endFromSlack();
+  expect(dataBroadcasts(result.media).at(-1)).toMatchObject({
+    type: "state",
+    session: { state: "ended" },
+  });
+});
+
+test("client mods run commands with their own permissions", async () => {
+  const result = await pluginSetup();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await Bun.sleep(0);
+  await result.send("guest", {
+    type: "command",
+    id: "r1",
+    command: { type: "skip" },
+  });
+  await result.send("host", {
+    type: "command",
+    id: "r2",
+    command: { type: "toggle" },
+  });
+  await result.send("stranger", {
+    type: "command",
+    id: "r3",
+    command: { type: "pause" },
+  });
+  const results = dataBroadcasts(result.media).filter(
+    (message) => message.type === "result",
+  );
+  expect(results).toEqual([
+    {
+      type: "result",
+      to: "guest",
+      id: "r1",
+      command: "skip",
+      ok: false,
+      error: "missing_permission",
+      message: "You do not have permission for that.",
+    },
+    {
+      type: "result",
+      to: "host",
+      id: "r2",
+      command: "toggle",
+      ok: true,
+      state: "paused",
+    },
+    expect.objectContaining({
+      to: "stranger",
+      id: "r3",
+      ok: false,
+      error: "not_granted",
+    }),
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
+test("client mods change settings as the modal would", async () => {
+  const result = await pluginSetup();
+  await result.send("host", { type: "sync" });
+  await result.send("guest", { type: "sync" });
+  await result.send("host", {
+    type: "setting",
+    id: "r1",
+    setting: "loop",
+    value: "queue",
+  });
+  await result.send("guest", {
+    type: "setting",
+    id: "r2",
+    setting: "loop",
+    value: "track",
+  });
+  await result.send("host", {
+    type: "setting",
+    id: "r3",
+    setting: "permissions",
+    value: ["skip", "volume", "not-a-capability"],
+  });
+  await result.send("guest", {
+    type: "setting",
+    id: "r4",
+    setting: "volume",
+    value: "35",
+  });
+  const messages = dataBroadcasts(result.media);
+  const results = messages.filter((message) => message.type === "result");
+  expect(results.map((message) => [message.id, message.ok])).toEqual([
+    ["r1", true],
+    ["r2", false],
+    ["r3", true],
+    ["r4", true],
+  ]);
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    loopMode: "queue",
+    volumePercent: 35,
+  });
+  expect(result.audit).toContainEqual([
+    "settings.changed",
+    "host",
+    expect.objectContaining({ source: "plugin" }),
+  ]);
+  // The guest hears what they may do now.
+  expect(
+    messages.findLast(
+      (message) => message.type === "you" && message.to === "guest",
+    ),
+  ).toMatchObject({ capabilities: ["skip", "volume"] });
+  expect(
+    messages.findLast((message) => message.type === "state"),
+  ).toMatchObject({
+    session: { allowed: ["skip", "volume"], loopMode: "queue", volume: 35 },
+  });
+  await result.coordinator.endFromSlack();
+});

@@ -164,12 +164,14 @@ async function start(bootstrap: ChimeBootstrap) {
   dataChannel = new DataChannel(
     chime.attendeeId,
     (data) => chime.sendData(dataTopic, data),
-    ({ payload, attendeeId, userId }) =>
-      log("info", "native_data_message", "Received a data message", {
+    ({ payload, attendeeId, userId }) => {
+      log("debug", "native_data_message", "Received a data message", {
         messageType: payload.type,
         attendeeId,
         userId,
-      }),
+      });
+      emit("data_message", { userId, attendeeId, payload });
+    },
     () =>
       log("warn", "native_data_throttled", "Chime throttled a data message"),
   );
@@ -440,7 +442,8 @@ function broadcastData(payload: unknown) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
   try {
     const sent = dataChannel?.broadcast(payload as Record<string, unknown>);
-    log("info", "native_data_broadcast", "Broadcast a data message", {
+    log("debug", "native_data_broadcast", "Broadcast a data message", {
+      messageType: (payload as { type?: unknown }).type,
       sent: Boolean(sent),
     });
   } catch (error) {

@@ -3,11 +3,11 @@ name: Taut plugin
 on:
   push:
     paths:
-      - "clients/taut/**"
+      - "clients/**"
       - ".github/workflows/taut-plugin.yml"
   pull_request:
     paths:
-      - "clients/taut/**"
+      - "clients/**"
       - ".github/workflows/taut-plugin.yml"
   workflow_dispatch:
 
@@ -37,10 +37,15 @@ jobs:
       - run: npm ci --no-audit --no-fund
         working-directory: taut
       # Checked as one of Taut's own plugins, against its types and lint rules.
+      # The plugin imports ../core, which sits beside plugins/ here as it does
+      # in clients/; its tests run with the bot's.
       - run: |
           cp ../clients/taut/HuddleFM.tsx plugins/HuddleFM.tsx
+          mkdir core
+          cp ../clients/core/*.ts ../clients/core/*.tsx core/
+          rm core/*.test.ts
           npx tsc --noEmit
-          npx biome lint plugins/HuddleFM.tsx
+          npx biome lint plugins/HuddleFM.tsx core
         working-directory: taut
       - run: |
           mkdir -p ../dist

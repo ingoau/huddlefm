@@ -1431,8 +1431,13 @@ function createMediaSession(current: () => Runtime | undefined) {
 
 /** Handles an event from a runtime's media backend, whichever it is. */
 function handleMediaMessage(runtime: Runtime, message: MediaMessage) {
-  runtime.mediaState = { type: message.type, details: message.details };
   const ownSession = message.sessionId === runtime.bootstrap.sessionId;
+  // Client mods' messages say nothing about the media connection.
+  if (message.type === "data_message") {
+    if (ownSession) runtime.coordinator?.dataMessage(message.details);
+    return;
+  }
+  runtime.mediaState = { type: message.type, details: message.details };
   const detail = detailMessage(message.details);
   if (ownSession && message.type === "joined") runtime.joinGate?.resolve();
   if (ownSession && (message.type === "fatal" || message.type === "ended"))

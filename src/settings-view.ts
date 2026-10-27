@@ -1,13 +1,10 @@
 import {
   actions,
   button,
-  capitalize,
   confirm,
   context,
   escape,
   input,
-  modeSelect,
-  permissionLabels,
   plain,
   section,
   songCount,
@@ -19,71 +16,24 @@ import {
   integrationSettingsBlocks,
   slackModalBlockLimit,
 } from "./integration.ts";
-import type { Interaction } from "./slack-app.ts";
 import {
-  autoplayModeLabels,
-  autoplayModes,
-  capabilities,
-  displayModes,
-  duckingModeLabels,
-  duckingModes,
-  huddleMixSources,
-  loopModeLabels,
-  loopModes,
-  mediaModes,
-  scrobblingModes,
-  transitionModes,
-  type AutoplayMode,
-  type DisplayMode,
-  type DuckingMode,
-  type HuddleMixSource,
-  type LoopMode,
-  type MediaMode,
-  type ScrobblingMode,
-  type TransitionMode,
-} from "./store.ts";
+  scrobbleServices,
+  settingFields,
+  videoAutoplayModes,
+  type ScrobbleService,
+  type SessionSettingsView,
+  type SettingField,
+  type SettingFieldValue,
+  type UserSettingsView,
+} from "./settings-schema.ts";
+import type { Interaction } from "./slack-app.ts";
+import { huddleMixSources, type HuddleMixSource } from "./store.ts";
 
-const autoplayDescriptions: Record<AutoplayMode, string> = {
-  off: "Do not queue recommendations",
-  related: "Continue from songs requested in this huddle",
-  huddle: "Mix what people in this huddle listen to",
-};
-// Video mode's autoplay is on or off: it only ever follows on with related
-// videos.
-const videoAutoplayModes = ["off", "related"] as const;
-type VideoAutoplayMode = (typeof videoAutoplayModes)[number];
-const videoAutoplayLabels: Record<VideoAutoplayMode, string> = {
-  off: "Off",
-  related: "Related videos",
-};
-const videoAutoplayDescriptions: Record<VideoAutoplayMode, string> = {
-  off: "Do not queue videos",
-  related: "Play a video related to what people queued",
-};
-const loopDescriptions: Record<LoopMode, string> = {
-  off: "Do not repeat",
-  track: "Restart the current song when it ends",
-  queue: "Move finished songs back to the end of the queue",
-};
-const mediaModeLabels: Record<MediaMode, string> = {
-  music: "Music",
-  video: "Video",
-};
-const mediaModeDescriptions: Record<MediaMode, string> = {
-  music: "Listen together, with autoplay, lyrics and crossfades",
-  video: "Watch YouTube videos together on a screen share",
-};
-const duckingDescriptions: Record<DuckingMode, string> = {
-  off: "Keep playing at full volume",
-  gentle: "Dip the music under the conversation",
-  strong: "Drop the music well back while people talk",
-};
-
-const huddleMixSourceLabels: Record<HuddleMixSource, string> = {
-  added: "Songs I've added or liked",
-  lastfm: "My Last.fm listening",
-  listenbrainz: "My ListenBrainz listening",
-};
+export {
+  scrobbleServices,
+  type ScrobbleService,
+  type UserSettingsView,
+} from "./settings-schema.ts";
 
 /** What a modal's inputs hold, by block and then action ID. */
 export type FormState = Interaction["state"];
@@ -122,23 +72,9 @@ export function checked(state: InputState | undefined) {
 // carrying over the old ones.
 const huddleMixActionPrefix = "sources:";
 
-function huddleMixSourceInput(
-  offered: readonly HuddleMixSource[],
-  chosen: readonly HuddleMixSource[],
-) {
-  const option = (source: HuddleMixSource) => ({
-    text: plain(huddleMixSourceLabels[source]),
-    value: source,
-  });
-  return {
-    type: "checkboxes",
-    action_id: `${huddleMixActionPrefix}${offered.join(",")}`,
-    options: offered.map(option),
-    initial_options: offered
-      .filter((source) => chosen.includes(source))
-      .map(option),
-  };
-}
+// The services a user scrobbles to, named in the checkboxes' action ID as the
+// Huddle mix sources are, so only the services the form offered are saved.
+const scrobbleServicesPrefix = "services:";
 
 // The choice a settings form makes for each Huddle mix source it offered, or
 // undefined when the checkboxes were not part of it.
@@ -317,22 +253,6 @@ export function mergeForm(draft: FormState, state: FormState): FormState {
 // Slack refuses private metadata over this many characters.
 const metadataLimit = 3000;
 
-/** A user's own settings, as Settings shows them. */
-export type UserSettingsView = {
-  lastFmAvailable: boolean;
-  lastFmConnected: boolean;
-  lastFmUsername?: string;
-  lastFmEnabled: boolean;
-  listenBrainzConnected: boolean;
-  listenBrainzUsername?: string;
-  listenBrainzEnabled: boolean;
-  huddleMixSources: readonly HuddleMixSource[];
-  huddleMixUsable: readonly HuddleMixSource[];
-  mode: ScrobblingMode;
-  configured: boolean;
-  sessionEnabled?: boolean;
-};
-
 export const defaultUserSettings: UserSettingsView = {
   lastFmAvailable: false,
   lastFmConnected: false,
@@ -374,20 +294,7 @@ export type SettingsViewOptions = {
     endSession: boolean;
     saveDefaults: boolean;
   };
-  session: {
-    hostId?: string;
-    mediaMode: MediaMode;
-    volume: number;
-    displayMode: DisplayMode;
-    autoplayMode: AutoplayMode;
-    videoAutoplay?: boolean;
-    loopMode: LoopMode;
-    transitionMode: TransitionMode;
-    duckingMode: DuckingMode;
-    anchorEnabled: boolean;
-    progressBar: boolean;
-    allowed: ReadonlySet<string>;
-  };
+  session: SessionSettingsView;
   user: UserSettingsView;
   // The viewer's Jellyfin servers, when Jellyfin is available.
   jellyfin?: { linked: number; needsLink: number };
@@ -493,146 +400,220 @@ export function settingsView(options: SettingsViewOptions) {
   };
 }
 
+// The action ID of each setting's input. Selects are `mode` and toggles
+// `enabled` unless named here; the Huddle mix and scrobbling checkboxes name
+// what they offer after their prefix.
+const actionIds: Record<string, string> = {
+  volume: "percent",
+  host: "user",
+  permissions: "selected",
+};
+const offeringPrefixes: Record<string, string> = {
+  huddle_mix: huddleMixActionPrefix,
+  scrobble_to: scrobbleServicesPrefix,
+};
+
+function actionId(field: SettingField) {
+  const prefix = offeringPrefixes[field.id];
+  if (prefix && field.kind === "multi")
+    return `${prefix}${field.options.map((option) => option.value).join(",")}`;
+  return (
+    actionIds[field.id] ??
+    (field.kind === "toggle"
+      ? "enabled"
+      : field.kind === "user"
+        ? "user"
+        : "mode")
+  );
+}
+
+// What a draft holds for a setting, or undefined when it holds nothing
+// that applies, read as each input reads back.
+function draftValue(
+  field: SettingField,
+  form: FormState,
+): SettingFieldValue | undefined {
+  const block = form[field.id];
+  if (!block) return undefined;
+  switch (field.kind) {
+    case "select": {
+      const value = block[actionId(field)]?.selected_option?.value;
+      if (value === undefined) return undefined;
+      // The volume keeps whatever it was, as its steps grow to include it.
+      return field.id === "volume" ||
+        field.options.some((option) => option.value === value)
+        ? value
+        : undefined;
+    }
+    case "toggle":
+      return checked(block.enabled);
+    case "user":
+      return block.user?.selected_user;
+    case "multi": {
+      const prefix = offeringPrefixes[field.id];
+      if (!prefix) {
+        const ticked = block[actionId(field)]?.selected_options;
+        if (!ticked) return undefined;
+        const values = new Set(ticked.map((option) => option.value));
+        return field.options
+          .map((option) => option.value)
+          .filter((value) => values.has(value));
+      }
+      // Only what the form offered is its choice; the rest keep theirs.
+      const [offeredBy, state] =
+        Object.entries(block).find(([id]) => id.startsWith(prefix)) ?? [];
+      if (!offeredBy || !state) return undefined;
+      const offered = new Set(offeredBy.slice(prefix.length).split(","));
+      const ticked = new Set(
+        state.selected_options?.map((option) => option.value) ?? [],
+      );
+      return field.options
+        .map((option) => option.value)
+        .filter((value) =>
+          offered.has(value) ? ticked.has(value) : field.value.includes(value),
+        );
+    }
+  }
+}
+
+// The settings the viewer may change, with the draft's edits in them.
+function fieldsFor(options: SettingsViewOptions, form: FormState) {
+  const { access, session, user } = options;
+  const context = {
+    access: {
+      volume: access.volume,
+      configure: access.configure,
+      admin: access.admin,
+    },
+    session,
+    user,
+  };
+  const overrides: Record<string, SettingFieldValue> = {};
+  for (const field of settingFields(context)) {
+    const value = draftValue(field, form);
+    if (value !== undefined) overrides[field.id] = value;
+  }
+  return settingFields(context, overrides);
+}
+
+function settingInput(field: SettingField, revision: number) {
+  const id = actionId(field);
+  const options = { optional: field.optional, hint: field.hint };
+  switch (field.kind) {
+    case "select":
+      return input(
+        field.id,
+        field.label,
+        staticSelect(
+          id,
+          field.options.map((option) => ({
+            text: plain(option.label),
+            value: option.value,
+            ...(option.description
+              ? { description: plain(option.description) }
+              : {}),
+          })),
+          field.value,
+        ),
+        options,
+      );
+    case "toggle":
+      return input(
+        field.id,
+        field.label,
+        toggle(id, field.text, field.value),
+        options,
+      );
+    case "user":
+      return input(
+        field.id,
+        field.label,
+        {
+          type: "users_select",
+          action_id: id,
+          ...(field.value ? { initial_user: field.value } : {}),
+        },
+        options,
+      );
+    case "multi": {
+      const all = field.options.map((option) => ({
+        text: plain(option.label),
+        value: option.value,
+      }));
+      return input(
+        field.id === "permissions"
+          ? versionedBlockId(field.id, revision)
+          : field.id,
+        field.label,
+        {
+          type: "checkboxes",
+          action_id: id,
+          options: all,
+          initial_options: all.filter((option) =>
+            field.value.includes(option.value),
+          ),
+        },
+        options,
+      );
+    }
+  }
+}
+
+// A tab's settings, each under the heading it starts, and the permissions
+// after the presets that fill them in.
+function settingBlocks(
+  options: SettingsViewOptions,
+  form: FormState,
+  tab: SettingField["tab"],
+) {
+  const revision = options.revision ?? 0;
+  return fieldsFor(options, form)
+    .filter((field) => field.tab === tab)
+    .flatMap((field) => [
+      ...when(field.section, {
+        type: "header",
+        text: plain(field.section ?? ""),
+      }),
+      ...(field.kind === "multi" && field.presets
+        ? [presetInput(field.presets, revision)]
+        : []),
+      settingInput(field, revision),
+    ]);
+}
+
+// A preset fills in the checkboxes when picked. Slack keeps what an input
+// showed across a redraw unless its block ID changes, so each fill gives
+// both inputs new ones.
+function presetInput(
+  presets: { value: string; label: string }[],
+  revision: number,
+) {
+  return {
+    ...input(
+      versionedBlockId("permission_preset", revision),
+      "Start from a preset",
+      {
+        type: "static_select",
+        action_id: "apply_permission_preset",
+        placeholder: plain("Choose a preset"),
+        options: presets.map((preset) => ({
+          text: plain(preset.label),
+          value: preset.value,
+        })),
+      },
+      {
+        optional: true,
+        hint: "Fills in the permissions below. Nothing changes until you save.",
+      },
+    ),
+    dispatch_action: true,
+  };
+}
+
 function sessionBlocks(options: SettingsViewOptions, form: FormState) {
-  const { access, session, sessionId: value } = options;
-  const volume =
-    form.volume?.percent?.selected_option?.value ??
-    String(Math.round(session.volume * 10_000) / 100);
-  // Video mode has no use for the music's own settings, so they are left
-  // out, and left as they are for when the music comes back.
-  const music = session.mediaMode === "music";
+  const { access, sessionId: value } = options;
   return [
-    ...when(
-      access.admin,
-      input(
-        "media_mode",
-        "Mode",
-        modeSelect(
-          mediaModes,
-          selected(form.media_mode?.mode, mediaModes) ?? session.mediaMode,
-          (mode) => mediaModeLabels[mode],
-          mediaModeDescriptions,
-        ),
-        { hint: "Only the host can switch modes" },
-      ),
-    ),
-    ...when(access.volume, input("volume", "Volume", volumeSelect(volume))),
-    ...when(
-      access.configure && music,
-      input(
-        "display",
-        "Display mode",
-        modeSelect(
-          displayModes,
-          selected(form.display?.mode, displayModes) ?? session.displayMode,
-          capitalize,
-        ),
-      ),
-      input(
-        "autoplay",
-        "Autoplay",
-        modeSelect(
-          autoplayModes,
-          selected(form.autoplay?.mode, autoplayModes) ?? session.autoplayMode,
-          (mode) => autoplayModeLabels[mode],
-          autoplayDescriptions,
-        ),
-        {
-          optional: true,
-          hint: "Play recommendations when the queue is empty",
-        },
-      ),
-    ),
-    ...when(
-      access.configure && !music,
-      input(
-        "video_autoplay",
-        "Autoplay",
-        modeSelect(
-          videoAutoplayModes,
-          selected(form.video_autoplay?.mode, videoAutoplayModes) ??
-            (session.videoAutoplay ? "related" : "off"),
-          (mode) => videoAutoplayLabels[mode],
-          videoAutoplayDescriptions,
-        ),
-        {
-          optional: true,
-          hint: "Play related videos when the queue is empty",
-        },
-      ),
-    ),
-    ...when(
-      access.configure,
-      input(
-        "loop",
-        "Loop",
-        modeSelect(
-          loopModes,
-          selected(form.loop?.mode, loopModes) ?? session.loopMode,
-          (mode) => loopModeLabels[mode],
-          loopDescriptions,
-        ),
-        {
-          optional: true,
-          hint: "Repeat the current track or cycle the queue",
-        },
-      ),
-    ),
-    ...when(
-      access.configure && music,
-      input(
-        "transition",
-        "Transitions",
-        modeSelect(
-          transitionModes,
-          selected(form.transition?.mode, transitionModes) ??
-            session.transitionMode,
-          (mode) =>
-            mode === "none"
-              ? "Disabled"
-              : mode === "adaptive"
-                ? "Adaptive crossfade"
-                : capitalize(mode),
-        ),
-      ),
-      input(
-        "ducking",
-        "Auto-duck",
-        modeSelect(
-          duckingModes,
-          selected(form.ducking?.mode, duckingModes) ?? session.duckingMode,
-          (mode) => duckingModeLabels[mode],
-          duckingDescriptions,
-        ),
-        { hint: "Lower the music while someone is speaking" },
-      ),
-    ),
-    ...when(
-      access.configure && !music,
-      input(
-        "progress_bar",
-        "Progress bar",
-        toggle(
-          "enabled",
-          "Show a progress bar on videos",
-          checked(form.progress_bar?.enabled) ?? session.progressBar,
-        ),
-        { optional: true },
-      ),
-    ),
-    ...when(
-      access.configure,
-      input(
-        "anchor",
-        "Thread position",
-        toggle(
-          "enabled",
-          "Keep player at bottom of thread",
-          checked(form.anchor?.enabled) ?? session.anchorEnabled,
-        ),
-        { optional: true },
-      ),
-    ),
+    ...settingBlocks(options, form, "session"),
     ...when(
       access.endSession,
       { type: "divider" },
@@ -646,20 +627,6 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
       ]),
     ),
   ];
-}
-
-// Volume in the player's steps of 5%, and the current volume when it falls
-// between them, as from an older default or a channel's.
-function volumeSelect(current: string) {
-  const steps = Array.from({ length: 21 }, (_, index) => String(index * 5));
-  const values = steps.includes(current)
-    ? steps
-    : [...steps, current].sort((a, b) => Number(a) - Number(b));
-  return staticSelect(
-    "percent",
-    values.map((value) => ({ text: plain(`${value}%`), value })),
-    current,
-  );
 }
 
 function channelBlocks(options: SettingsViewOptions) {
@@ -721,87 +688,6 @@ function channelBlocks(options: SettingsViewOptions) {
   ];
 }
 
-function hostBlocks(options: SettingsViewOptions, form: FormState) {
-  const { session } = options;
-  const allowed = new Set(
-    form.permissions?.selected?.selected_options?.map(
-      (option) => option.value,
-    ) ?? session.allowed,
-  );
-  const hostId = form.host?.user?.selected_user ?? session.hostId;
-  const presets = (
-    [
-      ["default", "Default"],
-      ["host-only", "Host only"],
-      ["collaborative", "Collaborative"],
-      ["communism", "Communism"],
-    ] satisfies [string, string][]
-  ).map(([value, label]) => ({ text: plain(label), value }));
-  // A preset fills in the checkboxes when picked. Slack keeps what an input
-  // showed across a redraw unless its block ID changes, so each fill gives
-  // both inputs new ones.
-  const revision = options.revision ?? 0;
-  return [
-    input(
-      "host",
-      "Transfer host",
-      {
-        type: "users_select",
-        action_id: "user",
-        ...(hostId ? { initial_user: hostId } : {}),
-      },
-      { optional: true },
-    ),
-    { type: "header", text: plain("Permissions") },
-    {
-      ...input(
-        versionedBlockId("permission_preset", revision),
-        "Start from a preset",
-        {
-          type: "static_select",
-          action_id: "apply_permission_preset",
-          placeholder: plain("Choose a preset"),
-          options: presets,
-        },
-        {
-          optional: true,
-          hint: "Fills in the permissions below. Nothing changes until you save.",
-        },
-      ),
-      dispatch_action: true,
-    },
-    input(
-      versionedBlockId("permissions", revision),
-      "Everyone else may",
-      {
-        type: "checkboxes",
-        action_id: "selected",
-        options: capabilities.map((value) => ({
-          text: plain(permissionLabels[value]),
-          value,
-        })),
-        initial_options: capabilities
-          .filter((value) => allowed.has(value))
-          .map((value) => ({
-            text: plain(permissionLabels[value]),
-            value,
-          })),
-      },
-      { optional: true },
-    ),
-  ];
-}
-
-// The services a user scrobbles to, named in the checkboxes' action ID as the
-// Huddle mix sources are, so only the services the form offered are saved.
-const scrobbleServicesPrefix = "services:";
-export const scrobbleServices = ["lastfm", "listenbrainz"] as const;
-export type ScrobbleService = (typeof scrobbleServices)[number];
-const scrobbleServiceLabels: Record<ScrobbleService, string> = {
-  lastfm: "Last.fm",
-  listenbrainz: "ListenBrainz",
-};
-
 // Whether the form ticks each scrobbling service it offered, or undefined
 // when the checkboxes were not part of it.
 export function submittedScrobbleServices(
@@ -825,29 +711,12 @@ export function submittedScrobbleServices(
   ) as Partial<Record<ScrobbleService, boolean>>;
 }
 
+function hostBlocks(options: SettingsViewOptions, form: FormState) {
+  return settingBlocks(options, form, "host");
+}
+
 function youBlocks(options: SettingsViewOptions, form: FormState) {
   const { user: settings, sessionId: value } = options;
-  const mix = submittedHuddleMixSources(form.huddle_mix);
-  const chosen = settings.huddleMixUsable.filter(
-    (source) => mix?.[source] ?? settings.huddleMixSources.includes(source),
-  );
-  const connected = scrobbleServices.filter((service) =>
-    service === "lastfm"
-      ? settings.lastFmConnected
-      : settings.listenBrainzConnected,
-  );
-  const services = submittedScrobbleServices(form.scrobble_to);
-  const serviceOption = (service: ScrobbleService) => ({
-    text: plain(scrobbleServiceLabels[service]),
-    value: service,
-  });
-  const scrobblingTo = connected.filter(
-    (service) =>
-      services?.[service] ??
-      (service === "lastfm"
-        ? settings.lastFmEnabled
-        : settings.listenBrainzEnabled),
-  );
   const lastFm = settings.lastFmConnected
     ? `Connected as ${escape(settings.lastFmUsername ?? "unknown")}`
     : "Not connected";
@@ -857,55 +726,8 @@ function youBlocks(options: SettingsViewOptions, form: FormState) {
       : "Token saved"
     : "Not connected";
   return [
-    // The mix is autoplay's, which video mode does without.
-    ...when(
-      options.session.mediaMode === "music",
-      input(
-        "huddle_mix",
-        "Include in Huddle mix",
-        huddleMixSourceInput(settings.huddleMixUsable, chosen),
-        {
-          optional: true,
-          hint: "Only used while you're in the huddle, and never shown as yours. Untick everything to opt out of the mix.",
-        },
-      ),
-    ),
-    ...when(
-      settings.configured,
-      { type: "header", text: plain("Scrobbling") },
-      input(
-        "session_scrobbling",
-        "This session",
-        toggle(
-          "enabled",
-          "Scrobble what I listen to here",
-          checked(form.session_scrobbling?.enabled) ??
-            Boolean(settings.sessionEnabled),
-        ),
-        { optional: true },
-      ),
-      input(
-        "scrobbling_mode",
-        "Default for new Huddles",
-        modeSelect(
-          scrobblingModes,
-          selected(form.scrobbling_mode?.mode, scrobblingModes) ??
-            settings.mode,
-          scrobblingModeLabel,
-        ),
-      ),
-      input(
-        "scrobble_to",
-        "Scrobble to",
-        {
-          type: "checkboxes",
-          action_id: `${scrobbleServicesPrefix}${connected.join(",")}`,
-          options: connected.map(serviceOption),
-          initial_options: scrobblingTo.map(serviceOption),
-        },
-        { optional: true },
-      ),
-    ),
+    ...settingBlocks(options, form, "you"),
+
     { type: "header", text: plain("Accounts") },
     ...when(settings.lastFmConnected || settings.lastFmAvailable, {
       type: "section",
@@ -1184,10 +1006,4 @@ export function yourDataView(options: YourDataOptions) {
       ]),
     ],
   };
-}
-
-function scrobblingModeLabel(mode: ScrobblingMode) {
-  if (mode === "ask") return "Ask every Huddle";
-  if (mode === "ask_track") return "Ask for every track";
-  return capitalize(mode);
 }

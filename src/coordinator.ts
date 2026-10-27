@@ -36,6 +36,7 @@ import {
   type SessionSaveOwner,
   type SessionSaveSettings,
   type SessionSaveTrack,
+  type ScrobblingMode,
   type TransitionMode,
 } from "./store.ts";
 import {
@@ -107,6 +108,7 @@ import {
   integrationReply,
   integrationRequestBlocks,
   parseIntegrationActionValue,
+  parseIntegrationMessage,
   parseIntegrationSettingsPage,
   sessionMatchesChannel,
   wrapIntegrationResult,
@@ -149,6 +151,13 @@ import {
   settingsChanges,
   type Settings,
 } from "./settings-diff.ts";
+import { settingFields, type SessionSettingsView } from "./settings-schema.ts";
+import {
+  PluginChannel,
+  type AgentResult,
+  type PluginCommand,
+  type PluginSettingChange,
+} from "./plugin-channel.ts";
 
 // What Your data calls each kind of record it deletes.
 const deletedNouns = {
@@ -459,6 +468,8 @@ export class Coordinator {
   >();
   private playbackScrobbling?: PlaybackScrobbler;
   private log = logger.child({ component: "coordinator" });
+  // Client mods on the data channel; see docs/data-channel.md.
+  private plugins: PluginChannel;
   private integrations = new Map<
     string,
     {
@@ -536,6 +547,20 @@ export class Coordinator {
       huddleId: room.huddleId,
       channelId: room.uiChannelId,
     });
+    this.plugins = new PluginChannel(
+      {
+        snapshot: () => this.pluginSnapshot(),
+        you: (userId) => this.pluginYou(userId),
+        command: (userId, command) => this.pluginCommand(userId, command),
+        setting: (userId, setting, change) =>
+          this.pluginSetting(userId, setting, change),
+        send: (payload) => this.sendMedia({ type: "data_broadcast", payload }),
+      },
+      {
+        log: (event, fields) =>
+          this.log.warn({ event, ...fields }, "Client mod message failed"),
+      },
+    );
     if (jellyfin)
       this.jellyfinUi = new JellyfinUi({
         sessionId: this.id,
@@ -1872,11 +1897,16 @@ export class Coordinator {
       transitionMode?: TransitionMode;
       duckingMode?: DuckingMode;
       anchorEnabled?: boolean;
+      progressBar?: boolean;
+      videoAutoplay?: boolean;
       permissionPreset?: keyof typeof permissionPresets;
+      // Exactly what everyone else may do, as Settings' checkboxes say it.
+      permissions?: string[];
       hostUserId?: string;
       mode?: MediaMode;
     },
     signal?: AbortSignal,
+    source: "agent" | "plugin" = "agent",
   ) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
@@ -1908,7 +1938,8 @@ export class Coordinator {
       const before = this.settingsSnapshot();
       if (
         (patch.hostUserId !== undefined ||
-          patch.permissionPreset !== undefined) &&
+          patch.permissionPreset !== undefined ||
+          patch.permissions !== undefined) &&
         !this.settingsAdmin(userId)
       )
         return {
@@ -1922,7 +1953,9 @@ export class Coordinator {
           patch.loopMode !== undefined ||
           patch.transitionMode !== undefined ||
           patch.duckingMode !== undefined ||
-          patch.anchorEnabled !== undefined) &&
+          patch.anchorEnabled !== undefined ||
+          patch.progressBar !== undefined ||
+          patch.videoAutoplay !== undefined) &&
         !this.can(userId, "configure-settings")
       )
         return {
@@ -1981,7 +2014,9 @@ export class Coordinator {
           (patch.autoplay === undefined || video
             ? undefined
             : parseAutoplayMode(patch.autoplay)),
-        videoAutoplay: video ? patch.autoplay : undefined,
+        videoAutoplay: video
+          ? (patch.videoAutoplay ?? patch.autoplay)
+          : undefined,
       });
       if (patch.mode === "video" && !this.videoMode) {
         const blocked = await this.switchMediaMode(userId, "video", "agent");
@@ -1989,12 +2024,20 @@ export class Coordinator {
         changed.push("mode=video");
         // Video's autoplay applies only once video mode is on.
         changed.push(
-          ...(await this.applySettings({ videoAutoplay: patch.autoplay })),
+          ...(await this.applySettings({
+            videoAutoplay: patch.videoAutoplay ?? patch.autoplay,
+          })),
         );
       } else if (patch.mode === "music") changed.push("mode=music");
       if (permissionPreset) {
         this.setPermissions(permissionPreset);
         changed.push(`permissions=${patch.permissionPreset}`);
+      } else if (patch.permissions) {
+        const allowed = capabilities.filter((value) =>
+          patch.permissions!.includes(value),
+        );
+        this.setPermissions(allowed);
+        changed.push(`permissions=${allowed.join(",")}`);
       }
       if (patch.hostUserId !== undefined) {
         this.setHost(patch.hostUserId);
@@ -2004,7 +2047,7 @@ export class Coordinator {
         const changes = settingsChanges(before, this.settingsSnapshot());
         this.audit.record("settings.changed", userId, {
           sessionId: this.id,
-          source: "agent",
+          source,
           changed: changedSettings(changes),
           changes,
         });
@@ -2090,6 +2133,277 @@ export class Coordinator {
     return { ok: true as const, sessionEnabled: enabled };
   }
 
+  /** A message from a client mod on the data channel. */
+  dataMessage(details: unknown) {
+    this.plugins.receive(details);
+  }
+
+  // The session as a `state` message carries it; see docs/data-channel.md.
+  private pluginSnapshot() {
+    const track = (entry: Entry) => ({
+      id: entry.id,
+      title: entry.title,
+      artist: entry.artist,
+      ...(entry.album ? { album: entry.album } : {}),
+      // Only public artwork: a file's own is served on loopback.
+      ...(entry.artwork?.startsWith("https://")
+        ? { artwork: entry.artwork }
+        : {}),
+      ...(entry.duration ? { duration: entry.duration } : {}),
+      kind: trackKind(entry),
+      live: Boolean(entry.live),
+      automatic: Boolean(entry.automatic),
+      addedBy: entry.requesterId,
+    });
+    return {
+      session: {
+        id: this.id,
+        mode: this.mediaMode,
+        state: this.state,
+        position: this.playbackSeconds,
+        volume: Math.round(this.volume * 100),
+        hostId: this.hostId ?? null,
+        allowed: capabilities.filter((value) => this.allowed.has(value)),
+        loopMode: this.loopMode,
+        queueLimit: this.config.queueLimit,
+        player: this.uiTs
+          ? { channel: this.room.uiChannelId, ts: this.uiTs }
+          : null,
+      },
+      nowPlaying: this.current ? track(this.current) : null,
+      queue: this.queue.map((entry) => ({
+        ...track(entry),
+        status: entry.status,
+      })),
+      participants: [...this.participants].filter(
+        (id) => id !== this.botUserId,
+      ),
+      // Every session and host setting; each client shows the ones its user
+      // may change, by `requires`.
+      settings: settingFields({
+        access: { volume: true, configure: true, admin: true },
+        session: this.sessionSettings(),
+      }),
+    };
+  }
+
+  // What one user may do, and their own settings, as `you` carries them.
+  private async pluginYou(userId: string) {
+    await this.primeManager(userId);
+    return {
+      capabilities: capabilities.filter((value) => this.can(userId, value)),
+      admin: this.settingsAdmin(userId),
+      settings: this.scrobbling
+        ? settingFields({
+            access: { volume: false, configure: false, admin: false },
+            session: this.sessionSettings(),
+            user: this.scrobbling.settings(userId, this.id),
+          })
+        : [],
+    };
+  }
+
+  // Runs a bot API command for a client mod, as its user, with their own
+  // permissions: there is no grant to hold, as they are in the huddle.
+  private async pluginCommand(
+    userId: string,
+    command: PluginCommand,
+  ): Promise<AgentResult> {
+    // a session without a host lets someone in the huddle take it, as the
+    // player's button does
+    if (command.type === "claim_host") return this.agentClaimHost(userId);
+    const parsed = parseIntegrationMessage(
+      JSON.stringify({ ...command, v: 1 }),
+    );
+    if (!parsed.ok)
+      return { ok: false, error: parsed.message ?? "That command is invalid." };
+    if (this.inactive())
+      return { ok: false, error: "This session is not active." };
+    await this.primeManager(userId);
+    return this.runIntegrationCommand(userId, parsed.command);
+  }
+
+  // Changes one setting for a client mod, by its field in settings-schema.
+  private async pluginSetting(
+    userId: string,
+    setting: string,
+    change: PluginSettingChange,
+  ): Promise<AgentResult> {
+    if (this.inactive())
+      return { ok: false, error: "This session is not active." };
+    await this.primeManager(userId);
+    const { value } = change;
+    const text = typeof value === "string" ? value : undefined;
+    const on = typeof value === "boolean" ? value : undefined;
+    const list =
+      Array.isArray(value) && value.every((item) => typeof item === "string")
+        ? (value as string[])
+        : undefined;
+    const invalid = { ok: false as const, error: "That value is invalid." };
+    const update = (patch: Parameters<Coordinator["agentUpdateSettings"]>[1]) =>
+      this.agentUpdateSettings(userId, patch, undefined, "plugin");
+    switch (setting) {
+      case "volume": {
+        const percent = typeof value === "number" ? value : Number(text);
+        if (text === undefined && typeof value !== "number") return invalid;
+        return this.agentSetVolume(userId, percent);
+      }
+      case "media_mode":
+        return text ? update({ mode: text as MediaMode }) : invalid;
+      case "display":
+        return text ? update({ displayMode: text as DisplayMode }) : invalid;
+      case "autoplay":
+        return text ? update({ autoplayMode: text as AutoplayMode }) : invalid;
+      case "video_autoplay":
+        return text === "off" || text === "related"
+          ? update({ videoAutoplay: text === "related" })
+          : invalid;
+      case "loop":
+        return text ? update({ loopMode: text as LoopMode }) : invalid;
+      case "transition":
+        return text
+          ? update({ transitionMode: text as TransitionMode })
+          : invalid;
+      case "ducking":
+        return text ? update({ duckingMode: text as DuckingMode }) : invalid;
+      case "anchor":
+        return on === undefined ? invalid : update({ anchorEnabled: on });
+      case "progress_bar":
+        return on === undefined ? invalid : update({ progressBar: on });
+      case "host":
+        return text ? update({ hostUserId: text }) : invalid;
+      case "permissions":
+        if (change.preset !== undefined)
+          return update({
+            permissionPreset: change.preset as keyof typeof permissionPresets,
+          });
+        return list ? update({ permissions: list }) : invalid;
+      case "huddle_mix":
+        return list
+          ? this.agentUpdateYourSettings(userId, { huddleMixSources: list })
+          : invalid;
+      case "session_scrobbling":
+        return on === undefined
+          ? invalid
+          : this.agentUpdateYourSettings(userId, { sessionScrobbling: on });
+      case "scrobbling_mode":
+        return text
+          ? this.agentUpdateYourSettings(userId, { scrobblingMode: text })
+          : invalid;
+      case "scrobble_to":
+        return list
+          ? this.agentUpdateYourSettings(userId, { scrobbleTo: list })
+          : invalid;
+      default:
+        return { ok: false, error: "That setting is not available here." };
+    }
+  }
+
+  /**
+   * Changes a user's own settings, those on Settings' You tab, as saving
+   * Settings does: the Huddle mix, scrobbling here, the default for new
+   * Huddles, and the services scrobbled to.
+   */
+  async agentUpdateYourSettings(
+    userId: string,
+    patch: {
+      huddleMixSources?: string[];
+      sessionScrobbling?: boolean;
+      scrobblingMode?: string;
+      scrobbleTo?: string[];
+    },
+    source: "agent" | "plugin" = "plugin",
+  ): Promise<AgentResult> {
+    if (!this.isParticipantOrManager(userId))
+      return { ok: false, error: "Join the huddle before using the player." };
+    const scrobbling = this.scrobbling;
+    if (!scrobbling)
+      return { ok: false, error: "Scrobbling is not available on this bot." };
+    if (
+      patch.scrobblingMode !== undefined &&
+      !scrobblingModes.includes(patch.scrobblingMode as ScrobblingMode)
+    )
+      return { ok: false, error: "Invalid scrobbling mode." };
+    try {
+      const previous = this.scrobblingSnapshot(userId);
+      const settings = scrobbling.settings(userId, this.id);
+      if (patch.sessionScrobbling !== undefined && !settings.configured)
+        return {
+          ok: false,
+          error:
+            "Connect Last.fm or ListenBrainz in Settings before toggling session scrobbling.",
+        };
+      let newlyEnabled = false;
+      const mode = patch.scrobblingMode as ScrobblingMode | undefined;
+      if (mode && mode !== settings.mode) {
+        scrobbling.setMode(userId, mode);
+        // The mode is the default for new Huddles, so this session keeps
+        // scrobbling as it was.
+        if (settings.configured && patch.sessionScrobbling === undefined)
+          scrobbling.setSessionEnabled(
+            this.id,
+            userId,
+            Boolean(settings.sessionEnabled),
+          );
+      }
+      if (patch.scrobbleTo) {
+        const to = new Set(patch.scrobbleTo);
+        if (settings.lastFmConnected) {
+          newlyEnabled ||= to.has("lastfm") && !settings.lastFmEnabled;
+          scrobbling.setLastFmEnabled(userId, to.has("lastfm"));
+        }
+        if (settings.listenBrainzConnected) {
+          newlyEnabled ||=
+            to.has("listenbrainz") && !settings.listenBrainzEnabled;
+          await scrobbling.setListenBrainz(
+            userId,
+            undefined,
+            to.has("listenbrainz"),
+          );
+        }
+      }
+      if (
+        patch.sessionScrobbling !== undefined &&
+        patch.sessionScrobbling !== settings.sessionEnabled
+      )
+        scrobbling.setSessionEnabled(this.id, userId, patch.sessionScrobbling);
+      if (patch.huddleMixSources) {
+        const chosen = new Set(patch.huddleMixSources);
+        scrobbling.setHuddleMixSources(
+          userId,
+          Object.fromEntries(
+            settings.huddleMixUsable.map((value) => [value, chosen.has(value)]),
+          ),
+        );
+      }
+      const sessionEnabled = scrobbling.sessionEnabled(this.id, userId);
+      if (!settings.sessionEnabled && sessionEnabled)
+        this.playbackScrobbling?.sessionEnabled(userId);
+      else if (newlyEnabled && sessionEnabled)
+        this.playbackScrobbling?.settingsEnabled(userId);
+      const changes = settingsChanges(
+        previous,
+        this.scrobblingSnapshot(userId),
+      );
+      if (changes.length) {
+        this.audit.record("settings.changed", userId, {
+          sessionId: this.id,
+          source,
+          changed: changedSettings(changes),
+          changes,
+        });
+        this.store.incrementUsage("settings");
+      }
+      return { ok: true, changed: changedSettings(changes) };
+    } catch (error) {
+      this.log.error(
+        { event: "scrobbling_settings_failed", userId, err: error },
+        "Could not change scrobbling settings",
+      );
+      return { ok: false, error: message(error) };
+    }
+  }
+
   participantIds() {
     return [...this.participants];
   }
@@ -2135,6 +2449,8 @@ export class Coordinator {
       this.sessionChanged();
     }
     this.participants.add(userId);
+    this.plugins.changed();
+    this.plugins.refreshYouFor(userId);
     this.playbackScrobbling?.memberJoined(userId);
     void this.promptScrobbling(userId);
     this.prefetchRecommendations(userId);
@@ -2150,6 +2466,8 @@ export class Coordinator {
     if (this.participants.delete(userId)) {
       this.participantsRevision++;
       this.sessionChanged();
+      this.plugins.changed();
+      this.plugins.refreshYouFor(userId);
     }
     this.playbackScrobbling?.memberLeft(userId);
     if (this.state === "suspended" || userId === this.botUserId) return;
@@ -4838,6 +5156,7 @@ export class Coordinator {
     const previous = this.playbackSeconds;
     this.playbackSeconds = Math.max(0, previous + offset);
     this.sendMedia({ type: "seek", offset });
+    this.plugins.changed();
     this.jellyfinUi?.playing(
       this.current!,
       this.playbackSeconds,
@@ -5818,20 +6137,7 @@ export class Coordinator {
         endSession: this.can(userId, "end-session"),
         saveDefaults,
       },
-      session: {
-        hostId: this.hostId,
-        mediaMode: this.mediaMode,
-        volume: this.volume,
-        displayMode: this.displayMode,
-        autoplayMode: this.autoplayMode,
-        videoAutoplay: this.videoAutoplay,
-        loopMode: this.loopMode,
-        transitionMode: this.transitionMode,
-        duckingMode: this.duckingMode,
-        anchorEnabled: this.anchorEnabled,
-        progressBar: this.progressBar,
-        allowed: this.allowed,
-      },
+      session: this.sessionSettings(),
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
       ...(this.jellyfinUi ? { jellyfin: this.jellyfinUi.summary(userId) } : {}),
       yourData: this.isParticipantOrManager(userId),
@@ -5856,6 +6162,24 @@ export class Coordinator {
         permissions: [...grant.permissions],
       })),
     });
+  }
+
+  /** The session's settings, as Settings and client mods show them. */
+  private sessionSettings(): SessionSettingsView {
+    return {
+      hostId: this.hostId,
+      mediaMode: this.mediaMode,
+      volume: this.volume,
+      displayMode: this.displayMode,
+      autoplayMode: this.autoplayMode,
+      videoAutoplay: this.videoAutoplay,
+      loopMode: this.loopMode,
+      transitionMode: this.transitionMode,
+      duckingMode: this.duckingMode,
+      anchorEnabled: this.anchorEnabled,
+      progressBar: this.progressBar,
+      allowed: this.allowed,
+    };
   }
 
   // Settings' metadata as of this interaction, for a dialog opened over it to
@@ -6637,6 +6961,7 @@ export class Coordinator {
         capability,
         this.allowed.has(capability),
       );
+    this.plugins.refreshYou();
   }
 
   private async hostLeft() {
@@ -6649,6 +6974,7 @@ export class Coordinator {
   private setHost(hostId: string | undefined) {
     this.hostId = hostId;
     this.store.setSession(this.id, { hostId: hostId ?? null });
+    this.plugins.refreshYou();
     // A request asked the host before, who is no longer the one to answer.
     if (this.videoRequest && this.videoRequest.hostId !== hostId)
       void this.closeVideoRequest("You are no longer the host.");
@@ -7117,6 +7443,7 @@ export class Coordinator {
   // before it reaching Slack: one update is in flight at a time, and renders
   // made meanwhile collapse into the newest.
   private render() {
+    this.plugins.changed();
     if (!this.uiTs || this.inactive()) return;
     this.revision++;
     this.store.setUi(this.id, this.uiTs, this.revision);
@@ -8144,6 +8471,8 @@ export class Coordinator {
 
   // Stops everything in flight: autoplay, downloads and timers.
   private stopWork() {
+    // Clients see the session end or pause for a restart, then hear no more.
+    this.plugins.finish();
     if (this.current)
       this.jellyfinUi?.stopped(this.current.id, this.playbackSeconds);
     this.jellyfinUi?.close();
