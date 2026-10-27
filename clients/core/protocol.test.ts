@@ -116,7 +116,7 @@ describe("HuddleFM client", () => {
     expect(huddlefm.position(at + 60_000)).toBe(30);
   });
 
-  test("shows a seek straight away, by an offset, until the bot's state follows", async () => {
+  test("shows a seek straight away, until the bot's state follows", async () => {
     const { huddlefm, sent, receive } = client();
     receive(
       state(1, {
@@ -127,7 +127,7 @@ describe("HuddleFM client", () => {
     const seeking = huddlefm.seek(120);
     expect(huddlefm.position()).toBe(120);
     const request = sent.at(-1) as { id: string; command: unknown };
-    expect(request.command).toEqual({ type: "seek", seconds: 110 });
+    expect(request.command).toEqual({ type: "seek", to: 120 });
     receive(
       state(2, {
         session: { id: "s", state: "paused", position: 121, volume: 50 },

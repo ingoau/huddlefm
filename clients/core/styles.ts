@@ -390,4 +390,16 @@ export const panelCss = `
   flex-wrap: wrap;
   gap: 8px;
 }
+.huddlefm-now__play-something.huddlefm-now__play-something {
+  margin-top: 8px;
+}
+.huddlefm-end {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.huddlefm-end__text {
+  margin: 0;
+  color: var(--dt_color-content-sec, #454447);
+}
 `;

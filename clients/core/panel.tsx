@@ -31,7 +31,9 @@ type Command = { type: string; [key: string]: unknown };
 const notice = new Store<string | undefined>(undefined);
 
 function say(result: Result) {
+  // a message on success says how it went, as "Added 3 of 10 songs"
   if (!result.ok) notice.set(result.message ?? "That didn't work.");
+  else if (result.message) notice.set(result.message);
   return result.ok;
 }
 
@@ -214,7 +216,10 @@ export function Panel({ platform }: { platform: Platform }) {
   const you = client.you.use();
   const presence = client.presence.use();
   const problem = notice.use();
-  const [view, setView] = React.useState<"main" | "settings">("main");
+  const [view, setView] = React.useState<"main" | "settings" | "end">("main");
+  // a new session, or none, starts from the song playing
+  const sessionId = state?.session.id;
+  React.useEffect(() => setView("main"), [sessionId]);
 
   React.useEffect(() => {
     if (!problem) return;
@@ -230,7 +235,10 @@ export function Panel({ platform }: { platform: Platform }) {
       state={state}
       you={you}
       back={() => setView("main")}
+      end={() => setView("end")}
     />
+  ) : view === "end" ? (
+    <EndSession platform={platform} back={() => setView("settings")} />
   ) : (
     <>
       <NowPlaying
@@ -365,6 +373,16 @@ function NowPlaying(props: {
           <div className="huddlefm-now__artist">
             {track ? track.artist : "Search below to add a song"}
           </div>
+          {!track && !state.queue.length && state.session.mode !== "video" && (
+            <kit.Button
+              type="primary"
+              size="small"
+              className="huddlefm-now__play-something"
+              onClick={() => run(platform, { type: "play_something" })}
+            >
+              Play something
+            </kit.Button>
+          )}
           {track && (
             <div className="huddlefm-now__meta">
               <AddedBy platform={platform} track={track} />
@@ -645,6 +663,25 @@ function Queue(props: {
   const [dragged, setDragged] = React.useState<string | undefined>();
   const [over, setOver] = React.useState<number | undefined>();
 
+  // A song still downloading can't play yet, so skipping would play
+  // another; it goes first instead, to play once it's ready.
+  const playNow = async (track: Track, index: number) => {
+    if (track.status === "failed") {
+      notice.set(`${track.title} couldn't be downloaded.`);
+      return;
+    }
+    if (
+      index > 0 &&
+      !(await run(platform, { type: "move", trackId: track.id, position: 1 }))
+    )
+      return;
+    if (track.status && track.status !== "ready") {
+      notice.set(`${track.title} is still downloading, so it plays next.`);
+      return;
+    }
+    run(platform, { type: "skip" });
+  };
+
   const drop = (index: number) => {
     const trackId = dragged;
     setDragged(undefined);
@@ -710,11 +747,28 @@ function Queue(props: {
               ].filter((item) => item !== false)
             : [];
           const removable = manage || track.addedBy === self;
-          const items: MenuItem[] = [
-            ...moves,
-            ...(moves.length && removable
-              ? [{ separator: true as const }]
+          const first: MenuItem[] = [
+            ...(manage && can(you, "skip")
+              ? [{ label: "Play now", onClick: () => playNow(track, index) }]
               : []),
+            ...(track.automatic
+              ? [
+                  {
+                    label: "Add to queue",
+                    onClick: () =>
+                      run(platform, { type: "keep", trackId: track.id }),
+                  },
+                ]
+              : []),
+          ];
+          // groups of rows, with a line between each
+          const items: MenuItem[] = [first, moves]
+            .filter((group) => group.length)
+            .flatMap((group, at) =>
+              at ? [{ separator: true as const }, ...group] : group,
+            );
+          if (removable && items.length) items.push({ separator: true });
+          items.push(
             ...(removable
               ? [
                   {
@@ -725,7 +779,7 @@ function Queue(props: {
                   },
                 ]
               : []),
-          ];
+          );
           return (
             <li
               key={track.id}
@@ -749,6 +803,14 @@ function Queue(props: {
                 setDragged(undefined);
                 setOver(undefined);
               }}
+              // plays it now: first in the queue, then skipping to it
+              onDoubleClick={(event) => {
+                // not the menu's button, or text being selected in it
+                if ((event.target as Element).closest("button, [role=menu]"))
+                  return;
+                playNow(track, index);
+              }}
+              title="Double-click to play now"
             >
               <Artwork platform={platform} track={track} size={36} />
               <div className="huddlefm-track__text">
@@ -787,6 +849,7 @@ function Settings(props: {
   state: SessionState;
   you: You | undefined;
   back: () => void;
+  end: () => void;
 }) {
   const { platform, state, you } = props;
   const { client, kit } = platform;
@@ -889,24 +952,83 @@ function Settings(props: {
           </kit.Button>
         )}
         {can(you, "end-session") && (
-          <kit.Button
-            type="danger"
-            size="small"
-            onClick={async () => {
-              if (
-                await kit.confirm({
-                  title: "End the session?",
-                  body: "HuddleFM stops playing and leaves the huddle for everyone.",
-                  confirmText: "End session",
-                  danger: true,
-                })
-              )
-                run(platform, { type: "end" });
-            }}
-          >
+          <kit.Button type="danger" size="small" onClick={props.end}>
             End session
           </kit.Button>
         )}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Ending, as End session's dialog in Slack asks it: whether to save the
+ * queue and settings for a later session, to this channel or the user's
+ * account.
+ */
+function EndSession(props: { platform: Platform; back: () => void }) {
+  const { platform } = props;
+  const { kit } = platform;
+  const [save, setSave] = React.useState("none");
+  const [name, setName] = React.useState("");
+  const options = [
+    { value: "none", label: "Don't save" },
+    { value: "channel", label: "Save to this channel" },
+    { value: "user", label: "Save to my account" },
+  ];
+  return (
+    <section className="huddlefm-end">
+      <header className="huddlefm-settings__header">
+        <kit.IconButton label="Back" icon="arrow-left" onClick={props.back} />
+        <span>End session?</span>
+      </header>
+      <p className="huddlefm-end__text">
+        This stops playback and ends the session.
+      </p>
+      <div className="huddlefm-field">
+        <div className="huddlefm-field__label">Save for next time</div>
+        <kit.Select
+          id="huddlefm-end-save"
+          label="Save for next time"
+          options={options}
+          value={save}
+          onChange={setSave}
+        />
+        <kit.Hint>
+          Saves the queue and settings, not permissions. Anyone here can load a
+          channel save; only you can load one in your account.
+        </kit.Hint>
+      </div>
+      {save !== "none" && (
+        <div className="huddlefm-field">
+          <div className="huddlefm-field__label">Name</div>
+          <kit.TextInput
+            value={name}
+            onChange={setName}
+            placeholder="Named for its first song, if left empty"
+          />
+          <kit.Hint>
+            Saving under a name you have used before replaces that save.
+          </kit.Hint>
+        </div>
+      )}
+      <div className="huddlefm-settings__footer">
+        <kit.Button type="outline" size="small" onClick={props.back}>
+          Cancel
+        </kit.Button>
+        <kit.Button
+          type="danger"
+          size="small"
+          onClick={() =>
+            run(platform, {
+              type: "end",
+              save,
+              ...(save !== "none" && name.trim() ? { name: name.trim() } : {}),
+            })
+          }
+        >
+          End session
+        </kit.Button>
       </div>
     </section>
   );

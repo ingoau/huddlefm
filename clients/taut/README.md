@@ -4,15 +4,16 @@ A [Taut](https://github.com/jeremy46231/taut) plugin that puts HuddleFM's contro
 
 ## What it does
 
-- **In the huddle's toolbar**, after the thread button: the song playing, with its artwork, play/pause and next. When the window is too narrow for that, a music note stands in for it. The toolbar is in the huddle's own window, or at the bottom of Slack's main window while that window is closed.
+- **In the huddle's toolbar**, after the thread button: the song playing, with its artwork, play/pause and next. When the window is too narrow for that, a music note stands in for it, and narrower still, where Slack leaves out screen sharing, HuddleFM goes too. The toolbar is in the huddle's own window, or at the bottom of Slack's main window while that window is closed.
 - **A popover** from either holds the rest:
-  - the song, with a seek bar and volume
+  - the song, with a seek bar and volume, or **Play something** when nothing is playing
   - search, or a pasted link, to add songs
-  - the queue, to drag into order, with a menu on each song to move it to the start or end, up or down, or remove it
+  - the queue, to drag into order, or double-click a song to play it now, with a menu on each to move it to the start or end, up or down, or remove it, and to keep an autoplay pick with **Add to queue**
   - **Take over** when nobody is host
-- **Settings**, in Session, Host and You tabs, show what each person may change: mode, volume, autoplay, loop, permissions, host and their own scrobbling. These come from the bot, so they match its Settings in Slack, which **Accounts and more in Slack** opens for linking accounts and the rest.
+- **Settings**, in Session, Host and You tabs, show what each person may change: mode, volume, autoplay, loop, permissions, host and their own scrobbling. These come from the bot, so they match its Settings in Slack, which **Accounts and more in Slack** opens for linking accounts and the rest. **End session** asks, as Slack's does, whether to save the session for next time.
 - When HuddleFM isn't in the huddle, the note offers **Start HuddleFM**, which invites it like the huddle's Invite people does. It searches the workspace for users with HuddleFM in their name, so "HuddleFM [bot]" counts. If there's more than one, the popover asks which, and keeps that choice, which it offers again to change. The HuddleFM last heard in a huddle is the default.
 - Controls are never greyed out. The bot decides what each person may do, and when it says no, the popover says why.
+- Everything counts as the user's own, as if they had used the player in Slack: the bot runs the same code for it, and its audit log notes it came over the data channel.
 
 ### Options
 
@@ -51,5 +52,6 @@ These are Slack's internals, so any Slack release can change them:
 - `HuddleGridComponent`'s `participantsAndScreenshares`, for the tile
 - `HuddleClosedCaptionEvent` and `HuddleTranscribeEvent`'s `memberId`, for the captions
 - `MessageBlocks`, for the player message
-- the `sendActions` thunk, for **Accounts and more in Slack**; `fetchAndUpsertMembersWithQuery`, to find HuddleFM; and `rooms.notifyMember`, for **Start HuddleFM**
+- the `sendActions` thunk, for **Accounts and more in Slack**, and `openModal`, for its confirmations, both run with the thunk contexts (`ThunkContextProvider`) above the bar, so they open in the huddle's window; `fetchAndUpsertMembersWithQuery`, to find HuddleFM; and `rooms.notifyMember`, for **Start HuddleFM**
+- the main window's huddle bar opening the huddle's window on a click, which the bar keeps its clicks from
 - `TabsWithWindow`, beside the components Taut's own API offers

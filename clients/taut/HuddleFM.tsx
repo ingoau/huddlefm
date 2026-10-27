@@ -3,6 +3,7 @@
 import { opt, TautPlugin, type TautAPI } from "$taut";
 import { Panel, PlayerBar, type Kit, type Platform } from "../core/panel.tsx";
 import { HuddleFMClient, TOPIC, type DataMessage } from "../core/protocol.ts";
+import { Store } from "../core/store.ts";
 import { panelCss } from "../core/styles.ts";
 
 /** How long to wait for Slack's huddle code before saying it's missing. */
@@ -28,6 +29,12 @@ const BOT_SEARCH_LIMIT = 20;
 const BOT_SEARCH_RETRY_MS = 1_500;
 /** Below this window width the huddle toolbar has room for the note alone. */
 const COMPACT_WIDTH = 960;
+/** Narrower than this, Slack leaves screen sharing out of the toolbar, and HuddleFM too. */
+const HIDDEN_WIDTH = 566;
+/** The tallest the popover gets, and the room it leaves above itself. */
+const POPOVER_MAX_HEIGHT = 640;
+const POPOVER_MIN_HEIGHT = 200;
+const POPOVER_MARGIN = 24;
 
 /** The parts of Chime's AudioVideoFacade the data channel uses. */
 type Facade = {
@@ -113,6 +120,10 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   private attached = new WeakSet<HuddlesSdk>();
   private unpatch: (() => void) | undefined;
   private stopped = false;
+  /** the bar whose popover is open, in the window it's in */
+  private openedFrom: Element | undefined;
+  /** counts the Slack dialogs opened from the popover, which close it */
+  private dialogsOpened = new Store(0);
   /** the HuddleFM Start invites, and the only one believed: chosen, or the first heard */
   private botUser = this.api.storage.store<string>("botUserId", "");
   private client = new HuddleFMClient(
@@ -123,7 +134,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
 
   private platform: Platform = {
     client: this.client,
-    kit: slackKit(this.api),
+    kit: slackKit(this.api, (options) => this.confirmHere(options)),
     selfUserId: () => this.api.members.getCurrentMemberId(),
     useUserName: (userId) => {
       const member = this.api.members.useMember(userId);
@@ -188,10 +199,6 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     this.facade?.realtimeUnsubscribeFromReceiveDataMessage(TOPIC);
     this.facade = undefined;
     this.client.disconnect();
-  }
-
-  dataPanel() {
-    return <Panel platform={this.platform} />;
   }
 
   // HuddleFM after the thread button in the huddle's toolbar, which is in the
@@ -295,31 +302,39 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
       bounds: DOMRect;
       window: WeakRef<Window>;
     } | null>(null);
-    // Slack places a popover once, from where its target is, so as the
-    // panel changes size it's placed again, or a taller one runs off the
-    // window
-    const panel = React.useRef<HTMLDivElement>(null);
+    // a Slack dialog from it goes over it, so it gets out of the way
+    React.useEffect(
+      () => this.dialogsOpened.subscribe(() => setAnchor(null)),
+      [],
+    );
+    // Slack places a popover once, from its size and where its target is.
+    // A panel that grew would run off the window and scroll it, so the
+    // popover is as tall as the room above the bar, and the panel sits at
+    // its foot, growing upward. It's placed again when the window resizes.
     React.useEffect(() => {
-      const element = panel.current;
-      const win = element?.ownerDocument.defaultView;
-      if (!element || !win) return;
-      const observer = new win.ResizeObserver(() =>
+      const win = anchor?.window.deref();
+      if (!win) return;
+      const place = () =>
         setAnchor((current) =>
           current
             ? { ...current, bounds: current.target.getBoundingClientRect() }
             : null,
-        ),
-      );
-      observer.observe(element);
-      return () => observer.disconnect();
+        );
+      win.addEventListener("resize", place);
+      return () => win.removeEventListener("resize", place);
     }, [!!anchor]);
     // the toolbar is a fixed row of buttons, so whether the song fits beside
     // them comes down to how wide its window is
     const [compact, setCompact] = React.useState(false);
+    const [hidden, setHidden] = React.useState(false);
     React.useEffect(() => {
       const win = ref.current?.ownerDocument.defaultView;
       if (!win) return;
-      const fit = () => setCompact(win.innerWidth < COMPACT_WIDTH);
+      const fit = () => {
+        setCompact(win.innerWidth < COMPACT_WIDTH);
+        setHidden(win.innerWidth < HIDDEN_WIDTH);
+        if (win.innerWidth < HIDDEN_WIDTH) setAnchor(null);
+      };
       fit();
       win.addEventListener("resize", fit);
       return () => win.removeEventListener("resize", fit);
@@ -328,6 +343,8 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     const open = (button: HTMLElement) =>
       setAnchor((current) => {
         const target = ref.current ?? button;
+        // Slack's dialogs from it open in this window
+        this.openedFrom = target;
         return current
           ? null
           : {
@@ -338,7 +355,15 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
             };
       });
     return (
-      <span className="taut-huddlefm-bar" ref={ref}>
+      // biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: it only keeps clicks from reaching Slack's bar; the buttons in it are the controls
+      <span
+        className="taut-huddlefm-bar"
+        ref={ref}
+        style={hidden ? { display: "none" } : undefined}
+        // In the main window, a click on the huddle bar opens the huddle's
+        // window, and the bar and its popover are in it as React sees it.
+        onClick={(event) => event.stopPropagation()}
+      >
         <PlayerBar
           platform={this.platform}
           open={open}
@@ -358,7 +383,22 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
             ariaRole="dialog"
             ariaLabel="HuddleFM"
           >
-            <div ref={panel}>
+            {/* biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: a click on the room above the panel is a click outside it; Escape closes the popover as ever */}
+            <div
+              className="taut-huddlefm-popover"
+              style={{
+                height: Math.max(
+                  POPOVER_MIN_HEIGHT,
+                  Math.min(
+                    POPOVER_MAX_HEIGHT,
+                    anchor.bounds.top - POPOVER_MARGIN,
+                  ),
+                ),
+              }}
+              onClick={(event) => {
+                if (event.target === event.currentTarget) setAnchor(null);
+              }}
+            >
               <Panel platform={this.platform} />
             </div>
           </Popover>
@@ -428,6 +468,79 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   }
 
   /**
+   * Runs one of Slack's thunks as a component where the popover was opened
+   * would: with the React context there, so what it opens, a dialog say,
+   * opens in that window, as Slack's own buttons in it do. The popover
+   * closes for it.
+   */
+  private async dispatchHere(name: string, args: unknown) {
+    const creator = await this.api.within(
+      this.api.redux.waitForThunkCreator(name),
+      SLACK_WAIT_MS,
+      `Slack's ${name}`,
+    );
+    if (!creator) throw new Error(`Slack's ${name} isn't there`);
+    const store = this.api.redux.getStore();
+    if (!store) throw new Error("Slack's store isn't ready");
+    const values = thunkContexts(this.openedFrom);
+    const thunk = creator(args) as (
+      dispatch: unknown,
+      getState: unknown,
+      getContext: (context: {
+        key?: unknown;
+        defaultValue?: unknown;
+      }) => unknown,
+    ) => unknown;
+    const result = thunk(store.dispatch, store.getState, (context) =>
+      values.has(context.key) ? values.get(context.key) : context.defaultValue,
+    );
+    this.dialogsOpened.set(this.dialogsOpened.get() + 1);
+    return result;
+  }
+
+  /** Slack's confirmation dialog, in the window the popover is in. */
+  private confirmHere(options: Parameters<Kit["confirm"]>[0]) {
+    const { ConfirmationModal } = this.api.elements;
+    return new Promise<boolean>((resolve) => {
+      let handle: { close(): void } | undefined;
+      let settled = false;
+      const settle = (confirmed: boolean) => {
+        if (settled) return;
+        settled = true;
+        handle?.close();
+        resolve(confirmed);
+      };
+      this.dispatchHere("openModal", {
+        name: "HuddleFM",
+        isStackable: true,
+        element: (
+          <ConfirmationModal
+            title={options.title}
+            submitButtonText={options.confirmText}
+            cancelButtonText="Cancel"
+            submitButtonType={options.danger ? "danger" : "primary"}
+            showCancelButton
+            showSubmitButton
+            onSubmit={() => settle(true)}
+            onCancel={() => settle(false)}
+            onClose={() => settle(false)}
+          >
+            {options.body ?? null}
+          </ConfirmationModal>
+        ),
+      })
+        .then((opened) => {
+          handle = opened as { close(): void } | undefined;
+          if (!handle) settle(false);
+        })
+        .catch((err) => {
+          this.log(`Couldn't open a dialog: ${err}`);
+          settle(false);
+        });
+    });
+  }
+
+  /**
    * Opens HuddleFM's settings in Slack, as clicking Settings on its message
    * does, so the modal can link accounts and everything else it offers.
    */
@@ -448,7 +561,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     try {
       // Slack's own click handler, which also readies the client for the
       // modal the bot opens in answer
-      await this.api.redux.dispatchThunk("sendActions", {
+      await this.dispatchHere("sendActions", {
         serviceId: botId,
         appId,
         serviceTeamId: team,
@@ -468,8 +581,6 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
           isEphemeral: false,
         },
       });
-      // the modal opens in Slack's main window
-      window.focus();
       return true;
     } catch (err) {
       this.log(`Couldn't open Slack's settings: ${err}`);
@@ -549,6 +660,15 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
 }
 
 const pluginCss = `
+/* the room above the bar, which the panel grows up into */
+.taut-huddlefm-popover {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.taut-huddlefm-popover > .huddlefm-panel {
+  max-height: 100%;
+}
 .taut-huddlefm-bar {
   display: inline-flex;
   align-items: center;
@@ -579,8 +699,40 @@ function findButton(
   }
 }
 
+/**
+ * The thunk contexts a node is inside, nearest first, by key: what Slack's
+ * thunks read through their `getContext`, and its components give them with
+ * a ThunkContextProvider, like the window they're in.
+ */
+function thunkContexts(node: Element | undefined) {
+  const values = new Map<unknown, unknown>();
+  if (!node) return values;
+  const key = Object.keys(node).find((name) =>
+    name.startsWith("__reactFiber$"),
+  );
+  type Fiber = {
+    type?: { displayName?: string } | string | null;
+    memoizedProps?: { contextKey?: unknown; value?: unknown };
+    return: Fiber | null;
+  };
+  for (
+    let fiber = key
+      ? ((node as unknown as Record<string, Fiber>)[key] ?? null)
+      : null;
+    fiber;
+    fiber = fiber.return
+  ) {
+    const type = fiber.type;
+    if (typeof type !== "function" && typeof type !== "object") continue;
+    if (type?.displayName !== "ThunkContextProvider") continue;
+    const { contextKey, value } = fiber.memoizedProps ?? {};
+    if (contextKey && !values.has(contextKey)) values.set(contextKey, value);
+  }
+  return values;
+}
+
 /** Slack's own components, in the shape the panel takes them. */
-function slackKit(api: TautAPI): Kit {
+function slackKit(api: TautAPI, confirm: Kit["confirm"]): Kit {
   const { elements } = api;
   const { SvgIcon, Button, Tooltip, BasicSelect, Checkbox, Label } = elements;
   const { FormTextInput, IconButtonBase, Avatar } = elements;
@@ -682,10 +834,6 @@ function slackKit(api: TautAPI): Kit {
     ),
     Hint: ({ children }) => <Hint>{children}</Hint>,
     Alert: ({ children }) => <InlineAlert>{children}</InlineAlert>,
-    confirm: ({ title, body, confirmText, danger }) => {
-      // Slack's dialogs open in the main window, maybe behind the huddle's
-      window.focus();
-      return api.modal.confirm({ title, body, confirmText, danger });
-    },
+    confirm,
   };
 }

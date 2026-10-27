@@ -427,6 +427,44 @@ function actionId(field: SettingField) {
   );
 }
 
+/**
+ * A setting's new value as Settings submits it, for whoever changes it
+ * without the dialog: the form state of that field alone, so Settings
+ * applies it and leaves the rest as they are.
+ */
+export function fieldFormState(
+  field: SettingField,
+  value: SettingFieldValue,
+): FormState {
+  const id = actionId(field);
+  switch (field.kind) {
+    case "select":
+      return {
+        [field.id]: { [id]: { selected_option: { value: String(value) } } },
+      };
+    case "toggle":
+      return {
+        [field.id]: {
+          [id]: {
+            selected_options: value === true ? [{ value: "enabled" }] : [],
+          },
+        },
+      };
+    case "user":
+      return { [field.id]: { [id]: { selected_user: String(value) } } };
+    case "multi":
+      return {
+        [field.id]: {
+          [id]: {
+            selected_options: (Array.isArray(value) ? value : []).map(
+              (option) => ({ value: String(option) }),
+            ),
+          },
+        },
+      };
+  }
+}
+
 // What a draft holds for a setting, or undefined when it holds nothing
 // that applies, read as each input reads back.
 function draftValue(
