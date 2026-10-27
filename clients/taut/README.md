@@ -28,7 +28,7 @@ In Slack's **Preferences → Taut → HuddleFM**:
 
 ## Build and install
 
-The **Taut plugin** workflow builds it on every change here: download `HuddleFM.js` from the `huddlefm-taut-plugin` artifact of its latest run. To build it yourself, from a checkout of Taut after `npm install`:
+The **Client plugins** workflow builds it on every change here: download `HuddleFM.js` from the `huddlefm-taut-plugin` artifact of its latest run. To build it yourself, from a checkout of Taut after `npm install`:
 
 ```sh
 npm run build:user-plugin -- /path/to/huddlefm/clients/taut/HuddleFM.tsx
@@ -40,8 +40,8 @@ To work on it, link `HuddleFM.tsx` and `../core` into a Taut checkout (`plugins/
 
 ## How it's put together
 
-- `../core/` has no Taut in it: the protocol client (`protocol.ts`), the bar and popover (`panel.tsx`), which draw with a kit of Slack components the mod hands in (`kit.ts`), and the media keys (`media-keys.ts`). A plugin for another client mod, like Slick, can reuse it with its own kit.
-- `HuddleFM.tsx` is the Taut side: the data channel, the kit, and the patches that place the bar and hide the tile, the captions and the player message.
+- `../core/` has no Taut in it, and the [Slick plugin](../slick/) shares all of it: the protocol client (`protocol.ts`), the bar and popover (`panel.tsx`), which draw with a kit of Slack components (`kit.ts`), the media keys (`media-keys.ts`), and `mod.tsx`, which has the data channel, the kit made of Slack's components, and the patches that place the bar and hide the tile, the captions and the player message.
+- `HuddleFM.tsx` is the Taut side: its options, and the `Host` it hands `mod.tsx`, Taut's way of reaching Slack's components, store, members and messages.
 
 ### Reaching the data channel
 
@@ -52,7 +52,7 @@ Slack's huddle session (from `HuddleConnectionManager.getInstance().getHuddlesSd
 These are Slack's internals, so any Slack release can change them:
 
 - `HuddleToolbarThreadButton`, to place the bar after it, and its `className` and `buttonToggledOnClassName` for the toolbar's look
-- `HuddleGridComponent`'s `participantsAndScreenshares`, for the tile
+- for the tile, the views that lay out the huddle's tiles (`HuddleCompactVideoPane`, `HuddleCompactAudioPane`, `HuddleGridContainer`, `GridPicker`, `MiniSideBySideLayoutComponent`, `MinimizedSelfLayoutComponent` and `HuddleVideoStrip`), rendered with Taut's `StateView` over state where the bot's peers in `peers.byId` have no `isConnected` and it's left out of each call's `pendingUsers` in `allCalls.byId` and each huddle's `lastInviteStatusByUser` in `huddlesCanvas.byHuddleId`, as Slack counts, sizes and pages tiles from only connected peers; and `HuddleGridComponent`'s `participantsAndScreenshares` in case a view is missed
 - `HuddleClosedCaptionEvent` and `HuddleTranscribeEvent`'s `memberId`, for the captions
 - `MessageBlocks`, for the player message
 - the `sendActions` thunk, for **Accounts and more in Slack** and linking Jellyfin, and `openModal`, for its confirmations, both run with the thunk contexts (`ThunkContextProvider`) above the bar, so they open in the huddle's window; `fetchAndUpsertMembersWithQuery`, to find HuddleFM; and `rooms.notifyMember`, for **Start HuddleFM**
