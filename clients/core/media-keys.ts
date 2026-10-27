@@ -162,7 +162,8 @@ export class MediaKeys {
       nexttrack: () => run({ type: "skip" }),
       previoustrack: () => run({ type: "previous" }),
       seekto: (details) => {
-        if (details.seekTime !== undefined)
+        // a held key seeks again and again; only where it stops is sent
+        if (details.seekTime !== undefined && !details.fastSeek)
           this.client.seek(details.seekTime).then(this.report);
       },
     };
