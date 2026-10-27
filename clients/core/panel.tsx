@@ -1001,7 +1001,12 @@ function Search(props: { platform: Platform; you: You | undefined }) {
                   <button
                     type="button"
                     className="c-button-unstyled huddlefm-result"
-                    onClick={() => add({ [group.kind]: item.id })}
+                    onClick={() => {
+                      add({ [group.kind]: item.id });
+                      // the button goes with the list, taking focus with it
+                      // and no blur, so the list is put away here
+                      setFocused(false);
+                    }}
                   >
                     <Artwork platform={platform} track={item} size={32} />
                     <span className="huddlefm-result__label">
