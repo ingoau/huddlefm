@@ -1,6 +1,6 @@
 # HuddleFM data channel
 
-Client mods, like the [Taut plugin](../clients/taut/), talk to the bot over the huddle's Amazon Chime data channel, on the topic `huddlefm`. Chime stamps each message with its sender's attendee and external user id, so the bot knows which Slack user sent it without any token. Everyone in the huddle receives every message on the topic, so nothing secret goes over it.
+Client mods, like the [Taut](../clients/taut/) and [Slick](../clients/slick/) plugins, talk to the bot over the huddle's Amazon Chime data channel, on the topic `huddlefm`. Chime stamps each message with its sender's attendee and external user id, so the bot knows which Slack user sent it without any token. Everyone in the huddle receives every message on the topic, so nothing secret goes over it.
 
 Every message is JSON, `{ "v": 1, "type": "…", … }`. Messages with another `v` or no `type` are ignored.
 
