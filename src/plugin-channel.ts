@@ -8,8 +8,8 @@ import { mapAgentError } from "./integration.ts";
  */
 
 /**
- * The bot API commands a client may run, as docs/data-channel.md lists, and
- * `claim_host`, `play_something` and `keep`, which only clients have.
+ * The commands a client may run, as docs/data-channel.md lists them: the
+ * bot API's, and the player's own that only clients have.
  */
 export const pluginCommandTypes = [
   "search",
@@ -29,6 +29,11 @@ export const pluginCommandTypes = [
   "claim_host",
   "play_something",
   "keep",
+  "suggestions",
+  "saves",
+  "load",
+  "lyrics",
+  "settings_tab",
 ] as const;
 
 export type PluginCommand = {
@@ -89,8 +94,9 @@ function validId(id: unknown): id is string {
 /** An `agent*` result as a `result` message's body, like the bot API's. */
 export function resultBody(result: AgentResult) {
   if (!result.ok) {
-    const message = String(result.error ?? "failed");
-    return { ok: false, error: mapAgentError(message), message };
+    const { ok: _ok, error, ...rest } = result;
+    const message = String(error ?? "failed");
+    return { ...rest, ok: false, error: mapAgentError(message), message };
   }
   const { ok: _ok, ...rest } = result;
   return { ok: true, ...rest };

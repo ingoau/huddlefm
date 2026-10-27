@@ -88,6 +88,8 @@ export type You = {
   capabilities: string[];
   admin: boolean;
   settings: SettingField[];
+  /** whether they've linked a Jellyfin server, when the bot plays from Jellyfin */
+  jellyfin?: boolean;
 };
 
 export type Result = {
@@ -348,8 +350,14 @@ export class HuddleFMClient {
         return;
       }
       case "you": {
-        const { capabilities, admin, settings } = payload as unknown as You;
-        this.you.set({ capabilities, admin, settings });
+        const { capabilities, admin, settings, jellyfin } =
+          payload as unknown as You;
+        this.you.set({
+          capabilities,
+          admin,
+          settings,
+          ...(typeof jellyfin === "boolean" ? { jellyfin } : {}),
+        });
         return;
       }
       case "result": {

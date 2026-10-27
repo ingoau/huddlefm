@@ -1,7 +1,14 @@
 // HuddleFM in the huddle bar: the song playing, and a popover with the rest
 
 import { opt, TautPlugin, type TautAPI } from "$taut";
-import { Panel, PlayerBar, type Kit, type Platform } from "../core/panel.tsx";
+import { MediaKeys } from "../core/media-keys.ts";
+import {
+  Panel,
+  PlayerBar,
+  say,
+  type Kit,
+  type Platform,
+} from "../core/panel.tsx";
 import { HuddleFMClient, TOPIC, type DataMessage } from "../core/protocol.ts";
 import { Store } from "../core/store.ts";
 import { panelCss } from "../core/styles.ts";
@@ -113,6 +120,10 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
       true,
       "Hide captions of HuddleFM's music, over the huddle and in its Captions tab",
     ),
+    mediaKeys: opt(
+      true,
+      "Control HuddleFM with your keyboard's media keys, and show its song in your system's media controls",
+    ),
   };
 
   private facade: Facade | undefined;
@@ -131,6 +142,9 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     (text) => this.log(text),
     () => this.botUser.get() || undefined,
   );
+  private mediaKeys = this.config.mediaKeys
+    ? new MediaKeys(this.client, say)
+    : undefined;
 
   private platform: Platform = {
     client: this.client,
@@ -146,7 +160,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
         "someone"
       );
     },
-    openSlackSettings: () => this.openSlackSettings(),
+    openSlackSettings: (tab) => this.openSlackSettings(tab),
     huddleFM: {
       useChosen: () => this.botUser.use() || undefined,
       find: () => this.findBots(),
@@ -159,6 +173,9 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
 
   start() {
     this.api.setStyle(panelCss + pluginCss);
+    // the huddle plays in Slack's main window, and in its own while it's open
+    this.mediaKeys?.start();
+    this.mediaKeys?.add(window);
     // with none chosen yet, the HuddleFM heard is kept, if it's named so:
     // anyone in a huddle could claim to be it
     this.client.state.subscribe(() => {
@@ -198,6 +215,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     this.unpatch?.();
     this.facade?.realtimeUnsubscribeFromReceiveDataMessage(TOPIC);
     this.facade = undefined;
+    this.mediaKeys?.stop();
     this.client.disconnect();
   }
 
@@ -330,6 +348,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     React.useEffect(() => {
       const win = ref.current?.ownerDocument.defaultView;
       if (!win) return;
+      this.mediaKeys?.add(win);
       const fit = () => {
         setCompact(win.innerWidth < COMPACT_WIDTH);
         setHidden(win.innerWidth < HIDDEN_WIDTH);
@@ -544,9 +563,12 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
    * Opens HuddleFM's settings in Slack, as clicking Settings on its message
    * does, so the modal can link accounts and everything else it offers.
    */
-  private async openSlackSettings() {
+  private async openSlackSettings(tab?: "you" | "session" | "host") {
     const player = this.client.state.get()?.session.player;
     if (!player) return false;
+    // the tab it opens on, which the bot takes from the click that follows;
+    // a bot without it opens where it always does
+    if (tab) await this.client.command({ type: "settings_tab", tab });
     const message = this.api.messages.getRawMessage(player.channel, player.ts);
     const found = findButton(
       (message?.blocks ?? []) as Block[],
@@ -756,12 +778,22 @@ function slackKit(api: TautAPI, confirm: Kit["confirm"]): Kit {
         {children}
       </Button>
     ),
-    IconButton: ({ label, icon, onClick, size = "medium", className }) => (
-      <Tooltip tip={label} delay={300}>
+    IconButton: ({
+      label,
+      tip,
+      icon,
+      onClick,
+      size = "medium",
+      className,
+      disabled,
+    }) => (
+      <Tooltip tip={tip ?? label} delay={300}>
         <IconButtonBase
           size={size}
-          className={className}
-          aria-label={label}
+          className={[className, disabled && "huddlefm-off"]
+            .filter(Boolean)
+            .join(" ")}
+          aria-label={disabled ? `${label}, unavailable` : label}
           onClick={onClick}
         >
           <SvgIcon name={icon} size={size === "small" ? 16 : 20} />

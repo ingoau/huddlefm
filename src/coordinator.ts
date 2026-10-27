@@ -123,6 +123,8 @@ import {
 import {
   JellyfinUi,
   jellyfinTracksCallback,
+  parseItemValue,
+  type JellyfinPick,
   type QueuedItem,
 } from "./jellyfin-ui.ts";
 import {
@@ -182,6 +184,13 @@ type SettingsChange = {
 };
 
 const endRestoreMs = 2 * 60_000;
+// How long a client mod's pick of Settings' tab waits for Settings to open
+// from its click on the player.
+const settingsTabMs = 15_000;
+// How long a client mod's first look at Add songs' suggestions waits for the
+// user's recommendations to be built, and how many of each it gets.
+const suggestionWaitMs = 3_000;
+const suggestionLimit = 20;
 // The longest a search waits for the same user's last one to finish.
 const searchDebounceMs = 300;
 // How long, and how many, search results are kept for the same words typed
@@ -413,6 +422,9 @@ export class Coordinator {
   private playbackSeconds = 0;
   /** What client mods asked for, while it runs. */
   private dataChannelRuns = new AsyncLocalStorage<DataChannelRun>();
+  // The tab a client mod asked Settings to open on, by user, for the click
+  // on the player that opens it next.
+  private settingsTabs = new Map<string, { tab: SettingsTab; until: number }>();
   /** The audit log, noting what came over the huddle's data channel. */
   private audit: Pick<AuditLog, "record">;
   /** The media process's last position report, and when it came. */
@@ -2258,6 +2270,9 @@ export class Coordinator {
     return {
       capabilities: capabilities.filter((value) => this.can(userId, value)),
       admin: this.settingsAdmin(userId),
+      ...(this.jellyfinUi
+        ? { jellyfin: this.jellyfinUi.hasServers(userId) }
+        : {}),
       settings: this.scrobbling
         ? settingFields({
             access: { volume: false, configure: false, admin: false },
@@ -2303,22 +2318,37 @@ export class Coordinator {
       notices?: "post";
     } = {},
   ) {
+    const { run } = await this.asPlayer(
+      userId,
+      () => this.action(this.playerInteraction(userId, actionId, options)),
+      options.notices,
+    );
+    return run;
+  }
+
+  /**
+   * Runs work for a client mod as its user, with what it would say in an
+   * ephemeral notice kept for the answer.
+   */
+  private async asPlayer<T>(
+    userId: string,
+    work: () => Promise<T>,
+    notices?: "post",
+  ) {
     const run: DataChannelRun = {
       userId,
       notices: [],
       info: [],
       done: false,
-      post: options.notices === "post",
+      post: notices === "post",
     };
     try {
-      await this.dataChannelRuns.run(run, () =>
-        this.action(this.playerInteraction(userId, actionId, options)),
-      );
+      const value = await this.dataChannelRuns.run(run, work);
+      return { run, value };
     } finally {
       // Timers it started carry on as the session's own.
       run.done = true;
     }
-    return run;
   }
 
   // An interaction as the player, or a dialog over it, would send one.
@@ -2371,35 +2401,27 @@ export class Coordinator {
     const nothingPlaying = { ok: false, error: "Nothing is playing." };
     switch (command.type) {
       case "search":
-        return this.pluginSearch(userId, command.query);
-      case "add": {
-        let reference =
-          typeof command.reference === "string" ? command.reference.trim() : "";
-        if (!reference)
-          return { ok: false, error: "Search for a song, or paste a link." };
-        // A link stands for itself as Add songs' search has it, so a playlist
-        // is added as one, under its permission.
-        if (/^https?:\/\//i.test(reference)) {
-          const found = await this.pluginSearch(userId, reference);
-          const first = (
-            found.results as { reference: string }[] | undefined
-          )?.[0];
-          if (!first)
-            return found.ok
-              ? { ok: false, error: "Nothing was found at that link." }
-              : found;
-          reference = first.reference;
-        }
-        // Jellyfin's are linked in a dialog only Slack opens
-        if (
-          parseJellyfinLink(this.tracks.referencedUrl?.(reference) ?? reference)
-        )
-          return {
-            ok: false,
-            error: "Add Jellyfin links with Add songs in Slack.",
-          };
-        return press("add_track_to_queue", reference);
-      }
+        return command.source === "jellyfin"
+          ? this.pluginJellyfinSearch(userId, command.query)
+          : this.pluginSearch(userId, command.query);
+      case "add":
+        return this.pluginAdd(userId, command);
+      case "suggestions":
+        return this.pluginSuggestions(userId);
+      case "saves":
+        return this.pluginSaves(userId);
+      case "load":
+        return this.pluginLoad(userId, command);
+      case "lyrics":
+        return this.pluginLyrics(command);
+      case "settings_tab":
+        if (!(settingsTabs as readonly unknown[]).includes(command.tab))
+          return { ok: false, error: "There's no such tab in Settings." };
+        this.settingsTabs.set(userId, {
+          tab: command.tab as SettingsTab,
+          until: Date.now() + settingsTabMs,
+        });
+        return { ok: true };
       case "remove":
         return queued ? press("remove_queue_track", trackId) : notQueued;
       case "move":
@@ -2450,6 +2472,223 @@ export class Coordinator {
         return this.pluginEnd(userId, command);
     }
     return { ok: false, error: "That command is not available here." };
+  }
+
+  // Add songs, with what it was given: a search result or link, one of its
+  // recent songs or recommendations, or something on the user's Jellyfin.
+  private async pluginAdd(
+    userId: string,
+    command: PluginCommand,
+  ): Promise<AgentResult> {
+    const pick = (field: "recent" | "recommend") =>
+      typeof command[field] === "string" ? (command[field] as string) : "";
+    for (const field of ["recent", "recommend"] as const)
+      if (pick(field))
+        return this.answer(
+          await this.viaPlayer(userId, "add_track_to_queue", {
+            submit: true,
+            state: {
+              [field]: {
+                selection: { selected_option: { value: pick(field) } },
+              },
+            },
+          }),
+        );
+    let reference =
+      typeof command.reference === "string" ? command.reference.trim() : "";
+    if (!reference)
+      return { ok: false, error: "Search for a song, or paste a link." };
+    if (parseItemValue(reference))
+      return this.pluginJellyfin(userId, (interaction) =>
+        this.jellyfinUi!.pick(interaction, reference),
+      );
+    const link = /^https?:\/\//i.test(reference) ? reference : undefined;
+    const jellyfinLink = link ? parseJellyfinLink(link) : undefined;
+    if (link && isJellyfinStreamLink(link))
+      return {
+        ok: false,
+        error:
+          "That link has your Jellyfin sign-in in it, so HuddleFM won’t play it. Paste the link from the item’s page in Jellyfin instead.",
+      };
+    if (jellyfinLink)
+      return this.pluginJellyfin(userId, (interaction) =>
+        this.jellyfinUi!.pickLink(interaction, jellyfinLink),
+      );
+    // A link stands for itself as Add songs' search has it, so a playlist
+    // is added as one, under its permission.
+    if (link) {
+      const found = await this.pluginSearch(userId, link);
+      const first = (found.results as { reference: string }[] | undefined)?.[0];
+      if (!first)
+        return found.ok
+          ? { ok: false, error: "Nothing was found at that link." }
+          : found;
+      reference = first.reference;
+    }
+    return this.answer(
+      await this.viaPlayer(userId, "add_track_to_queue", { value: reference }),
+    );
+  }
+
+  // Something on the user's Jellyfin, picked as its dialogs would, with
+  // what the queue says kept for the answer.
+  private async pluginJellyfin(
+    userId: string,
+    pick: (interaction: Interaction) => Promise<JellyfinPick>,
+  ): Promise<AgentResult> {
+    if (!this.jellyfinUi)
+      return { ok: false, error: "This HuddleFM doesn't play from Jellyfin." };
+    await this.primeManager(userId);
+    if (!this.isParticipantOrManager(userId))
+      return { ok: false, error: "Join the huddle before using the player." };
+    const { run, value } = await this.asPlayer(userId, () =>
+      pick(this.playerInteraction(userId, "add_track_to_queue", {})),
+    );
+    if (value.error)
+      return {
+        ok: false,
+        error: value.error,
+        ...(value.linkNeeded ? { linkNeeded: true } : {}),
+      };
+    if (run.notices.length) return this.answer(run);
+    return {
+      ok: true,
+      ...(value.message ? { message: value.message } : {}),
+      ...(value.choices ? { choices: value.choices } : {}),
+    };
+  }
+
+  private async pluginJellyfinSearch(
+    userId: string,
+    query: unknown,
+  ): Promise<AgentResult> {
+    const text = typeof query === "string" ? query.trim() : "";
+    if (!text) return { ok: true, results: [] };
+    if (!this.jellyfinUi)
+      return { ok: false, error: "This HuddleFM doesn't play from Jellyfin." };
+    if (!this.jellyfinUi.hasServers(userId))
+      return {
+        ok: false,
+        error: "Link Jellyfin first, under Accounts and more in Slack.",
+        linkNeeded: true,
+      };
+    await this.primeManager(userId);
+    if (!this.can(userId, "add") && !this.can(userId, "add-bulk"))
+      return this.denied(userId);
+    const options = await this.jellyfinUi.search(userId, text);
+    return {
+      ok: true,
+      results: options.map((option) => ({
+        label: option.text.text,
+        reference: option.value,
+      })),
+    };
+  }
+
+  // What Add songs offers before anything is typed: recommendations for the
+  // user, and the songs they added lately. Music only, as there.
+  private async pluginSuggestions(userId: string): Promise<AgentResult> {
+    await this.primeManager(userId);
+    if (this.videoMode || !this.can(userId, "add"))
+      return { ok: true, recommended: [], recent: [] };
+    // a first look builds the user's recommendations, briefly waited on
+    if (this.recommendations)
+      await Promise.race([
+        this.recommendations.prefetchUser(userId).catch(() => {}),
+        Bun.sleep(suggestionWaitMs),
+      ]);
+    const recommended = this.recommendations?.userRecommendations(
+      userId,
+      this.sessionExclusions(),
+    );
+    const track = (
+      item: { id: string; title: string; artist?: string; artwork?: string },
+      group?: string,
+    ) => ({
+      id: item.id,
+      title: item.title,
+      ...(item.artist ? { artist: item.artist } : {}),
+      ...(item.artwork ? { artwork: item.artwork } : {}),
+      ...(group ? { group } : {}),
+    });
+    return {
+      ok: true,
+      recommended: [
+        ...(recommended?.favourites ?? []).map((item) =>
+          track(item, "Your favourites"),
+        ),
+        ...(recommended?.discover ?? []).map((item) => track(item, "Discover")),
+      ].slice(0, suggestionLimit),
+      recent: this.store
+        .recentTracks(userId, recentTrackLimit)
+        .slice(0, suggestionLimit)
+        .map((item) => track(item)),
+    };
+  }
+
+  // The saved sessions Load saved session offers the user.
+  private async pluginSaves(userId: string): Promise<AgentResult> {
+    await this.primeManager(userId);
+    return {
+      ok: true,
+      saves: this.store
+        .sessionSaves(this.saveOwners(userId))
+        .slice(0, 100)
+        .map((save) => ({
+          id: save.id,
+          name: save.name,
+          owner: save.owner.type,
+          songs: save.tracks.length,
+          savedAt: save.savedAt,
+          deletable: this.canDeleteSave(userId, save),
+        })),
+    };
+  }
+
+  private async pluginLoad(
+    userId: string,
+    command: PluginCommand,
+  ): Promise<AgentResult> {
+    const saveId = typeof command.saveId === "string" ? command.saveId : "";
+    if (!saveId) return { ok: false, error: "Pick a saved session to load." };
+    return this.answer(
+      await this.viaPlayer(userId, "load_session_save", {
+        submit: true,
+        state: {
+          save: { selection: { selected_option: { value: saveId } } },
+          forget: {
+            enabled: {
+              selected_options:
+                command.forget === true ? [{ value: "enabled" }] : [],
+            },
+          },
+        },
+      }),
+    );
+  }
+
+  // The playing song's lyrics, as the video card shows them: each line's
+  // words and when it starts and ends, in milliseconds.
+  private async pluginLyrics(command: PluginCommand): Promise<AgentResult> {
+    const current = this.current;
+    if (!current) return { ok: false, error: "Nothing is playing." };
+    if (typeof command.trackId === "string" && command.trackId !== current.id)
+      return { ok: false, error: "That song isn't playing any more." };
+    if (this.videoMode || current.live) return { ok: true, lines: [] };
+    const lyrics = await this.loadLyrics(current);
+    if (!lyrics) return { ok: true, lines: [] };
+    return {
+      ok: true,
+      trackId: current.id,
+      source: lyrics.source,
+      synced: lyrics.lines.some((line) => line.startTimeMs > 0),
+      lines: lyrics.lines.map((line) => ({
+        start: Math.round(line.startTimeMs),
+        end: Math.round(line.startTimeMs + line.durationMs),
+        text: line.words,
+        ...(line.isInstrumental ? { instrumental: true } : {}),
+      })),
+    };
   }
 
   // What Add songs' search offers as the user types.
@@ -6245,17 +6484,14 @@ export class Coordinator {
         loading,
       );
     }
-    if (loading)
-      await this.slack.updateModal(
-        loading.id,
-        loading.hash,
-        this.settingsViewFor(interaction),
-      );
-    else
-      await this.slack.modal(
-        interaction.triggerId,
-        this.settingsViewFor(interaction),
-      );
+    const asked = this.settingsTabs.get(interaction.userId);
+    this.settingsTabs.delete(interaction.userId);
+    const view = this.settingsViewFor(
+      interaction,
+      asked && asked.until > Date.now() ? { tab: asked.tab } : {},
+    );
+    if (loading) await this.slack.updateModal(loading.id, loading.hash, view);
+    else await this.slack.modal(interaction.triggerId, view);
   }
 
   // The Settings an interaction came from: its tab, page and unsaved edits,

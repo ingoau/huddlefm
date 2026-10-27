@@ -646,3 +646,82 @@ test("the address form can be submitted, as Slack requires of a form", async () 
   expect(view.submit.text).toBe("Continue");
   expect(view.callback_id).toBe("jellyfin_address_form");
 });
+
+test("a client mod's pick plays what plays, and offers the rest to pick from", async () => {
+  const { ui, store, queued } = setup();
+  linked(store);
+  const pick = (action: string, itemId: string) =>
+    ui.pick(
+      interaction("add_track_to_queue"),
+      itemValue(action, serverId, itemId),
+    );
+
+  expect(await pick("open", movieId)).toEqual({
+    message: "Added Film to the queue.",
+  });
+  expect(queued.at(-1)?.items.map((item) => item.title)).toEqual(["Film"]);
+
+  // a show with one season is its episodes, each opened to ask where to start
+  const episodes = await pick("open", seriesId);
+  expect(episodes.choices?.map((choice) => choice.reference)).toEqual([
+    itemValue("open", serverId, episodeId),
+    itemValue("open", serverId, "44444444444444444444444444444444"),
+  ]);
+  expect(
+    await ui.pick(interaction("add_track_to_queue"), "open:nothing"),
+  ).toEqual({ error: "That Jellyfin item can't be found." });
+});
+
+test("a client mod's pick asks where to start something left part way", async () => {
+  const { ui, store, queued } = setup({
+    movie: { UserData: { PlaybackPositionTicks: 600 * 10_000_000 } },
+  });
+  linked(store);
+  const film = (action: string) =>
+    ui.pick(
+      interaction("add_track_to_queue"),
+      itemValue(action, serverId, movieId),
+    );
+  expect(await film("open")).toEqual({
+    choices: [
+      {
+        label: "Resume from 10:00",
+        reference: itemValue("resume", serverId, movieId),
+      },
+      {
+        label: "Start from the beginning",
+        reference: itemValue("start", serverId, movieId),
+      },
+    ],
+  });
+  expect(queued).toEqual([]);
+  expect(await film("resume")).toEqual({
+    message: "Added Film to the queue, from 10:00.",
+  });
+  expect(queued.at(-1)?.items[0]?.startAt).toBe(600);
+  expect(await film("start")).toEqual({ message: "Added Film to the queue." });
+  expect(queued.at(-1)?.items[0]?.startAt).toBeUndefined();
+});
+
+test("a client mod's pick of an unlinked server says to link it in Slack", async () => {
+  const { ui, store } = setup();
+  const link = { baseUrl: base, itemId: movieId };
+  expect(await ui.pickLink(interaction("add_track_to_queue"), link)).toEqual({
+    error: "Link this Jellyfin server first, under Accounts and more in Slack.",
+    linkNeeded: true,
+  });
+  linked(store);
+  expect(await ui.pickLink(interaction("add_track_to_queue"), link)).toEqual({
+    message: "Added Film to the queue.",
+  });
+  // a link that stopped working is let go
+  const revoked = setup({ revoked: true });
+  linked(revoked.store);
+  expect(
+    await revoked.ui.pick(
+      interaction("add_track_to_queue"),
+      itemValue("open", serverId, movieId),
+    ),
+  ).toMatchObject({ linkNeeded: true });
+  expect(revoked.store.jellyfinServer("U1", serverId)?.revoked).toBeTrue();
+});

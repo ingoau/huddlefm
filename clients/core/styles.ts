@@ -302,8 +302,12 @@ export const panelCss = `
 .huddlefm-track[draggable="true"] {
   cursor: grab;
 }
-.huddlefm-track--over {
+/* where a dragged song would land, as a line between songs */
+.huddlefm-track--gap-above {
   box-shadow: inset 0 2px 0 var(--dt_color-otl-hgl-1, #1264a3);
+}
+.huddlefm-track--gap-below {
+  box-shadow: inset 0 -2px 0 var(--dt_color-otl-hgl-1, #1264a3);
 }
 .huddlefm-track--dragged {
   opacity: 0.4;
@@ -390,16 +394,155 @@ export const panelCss = `
   flex-wrap: wrap;
   gap: 8px;
 }
-.huddlefm-now__play-something.huddlefm-now__play-something {
+.huddlefm-now__start {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-top: 8px;
 }
-.huddlefm-end {
+.huddlefm-end,
+.huddlefm-load {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
+/* the screen's own gap spaces its fields, so Slack's room under inputs and
+   hints would double it */
+.huddlefm-end .huddlefm-field,
+.huddlefm-end .huddlefm-field > .c-hint,
+.huddlefm-end .c-input_text,
+.huddlefm-load .c-hint {
+  margin-bottom: 0;
+}
+.huddlefm-load .huddlefm-settings__section {
+  margin-top: 0;
+}
 .huddlefm-end__text {
   margin: 0;
+  color: var(--dt_color-content-sec, #454447);
+}
+/* a control that's not allowed: it stays, to say why on hover */
+.huddlefm-off {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.huddlefm-slider-wrap {
+  display: flex;
+  min-width: 0;
+}
+.huddlefm-slider-wrap > .huddlefm-slider,
+.huddlefm-slider-wrap > .huddlefm-off,
+.huddlefm-slider-wrap > .huddlefm-off > .huddlefm-slider {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+}
+.huddlefm-slider:disabled {
+  cursor: not-allowed;
+}
+.huddlefm-sources {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+}
+.huddlefm-source {
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  color: var(--dt_color-content-sec, #454447);
+  box-shadow: inset 0 0 0 1px var(--dt_color-otl-ter, #5e5d6021);
+}
+.huddlefm-source--on {
+  color: var(--dt_color-content-inv-pry, #fff);
+  background: var(--dt_color-surf-acc-pry, #1264a3);
+  box-shadow: none;
+}
+.huddlefm-search__link {
+  margin-top: 8px;
+}
+.huddlefm-results__heading {
+  padding: 6px 12px 2px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--dt_color-content-ter, #5e5d60);
+}
+.huddlefm-suggestions {
+  max-height: 300px;
+}
+.huddlefm-result__title,
+.huddlefm-result__artist {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.huddlefm-result__artist {
+  font-size: 12px;
+  color: var(--dt_color-content-ter, #5e5d60);
+}
+.huddlefm-saves {
+  margin: 0 -8px;
+  padding: 0;
+  list-style: none;
+}
+.huddlefm-save {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  text-align: left;
+}
+.huddlefm-save:hover {
+  background: var(--dt_color-base-pry-hover, #4544470f);
+}
+.huddlefm-save--on,
+.huddlefm-save--on:hover {
+  box-shadow: inset 0 0 0 2px var(--dt_color-otl-hgl-1, #1264a3);
+}
+.huddlefm-save__name {
+  font-size: 14px;
+  font-weight: 700;
+}
+.huddlefm-save__meta {
+  font-size: 12px;
+  color: var(--dt_color-content-ter, #5e5d60);
+}
+.huddlefm-lyrics {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 12px 0;
+  scrollbar-width: thin;
+}
+.huddlefm-lyric {
+  margin: 0;
+  padding: 2px 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: left;
+  color: var(--dt_color-content-ter, #5e5d60);
+  opacity: 0.55;
+  transition: opacity 200ms, color 200ms;
+}
+button.huddlefm-lyric:hover {
+  opacity: 0.85;
+}
+.huddlefm-lyric--active {
+  color: var(--dt_color-content-pry, #1d1c1d);
+  opacity: 1;
+}
+.huddlefm-lyrics--plain .huddlefm-lyric {
+  font-size: 15px;
+  font-weight: 400;
+  opacity: 1;
+  color: var(--dt_color-content-pry, #1d1c1d);
+}
+.huddlefm-lyrics__none {
+  margin: 12px 0 0;
   color: var(--dt_color-content-sec, #454447);
 }
 `;

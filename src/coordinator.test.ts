@@ -8388,7 +8388,9 @@ const dataBroadcasts = (media: unknown[]) =>
       : [];
   });
 
-async function pluginSetup() {
+async function pluginSetup(
+  options: { store?: Store; lyrics?: LyricsCatalog } = {},
+) {
   const tracks = {
     resolve: async (value: string) => ({
       sourceInput: value,
@@ -8405,8 +8407,17 @@ async function pluginSetup() {
     suggestions: async (query: string) => [
       { text: { type: "plain_text", text: `Link: ${query}` }, value: query },
     ],
+    upNextIds: async () => [],
   } as unknown as TrackCatalog;
-  const result = setup(tracks);
+  const result = setup(
+    tracks,
+    undefined,
+    undefined,
+    undefined,
+    options.store,
+    undefined,
+    options.lyrics,
+  );
   await result.coordinator.start();
   const send = async (userId: string, payload: Record<string, unknown>) => {
     result.coordinator.dataMessage({
@@ -8607,6 +8618,239 @@ test("client mods add a pasted link as Add songs' search has it", async () => {
     (message) => message.type === "state",
   )!;
   expect(state).toMatchObject({ nowPlaying: { title: "B" } });
+  await result.coordinator.endFromSlack();
+});
+
+/** The result a client mod was sent for its request `id`. */
+function resultFor(media: unknown[], id: string) {
+  return dataBroadcasts(media).findLast(
+    (message) => message.type === "result" && message.id === id,
+  );
+}
+
+test("client mods load a saved session as Load saved session does", async () => {
+  const store = new Store(":memory:");
+  const channel = { type: "channel", id: "channel" } as const;
+  const track = (id: string) => ({
+    sourceInput: `https://${id}`,
+    canonicalUrl: `https://${id}`,
+    sourceId: id,
+    title: id.toUpperCase(),
+    artist: "Artist",
+    duration: 100,
+  });
+  const saveId = store.addSessionSave(
+    channel,
+    "Friday",
+    "guest",
+    [track("a"), track("b")],
+    { volume: 0.3 },
+  );
+  store.addSessionSave(
+    { type: "user", id: "someone" },
+    "Not theirs",
+    "someone",
+    [],
+    {},
+  );
+  const result = await pluginSetup({ store });
+  await result.send("host", {
+    type: "command",
+    id: "s1",
+    command: { type: "saves" },
+  });
+  expect(resultFor(result.media, "s1")).toMatchObject({
+    ok: true,
+    saves: [
+      {
+        id: saveId,
+        name: "Friday",
+        owner: "channel",
+        songs: 2,
+        savedAt: expect.any(Number),
+        // the host may end the session, so may delete the channel's saves
+        deletable: true,
+      },
+    ],
+  });
+  await result.send("host", {
+    type: "command",
+    id: "l1",
+    command: { type: "load", saveId, forget: true },
+  });
+  expect(resultFor(result.media, "l1")).toMatchObject({ ok: true });
+  await until(() => Boolean(Reflect.get(result.coordinator, "current")));
+  const loaded = [
+    Reflect.get(result.coordinator, "current"),
+    ...(Reflect.get(result.coordinator, "queue") as unknown[]),
+  ] as { sourceId: string; requesterId: string }[];
+  expect(loaded.map((entry) => [entry.sourceId, entry.requesterId])).toEqual([
+    ["a", "host"],
+    ["b", "host"],
+  ]);
+  expect(Reflect.get(result.coordinator, "volume")).toBe(0.3);
+  expect(store.sessionSaves([channel])).toEqual([]);
+  expect(result.audit).toContainEqual([
+    "session.save_loaded",
+    "host",
+    expect.objectContaining({ deleted: true, via: "data_channel" }),
+  ]);
+  await result.send("host", {
+    type: "command",
+    id: "l2",
+    command: { type: "load", saveId },
+  });
+  expect(resultFor(result.media, "l2")).toMatchObject({
+    ok: false,
+    message: "That saved session is no longer available.",
+  });
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("client mods get the playing song's lyrics, line by line", async () => {
+  const lyrics = {
+    get: async () => ({
+      source: "test",
+      priority: 1,
+      lines: [
+        { startTimeMs: 1000, durationMs: 2000, words: "Hello" },
+        {
+          startTimeMs: 3000,
+          durationMs: 1500,
+          words: "",
+          isInstrumental: true,
+        },
+      ],
+    }),
+  } as unknown as LyricsCatalog;
+  const result = await pluginSetup({ lyrics });
+  await result.send("host", {
+    type: "command",
+    id: "y0",
+    command: { type: "lyrics" },
+  });
+  expect(resultFor(result.media, "y0")).toMatchObject({
+    ok: false,
+    message: "Nothing is playing.",
+  });
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await until(() => Boolean(Reflect.get(result.coordinator, "current")));
+  const current = Reflect.get(result.coordinator, "current") as { id: string };
+  await result.send("guest", {
+    type: "command",
+    id: "y1",
+    command: { type: "lyrics", trackId: current.id },
+  });
+  expect(resultFor(result.media, "y1")).toMatchObject({
+    ok: true,
+    trackId: current.id,
+    synced: true,
+    lines: [
+      { start: 1000, end: 3000, text: "Hello" },
+      { start: 3000, end: 4500, text: "", instrumental: true },
+    ],
+  });
+  // a client still showing the last song isn't given this one's
+  await result.send("guest", {
+    type: "command",
+    id: "y2",
+    command: { type: "lyrics", trackId: "gone" },
+  });
+  expect(resultFor(result.media, "y2")).toMatchObject({ ok: false });
+  await result.coordinator.endFromSlack();
+});
+
+test("client mods open Slack's Settings on the tab they ask for", async () => {
+  const result = await pluginSetup();
+  await result.send("host", {
+    type: "command",
+    id: "t1",
+    command: { type: "settings_tab", tab: "nowhere" },
+  });
+  expect(resultFor(result.media, "t1")).toMatchObject({ ok: false });
+  await result.send("host", {
+    type: "command",
+    id: "t2",
+    command: { type: "settings_tab", tab: "you" },
+  });
+  expect(resultFor(result.media, "t2")).toMatchObject({ ok: true });
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings", result.coordinator.id),
+  );
+  const opened = JSON.stringify(result.modals.at(-1));
+  expect(opened).toContain('\\"tab\\":\\"you\\"');
+  // only the next opening: after it, Settings opens where it always does
+  await result.coordinator.action(
+    interaction(result.coordinator, "open_settings", result.coordinator.id),
+  );
+  expect(JSON.stringify(result.modals.at(-1))).not.toContain(
+    '\\"tab\\":\\"you\\"',
+  );
+  await result.coordinator.endFromSlack();
+});
+
+test("client mods are offered what Add songs offers before anything's typed", async () => {
+  const store = new Store(":memory:");
+  const result = await pluginSetup({ store });
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "https://a"),
+  );
+  await until(() => store.recentTracks("host").length > 0);
+  await result.send("host", {
+    type: "command",
+    id: "g1",
+    command: { type: "suggestions" },
+  });
+  const answer = resultFor(result.media, "g1") as {
+    ok: boolean;
+    recent: { id: string; title: string }[];
+    recommended: unknown[];
+  };
+  expect(answer).toMatchObject({
+    ok: true,
+    recommended: [],
+    recent: [{ title: "A", artist: "Artist" }],
+  });
+  await result.send("host", {
+    type: "command",
+    id: "g2",
+    command: { type: "add", recent: answer.recent[0]!.id },
+  });
+  expect(resultFor(result.media, "g2")).toMatchObject({ ok: true });
+  await until(
+    () => (Reflect.get(result.coordinator, "queue") as unknown[]).length > 0,
+  );
+  await result.coordinator.endFromSlack();
+  store.close();
+});
+
+test("client mods hear that Jellyfin isn't there to search", async () => {
+  const result = await pluginSetup();
+  await result.send("host", {
+    type: "command",
+    id: "j1",
+    command: { type: "search", query: "song", source: "jellyfin" },
+  });
+  expect(resultFor(result.media, "j1")).toMatchObject({
+    ok: false,
+    message: "This HuddleFM doesn't play from Jellyfin.",
+  });
+  expect(resultFor(result.media, "j1")).not.toHaveProperty("linkNeeded");
+  await result.send("host", {
+    type: "command",
+    id: "j2",
+    command: {
+      type: "add",
+      reference: `open:${"a".repeat(32)}:${"b".repeat(32)}`,
+    },
+  });
+  expect(resultFor(result.media, "j2")).toMatchObject({
+    ok: false,
+    message: "This HuddleFM doesn't play from Jellyfin.",
+  });
   await result.coordinator.endFromSlack();
 });
 

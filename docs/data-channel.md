@@ -114,13 +114,15 @@ What one user may do, and their own settings. Sent after that user's `sync`, aft
   "to": "U123",
   "capabilities": ["add", "remove-own", "volume", "configure-settings"],
   "admin": false,
-  "settings": []
+  "settings": [],
+  "jellyfin": false
 }
 ```
 
 - `capabilities` are the [permission names](bot-api.md) the user holds; a host or manager holds all of them.
 - `admin` means they may change `admin` settings: switch mode, transfer host and set permissions.
 - `settings` are their own settings, the ones Settings shows on its **You** tab, as [settings fields](#settings-fields) with `requires: "self"`. It is empty when the bot has no scrobbling set up.
+- `jellyfin` says whether they've linked a Jellyfin server, and is absent when the bot doesn't play from Jellyfin. Linking shows a code to approve, which only Slack's own dialogs show: everyone in the huddle hears this channel.
 
 ### `result`
 
@@ -139,7 +141,7 @@ The answer to a `command` or `setting`, with its `id`.
 }
 ```
 
-It names what it answers in `command` (the command's type) or `setting` (the field id). On success, `ok` is `true`; `search` adds `results: { label, reference }[]`. A failure carries `message`, what the player would have told the user in Slack, and an `error` code where there is one.
+It names what it answers in `command` (the command's type) or `setting` (the field id). On success, `ok` is `true`, and some commands add what they found, as their rows below say. A failure carries `message`, what the player would have told the user in Slack, and an `error` code where there is one.
 
 ## Clients to the bot
 
@@ -159,26 +161,40 @@ Does what one of the player's buttons or dialogs does, as the sender: the bot ru
 { "v": 1, "type": "command", "id": "r7", "command": { "type": "skip" } }
 ```
 
-| `type`           | Fields                                                 | As the player's                                   |
-| ---------------- | ------------------------------------------------------ | ------------------------------------------------- |
-| `search`         | `query`                                                | Add songs' search, as it's typed                  |
-| `add`            | `reference`, from `search`, or a link                  | Add songs                                         |
-| `remove`         | `trackId`                                              | queue's Remove                                    |
-| `move`           | `trackId`, and `direction` (`up`/`down`) or `position` | queue's Move up, Move down, Play next and Move to |
-| `shuffle`        |                                                        | Shuffle                                           |
-| `clear`          |                                                        | Clear queue                                       |
-| `skip`           |                                                        | Next                                              |
-| `previous`       |                                                        | Previous                                          |
-| `toggle`         |                                                        | Play/pause                                        |
-| `pause`/`resume` |                                                        | Play/pause, when it isn't already so              |
-| `seek`           | `to`, in seconds                                       | Jump to                                           |
-| `volume`         | `percent`                                              | Settings' Volume                                  |
-| `claim_host`     |                                                        | Take over                                         |
-| `play_something` |                                                        | Play something, in music mode                     |
-| `keep`           | `trackId`, an autoplay pick                            | queue's Add to queue                              |
-| `end`            | `save` (`none`, `channel` or `user`), and maybe `name` | End session's dialog, saving the session if asked |
+| `type`           | Fields                                                                                        | As the player's                                   |
+| ---------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `search`         | `query`, and `source: "jellyfin"` for theirs                                                  | Add songs' search, as it's typed                  |
+| `add`            | `reference`, from `search`, or a link; or `recent` or `recommend`, an `id` from `suggestions` | Add songs                                         |
+| `suggestions`    |                                                                                               | Add songs' recommendations and recent songs       |
+| `remove`         | `trackId`                                                                                     | queue's Remove                                    |
+| `move`           | `trackId`, and `direction` (`up`/`down`) or `position`                                        | queue's Move up, Move down, Play next and Move to |
+| `shuffle`        |                                                                                               | Shuffle                                           |
+| `clear`          |                                                                                               | Clear queue                                       |
+| `skip`           |                                                                                               | Next                                              |
+| `previous`       |                                                                                               | Previous                                          |
+| `toggle`         |                                                                                               | Play/pause                                        |
+| `pause`/`resume` |                                                                                               | Play/pause, when it isn't already so              |
+| `seek`           | `to`, in seconds                                                                              | Jump to                                           |
+| `volume`         | `percent`                                                                                     | Settings' Volume                                  |
+| `claim_host`     |                                                                                               | Take over                                         |
+| `play_something` |                                                                                               | Play something, in music mode                     |
+| `keep`           | `trackId`, an autoplay pick                                                                   | queue's Add to queue                              |
+| `end`            | `save` (`none`, `channel` or `user`), and maybe `name`                                        | End session's dialog, saving the session if asked |
+| `saves`          |                                                                                               | Load saved session's list                         |
+| `load`           | `saveId`, and `forget: true` to delete it after                                               | Load saved session                                |
+| `lyrics`         | `trackId`, the song playing                                                                   | the video card's lyrics                           |
+| `settings_tab`   | `tab`: `you`, `session`, `channel` or `host`                                                  | Settings' tabs, for its next opening in Slack     |
 
 `end` is answered by the final `state` instead, since the bot stops answering once the session is over; how saving went is posted in Slack, as for the dialog.
+
+What some answer with, besides `ok`:
+
+- `search`: `results: { label, reference }[]`, each a `reference` for `add`.
+- `add`: `message` when it says how it went, as "Added 3 of 10 songs". Something on Jellyfin that needs picking first, like a show or a film left part way, answers with `choices: { label, reference }[]` instead, each another `add`. `linkNeeded: true` on a failure means the user hasn't linked that Jellyfin server; they link it in Slack.
+- `suggestions`: `recommended` and `recent`, each a list of `{ id, title, artist?, artwork? }`; recommendations also have their `group`, like `Discover`. Both are empty in video mode, as in Slack.
+- `saves`: `saves: { id, name, owner, songs, savedAt, deletable }[]`, newest first. `owner` is `channel` or `user`, `savedAt` is in milliseconds, and `deletable` says whether `forget` would delete it.
+- `lyrics`: `lines: { start, end, text, instrumental? }[]`, in milliseconds, and `synced`, whether they have times at all. No lyrics is an empty `lines`.
+- `settings_tab` makes the user's next opening of Settings in Slack, within 15 seconds, start on that tab. A client sends it before it opens Settings from the player's button.
 
 ### `setting`
 

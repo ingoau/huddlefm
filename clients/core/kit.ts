@@ -22,13 +22,18 @@ export type Kit = {
       className?: string;
     }
   >;
-  /** Slack's icon button with its tooltip */
+  /**
+   * Slack's icon button with its tooltip, `label` unless `tip` says more.
+   * A disabled one still takes clicks, to say why it's off.
+   */
   IconButton: React.ComponentType<{
     label: string;
+    tip?: string;
     icon: string;
     onClick: () => void;
     size?: "small" | "medium";
     className?: string;
+    disabled?: boolean;
   }>;
   Tooltip: React.ComponentType<
     Children & { tip: React.ReactNode; position?: string; delay?: number }
@@ -84,8 +89,8 @@ export type Platform = {
   selfUserId(): string | undefined;
   /** a Slack user's name, read reactively */
   useUserName(userId: string): string;
-  /** opens Slack's own HuddleFM settings, when the mod can */
-  openSlackSettings?(): Promise<boolean>;
+  /** opens Slack's own HuddleFM settings, on `tab`, when the mod can */
+  openSlackSettings?(tab?: "you" | "session" | "host"): Promise<boolean>;
   /** inviting HuddleFM to the huddle, when the mod can */
   huddleFM?: {
     /** the user Start HuddleFM invites, read reactively */
