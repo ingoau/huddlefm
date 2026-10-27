@@ -8589,6 +8589,28 @@ test("client mods seek, move and end with a save as the player's dialogs do", as
   });
 });
 
+test("client mods hear what the player's buttons would quietly pass over", async () => {
+  const result = await pluginSetup();
+  const asks: Record<string, unknown>[] = [
+    { type: "toggle" },
+    { type: "remove", trackId: "gone" },
+    { type: "keep", trackId: "gone" },
+    { type: "seek", to: 10 },
+  ];
+  for (const [index, command] of asks.entries())
+    await result.send("host", { type: "command", id: `r${index}`, command });
+  const results = dataBroadcasts(result.media).filter(
+    (message) => message.type === "result",
+  );
+  expect(results.map((message) => [message.ok, message.message])).toEqual([
+    [false, "Nothing is playing."],
+    [false, "That song isn't in the queue."],
+    [false, "That song isn't an autoplay pick."],
+    [false, "Nothing is playing."],
+  ]);
+  await result.coordinator.endFromSlack();
+});
+
 test("client mods can't send settings the modal wouldn't", async () => {
   const result = await pluginSetup();
   await result.send("host", { type: "sync" });

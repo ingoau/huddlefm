@@ -386,7 +386,15 @@ function reshuffle<T>(items: T[]) {
  * Work a client mod asked for over the huddle's data channel: the notices
  * the player would have sent, which answer it instead.
  */
-type DataChannelRun = { notices: string[]; done: boolean; post: boolean };
+type DataChannelRun = {
+  /** who asked: only what is done as them is theirs */
+  userId: string;
+  notices: string[];
+  /** notices that tell how it went, not that it failed */
+  info: string[];
+  done: boolean;
+  post: boolean;
+};
 
 /** The most of the queue a client mod's `state` carries. */
 const pluginQueueMax = 100;
@@ -564,7 +572,7 @@ export class Coordinator {
         auditLog.record(
           event,
           actorId,
-          this.fromDataChannel()
+          this.fromDataChannel(actorId)
             ? { ...details, via: "data_channel" }
             : details,
         ),
@@ -2260,14 +2268,21 @@ export class Coordinator {
     };
   }
 
+  /** A notice that says how something went, rather than that it failed. */
+  private inform(user: string, text: string) {
+    return this.notice(user, text, "info");
+  }
+
   /**
    * Whether the work running now came over the huddle's data channel, from
    * a client mod. It is the user's own, as if they had used the player in
    * Slack, and its audit records say how it came.
    */
-  private fromDataChannel() {
+  private fromDataChannel(actorId?: string) {
     const run = this.dataChannelRuns.getStore();
-    return Boolean(run && !run.done);
+    return Boolean(
+      run && !run.done && (actorId === undefined || actorId === run.userId),
+    );
   }
 
   /**
@@ -2289,7 +2304,9 @@ export class Coordinator {
     } = {},
   ) {
     const run: DataChannelRun = {
+      userId,
       notices: [],
+      info: [],
       done: false,
       post: options.notices === "post",
     };
@@ -2321,7 +2338,8 @@ export class Coordinator {
       actionId,
       value: options.value ?? "",
       channelId: this.room.uiChannelId,
-      messageTs: this.uiTs ?? "",
+      // read as it runs, so it's never stale
+      messageTs: "",
       triggerId: "",
       // Stands in for the dialog that the queue's buttons and forms are in.
       viewId: `data-channel:${userId}`,
@@ -2332,9 +2350,8 @@ export class Coordinator {
   }
 
   private answer(run: DataChannelRun): AgentResult {
-    return run.notices.length
-      ? { ok: false, error: run.notices[0]! }
-      : { ok: true };
+    if (run.notices.length) return { ok: false, error: run.notices[0]! };
+    return run.info.length ? { ok: true, message: run.info[0] } : { ok: true };
   }
 
   // Runs what a client mod asks, through the player's own handlers.
@@ -2347,6 +2364,11 @@ export class Coordinator {
     const trackId = typeof command.trackId === "string" ? command.trackId : "";
     const press = async (actionId: string, value?: string) =>
       this.answer(await this.viaPlayer(userId, actionId, { value }));
+    // What the player's buttons pass over quietly, as they can't be pressed
+    // then, a client mod hears.
+    const queued = this.queue.find((entry) => entry.id === trackId);
+    const notQueued = { ok: false, error: "That song isn't in the queue." };
+    const nothingPlaying = { ok: false, error: "Nothing is playing." };
     switch (command.type) {
       case "search":
         return this.pluginSearch(userId, command.query);
@@ -2355,12 +2377,20 @@ export class Coordinator {
           typeof command.reference === "string" ? command.reference.trim() : "";
         if (!reference)
           return { ok: false, error: "Search for a song, or paste a link." };
+        // Jellyfin's are linked in a dialog only Slack opens
+        if (
+          parseJellyfinLink(this.tracks.referencedUrl?.(reference) ?? reference)
+        )
+          return {
+            ok: false,
+            error: "Add Jellyfin links with Add songs in Slack.",
+          };
         return press("add_track_to_queue", reference);
       }
       case "remove":
-        return press("remove_queue_track", trackId);
+        return queued ? press("remove_queue_track", trackId) : notQueued;
       case "move":
-        return this.pluginMove(userId, trackId, command);
+        return queued ? this.pluginMove(userId, trackId, command) : notQueued;
       case "shuffle":
         return press("shuffle_queue");
       case "clear":
@@ -2370,9 +2400,10 @@ export class Coordinator {
       case "previous":
         return press("previous_track");
       case "toggle":
-        return press("toggle_playback");
+        return this.current ? press("toggle_playback") : nothingPlaying;
       case "pause":
       case "resume":
+        if (!this.current) return nothingPlaying;
         // already as asked, for whoever may pause it
         if (
           this.current &&
@@ -2395,8 +2426,12 @@ export class Coordinator {
             ok: false,
             error: "In video mode, Play something is in the player in Slack.",
           };
+        if (this.current || this.queue.length || this.autoplayPending)
+          return { ok: false, error: "Something is already playing." };
         return press("play_something", this.id);
       case "keep":
+        if (!queued?.automatic)
+          return { ok: false, error: "That song isn't an autoplay pick." };
         return press("queue_keep_autoplay", trackId);
       case "end":
         return this.pluginEnd(userId, command);
@@ -2456,6 +2491,12 @@ export class Coordinator {
   private async pluginSeek(userId: string, command: PluginCommand) {
     const current = this.current;
     if (!current) return { ok: false, error: "Nothing is playing." };
+    if (current.live)
+      return {
+        ok: false,
+        error:
+          "A live stream plays where it is now, so there is nowhere to jump to.",
+      };
     const to =
       typeof command.to === "number"
         ? command.to
@@ -2568,7 +2609,6 @@ export class Coordinator {
     return this.answer(
       await this.viaPlayer(userId, "save_settings", {
         submit: true,
-        metadata: this.hostId ? { hostId: this.hostId } : {},
         state: fieldFormState(field, value as SettingFieldValue),
       }),
     );
@@ -3743,11 +3783,17 @@ export class Coordinator {
       total,
     );
     if (!pending) return;
-    await Promise.all(
-      pending.map(({ entry, controller }) =>
-        this.prepareManual(entry, controller),
-      ),
-    );
+    const prepare = () =>
+      Promise.all(
+        pending.map(({ entry, controller }) =>
+          this.prepareManual(entry, controller),
+        ),
+      );
+    // A client mod hears once the songs are queued; downloading them is the
+    // session's, and says how it went in Slack, as for anyone.
+    if (this.fromDataChannel())
+      return this.dataChannelRuns.exit(() => void prepare());
+    await prepare();
   }
 
   // Queues Jellyfin items without waiting for them to be ready, and says
@@ -3792,7 +3838,7 @@ export class Coordinator {
     });
     if (!pending) return;
     if (pending.length < total)
-      await this.notice(
+      await this.inform(
         interaction.userId,
         `Added ${pending.length} of ${total} songs; the rest did not fit.`,
       );
@@ -6804,7 +6850,9 @@ export class Coordinator {
     };
     if (
       metadata.sessionId !== this.id ||
-      (metadata.hostId || undefined) !== this.hostId ||
+      // A client mod's change is one field, checked as it applies.
+      (!this.fromDataChannel() &&
+        (metadata.hostId || undefined) !== this.hostId) ||
       !this.canOpenSettings(interaction.userId)
     )
       return this.notice(
@@ -7434,7 +7482,7 @@ export class Coordinator {
             "Could not update Settings after ending the session",
           ),
         );
-    else if (owner && !saved) await this.notice(interaction.userId, text);
+    else if (owner) await this.notice(interaction.userId, text);
   }
 
   // The idle player's other button: pick a saved session, from this channel
@@ -7615,7 +7663,10 @@ export class Coordinator {
   }
 
   private async claimHost(interaction: Interaction) {
-    if (interaction.value !== this.id || interaction.messageTs !== this.uiTs)
+    if (
+      interaction.value !== this.id ||
+      (interaction.messageTs && interaction.messageTs !== this.uiTs)
+    )
       return this.notice(interaction.userId, "That takeover request is stale.");
     if (this.hostId)
       return this.notice(interaction.userId, "Host already claimed.");
@@ -8496,11 +8547,11 @@ export class Coordinator {
 
   // A notice is told in passing, often partway through a change to the
   // session, so one Slack refuses (ephemerals fail fast) never stops it.
-  private async notice(user: string, text: string) {
+  private async notice(user: string, text: string, kind = "failure") {
     // A client mod hears it as the answer to what it asked.
     const run = this.dataChannelRuns.getStore();
     if (run && !run.done && !run.post) {
-      run.notices.push(text);
+      (kind === "info" ? run.info : run.notices).push(text);
       return;
     }
     await this.slack

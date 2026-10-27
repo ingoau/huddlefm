@@ -33,6 +33,7 @@ const COMPACT_WIDTH = 960;
 const HIDDEN_WIDTH = 566;
 /** The tallest the popover gets, and the room it leaves above itself. */
 const POPOVER_MAX_HEIGHT = 640;
+const POPOVER_MIN_HEIGHT = 200;
 const POPOVER_MARGIN = 24;
 
 /** The parts of Chime's AudioVideoFacade the data channel uses. */
@@ -382,13 +383,20 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
             ariaRole="dialog"
             ariaLabel="HuddleFM"
           >
+            {/* biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: a click on the room above the panel is a click outside it; Escape closes the popover as ever */}
             <div
               className="taut-huddlefm-popover"
               style={{
-                height: Math.min(
-                  POPOVER_MAX_HEIGHT,
-                  anchor.bounds.top - POPOVER_MARGIN,
+                height: Math.max(
+                  POPOVER_MIN_HEIGHT,
+                  Math.min(
+                    POPOVER_MAX_HEIGHT,
+                    anchor.bounds.top - POPOVER_MARGIN,
+                  ),
                 ),
+              }}
+              onClick={(event) => {
+                if (event.target === event.currentTarget) setAnchor(null);
               }}
             >
               <Panel platform={this.platform} />
@@ -462,10 +470,16 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   /**
    * Runs one of Slack's thunks as a component where the popover was opened
    * would: with the React context there, so what it opens, a dialog say,
-   * opens in that window, as Slack's own buttons in it do.
+   * opens in that window, as Slack's own buttons in it do. The popover
+   * closes for it.
    */
   private async dispatchHere(name: string, args: unknown) {
-    const creator = await this.api.redux.waitForThunkCreator(name);
+    const creator = await this.api.within(
+      this.api.redux.waitForThunkCreator(name),
+      SLACK_WAIT_MS,
+      `Slack's ${name}`,
+    );
+    if (!creator) throw new Error(`Slack's ${name} isn't there`);
     const store = this.api.redux.getStore();
     if (!store) throw new Error("Slack's store isn't ready");
     const values = thunkContexts(this.openedFrom);
@@ -477,15 +491,16 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
         defaultValue?: unknown;
       }) => unknown,
     ) => unknown;
-    return thunk(store.dispatch, store.getState, (context) =>
+    const result = thunk(store.dispatch, store.getState, (context) =>
       values.has(context.key) ? values.get(context.key) : context.defaultValue,
     );
+    this.dialogsOpened.set(this.dialogsOpened.get() + 1);
+    return result;
   }
 
   /** Slack's confirmation dialog, in the window the popover is in. */
   private confirmHere(options: Parameters<Kit["confirm"]>[0]) {
     const { ConfirmationModal } = this.api.elements;
-    this.dialogsOpened.set(this.dialogsOpened.get() + 1);
     return new Promise<boolean>((resolve) => {
       let handle: { close(): void } | undefined;
       let settled = false;
@@ -546,7 +561,6 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     try {
       // Slack's own click handler, which also readies the client for the
       // modal the bot opens in answer
-      this.dialogsOpened.set(this.dialogsOpened.get() + 1);
       await this.dispatchHere("sendActions", {
         serviceId: botId,
         appId,
@@ -651,11 +665,9 @@ const pluginCss = `
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  pointer-events: none;
 }
 .taut-huddlefm-popover > .huddlefm-panel {
   max-height: 100%;
-  pointer-events: auto;
 }
 .taut-huddlefm-bar {
   display: inline-flex;

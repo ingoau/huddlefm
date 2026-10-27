@@ -31,7 +31,9 @@ type Command = { type: string; [key: string]: unknown };
 const notice = new Store<string | undefined>(undefined);
 
 function say(result: Result) {
+  // a message on success says how it went, as "Added 3 of 10 songs"
   if (!result.ok) notice.set(result.message ?? "That didn't work.");
+  else if (result.message) notice.set(result.message);
   return result.ok;
 }
 
@@ -215,6 +217,9 @@ export function Panel({ platform }: { platform: Platform }) {
   const presence = client.presence.use();
   const problem = notice.use();
   const [view, setView] = React.useState<"main" | "settings" | "end">("main");
+  // a new session, or none, starts from the song playing
+  const sessionId = state?.session.id;
+  React.useEffect(() => setView("main"), [sessionId]);
 
   React.useEffect(() => {
     if (!problem) return;
@@ -661,6 +666,10 @@ function Queue(props: {
   // A song still downloading can't play yet, so skipping would play
   // another; it goes first instead, to play once it's ready.
   const playNow = async (track: Track, index: number) => {
+    if (track.status === "failed") {
+      notice.set(`${track.title} couldn't be downloaded.`);
+      return;
+    }
     if (
       index > 0 &&
       !(await run(platform, { type: "move", trackId: track.id, position: 1 }))
@@ -738,24 +747,28 @@ function Queue(props: {
               ].filter((item) => item !== false)
             : [];
           const removable = manage || track.addedBy === self;
-          const keep: MenuItem[] = track.automatic
-            ? [
-                {
-                  label: "Add to queue",
-                  onClick: () =>
-                    run(platform, { type: "keep", trackId: track.id }),
-                },
-              ]
-            : [];
-          const items: MenuItem[] = [
-            ...keep,
-            ...(keep.length && moves.length
-              ? [{ separator: true as const }]
+          const first: MenuItem[] = [
+            ...(manage && can(you, "skip")
+              ? [{ label: "Play now", onClick: () => playNow(track, index) }]
               : []),
-            ...moves,
-            ...(moves.length && removable
-              ? [{ separator: true as const }]
+            ...(track.automatic
+              ? [
+                  {
+                    label: "Add to queue",
+                    onClick: () =>
+                      run(platform, { type: "keep", trackId: track.id }),
+                  },
+                ]
               : []),
+          ];
+          // groups of rows, with a line between each
+          const items: MenuItem[] = [first, moves]
+            .filter((group) => group.length)
+            .flatMap((group, at) =>
+              at ? [{ separator: true as const }, ...group] : group,
+            );
+          if (removable && items.length) items.push({ separator: true });
+          items.push(
             ...(removable
               ? [
                   {
@@ -766,7 +779,7 @@ function Queue(props: {
                   },
                 ]
               : []),
-          ];
+          );
           return (
             <li
               key={track.id}
@@ -791,7 +804,12 @@ function Queue(props: {
                 setOver(undefined);
               }}
               // plays it now: first in the queue, then skipping to it
-              onDoubleClick={() => playNow(track, index)}
+              onDoubleClick={(event) => {
+                // not the menu's button, or text being selected in it
+                if ((event.target as Element).closest("button, [role=menu]"))
+                  return;
+                playNow(track, index);
+              }}
               title="Double-click to play now"
             >
               <Artwork platform={platform} track={track} size={36} />
