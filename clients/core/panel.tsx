@@ -419,8 +419,11 @@ function Progress({ platform, track }: { platform: Platform; track: Track }) {
   }, [playing]);
   // where a drag or key press holds the slider, until it lets go
   const [held, setHeld] = React.useState<number | undefined>();
+  // without a duration there's nothing to seek along, only the clock
+  const known = Boolean(track.duration) && !track.live;
   const duration = Math.max(1, Math.round(track.duration ?? 0));
-  const position = held ?? Math.min(duration, client.position());
+  const position =
+    held ?? (known ? Math.min(duration, client.position()) : client.position());
 
   const commit = () => {
     if (held === undefined) return;
@@ -432,8 +435,10 @@ function Progress({ platform, track }: { platform: Platform; track: Track }) {
   return (
     <div className="huddlefm-progress">
       <span className="huddlefm-progress__time">{clock(position)}</span>
-      {track.live ? (
-        <span className="huddlefm-progress__live">Live</span>
+      {!known ? (
+        <span className="huddlefm-progress__live">
+          {track.live ? "Live" : ""}
+        </span>
       ) : (
         <Slider
           className="huddlefm-progress__slider"
@@ -447,7 +452,7 @@ function Progress({ platform, track }: { platform: Platform; track: Track }) {
         />
       )}
       <span className="huddlefm-progress__time">
-        {track.live ? "" : clock(track.duration)}
+        {known ? clock(track.duration) : ""}
       </span>
     </div>
   );
@@ -633,6 +638,8 @@ function Queue(props: {
 }) {
   const { platform, state, you } = props;
   const { kit } = platform;
+  // a long queue's state carries only its start
+  const queued = state.queueLength ?? state.queue.length;
   const manage = can(you, "manage-queue");
   const self = platform.selfUserId();
   const [dragged, setDragged] = React.useState<string | undefined>();
@@ -652,8 +659,8 @@ function Queue(props: {
     <section className="huddlefm-queue">
       <header className="huddlefm-queue__header">
         <span>
-          {state.queue.length
-            ? `Up next · ${state.queue.length}${state.session.queueLimit ? ` of ${state.session.queueLimit}` : ""}`
+          {queued
+            ? `Up next · ${queued}${state.session.queueLimit ? ` of ${state.session.queueLimit}` : ""}`
             : "Nothing queued"}
         </span>
         {state.queue.length > 0 && (
@@ -672,7 +679,7 @@ function Queue(props: {
                 if (
                   await kit.confirm({
                     title: "Clear the queue?",
-                    body: `This removes all ${state.queue.length} songs waiting to play.`,
+                    body: `This removes all ${queued} songs waiting to play.`,
                     confirmText: "Clear",
                     danger: true,
                   })
@@ -685,7 +692,7 @@ function Queue(props: {
       </header>
       <ol className="huddlefm-queue__list">
         {state.queue.map((track, index) => {
-          const last = state.queue.length - 1;
+          const last = queued - 1;
           const move = (position: number) => () =>
             run(platform, { type: "move", trackId: track.id, position });
           const moves = manage

@@ -78,6 +78,8 @@ export type SessionState = {
   };
   nowPlaying: Track | null;
   queue: Track[];
+  /** the whole queue's length; `queue` has only its first 100 */
+  queueLength?: number;
   participants: string[];
   settings: SettingField[];
 };

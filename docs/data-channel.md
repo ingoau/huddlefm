@@ -19,7 +19,7 @@ Chime refuses data messages over 2048 bytes. The bot sends a larger message as `
 }
 ```
 
-`id` is unique per message from that sender, `i` counts from 0 to `n - 1`, and joining every `data` in order gives the message. A client drops a message still missing chunks after 5 seconds and sends `sync`. Clients' own messages must fit in one data message; the bot ignores chunks from clients.
+`id` is unique per message from that sender, `i` counts from 0 to `n - 1`, and joining every `data` in order gives the message. A client drops a message still missing chunks after 5 seconds and sends `sync`. Clients' own messages must fit in one data message; the bot ignores chunks from clients. A message takes at most 64 chunks, and clients drop larger ones; so the bot's `state` stays within them, its `queue` lists only the first 100 songs, and `queueLength` counts them all.
 
 ## Bot to everyone
 
@@ -85,6 +85,7 @@ The whole session, sent after every change (merged, at most every 250 ms) and af
       "status": "ready"
     }
   ],
+  "queueLength": 1,
   "participants": ["U123", "U456"],
   "settings": []
 }

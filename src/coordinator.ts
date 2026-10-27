@@ -378,6 +378,9 @@ function reshuffle<T>(items: T[]) {
   return shuffled;
 }
 
+/** The most of the queue a client mod's `state` carries. */
+const pluginQueueMax = 100;
+
 type YourSettingsPatch = {
   huddleMixSources?: string[];
   sessionScrobbling?: boolean;
@@ -1837,6 +1840,7 @@ export class Coordinator {
       const previous = this.playbackSeconds;
       this.playbackSeconds = seconds;
       this.sendMedia({ type: "seek", seconds });
+      this.plugins.changed();
       this.audit.record("playback.seeked", userId, {
         sessionId: this.id,
         trackId: current.id,
@@ -2190,10 +2194,12 @@ export class Coordinator {
           : null,
       },
       nowPlaying: this.current ? track(this.current) : null,
-      queue: this.queue.map((entry) => ({
+      // The first of a long queue, so the state stays within its chunks.
+      queue: this.queue.slice(0, pluginQueueMax).map((entry) => ({
         ...track(entry),
         status: entry.status,
       })),
+      queueLength: this.queue.length,
       participants: [...this.participants].filter(
         (id) => id !== this.botUserId,
       ),
@@ -5164,6 +5170,7 @@ export class Coordinator {
       this.store.incrementUsage("previous");
       this.playbackSeconds = 0;
       this.sendMedia({ type: "seek", seconds: 0 });
+      this.plugins.changed();
       return { restarted: current };
     }
     if (!this.history.length) return;
@@ -8112,6 +8119,7 @@ export class Coordinator {
     const previous = this.playbackSeconds;
     this.playbackSeconds = seconds;
     this.sendMedia({ type: "seek", seconds });
+    this.plugins.changed();
     this.audit.record("playback.seeked", interaction.userId, {
       sessionId: this.id,
       trackId: current.id,

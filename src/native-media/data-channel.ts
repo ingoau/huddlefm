@@ -50,6 +50,9 @@ export function encodePayload(payload: Record<string, unknown>) {
  * A payload as the data messages that carry it: itself when it fits, or else
  * `chunk`s, each a slice of its JSON text that fits once wrapped.
  */
+/** The most chunks a message may take; clients drop larger ones. */
+export const maxChunks = 64;
+
 export function encodeMessages(payload: Record<string, unknown>, id: string) {
   const text = JSON.stringify({ ...payload, v: protocolVersion });
   const whole = new TextEncoder().encode(text);
@@ -76,6 +79,8 @@ export function encodeMessages(payload: Record<string, unknown>, id: string) {
     slices.push(text.slice(start, end));
     start = end;
   }
+  if (slices.length > maxChunks)
+    throw new Error(`Data message needs ${slices.length} chunks`);
   return slices.map((data, i) =>
     encodePayload({ type: "chunk", id, i, n: slices.length, data }),
   );

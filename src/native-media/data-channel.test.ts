@@ -3,6 +3,7 @@ import {
   DataChannel,
   dataTopic,
   encodeMessages,
+  maxChunks,
   encodePayload,
   maxDataBytes,
   slackUserId,
@@ -194,5 +195,10 @@ describe("data channel", () => {
     // Each message gets its own id.
     data.broadcast({ type: "state", text });
     expect((sent.at(-1) as { id: string }).id).not.toBe(chunks[0]!.id);
+  });
+
+  test("won't chunk a message past what clients put back together", () => {
+    const text = "x".repeat(maxDataBytes * (maxChunks + 1));
+    expect(() => encodeMessages({ type: "state", text }, "zz")).toThrow();
   });
 });
