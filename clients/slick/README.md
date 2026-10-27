@@ -39,5 +39,6 @@ That writes `dist/plugins/HuddleFM.js` and `HuddleFM.user.js`. With the folder t
 `HuddleFM.tsx` is the Slick side: its settings, and the `Host` it hands `../core/mod.tsx`. Where Taut has something Slick doesn't, it does without Taut:
 
 - Slack's components Slick doesn't offer, like `Popover`, `Checkbox` and `TabsWithWindow`, it finds itself, by name and, for names other components share, by the markup they draw, as Taut does.
+- **Hide HuddleFM's tile** leaves the bot out of the grid, but Slack's views still count it when they size and page the tiles, so its place stays empty: Taut renders those views over state without the bot, and Slick has no way to.
 - The bot it remembers is kept in Slick's plugin storage, by the user you are in each workspace, as Slick's storage is shared by all of them.
 - **Start HuddleFM** finds the huddle you're in with Slack's `getActiveHuddleChannelId` selector, found by its name. Taut also learns selector names Slack gives its debugger, which a user plugin starts too late to; if a Slack release drops the name, **Start HuddleFM** says it couldn't invite HuddleFM, and the rest works as ever.

@@ -52,7 +52,7 @@ Slack's huddle session (from `HuddleConnectionManager.getInstance().getHuddlesSd
 These are Slack's internals, so any Slack release can change them:
 
 - `HuddleToolbarThreadButton`, to place the bar after it, and its `className` and `buttonToggledOnClassName` for the toolbar's look
-- `HuddleGridComponent`'s `participantsAndScreenshares`, for the tile
+- for the tile, the views that lay out the huddle's tiles (`HuddleCompactVideoPane`, `HuddleCompactAudioPane`, `HuddleGridContainer`, `GridPicker`, `MiniSideBySideLayoutComponent`, `MinimizedSelfLayoutComponent` and `HuddleVideoStrip`), rendered with Taut's `StateView` over state where the bot's peers in `peers.byId` have no `isConnected` and it's left out of each call's `pendingUsers` in `allCalls.byId` and each huddle's `lastInviteStatusByUser` in `huddlesCanvas.byHuddleId`, as Slack counts, sizes and pages tiles from only connected peers; and `HuddleGridComponent`'s `participantsAndScreenshares` in case a view is missed
 - `HuddleClosedCaptionEvent` and `HuddleTranscribeEvent`'s `memberId`, for the captions
 - `MessageBlocks`, for the player message
 - the `sendActions` thunk, for **Accounts and more in Slack** and linking Jellyfin, and `openModal`, for its confirmations, both run with the thunk contexts (`ThunkContextProvider`) above the bar, so they open in the huddle's window; `fetchAndUpsertMembersWithQuery`, to find HuddleFM; and `rooms.notifyMember`, for **Start HuddleFM**

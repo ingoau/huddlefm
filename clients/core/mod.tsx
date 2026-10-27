@@ -167,6 +167,15 @@ export type Host = {
   dispatchThunk<T>(name: string, ...args: unknown[]): Promise<T>;
   /** Slack's redux store, the main window's */
   getStore(): { dispatch: unknown; getState: unknown } | null | undefined;
+  /**
+   * renders `children` against Slack's state read through `patch` (keep
+   * `patch` stable); without it, a hidden tile still leaves its place in the
+   * huddle's layout
+   */
+  StateView?: React.ComponentType<{
+    patch: (state: HuddleState) => HuddleState;
+    children?: React.ReactNode;
+  }>;
   members: {
     selfId(): string | undefined;
     get(userId: string): Promise<SlackUser | undefined>;
@@ -323,8 +332,18 @@ export class HuddleFMMod {
       </>
     ));
 
-    // HuddleFM's tile, by the bot's user, in the grid every layout draws;
-    // its screen share in video mode is a share, so it stays
+    // HuddleFM's tile. Each view that lays out tiles counts, sizes and pages
+    // them from the huddle's peers itself, so it reads them with the bot
+    // never connected; its screen share in video mode is a share, so it stays
+    if (host.options.hideTile && host.StateView)
+      for (const name of TILE_VIEWS)
+        host.patchComponent<object>(name, (Original) => (props) => (
+          <this.WithoutTile>
+            <Original {...props} />
+          </this.WithoutTile>
+        ));
+
+    // and the grid they draw with, should a view Slack adds still list it
     if (host.options.hideTile)
       host.patchComponent<{
         participantsAndScreenshares?: {
@@ -391,6 +410,20 @@ export class HuddleFMMod {
   private botUserId() {
     return this.client.botUserId ?? (this.host.botUser.get() || undefined);
   }
+
+  /** Its children, reading Slack's state without the bot in the huddle. */
+  private readonly WithoutTile = ({
+    children,
+  }: {
+    children?: React.ReactNode;
+  }) => {
+    this.client.state.use();
+    const bot = this.botUserId();
+    const patch = withoutPeerShared(bot);
+    const { StateView } = this.host;
+    if (!StateView) return <>{children}</>;
+    return <StateView patch={patch}>{children}</StateView>;
+  };
 
   /** HuddleFM in a huddle bar, opening the popover with everything else. */
   private readonly Bar = ({
@@ -812,6 +845,122 @@ const modCss = `
   flex: 1 1 140px;
 }
 `;
+
+/**
+ * Slack's views that lay out the huddle's tiles, each from the peers through
+ * the same hook: the compact window's video and audio panes, and the full
+ * window's grid, strip and smaller layouts.
+ */
+const TILE_VIEWS = [
+  "HuddleCompactVideoPane",
+  "HuddleCompactAudioPane",
+  "HuddleGridContainer",
+  "GridPicker",
+  "MiniSideBySideLayoutComponent",
+  "MinimizedSelfLayoutComponent",
+  "HuddleVideoStrip",
+];
+
+type Peer = { userId?: string; isConnected?: boolean };
+type Call = { pendingUsers?: Record<string, unknown> };
+type Canvas = { lastInviteStatusByUser?: Record<string, unknown> };
+type HuddleState = {
+  peers?: { byId?: Record<string, Peer> };
+  allCalls?: { byId?: Record<string, Call> };
+  huddlesCanvas?: { byHuddleId?: Record<string, Canvas> };
+};
+
+/** `byId` with each entry `map` changes replaced, or itself if none was. */
+function mapById<T>(
+  byId: Record<string, T> | undefined,
+  map: (entry: T) => T,
+): Record<string, T> | undefined {
+  let out = byId;
+  for (const [id, entry] of Object.entries(byId ?? {})) {
+    const mapped = entry && map(entry);
+    if (mapped !== entry) out = { ...out, [id]: mapped };
+  }
+  return out;
+}
+
+/** `entry` with `userId` left out of its `key`, or itself if it isn't there. */
+function omitUser<T, K extends keyof T>(entry: T, key: K, userId: string): T {
+  const users = entry[key] as Record<string, unknown> | undefined;
+  if (!users || !(userId in users)) return entry;
+  const { [userId]: _, ...rest } = users;
+  return { ...entry, [key]: rest };
+}
+
+/** `byId` mapped by `map`, again only when Slack replaces it. */
+function memoById<T>(map: (entry: T) => T) {
+  let input: Record<string, T> | undefined;
+  let output: Record<string, T> | undefined;
+  return (byId: Record<string, T> | undefined) => {
+    if (byId !== input) {
+      input = byId;
+      output = mapById(byId, map);
+    }
+    return output;
+  };
+}
+
+/** `state` with `slice`'s `key` set to `value`, if it isn't already. */
+function withEntries<S, K extends keyof S>(
+  state: S,
+  slice: K,
+  key: string,
+  value: unknown,
+): S {
+  const current = state[slice] as Record<string, unknown> | undefined;
+  if (current?.[key] === value) return state;
+  return { ...state, [slice]: { ...current, [key]: value } };
+}
+
+/**
+ * A view of Slack's state where `userId` hasn't connected yet: Slack lists a
+ * peer once it has, and it's left out of the call's invites and the huddle's
+ * invite answers, which would list it as joining or declined. Screen shares
+ * come from every peer, so they stay.
+ */
+function withoutPeer(userId: string) {
+  const peers = memoById<Peer>((peer) =>
+    peer.userId === userId && peer.isConnected !== undefined
+      ? { ...peer, isConnected: undefined }
+      : peer,
+  );
+  const calls = memoById<Call>((call) =>
+    omitUser(call, "pendingUsers", userId),
+  );
+  const canvases = memoById<Canvas>((canvas) =>
+    omitUser(canvas, "lastInviteStatusByUser", userId),
+  );
+  return <S extends HuddleState>(state: S): S => {
+    if (!state) return state;
+    let out = withEntries(state, "peers", "byId", peers(state.peers?.byId));
+    out = withEntries(out, "allCalls", "byId", calls(state.allCalls?.byId));
+    return withEntries(
+      out,
+      "huddlesCanvas",
+      "byHuddleId",
+      canvases(state.huddlesCanvas?.byHuddleId),
+    );
+  };
+}
+
+const unchanged = <S,>(state: S) => state;
+let sharedPatch:
+  { userId: string; patch: (state: HuddleState) => HuddleState } | undefined;
+
+/**
+ * One patch for every view, so Slack's selectors, which remember only their
+ * last input, see the same peers from all of them.
+ */
+function withoutPeerShared(userId: string | undefined) {
+  if (!userId) return unchanged;
+  if (sharedPatch?.userId !== userId)
+    sharedPatch = { userId, patch: withoutPeer(userId) };
+  return sharedPatch.patch;
+}
 
 /** A button in a message's blocks, with the block it's in, nested or not. */
 function findButton(

@@ -55,6 +55,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
       waitForThunkCreator: (name) => api.redux.waitForThunkCreator(name),
       dispatchThunk: (name, ...args) => api.redux.dispatchThunk(name, ...args),
       getStore: () => api.redux.getStore(),
+      StateView: api.redux.StateView,
       members: {
         selfId: () => api.members.getCurrentMemberId(),
         get: (userId) => api.members.getMember(userId),
