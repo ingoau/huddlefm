@@ -216,7 +216,7 @@ What some answer with, besides `ok`:
 
 - `search`: `results: { label, reference }[]`, each a `reference` for `add`.
 - `add`: `message` when it says how it went, as "Added 3 of 10 songs". Something on Jellyfin that needs picking first, like a show or a film left part way, answers with `choices: { label, reference }[]` instead, each another `add`. `linkNeeded: true` on a failure means the user hasn't linked that Jellyfin server; they link it in Slack.
-- `suggestions`: `recommended` and `recent`, each a list of `{ id, title, artist?, artwork? }`; recommendations also have their `group`, like `Discover`. Both are empty in video mode, as in Slack, and for someone who can't add songs one at a time, as each adds one.
+- `suggestions`: `recommended` and `recent`, each a list of `{ id, title, artist?, artwork? }`; recommendations also have their `group`, `Your favourites` or `Discover`, with up to 20 of each, and up to 20 recent songs. Both are empty in video mode, as in Slack, and for someone who can't add songs one at a time, as each adds one.
 - `saves`: `saves: { id, name, owner, songs, savedAt, deletable }[]`, newest first. `owner` is `channel` or `user`, `savedAt` is in milliseconds, and `deletable` says whether `forget` would delete it.
 - `lyrics`: `lines: { start, end, text, instrumental? }[]`, in milliseconds, `synced`, whether they have times at all, the `trackId` they're for and the `source` they came from. No lyrics is an empty `lines`, as in video mode and for live streams. A `trackId` that isn't playing any more is a failure.
 - `settings_tab` makes the user's next opening of Settings in Slack, within 15 seconds, start on that tab. A client sends it before it opens Settings from the player's button.

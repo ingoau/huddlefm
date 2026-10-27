@@ -21,6 +21,8 @@ const SEARCH_DELAY_MS = 300;
 const NOTICE_MS = 5_000;
 /** Seconds a keyboard seek moves by. */
 const SEEK_STEP = 5;
+/** How long a volume that was taken shows before the bot's state must. */
+const VOLUME_WAIT_MS = 3_000;
 /** How wide a slider's thumb is, in pixels, as styles.ts draws it. */
 const THUMB = 12;
 
@@ -38,6 +40,32 @@ export function say(result: Result) {
   if (!result.ok) notice.set(result.message ?? "That didn't work.");
   else if (result.message) notice.set(result.message);
   return result.ok;
+}
+
+/**
+ * Shows the whole of a line of text marked `data-fulltext` that's cut
+ * short, as a song title too long for its room, as its tooltip while it's
+ * hovered, and none when it all fits.
+ */
+function useFullText(ref: React.RefObject<HTMLElement | null>) {
+  // again after every render, as what the ref holds can change: the bar's
+  // song only has it while there's room for the song
+  React.useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const over = (event: Event) => {
+      const element = (event.target as Element | null)?.closest?.(
+        "[data-fulltext]",
+      ) as HTMLElement | null;
+      if (!element || !root.contains(element)) return;
+      const cut =
+        element.scrollWidth > element.clientWidth ||
+        element.scrollHeight > element.clientHeight;
+      element.title = cut ? (element.textContent ?? "") : "";
+    };
+    root.addEventListener("mouseover", over);
+    return () => root.removeEventListener("mouseover", over);
+  });
 }
 
 function can(you: You | undefined, capability: string) {
@@ -222,6 +250,7 @@ export function PlayerBar(props: {
   const { Icon, Tooltip, IconButton } = platform.kit;
   const state = platform.client.state.use();
   const ref = React.useRef<HTMLDivElement>(null);
+  useFullText(ref);
   const track = state?.nowPlaying;
   const playing = state?.session.state === "playing";
   const pause = usePermission(platform, "pause");
@@ -263,7 +292,14 @@ export function PlayerBar(props: {
   return (
     <div
       ref={ref}
-      className={`${props.className ?? ""} huddlefm-bar`}
+      // on while its popover is open, as the toolbar's own buttons are
+      className={[
+        props.className,
+        props.expanded && props.onClassName,
+        "huddlefm-bar",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       // the toolbar's button look is square, and this holds the song too
       style={{ width: "auto" }}
     >
@@ -277,10 +313,10 @@ export function PlayerBar(props: {
       >
         <Artwork platform={platform} track={track} size={28} />
         <span className="huddlefm-bar__text">
-          <span className="huddlefm-bar__title">
+          <span className="huddlefm-bar__title" data-fulltext>
             {track ? track.title : "Nothing playing"}
           </span>
-          <span className="huddlefm-bar__artist">
+          <span className="huddlefm-bar__artist" data-fulltext>
             {track ? track.artist : "Add a song"}
           </span>
         </span>
@@ -314,17 +350,25 @@ export function PlayerBar(props: {
 /** Everything else, for the popover the bar opens. */
 export function Panel({ platform }: { platform: Platform }) {
   const { client, kit } = platform;
+  const root = React.useRef<HTMLDivElement>(null);
+  useFullText(root);
   const state = client.state.use();
   const you = client.you.use();
   const presence = client.presence.use();
   const problem = notice.use();
-  const [view, setView] = React.useState<"main" | "settings" | "end" | "load">(
-    "main",
-  );
+  const [view, setView] = React.useState<
+    "main" | "settings" | "end" | "load" | "discover"
+  >("main");
   const [tab, setTab] = React.useState<"queue" | "lyrics">("queue");
   // a new session, or none, starts from the song playing
   const sessionId = state?.session.id;
   React.useEffect(() => setView("main"), [sessionId]);
+  // what Add songs offers is for adding songs, in music mode
+  const discoverable = state?.session.mode === "music" && can(you, "add");
+  React.useEffect(() => {
+    if (!discoverable)
+      setView((shown) => (shown === "discover" ? "main" : shown));
+  }, [discoverable]);
   // lyrics are for a song playing in music mode
   const lyrical = Boolean(
     state?.nowPlaying &&
@@ -352,6 +396,8 @@ export function Panel({ platform }: { platform: Platform }) {
     <EndSession platform={platform} back={() => setView("settings")} />
   ) : view === "load" ? (
     <LoadSave platform={platform} back={() => setView("main")} />
+  ) : view === "discover" ? (
+    <Discover platform={platform} back={() => setView("main")} />
   ) : (
     <>
       <NowPlaying
@@ -360,7 +406,12 @@ export function Panel({ platform }: { platform: Platform }) {
         openSettings={() => setView("settings")}
         openSaves={() => setView("load")}
       />
-      <Search platform={platform} you={you} />
+      <Search
+        platform={platform}
+        you={you}
+        // as in Slack, video mode has no recommendations or recent songs
+        openDiscover={discoverable ? () => setView("discover") : undefined}
+      />
       {lyrical ? (
         <kit.Tabs
           label="Up next and lyrics"
@@ -388,7 +439,7 @@ export function Panel({ platform }: { platform: Platform }) {
   );
 
   return (
-    <div className="huddlefm-panel">
+    <div className="huddlefm-panel" ref={root}>
       {problem && <kit.Alert>{problem}</kit.Alert>}
       {body}
     </div>
@@ -512,10 +563,10 @@ function NowPlaying(props: {
       <div className="huddlefm-now__top">
         <Artwork platform={platform} track={track} size={64} />
         <div className="huddlefm-now__text">
-          <div className="huddlefm-now__title">
+          <div className="huddlefm-now__title" data-fulltext>
             {track ? track.title : "Nothing playing"}
           </div>
-          <div className="huddlefm-now__artist">
+          <div className="huddlefm-now__artist" data-fulltext>
             {track
               ? track.artist
               : add.allowed
@@ -674,13 +725,35 @@ function Slider(props: {
   const input = React.useRef<HTMLInputElement>(null);
   const commit = React.useRef(onCommit);
   commit.current = onCommit;
+  // A drag that ends off the slider may never say it changed, so its end is
+  // heard from the window too. Each drag is counted, and commits once,
+  // whether its change or its release comes first.
+  const drag = React.useRef({ count: 0, active: false, committed: 0 });
+  const fire = React.useCallback(() => {
+    const current = drag.current;
+    if (current.count && current.committed === current.count) return;
+    current.committed = current.count;
+    commit.current();
+  }, []);
   React.useEffect(() => {
     const element = input.current;
-    if (!element) return;
-    const changed = () => commit.current();
+    const win = element?.ownerDocument.defaultView;
+    if (!element || !win) return;
+    const changed = () => fire();
+    const released = () => {
+      if (!drag.current.active) return;
+      drag.current.active = false;
+      fire();
+    };
     element.addEventListener("change", changed);
-    return () => element.removeEventListener("change", changed);
-  }, []);
+    win.addEventListener("pointerup", released, true);
+    win.addEventListener("pointercancel", released, true);
+    return () => {
+      element.removeEventListener("change", changed);
+      win.removeEventListener("pointerup", released, true);
+      win.removeEventListener("pointercancel", released, true);
+    };
+  }, [fire]);
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     const by = steps[event.key];
     if (!by) return;
@@ -689,6 +762,26 @@ function Slider(props: {
   };
   // the point under the pointer, as a share of the way along
   const [hover, setHover] = React.useState<number | undefined>();
+  // The slider doesn't always hear the pointer leave, as after a drag that
+  // ends off it, so its window is watched while it shows the time.
+  const hovering = hover !== undefined;
+  React.useEffect(() => {
+    const element = input.current;
+    const win = element?.ownerDocument.defaultView;
+    if (!hovering || !element || !win) return;
+    const away = (event: Event) => {
+      if (event.type !== "pointermove" || event.target !== element)
+        setHover(undefined);
+    };
+    win.addEventListener("pointermove", away, true);
+    win.addEventListener("blur", away);
+    element.ownerDocument.addEventListener("pointerleave", away);
+    return () => {
+      win.removeEventListener("pointermove", away, true);
+      win.removeEventListener("blur", away);
+      element.ownerDocument.removeEventListener("pointerleave", away);
+    };
+  }, [hovering]);
   const point = (event: React.PointerEvent<HTMLInputElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
     // the thumb's centre stops half its width from each end
@@ -713,6 +806,10 @@ function Slider(props: {
       onKeyDown={onKeyDown}
       onKeyUp={(event) => {
         if (steps[event.key]) onCommit();
+      }}
+      onPointerDown={() => {
+        drag.current.count++;
+        drag.current.active = true;
       }}
       onPointerMove={props.preview && !why ? point : undefined}
       onPointerLeave={() => setHover(undefined)}
@@ -745,14 +842,35 @@ function Slider(props: {
 
 function Volume({ platform, volume }: { platform: Platform; volume: number }) {
   const [held, setHeld] = React.useState<number | undefined>();
+  // where it was let go, shown until the bot's state says so too, rather
+  // than going back to the old volume meanwhile
+  const [sent, setSent] = React.useState<number | undefined>();
   const permission = usePermission(platform, "volume");
-  const value = held ?? volume;
+  // only the latest change's answer may put it away
+  const latest = React.useRef(0);
+  // the state has it, so it's no longer only sent
+  React.useEffect(() => {
+    if (volume === sent) setSent(undefined);
+  }, [volume, sent]);
+  const value = held ?? sent ?? volume;
   const commit = () => {
     if (held === undefined) return;
     const percent = held;
     setHeld(undefined);
-    if (percent !== volume)
-      platform.client.command({ type: "volume", percent }).then(say);
+    // against what's shown: dragged back to the old volume before the bot
+    // took the last change is a change too
+    if (percent === (sent ?? volume)) return;
+    const ticket = ++latest.current;
+    const settle = () => {
+      if (latest.current === ticket) setSent(undefined);
+    };
+    setSent(percent);
+    platform.client.command({ type: "volume", percent }).then((result) => {
+      // refused, it's the old volume again
+      if (!say(result)) return settle();
+      // taken, the state brings it, unless someone else's change comes first
+      setTimeout(settle, VOLUME_WAIT_MS);
+    });
   };
   return (
     <div className="huddlefm-volume">
@@ -783,12 +901,12 @@ type Suggestion = {
   group?: string;
 };
 
-/** How long suggestions stay once the search loses focus. */
-const BLUR_MS = 200;
-/** How long suggestions are kept before they're asked for again. */
-const SUGGESTIONS_MS = 60_000;
-
-function Search(props: { platform: Platform; you: You | undefined }) {
+function Search(props: {
+  platform: Platform;
+  you: You | undefined;
+  /** opens what Add songs offers before anything's typed, when it can */
+  openDiscover?: () => void;
+}) {
   const { platform, you } = props;
   const { client, kit } = platform;
   const allowed = can(you, "add") || can(you, "add-bulk");
@@ -801,17 +919,9 @@ function Search(props: { platform: Platform; you: You | undefined }) {
   const [searching, setSearching] = React.useState(false);
   // what the results shown were searched for
   const [resultsFor, setResultsFor] = React.useState("");
-  const [focused, setFocused] = React.useState(false);
-  const [suggestions, setSuggestions] = React.useState<{
-    recommended: Suggestion[];
-    recent: Suggestion[];
-    at: number;
-  }>();
   // a pasted link to a Jellyfin server they haven't linked
   const [linkNeeded, setLinkNeeded] = React.useState(false);
   const latest = React.useRef(0);
-  const blurTimer = React.useRef<ReturnType<typeof setTimeout>>(undefined);
-  React.useEffect(() => () => clearTimeout(blurTimer.current), []);
   const jellyfin = source === "jellyfin" && you?.jellyfin === true;
 
   React.useEffect(() => {
@@ -846,35 +956,10 @@ function Search(props: { platform: Platform; you: You | undefined }) {
     return () => clearTimeout(timer);
   }, [query, client, jellyfin]);
 
-  // what Add songs offers before anything is typed, once it's looked at
-  const wantSuggestions = allowed && focused && !query.trim() && !jellyfin;
-  React.useEffect(() => {
-    if (!wantSuggestions) return;
-    if (suggestions && Date.now() - suggestions.at < SUGGESTIONS_MS) return;
-    let current = true;
-    client.command({ type: "suggestions" }).then((result) => {
-      if (!current || !result.ok) return;
-      setSuggestions({
-        recommended: Array.isArray(result.recommended)
-          ? (result.recommended as Suggestion[])
-          : [],
-        recent: Array.isArray(result.recent)
-          ? (result.recent as Suggestion[])
-          : [],
-        at: Date.now(),
-      });
-    });
-    return () => {
-      current = false;
-    };
-  }, [wantSuggestions, suggestions, client]);
-
   const done = () => {
     setQuery("");
     setResults([]);
     setChoices(undefined);
-    // what's suggested changes with what's added
-    setSuggestions(undefined);
   };
   const add = (command: Record<string, unknown>) =>
     client.command({ type: "add", ...command }).then((result) => {
@@ -894,51 +979,36 @@ function Search(props: { platform: Platform; you: You | undefined }) {
       </section>
     ) : null;
   const shown = choices ?? results;
-  const suggested =
-    wantSuggestions && suggestions
-      ? [
-          ...groupBy(suggestions.recommended, "Recommended for you"),
-          ...(suggestions.recent.length
-            ? [{ title: "Recent", items: suggestions.recent, kind: "recent" }]
-            : []),
-        ]
-      : [];
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: it only notes whether focus is in the search, which its suggestions follow
-    <section
-      className="huddlefm-search"
-      onFocus={() => {
-        clearTimeout(blurTimer.current);
-        setFocused(true);
-      }}
-      onBlur={(event) => {
-        // still in it, as on a suggestion
-        if (event.currentTarget.contains(event.relatedTarget as Node | null))
-          return;
-        // a moment later, so the click that took focus lands where it was
-        // aimed before the suggestions fold away and the panel moves
-        blurTimer.current = setTimeout(() => setFocused(false), BLUR_MS);
-      }}
-    >
-      <kit.TextInput
-        value={query}
-        onChange={setQuery}
-        placeholder={
-          jellyfin ? "Search your Jellyfin" : "Search, or paste a link"
-        }
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && (query || choices)) {
-            event.stopPropagation();
-            done();
-            return;
+    <section className="huddlefm-search">
+      <div className="huddlefm-search__row">
+        <kit.TextInput
+          value={query}
+          onChange={setQuery}
+          placeholder={
+            jellyfin ? "Search your Jellyfin" : "Search, or paste a link"
           }
-          if (event.key !== "Enter") return;
-          const text = query.trim();
-          if (isLink(text)) add({ reference: text });
-          else if (shown[0] && (choices || resultsFor === text))
-            add({ reference: shown[0].reference });
-        }}
-      />
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && (query || choices)) {
+              event.stopPropagation();
+              done();
+              return;
+            }
+            if (event.key !== "Enter") return;
+            const text = query.trim();
+            if (isLink(text)) add({ reference: text });
+            else if (shown[0] && (choices || resultsFor === text))
+              add({ reference: shown[0].reference });
+          }}
+        />
+        {props.openDiscover && (
+          <kit.IconButton
+            label="Recommendations and recent songs"
+            icon={SPARKLE_ICON}
+            onClick={props.openDiscover}
+          />
+        )}
+      </div>
       {you?.jellyfin && (
         <div className="huddlefm-sources">
           {(
@@ -984,46 +1054,12 @@ function Search(props: { platform: Platform; you: You | undefined }) {
                 className="c-button-unstyled huddlefm-result"
                 onClick={() => add({ reference: result.reference })}
               >
-                <span className="huddlefm-result__label">{result.label}</span>
+                <span className="huddlefm-result__label" data-fulltext>
+                  {result.label}
+                </span>
                 <kit.Icon name="plus" size={16} />
               </button>
             </li>
-          ))}
-        </ul>
-      )}
-      {suggested.length > 0 && (
-        <ul className="huddlefm-results huddlefm-suggestions">
-          {suggested.map((group) => (
-            <React.Fragment key={group.title}>
-              <li className="huddlefm-results__heading">{group.title}</li>
-              {group.items.map((item) => (
-                <li key={`${group.kind}:${item.id}`}>
-                  <button
-                    type="button"
-                    className="c-button-unstyled huddlefm-result"
-                    onClick={() => {
-                      add({ [group.kind]: item.id });
-                      // the button goes with the list, taking focus with it
-                      // and no blur, so the list is put away here
-                      setFocused(false);
-                    }}
-                  >
-                    <Artwork platform={platform} track={item} size={32} />
-                    <span className="huddlefm-result__label">
-                      <span className="huddlefm-result__title">
-                        {item.title}
-                      </span>
-                      {item.artist && (
-                        <span className="huddlefm-result__artist">
-                          {item.artist}
-                        </span>
-                      )}
-                    </span>
-                    <kit.Icon name="plus" size={16} />
-                  </button>
-                </li>
-              ))}
-            </React.Fragment>
           ))}
         </ul>
       )}
@@ -1031,19 +1067,130 @@ function Search(props: { platform: Platform; you: You | undefined }) {
   );
 }
 
-/** Recommendations under their groups' names, in the order they came. */
-function groupBy(items: Suggestion[], fallback: string) {
-  const groups: { title: string; items: Suggestion[]; kind: string }[] = [];
-  for (const item of items) {
-    const title = item.group ?? fallback;
-    let group = groups.find((existing) => existing.title === title);
-    if (!group) {
-      group = { title, items: [], kind: "recommend" };
-      groups.push(group);
-    }
-    group.items.push(item);
-  }
-  return groups;
+/** Slack's sparkle, as its own features that suggest things wear. */
+const SPARKLE_ICON = "sparkles";
+
+type DiscoverTab = "recommended" | "recent" | "discover";
+
+/**
+ * What Add songs offers before anything's typed, on a page of its own:
+ * songs picked for the user, the ones they added lately, and new ones to
+ * try. Adding one keeps the page, for adding more.
+ */
+function Discover(props: { platform: Platform; back: () => void }) {
+  const { platform } = props;
+  const { client, kit } = platform;
+  const [tab, setTab] = React.useState<DiscoverTab>("recommended");
+  const [lists, setLists] = React.useState<
+    Record<DiscoverTab, Suggestion[]> | undefined
+  >();
+  // what's been added from here, and what's on its way, by tab and id
+  const [added, setAdded] = React.useState<Set<string>>(new Set());
+  const [adding, setAdding] = React.useState<Set<string>>(new Set());
+  React.useEffect(() => {
+    let current = true;
+    client.command({ type: "suggestions" }).then((result) => {
+      if (!current) return;
+      if (!say(result)) return props.back();
+      const recommended = Array.isArray(result.recommended)
+        ? (result.recommended as Suggestion[])
+        : [];
+      setLists({
+        recommended: recommended.filter((item) => item.group !== "Discover"),
+        recent: Array.isArray(result.recent)
+          ? (result.recent as Suggestion[])
+          : [],
+        discover: recommended.filter((item) => item.group === "Discover"),
+      });
+    });
+    return () => {
+      current = false;
+    };
+  }, [client]);
+
+  const add = async (kind: DiscoverTab, item: Suggestion) => {
+    const key = `${kind}:${item.id}`;
+    if (adding.has(key) || added.has(key)) return;
+    setAdding((keys) => new Set(keys).add(key));
+    const result = await client.command({
+      type: "add",
+      [kind === "recent" ? "recent" : "recommend"]: item.id,
+    });
+    setAdding((keys) => {
+      const next = new Set(keys);
+      next.delete(key);
+      return next;
+    });
+    if (say(result)) setAdded((keys) => new Set(keys).add(key));
+  };
+
+  const empty: Record<DiscoverTab, string> = {
+    recommended:
+      "Nothing to recommend yet. Add some songs, and HuddleFM learns what you like.",
+    recent: "Songs you add show up here.",
+    discover:
+      "Nothing new to try yet. Add some songs, and HuddleFM finds more.",
+  };
+  const list = (kind: DiscoverTab) => {
+    if (!lists) return <kit.Hint>Finding songs…</kit.Hint>;
+    const items = lists[kind];
+    if (!items.length)
+      return <p className="huddlefm-discover__empty">{empty[kind]}</p>;
+    return (
+      <ul className="huddlefm-discover__list">
+        {items.map((item) => {
+          const key = `${kind}:${item.id}`;
+          const done = added.has(key);
+          return (
+            <li key={key}>
+              <button
+                type="button"
+                className="c-button-unstyled huddlefm-result"
+                disabled={done || adding.has(key)}
+                aria-label={`${done ? "Added" : "Add"} ${item.title}${item.artist ? ` by ${item.artist}` : ""}`}
+                onClick={() => add(kind, item)}
+              >
+                <Artwork platform={platform} track={item} size={36} />
+                <span className="huddlefm-result__label">
+                  <span className="huddlefm-result__title" data-fulltext>
+                    {item.title}
+                  </span>
+                  {item.artist && (
+                    <span className="huddlefm-result__artist" data-fulltext>
+                      {item.artist}
+                    </span>
+                  )}
+                </span>
+                <kit.Icon name={done ? "check" : "plus"} size={16} />
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  };
+  return (
+    <section className="huddlefm-discover">
+      <header className="huddlefm-settings__header">
+        <kit.IconButton label="Back" icon="arrow-left" onClick={props.back} />
+        <span>Find something to play</span>
+      </header>
+      <kit.Tabs
+        label="Recommendations and recent songs"
+        current={tab}
+        onChange={(id) => setTab(id as DiscoverTab)}
+        tabs={[
+          {
+            id: "recommended",
+            title: "Recommended",
+            content: list("recommended"),
+          },
+          { id: "recent", title: "Recently added", content: list("recent") },
+          { id: "discover", title: "Discover", content: list("discover") },
+        ]}
+      />
+    </section>
+  );
 }
 
 /** Opens HuddleFM's settings in Slack, saying so if it can't. */
@@ -1267,8 +1414,10 @@ function Queue(props: {
             >
               <Artwork platform={platform} track={track} size={36} />
               <div className="huddlefm-track__text">
-                <div className="huddlefm-track__title">{track.title}</div>
-                <div className="huddlefm-track__meta">
+                <div className="huddlefm-track__title" data-fulltext>
+                  {track.title}
+                </div>
+                <div className="huddlefm-track__meta" data-fulltext>
                   {track.artist}
                   {track.artist ? " · " : ""}
                   <AddedBy platform={platform} track={track} />
@@ -1597,7 +1746,9 @@ function LoadSave(props: { platform: Platform; back: () => void }) {
                         load(item);
                       }}
                     >
-                      <span className="huddlefm-save__name">{item.name}</span>
+                      <span className="huddlefm-save__name" data-fulltext>
+                        {item.name}
+                      </span>
                       <span className="huddlefm-save__meta">
                         {item.songs === 1 ? "1 song" : `${item.songs} songs`}
                         {" · "}
