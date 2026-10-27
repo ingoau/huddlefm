@@ -59,6 +59,10 @@ type Syllable = {
   width: number;
   word: number;
   glyphs?: Glyph[];
+  /** Sung from right to left. */
+  rtl?: boolean;
+  /** For a shaped word: the part of it this syllable lights, left to right. */
+  clip?: [number, number];
 };
 type Word = {
   start: number;
@@ -66,12 +70,20 @@ type Word = {
   first: number;
   last: number;
   emphasis?: { amount: number; glow: number; duration: number };
+  /**
+   * Drawn whole and clipped to each syllable, rather than syllable by
+   * syllable: right-to-left text, whose letters join across syllables and
+   * whose syllables run right to left.
+   */
+  shaped?: { text: string; x: number };
 };
 type TextBlock = {
   syllables: Syllable[];
   words: Word[];
   rows: number;
   timed: boolean;
+  /** Read right to left, like Arabic and Hebrew. */
+  rtl: boolean;
   size: number;
   weight: number;
   tone: Tone;
@@ -147,6 +159,59 @@ const white = (alpha: number) =>
   `rgba(255, 255, 255, ${clamp(alpha).toFixed(3)})`;
 
 const cjk = /[぀-ヿ㐀-鿿가-힯豈-﫿]/;
+
+const rtlScript =
+  /[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Adlam}\p{Script=Samaritan}\p{Script=Mandaic}]/u;
+
+/** Whether text reads right to left: its first letter is from such a script. */
+const isRtl = (text: string) => rtlScript.test(text.match(/\p{L}/u)?.[0] ?? "");
+
+type Direction = "rtl" | "ltr" | "number" | undefined;
+/**
+ * A word's direction, or whether it is a number or only punctuation. Its
+ * first letter decides, and Arabic-Indic digits count as Arabic.
+ */
+function directionOf(word: string): Direction {
+  const strong = word.match(/\p{L}|[\u0660-\u0669\u06f0-\u06f9]/u)?.[0];
+  if (strong) return rtlScript.test(strong) ? "rtl" : "ltr";
+  return /\p{N}/u.test(word) ? "number" : undefined;
+}
+
+/**
+ * The order a row's words appear in from left to right: the Unicode bidi
+ * algorithm at the level of words. A run of words against the line's
+ * direction keeps its own order, numbers go with the words before them, and
+ * punctuation between two words of one direction takes theirs.
+ */
+function visualOrder(directions: Direction[], rtl: boolean): number[] {
+  const base = rtl ? "rtl" : "ltr";
+  const strong = (from: number, step: number) => {
+    for (
+      let index = from;
+      index >= 0 && index < directions.length;
+      index += step
+    ) {
+      const value = directions[index];
+      if (value === "rtl" || value === "ltr") return value;
+    }
+  };
+  const resolved = directions.map((value, index) => {
+    if (value === "rtl" || value === "ltr") return value;
+    const before = strong(index - 1, -1);
+    if (value === "number") return before ?? base;
+    return before && before === strong(index + 1, 1) ? before : base;
+  });
+  const order: number[] = [];
+  let run: number[] = [];
+  for (const [index, value] of resolved.entries()) {
+    if (value === base) {
+      order.push(...run.reverse(), index);
+      run = [];
+    } else run.push(index);
+  }
+  order.push(...run.reverse());
+  return rtl ? order.reverse() : order;
+}
 
 /** AMLL's rule for words held long enough to glow. */
 function shouldEmphasize(text: string, duration: number) {
@@ -269,6 +334,18 @@ export class LyricsView {
       ...(item.kind === "line"
         ? {
             text: item.main.syllables.map((value) => value.text).join(""),
+            /** The main words as they sit from left to right. */
+            visual: item.main.words
+              .map((word) => ({
+                x: item.main.syllables[word.first]!.x,
+                text: item.main.syllables
+                  .slice(word.first, word.last + 1)
+                  .map((value) => value.text)
+                  .join("")
+                  .trim(),
+              }))
+              .sort((a, b) => a.x - b.x)
+              .map((word) => word.text),
             background: item.background?.syllables
               .map((value) => value.text)
               .join(""),
@@ -601,13 +678,6 @@ export class LyricsView {
     duet: boolean,
     measure: SKRSContext2D,
   ): LineItem | undefined {
-    const align = this.alignOf(line);
-    const inset = duet ? this.width * duetInset : 0;
-    const box = {
-      left: align === "right" ? inset : 0,
-      width: this.width - inset,
-      align,
-    };
     const parts = (line.parts ?? []).filter((part) => part.words.length > 0);
     const timed = parts.some((part) => part.durationMs > 0);
     const lineEnd = line.startTimeMs + line.durationMs;
@@ -637,6 +707,17 @@ export class LyricsView {
     trimPieces(main);
     trimPieces(background, true);
     if (!main.length) return;
+
+    // Right-to-left lines start on the right, and other voices go left.
+    let align = this.alignOf(line);
+    if (isRtl(main.map((value) => value.text).join("")))
+      align = align === "right" ? "left" : "right";
+    const inset = duet ? this.width * duetInset : 0;
+    const box = {
+      left: align === "right" ? inset : 0,
+      width: this.width - inset,
+      align,
+    };
 
     const mainBlock = layoutBlock(measure, main, {
       ...box,
@@ -842,12 +923,18 @@ export class LyricsView {
     if (!block.timed) {
       // No syllable timing: the whole line lights at once, never swept.
       context.fillStyle = white(sung);
-      for (const syllable of block.syllables)
-        context.fillText(
-          syllable.text,
-          syllable.x,
-          syllable.row * block.rowHeight + size * 0.95,
-        );
+      for (const word of block.words) {
+        const baseline =
+          block.syllables[word.first]!.row * block.rowHeight + size * 0.95;
+        if (word.shaped)
+          context.fillText(word.shaped.text, word.shaped.x, baseline);
+        else
+          for (const syllable of block.syllables.slice(
+            word.first,
+            word.last + 1,
+          ))
+            context.fillText(syllable.text, syllable.x, baseline);
+      }
       return;
     }
     const fade = size * motion.fadeWidth;
@@ -868,15 +955,45 @@ export class LyricsView {
         if (progress <= 0) target.fillStyle = white(unsung);
         else if (progress >= 1) target.fillStyle = white(sung);
         else {
-          // The soft leading edge sweeps across the syllable as it is sung.
-          const edge = syllable.x - fade + progress * (syllable.width + fade);
-          const gradient = target.createLinearGradient(edge, 0, edge + fade, 0);
+          // The soft leading edge sweeps across the syllable as it is sung,
+          // from its right when it reads right to left.
+          const travel = progress * (syllable.width + fade);
+          const edge = syllable.rtl
+            ? syllable.x + syllable.width + fade - travel
+            : syllable.x - fade + travel;
+          const gradient = target.createLinearGradient(
+            edge,
+            0,
+            syllable.rtl ? edge - fade : edge + fade,
+            0,
+          );
           gradient.addColorStop(0, white(sung));
           gradient.addColorStop(1, white(unsung));
           target.fillStyle = gradient;
         }
       };
       paint(context);
+      // A shaped word is drawn whole, and each syllable shows its own part.
+      const shaped = word.shaped;
+      const [clipLeft, clipRight] = syllable.clip ?? [
+        syllable.x - 4,
+        syllable.x + syllable.width + 4,
+      ];
+      const fill = (target: SKRSContext2D) => {
+        if (!shaped)
+          return target.fillText(syllable.text, syllable.x, baseline);
+        target.save();
+        target.beginPath();
+        target.rect(
+          clipLeft,
+          baseline - size * 1.2,
+          clipRight - clipLeft,
+          size * 1.6,
+        );
+        target.clip();
+        target.fillText(shaped.text, shaped.x, baseline);
+        target.restore();
+      };
       const emphasis = word.emphasis;
       if (!emphasis || !syllable.glyphs || bright <= 0) {
         const rise =
@@ -885,19 +1002,19 @@ export class LyricsView {
           easeOut(
             clamp((time - word.start) / Math.max(1_000, word.end - word.start)),
           );
-        if (rise < 0.01) context.fillText(syllable.text, syllable.x, baseline);
+        if (rise < 0.01) fill(context);
         else
           this.drawSprite(
             context,
             {
-              x: syllable.x - 4,
+              x: clipLeft,
               y: baseline - size * 1.2,
-              width: syllable.width + 8,
+              width: clipRight - clipLeft,
               height: size * 1.6,
             },
             (target) => {
               paint(target);
-              target.fillText(syllable.text, syllable.x, baseline);
+              fill(target);
             },
             { dy: -rise },
           );
@@ -1208,6 +1325,62 @@ type BlockBox = {
 };
 
 /**
+ * Places a shaped word drawn from `x` and which part of it each syllable
+ * lights. Its spaces sit at the line's end of it: the end of a
+ * right-to-left line is on the left. Its syllables run from its own start,
+ * measured with a joiner after them so a letter cut off from the next one
+ * keeps its joined width.
+ */
+function placeShaped(
+  context: SKRSContext2D,
+  word: Word,
+  syllables: Syllable[],
+  x: number,
+  rtlLine: boolean,
+  direction: Direction,
+) {
+  const shaped = word.shaped!;
+  const { text } = shaped;
+  const width = context.measureText(text).width;
+  const leading = width - context.measureText(text.trimStart()).width;
+  const trailing = width - context.measureText(text.trimEnd()).width;
+  const left = x + (rtlLine ? trailing : leading);
+  const right = x + width - (rtlLine ? leading : trailing);
+  // Drawn without its spaces, which would land on the wrong side of it.
+  shaped.text = text.trim();
+  shaped.x = left;
+  const rtl = direction === "rtl" || (direction !== "ltr" && rtlLine);
+  const joiner = rtl ? "\u200d" : "";
+  const own = syllables.slice(word.first, word.last + 1);
+  const outside = context.measureText("M").width;
+  let prefix = "";
+  let from = 0;
+  for (const [index, syllable] of own.entries()) {
+    prefix += syllable.text;
+    const to =
+      index === own.length - 1
+        ? right - left
+        : Math.min(
+            right - left,
+            context.measureText(prefix.trim() + joiner).width,
+          );
+    const start = rtl ? right - to : left + from;
+    const end = rtl ? right - from : left + to;
+    syllable.x = start;
+    syllable.width = Math.max(0, end - start);
+    syllable.rtl = rtl;
+    // The word's outer edges reach further, for marks and swashes.
+    const first = index === 0;
+    const last = index === own.length - 1;
+    syllable.clip = [
+      (rtl ? last : first) ? start - outside / 2 : start,
+      (rtl ? first : last) ? end + outside / 2 : end,
+    ];
+    from = to;
+  }
+}
+
+/**
  * Splits pieces into words at whitespace, wraps them into balanced rows (no
  * lone word left on the last one), and places every syllable.
  */
@@ -1218,6 +1391,7 @@ function layoutBlock(
 ): TextBlock {
   const { weight = 700, tone = lyricTone, emphasis = true } = box;
   context.font = `${weight} ${box.size}px ${fonts()}`;
+  const rtl = isRtl(pieces.map((piece) => piece.text).join(""));
   const syllables: Syllable[] = [];
   const words: Word[] = [];
   let word: Word | undefined;
@@ -1244,13 +1418,22 @@ function layoutBlock(
     });
     if (/\s$/.test(piece.text)) word = undefined;
   }
-  // Glyph positions for the words that will glow.
-  for (const [index, value] of words.entries()) {
-    const text = syllables
+  const texts = words.map((value) =>
+    syllables
       .slice(value.first, value.last + 1)
       .map((syllable) => syllable.text)
-      .join("");
+      .join(""),
+  );
+  const directions = texts.map(directionOf);
+  for (const [index, value] of words.entries())
+    if (rtl || directions[index] === "rtl")
+      value.shaped = { text: texts[index]!, x: 0 };
+  // Glyph positions for the words that will glow. Shaped words do not:
+  // their letters join, so they cannot swell one by one.
+  for (const [index, value] of words.entries()) {
+    const text = texts[index]!;
     if (
+      value.shaped ||
       !box.timed ||
       !emphasis ||
       !shouldEmphasize(text, value.end - value.start)
@@ -1272,10 +1455,12 @@ function layoutBlock(
   }
 
   // Measured once: the balanced wrap below tries a dozen widths.
-  const widths = words.map((value) =>
-    syllables
-      .slice(value.first, value.last + 1)
-      .reduce((sum, syllable) => sum + syllable.width, 0),
+  const widths = words.map((value, index) =>
+    value.shaped
+      ? context.measureText(texts[index]!).width
+      : syllables
+          .slice(value.first, value.last + 1)
+          .reduce((sum, syllable) => sum + syllable.width, 0),
   );
   const trailings = words.map((value) => {
     const last = syllables[value.last]!;
@@ -1307,17 +1492,34 @@ function layoutBlock(
     rows = wrap(high);
   }
   for (const [rowIndex, row] of rows.entries()) {
-    const last = row.at(-1);
-    const rowWidth =
-      row.reduce((sum, index) => sum + widths[index]!, 0) -
-      (last === undefined ? 0 : trailings[last]!);
-    let x = box.left + (box.align === "right" ? box.width - rowWidth : 0);
-    for (const index of row) {
+    const order = visualOrder(
+      row.map((index) => directions[index]),
+      rtl,
+    ).map((value) => row[value]!);
+    // The space after the word at the line's end, which is the leftmost one
+    // when it reads right to left, falls outside the line.
+    const end = rtl ? order[0] : order.at(-1);
+    const trailing = end === undefined ? 0 : trailings[end]!;
+    const rowWidth = row.reduce((sum, index) => sum + widths[index]!, 0);
+    let x =
+      box.left +
+      (box.align === "right" ? box.width - rowWidth + trailing : 0) -
+      (rtl ? trailing : 0);
+    for (const index of order) {
       const value = words[index]!;
+      const first = x;
+      x += widths[index]!;
+      if (value.shaped) {
+        placeShaped(context, value, syllables, first, rtl, directions[index]);
+        for (const syllable of syllables.slice(value.first, value.last + 1))
+          syllable.row = rowIndex;
+        continue;
+      }
+      let left = first;
       for (const syllable of syllables.slice(value.first, value.last + 1)) {
-        syllable.x = x;
+        syllable.x = left;
         syllable.row = rowIndex;
-        x += syllable.width;
+        left += syllable.width;
       }
     }
   }
@@ -1327,6 +1529,7 @@ function layoutBlock(
     words,
     rows: rows.length,
     timed: box.timed,
+    rtl,
     size: box.size,
     weight,
     tone,

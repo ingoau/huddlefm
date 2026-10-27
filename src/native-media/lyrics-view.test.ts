@@ -91,6 +91,38 @@ describe("lyrics view", () => {
     });
   });
 
+  test("lays right-to-left lines out from the right", () => {
+    const items = new LyricsView(
+      [
+        line(1_000, 2_000, [
+          part("قل", 1_000, 400),
+          part("بي ", 1_400, 400),
+          part("يحبك", 1_800, 1_200),
+        ]),
+        line(3_000, 2_000, undefined, { words: "أنا habibi you ٢٠٢٦" }),
+        line(5_000, 2_000, [
+          part("Hello ", 5_000, 1_000),
+          part("world", 6_000, 1_000),
+        ]),
+      ],
+      600,
+    ).describe();
+    // Syllables of a word stay one word, and the first word is rightmost.
+    expect(items[0]).toMatchObject({
+      align: "right",
+      visual: ["يحبك", "قلبي"],
+    });
+    // A Latin run keeps its own order, and digits sit after it.
+    expect(items[1]).toMatchObject({
+      align: "right",
+      visual: ["٢٠٢٦", "habibi", "you", "أنا"],
+    });
+    expect(items[2]).toMatchObject({
+      align: "left",
+      visual: ["Hello", "world"],
+    });
+  });
+
   test("romanizes only lines in other scripts", () => {
     const view = new LyricsView(
       [
