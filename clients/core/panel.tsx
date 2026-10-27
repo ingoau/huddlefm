@@ -21,8 +21,8 @@ const SEARCH_DELAY_MS = 300;
 const NOTICE_MS = 5_000;
 /** Seconds a keyboard seek moves by. */
 const SEEK_STEP = 5;
-/** Within this long, a second end of the same drag is the same commit. */
-const COMMIT_GAP_MS = 100;
+/** How long a volume that was taken shows before the bot's state must. */
+const VOLUME_WAIT_MS = 3_000;
 /** How wide a slider's thumb is, in pixels, as styles.ts draws it. */
 const THUMB = 12;
 
@@ -696,13 +696,14 @@ function Slider(props: {
   const input = React.useRef<HTMLInputElement>(null);
   const commit = React.useRef(onCommit);
   commit.current = onCommit;
-  // a drag that ends off the slider may never say it changed, so its end is
-  // heard from the window too; each drag commits once, whichever comes first
-  const dragging = React.useRef(false);
-  const lastCommit = React.useRef(0);
+  // A drag that ends off the slider may never say it changed, so its end is
+  // heard from the window too. Each drag is counted, and commits once,
+  // whether its change or its release comes first.
+  const drag = React.useRef({ count: 0, active: false, committed: 0 });
   const fire = React.useCallback(() => {
-    if (performance.now() - lastCommit.current < COMMIT_GAP_MS) return;
-    lastCommit.current = performance.now();
+    const current = drag.current;
+    if (current.count && current.committed === current.count) return;
+    current.committed = current.count;
     commit.current();
   }, []);
   React.useEffect(() => {
@@ -711,8 +712,8 @@ function Slider(props: {
     if (!element || !win) return;
     const changed = () => fire();
     const released = () => {
-      if (!dragging.current) return;
-      dragging.current = false;
+      if (!drag.current.active) return;
+      drag.current.active = false;
       fire();
     };
     element.addEventListener("change", changed);
@@ -778,7 +779,8 @@ function Slider(props: {
         if (steps[event.key]) onCommit();
       }}
       onPointerDown={() => {
-        dragging.current = true;
+        drag.current.count++;
+        drag.current.active = true;
       }}
       onPointerMove={props.preview && !why ? point : undefined}
       onPointerLeave={() => setHover(undefined)}
@@ -815,7 +817,12 @@ function Volume({ platform, volume }: { platform: Platform; volume: number }) {
   // than going back to the old volume meanwhile
   const [sent, setSent] = React.useState<number | undefined>();
   const permission = usePermission(platform, "volume");
-  React.useEffect(() => setSent(undefined), [volume]);
+  // only the latest change's answer may put it away
+  const latest = React.useRef(0);
+  // the state has it, so it's no longer only sent
+  React.useEffect(() => {
+    if (volume === sent) setSent(undefined);
+  }, [volume, sent]);
   const value = held ?? sent ?? volume;
   const commit = () => {
     if (held === undefined) return;
@@ -824,10 +831,16 @@ function Volume({ platform, volume }: { platform: Platform; volume: number }) {
     // against what's shown: dragged back to the old volume before the bot
     // took the last change is a change too
     if (percent === (sent ?? volume)) return;
+    const ticket = ++latest.current;
+    const settle = () => {
+      if (latest.current === ticket) setSent(undefined);
+    };
     setSent(percent);
     platform.client.command({ type: "volume", percent }).then((result) => {
-      // refused, it's the old volume again; taken, the state brings it
-      if (!say(result)) setSent(undefined);
+      // refused, it's the old volume again
+      if (!say(result)) return settle();
+      // taken, the state brings it, unless someone else's change comes first
+      setTimeout(settle, VOLUME_WAIT_MS);
     });
   };
   return (
