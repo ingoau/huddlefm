@@ -482,8 +482,36 @@ export const panelCss = `
   font-weight: 700;
   color: var(--dt_color-content-ter, #5e5d60);
 }
-.huddlefm-suggestions {
-  max-height: 300px;
+.huddlefm-search__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.huddlefm-search__row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.huddlefm-discover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.huddlefm-discover__list {
+  margin: 8px -8px 0;
+  padding: 0;
+  list-style: none;
+}
+.huddlefm-discover .huddlefm-result {
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.huddlefm-discover__empty {
+  margin: 12px 0 0;
+  color: var(--dt_color-content-sec, #454447);
+}
+.huddlefm-result:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 .huddlefm-result__title,
 .huddlefm-result__artist {

@@ -4,10 +4,10 @@ A [Taut](https://github.com/jeremy46231/taut) plugin that puts HuddleFM's contro
 
 ## What it does
 
-- **In the huddle's toolbar**, after the thread button: the song playing, with its artwork, play/pause and next. When the window is too narrow for that, a music note stands in for it, and narrower still, where Slack leaves out screen sharing, HuddleFM goes too. The toolbar is in the huddle's own window, or at the bottom of Slack's main window while that window is closed.
+- **In the huddle's toolbar**, after the thread button: the song playing, with its artwork, play/pause and next, shown as on while its popover is open. When the window is too narrow for that, a music note stands in for it, and narrower still, where Slack leaves out screen sharing, HuddleFM goes too. The toolbar is in the huddle's own window, or at the bottom of Slack's main window while that window is closed.
 - **A popover** from either holds the rest:
-  - the song, with a seek bar and volume, or **Play something** and **Load a saved session** when nothing is playing
-  - search, or a pasted link, to add songs. Before anything's typed, it offers the recommendations and recent songs Slack's Add songs does. Someone who has linked Jellyfin can search it too, and pick a show's episodes or where to resume a film there.
+  - the song, with a seek bar that shows the time under the pointer and volume, or **Play something** and **Load a saved session** when nothing is playing
+  - search, or a pasted link, to add songs. The sparkle beside it opens a page of what Slack's Add songs offers before anything's typed, in tabs: **Recommended**, **Recently added** and **Discover**. Someone who has linked Jellyfin can search it too, and pick a show's episodes or where to resume a film there.
   - the queue, to drag into order, or double-click a song to play it now, with a menu on each to move it to the start or end, up or down, or remove it, and to keep an autoplay pick with **Add to queue**
   - **Lyrics** beside the queue in music mode: the song's synced lyrics, the line being sung lit and kept in view, and a click on a line jumping there
   - **Take over** when nobody is host

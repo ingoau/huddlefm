@@ -2634,12 +2634,15 @@ export class Coordinator {
     });
     return {
       ok: true,
+      // each group to its own limit, as a client may show them apart
       recommended: [
-        ...(recommended?.favourites ?? []).map((item) =>
-          track(item, "Your favourites"),
-        ),
-        ...(recommended?.discover ?? []).map((item) => track(item, "Discover")),
-      ].slice(0, suggestionLimit),
+        ...(recommended?.favourites ?? [])
+          .slice(0, suggestionLimit)
+          .map((item) => track(item, "Your favourites")),
+        ...(recommended?.discover ?? [])
+          .slice(0, suggestionLimit)
+          .map((item) => track(item, "Discover")),
+      ],
       recent: this.store
         .recentTracks(userId, recentTrackLimit)
         .slice(0, suggestionLimit)
