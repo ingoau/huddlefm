@@ -238,8 +238,18 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
       </>
     ));
 
-    // HuddleFM's tile, by the bot's user, in the grid every layout draws;
-    // its screen share in video mode is a share, so it stays
+    // HuddleFM's tile. Each view that lays out tiles counts, sizes and pages
+    // them from the huddle's peers itself, so it reads them with the bot
+    // never connected; its screen share in video mode is a share, so it stays
+    if (this.config.hideTile)
+      for (const name of TILE_VIEWS)
+        this.api.patchComponent<object>(name, (Original) => (props) => (
+          <this.WithoutTile>
+            <Original {...props} />
+          </this.WithoutTile>
+        ));
+
+    // and the grid they draw with, should a view Slack adds still list it
     if (this.config.hideTile)
       this.api.patchComponent<{
         participantsAndScreenshares?: {
@@ -306,6 +316,19 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   private botUserId() {
     return this.client.botUserId ?? (this.botUser.get() || undefined);
   }
+
+  /** Its children, reading Slack's state without the bot in the huddle. */
+  private readonly WithoutTile = ({
+    children,
+  }: {
+    children?: React.ReactNode;
+  }) => {
+    this.client.state.use();
+    const bot = this.botUserId();
+    const patch = React.useMemo(() => withoutPeer(bot), [bot]);
+    const { StateView } = this.api.redux;
+    return <StateView patch={patch}>{children}</StateView>;
+  };
 
   /** HuddleFM in a huddle bar, opening the popover with everything else. */
   private readonly Bar = ({
@@ -729,6 +752,71 @@ const pluginCss = `
   flex: 1 1 140px;
 }
 `;
+
+/**
+ * Slack's views that lay out the huddle's tiles, each from the peers through
+ * the same hook: the compact window's video and audio panes, and the full
+ * window's grid, strip and smaller layouts.
+ */
+const TILE_VIEWS = [
+  "HuddleCompactVideoPane",
+  "HuddleCompactAudioPane",
+  "HuddleGridContainer",
+  "GridPicker",
+  "MiniSideBySideLayoutComponent",
+  "MinimizedSelfLayoutComponent",
+  "HuddleVideoStrip",
+];
+
+type Peer = { userId?: string; isConnected?: boolean };
+type Call = { pendingUsers?: Record<string, unknown> };
+type HuddleState = {
+  peers?: { byId?: Record<string, Peer> };
+  allCalls?: { byId?: Record<string, Call> };
+};
+
+/**
+ * A view of Slack's state where `userId` hasn't connected yet: Slack lists a
+ * peer once it has, and it's left out of the call's invites, which would
+ * list it as joining. Screen shares come from every peer, so they stay.
+ */
+function withoutPeer(userId: string | undefined) {
+  let peersIn: Record<string, Peer> | undefined;
+  let peersOut: Record<string, Peer> | undefined;
+  let callsIn: Record<string, Call> | undefined;
+  let callsOut: Record<string, Call> | undefined;
+  return <S extends HuddleState>(state: S): S => {
+    if (!userId || !state) return state;
+    const peers = state.peers?.byId;
+    if (peers !== peersIn) {
+      peersIn = peers;
+      peersOut = peers;
+      for (const [id, peer] of Object.entries(peers ?? {}))
+        if (peer?.userId === userId && peer.isConnected !== undefined)
+          peersOut = { ...peersOut, [id]: { ...peer, isConnected: undefined } };
+    }
+    const calls = state.allCalls?.byId;
+    if (calls !== callsIn) {
+      callsIn = calls;
+      callsOut = calls;
+      for (const [id, call] of Object.entries(calls ?? {}))
+        if (call?.pendingUsers && userId in call.pendingUsers) {
+          const { [userId]: _, ...pendingUsers } = call.pendingUsers;
+          callsOut = { ...callsOut, [id]: { ...call, pendingUsers } };
+        }
+    }
+    if (peersOut === peers && callsOut === calls) return state;
+    return {
+      ...state,
+      peers:
+        peersOut === peers ? state.peers : { ...state.peers, byId: peersOut },
+      allCalls:
+        callsOut === calls
+          ? state.allCalls
+          : { ...state.allCalls, byId: callsOut },
+    };
+  };
+}
 
 /** A button in a message's blocks, with the block it's in, nested or not. */
 function findButton(
