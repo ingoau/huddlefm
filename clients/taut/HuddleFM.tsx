@@ -317,6 +317,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   }) => {
     const { Popover } = this.api.elements;
     const ref = React.useRef<HTMLSpanElement>(null);
+    const pressedOutside = React.useRef(false);
     const [anchor, setAnchor] = React.useState<{
       target: HTMLElement;
       bounds: DOMRect;
@@ -416,8 +417,17 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
                   ),
                 ),
               }}
+              // a press that starts in the panel and ends out of it, as when
+              // the panel moves under it, isn't a click outside
+              onPointerDown={(event) => {
+                pressedOutside.current = event.target === event.currentTarget;
+              }}
               onClick={(event) => {
-                if (event.target === event.currentTarget) setAnchor(null);
+                if (
+                  pressedOutside.current &&
+                  event.target === event.currentTarget
+                )
+                  setAnchor(null);
               }}
             >
               <Panel platform={this.platform} />
@@ -689,6 +699,11 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
 }
 
 const pluginCss = `
+/* In the huddle's window the popover is in Slack's layer above full
+   screen, over the tooltips' own, which would hide its buttons' tooltips */
+.c-popover:has(.c-tooltip__tip) {
+  z-index: 1054;
+}
 /* the room above the bar, which the panel grows up into */
 .taut-huddlefm-popover {
   display: flex;

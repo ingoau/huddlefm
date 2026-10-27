@@ -783,6 +783,8 @@ type Suggestion = {
   group?: string;
 };
 
+/** How long suggestions stay once the search loses focus. */
+const BLUR_MS = 200;
 /** How long suggestions are kept before they're asked for again. */
 const SUGGESTIONS_MS = 60_000;
 
@@ -808,6 +810,8 @@ function Search(props: { platform: Platform; you: You | undefined }) {
   // a pasted link to a Jellyfin server they haven't linked
   const [linkNeeded, setLinkNeeded] = React.useState(false);
   const latest = React.useRef(0);
+  const blurTimer = React.useRef<ReturnType<typeof setTimeout>>(undefined);
+  React.useEffect(() => () => clearTimeout(blurTimer.current), []);
   const jellyfin = source === "jellyfin" && you?.jellyfin === true;
 
   React.useEffect(() => {
@@ -903,11 +907,17 @@ function Search(props: { platform: Platform; you: You | undefined }) {
     // biome-ignore lint/a11y/noStaticElementInteractions: it only notes whether focus is in the search, which its suggestions follow
     <section
       className="huddlefm-search"
-      onFocus={() => setFocused(true)}
+      onFocus={() => {
+        clearTimeout(blurTimer.current);
+        setFocused(true);
+      }}
       onBlur={(event) => {
         // still in it, as on a suggestion
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-          setFocused(false);
+        if (event.currentTarget.contains(event.relatedTarget as Node | null))
+          return;
+        // a moment later, so the click that took focus lands where it was
+        // aimed before the suggestions fold away and the panel moves
+        blurTimer.current = setTimeout(() => setFocused(false), BLUR_MS);
       }}
     >
       <kit.TextInput
