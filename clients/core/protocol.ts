@@ -381,21 +381,29 @@ export class HuddleFMClient {
           typeof data !== "string"
         )
           return;
-        this.opening = this.opening.then(async () => {
-          const inner = (await sealing.open({ key, iv, data })) as
-            Payload | undefined;
-          if (
-            !inner ||
-            inner.v !== VERSION ||
-            typeof inner.type !== "string" ||
-            inner.type === "sealed" ||
-            inner.to !== this.selfUserId()
-          )
-            return;
-          this.handle({ attendeeId, userId }, inner);
-        });
+        this.opening = this.opening
+          .then(async () => {
+            const inner = (await sealing.open({ key, iv, data })) as
+              Payload | undefined;
+            if (
+              !inner ||
+              inner.v !== VERSION ||
+              typeof inner.type !== "string" ||
+              inner.type === "sealed" ||
+              inner.to !== this.selfUserId()
+            )
+              return;
+            this.handle({ attendeeId, userId }, inner);
+          })
+          // one that fails mustn't hold up the rest
+          .catch((err) => this.log(`Couldn't open a message: ${err}`));
         return;
       }
+      case "resync":
+        // the bot doesn't know this client, as after it was taken to have
+        // left, so what's for this user has nowhere sealed to go
+        this.sync();
+        return;
       case "result": {
         const id = String(payload.id);
         const request = this.pending.get(id);

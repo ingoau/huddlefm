@@ -112,9 +112,11 @@ export class PluginChannel {
   private recent = new Map<string, number[]>();
   /**
    * Each user's clients, by attendee, with the key what's for them is
-   * sealed with, or null for one that sent none.
+   * sealed with, or null for one that sent none, as it's worked out.
    */
-  private keys = new Map<string, Map<string, CryptoKey | null>>();
+  private keys = new Map<string, Map<string, Promise<CryptoKey | null>>>();
+  /** what's on its way to each user, so it goes in the order it was sent */
+  private sending = new Map<string, Promise<void>>();
   private sealing = sealingKeys();
   private closed = false;
   private now: () => number;
@@ -189,6 +191,7 @@ export class PluginChannel {
   forget(userId: string) {
     this.users.delete(userId);
     this.keys.delete(userId);
+    this.sending.delete(userId);
     this.recent.delete(userId);
     this.recent.delete(`${userId}/search`);
   }
@@ -223,12 +226,18 @@ export class PluginChannel {
     return true;
   }
 
-  private async sync(userId: string, attendeeId: string, key: unknown) {
-    const shared =
+  private sync(userId: string, attendeeId: string, key: unknown) {
+    // kept straight away, so what's sent before it's worked out waits for it
+    const shared: Promise<CryptoKey | null> =
       key === undefined
-        ? null
-        : ((await sharedKey((await this.sealing).privateKey, key)) ?? null);
-    if (this.closed) return;
+        ? Promise.resolve(null)
+        : this.sealing
+            .then(({ privateKey }) => sharedKey(privateKey, key))
+            // a key that isn't one is the client's own choice of none
+            .then(
+              (derived) => derived ?? null,
+              () => null,
+            );
     const clients = this.keys.get(userId) ?? new Map();
     clients.set(attendeeId, shared);
     this.keys.set(userId, clients);
@@ -238,21 +247,40 @@ export class PluginChannel {
   }
 
   /**
-   * Sends what's for one user: sealed for each of their clients with a key,
-   * and plainly too while any of theirs has none, as an older client.
+   * Sends what's for one user, in order: sealed for each of their clients
+   * with a key, and plainly only for one that synced without one, as an
+   * older client. A user whose clients aren't known, as one who left the
+   * huddle, is asked to sync rather than told plainly.
    */
-  private async sendTo(userId: string, body: Record<string, unknown>) {
-    const message = { ...body, to: userId };
-    const clients = [...(this.keys.get(userId)?.values() ?? [])];
-    if (!clients.length || clients.includes(null)) this.host.send(message);
-    const keys = clients.filter((key): key is CryptoKey => key !== null);
-    if (!keys.length) return;
-    const { publicKey } = await this.sealing;
-    for (const key of keys) {
-      const sealed = await seal(key, { v: 1, ...message });
+  private sendTo(userId: string, body: Record<string, unknown>) {
+    const send = async () => {
+      const message = { ...body, to: userId };
+      const clients = this.keys.get(userId);
+      if (!clients?.size) {
+        this.host.send({ type: "resync", to: userId });
+        return;
+      }
+      const keys = await Promise.all(clients.values());
       if (this.closed) return;
-      this.host.send({ type: "sealed", to: userId, key: publicKey, ...sealed });
-    }
+      if (keys.includes(null)) this.host.send(message);
+      const { publicKey } = await this.sealing;
+      for (const key of keys) {
+        if (!key) continue;
+        const sealed = await seal(key, { v: 1, ...message });
+        if (this.closed) return;
+        this.host.send({
+          type: "sealed",
+          to: userId,
+          key: publicKey,
+          ...sealed,
+        });
+      }
+    };
+    const next = (this.sending.get(userId) ?? Promise.resolve())
+      .then(send)
+      .catch((error) => this.log("plugin_send_failed", { userId, err: error }));
+    this.sending.set(userId, next);
+    return next;
   }
 
   private sendState() {
@@ -356,8 +384,6 @@ export class PluginChannel {
 
   private reply(userId: string, id: string, body: Record<string, unknown>) {
     if (this.closed) return;
-    void this.sendTo(userId, { type: "result", id, ...body }).catch((error) =>
-      this.log("plugin_reply_failed", { userId, err: error }),
-    );
+    void this.sendTo(userId, { type: "result", id, ...body });
   }
 }

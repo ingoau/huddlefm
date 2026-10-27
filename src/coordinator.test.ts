@@ -8419,7 +8419,16 @@ async function pluginSetup(
     options.lyrics,
   );
   await result.coordinator.start();
+  // a client syncs before anything else, as a real one does
+  const synced = new Set<string>();
   const send = async (userId: string, payload: Record<string, unknown>) => {
+    if (payload.type !== "sync" && !synced.has(userId))
+      result.coordinator.dataMessage({
+        userId,
+        attendeeId: `${userId}-attendee`,
+        payload: { v: 1, type: "sync" },
+      });
+    synced.add(userId);
     result.coordinator.dataMessage({
       userId,
       attendeeId: `${userId}-attendee`,

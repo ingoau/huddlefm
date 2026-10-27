@@ -273,4 +273,13 @@ describe("HuddleFM client", () => {
     await deliver({ type: "you", to: self, ...you });
     expect(huddlefm.you.get()).toEqual(you);
   });
+
+  test("syncs again when the bot asks", () => {
+    const { sent, receive } = client();
+    sent.length = 0;
+    receive({ type: "resync", to: "U0OTHER" });
+    expect(sent).toEqual([]);
+    receive({ type: "resync", to: self });
+    expect(sent).toEqual([{ type: "sync", v: 1 }]);
+  });
 });

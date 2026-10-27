@@ -145,7 +145,7 @@ It names what it answers in `command` (the command's type) or `setting` (the fie
 
 ### `sealed`
 
-What's for one user, sealed for one of their clients. Search results, saved sessions, recent songs and a Jellyfin library are theirs alone, so `you` and `result` come sealed to every client of that user that sent a key with its `sync`. While one of their clients sent none, as an older client, they come plainly too.
+What's for one user, sealed for one of their clients. Search results, saved sessions, recent songs and a Jellyfin library are theirs alone, so `you` and `result` come sealed to every client of that user that sent a key with its `sync`, in the order they were sent. They come plainly only while one of that user's clients synced without a key, or with one that isn't a P-256 point, as an older client. To a user the bot has no client for, as one it took to have left the huddle, it sends [`resync`](#resync) instead.
 
 ```json
 {
@@ -159,6 +159,14 @@ What's for one user, sealed for one of their clients. Search results, saved sess
 ```
 
 `key` is the bot's P-256 public key for the session, raw and in base64. The client derives an AES-GCM key from it and its own private key by ECDH, and opens `data` with `iv` (both base64): the message inside is the whole `you` or `result`, with its own `v`, `type` and `to`. A client that can't open one ignores it, as one sealed for another of the user's clients. Chime stamps who sent each `sync`, so no one can put their key in place of another user's.
+
+### `resync`
+
+Asks the client to send `sync` again: the bot has something for this user but doesn't know their client, so it has no key to seal it with. What it had is dropped, and the client's request goes unanswered.
+
+```json
+{ "v": 1, "type": "resync", "to": "U123" }
+```
 
 ## Clients to the bot
 

@@ -57,11 +57,24 @@ function setup() {
     }
     await Bun.sleep(0);
   };
+  // a client syncs before anything else, as a real one does
+  const synced = new Set<string>();
   const receive = async (
     payload: Record<string, unknown>,
     from = user,
     attendeeId = "a",
   ) => {
+    if (payload.type !== "sync" && !synced.has(from)) {
+      synced.add(from);
+      channel.receive({
+        userId: from,
+        attendeeId,
+        payload: { v: 1, type: "sync" },
+      });
+      await Bun.sleep(0);
+      sent.length = 0;
+    }
+    if (payload.type === "sync") synced.add(from);
     channel.receive({
       userId: from,
       attendeeId,
@@ -118,6 +131,42 @@ describe("plugin channel", () => {
       "result",
       "sealed",
     ]);
+  });
+
+  test("seals an answer to a command sent before the key is worked out", async () => {
+    const { sent, receive } = setup();
+    const client = new Sealing();
+    const key = await client.publicKey();
+    // no wait between them
+    await receive({ type: "sync", key });
+    await receive({ type: "command", id: "r1", command: { type: "skip" } });
+    await Bun.sleep(30);
+    expect(sent.filter((message) => message.type === "result")).toEqual([]);
+    const opened = await Promise.all(
+      sent
+        .filter((message) => message.type === "sealed")
+        .map((message) => client.open(message as any)),
+    );
+    // in the order they were sent
+    expect(opened.map((message: any) => message?.type)).toEqual([
+      "you",
+      "result",
+    ]);
+  });
+
+  test("asks a user it has forgotten to sync, rather than answer plainly", async () => {
+    const { channel, sent, receive } = setup();
+    await receive({ type: "sync", key: await new Sealing().publicKey() });
+    await Bun.sleep(20);
+    channel.forget(user);
+    sent.length = 0;
+    channel.receive({
+      userId: user,
+      attendeeId: "a",
+      payload: { v: 1, type: "command", id: "r1", command: { type: "skip" } },
+    });
+    await Bun.sleep(20);
+    expect(sent).toEqual([{ type: "resync", to: user }]);
   });
 
   test("takes a key that isn't one as no key", async () => {
@@ -266,6 +315,9 @@ describe("plugin channel", () => {
 
   test("lets each user send 10 messages a second", async () => {
     const { commands, advance, receive } = setup();
+    await receive({ type: "sync" });
+    await receive({ type: "sync" }, "U999");
+    await advance(1_000);
     for (let i = 0; i < 12; i++)
       await receive({
         type: "command",
