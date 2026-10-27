@@ -9,7 +9,7 @@ import { mapAgentError } from "./integration.ts";
 
 /**
  * The bot API commands a client may run, as docs/data-channel.md lists, and
- * `claim_host`, which only clients have.
+ * `claim_host`, `play_something` and `keep`, which only clients have.
  */
 export const pluginCommandTypes = [
   "search",
@@ -27,6 +27,8 @@ export const pluginCommandTypes = [
   "volume",
   "end",
   "claim_host",
+  "play_something",
+  "keep",
 ] as const;
 
 export type PluginCommand = {

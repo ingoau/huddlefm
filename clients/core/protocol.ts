@@ -251,15 +251,12 @@ export class HuddleFMClient {
     const before = this.state.get();
     if (!before) return { ok: false, error: "HuddleFM isn't playing." };
     const receivedAt = this.receivedAt;
-    // the bot seeks by an offset from where it is
-    const offset = Math.round(seconds - this.position());
-    if (!offset) return { ok: true };
     this.receivedAt = performance.now();
     this.state.set({
       ...before,
       session: { ...before.session, position: seconds },
     });
-    const result = await this.command({ type: "seek", seconds: offset });
+    const result = await this.command({ type: "seek", to: seconds });
     // unless a newer state has come since, the one before is still the truth
     if (!result.ok && this.state.get()?.seq === before.seq) {
       this.receivedAt = receivedAt;
@@ -268,7 +265,7 @@ export class HuddleFMClient {
     return result;
   }
 
-  /** Runs a bot API command, as docs/data-channel.md lists them. */
+  /** Does what a player button or dialog does, as docs/data-channel.md lists them. */
   command(command: { type: string; [key: string]: unknown }) {
     return this.request({ type: "command", command });
   }

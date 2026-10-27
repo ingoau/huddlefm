@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { capture as captureAnalytics } from "./analytics.ts";
 import type { AuditLog } from "./audit-log.ts";
 import { loadFatigue, skipBystanderShare } from "./fatigue.ts";
@@ -36,7 +37,6 @@ import {
   type SessionSaveOwner,
   type SessionSaveSettings,
   type SessionSaveTrack,
-  type ScrobblingMode,
   type TransitionMode,
 } from "./store.ts";
 import {
@@ -108,7 +108,6 @@ import {
   integrationReply,
   integrationRequestBlocks,
   parseIntegrationActionValue,
-  parseIntegrationMessage,
   parseIntegrationSettingsPage,
   sessionMatchesChannel,
   wrapIntegrationResult,
@@ -140,6 +139,7 @@ import {
   settingsView,
   submittedHuddleMixSources,
   submittedScrobbleServices,
+  fieldFormState,
   videoAutoplaySelected,
   withoutUserForm,
   yourDataView,
@@ -151,7 +151,11 @@ import {
   settingsChanges,
   type Settings,
 } from "./settings-diff.ts";
-import { settingFields, type SessionSettingsView } from "./settings-schema.ts";
+import {
+  settingFields,
+  type SessionSettingsView,
+  type SettingFieldValue,
+} from "./settings-schema.ts";
 import {
   PluginChannel,
   type AgentResult,
@@ -378,15 +382,14 @@ function reshuffle<T>(items: T[]) {
   return shuffled;
 }
 
+/**
+ * Work a client mod asked for over the huddle's data channel: the notices
+ * the player would have sent, which answer it instead.
+ */
+type DataChannelRun = { notices: string[]; done: boolean; post: boolean };
+
 /** The most of the queue a client mod's `state` carries. */
 const pluginQueueMax = 100;
-
-type YourSettingsPatch = {
-  huddleMixSources?: string[];
-  sessionScrobbling?: boolean;
-  scrobblingMode?: string;
-  scrobbleTo?: string[];
-};
 
 export class Coordinator {
   readonly id: string;
@@ -400,6 +403,10 @@ export class Coordinator {
   private current?: Entry;
   private state = "ready";
   private playbackSeconds = 0;
+  /** What client mods asked for, while it runs. */
+  private dataChannelRuns = new AsyncLocalStorage<DataChannelRun>();
+  /** The audit log, noting what came over the huddle's data channel. */
+  private audit: Pick<AuditLog, "record">;
   /** The media process's last position report, and when it came. */
   private positionReport: { seconds: number; at: number } | undefined;
   private listenedSeconds = 0;
@@ -515,7 +522,7 @@ export class Coordinator {
     private store: Store,
     private tracks: TrackCatalog,
     private lyrics: LyricsCatalog,
-    private audit: AuditLog,
+    auditLog: AuditLog,
     private config: {
       queueLimit: number;
       initialVolume: number;
@@ -552,6 +559,16 @@ export class Coordinator {
     private videoSessions: () => number = () => 0,
     jellyfin?: Jellyfin,
   ) {
+    this.audit = {
+      record: (event, actorId, details = {}) =>
+        auditLog.record(
+          event,
+          actorId,
+          this.fromDataChannel()
+            ? { ...details, via: "data_channel" }
+            : details,
+        ),
+    };
     this.id = restored?.id ?? crypto.randomUUID();
     this.log = logger.child({
       component: "coordinator",
@@ -1924,7 +1941,6 @@ export class Coordinator {
       mode?: MediaMode;
     },
     signal?: AbortSignal,
-    source: "agent" | "plugin" = "agent",
   ) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
@@ -2026,7 +2042,7 @@ export class Coordinator {
       }
       // Back to music first, so the music settings asked for apply.
       if (patch.mode === "music") {
-        const blocked = await this.switchMediaMode(userId, "music", source);
+        const blocked = await this.switchMediaMode(userId, "music", "agent");
         if (blocked) return { ok: false as const, error: blocked };
       }
       const changed = await this.applySettings({
@@ -2041,7 +2057,7 @@ export class Coordinator {
           : undefined,
       });
       if (patch.mode === "video" && !this.videoMode) {
-        const blocked = await this.switchMediaMode(userId, "video", source);
+        const blocked = await this.switchMediaMode(userId, "video", "agent");
         if (blocked) return { ok: false as const, error: blocked };
         changed.push("mode=video");
         // Video's autoplay applies only once video mode is on.
@@ -2069,7 +2085,7 @@ export class Coordinator {
         const changes = settingsChanges(before, this.settingsSnapshot());
         this.audit.record("settings.changed", userId, {
           sessionId: this.id,
-          source,
+          source: "agent",
           changed: changedSettings(changes),
           changes,
         });
@@ -2244,27 +2260,248 @@ export class Coordinator {
     };
   }
 
-  // Runs a bot API command for a client mod, as its user, with their own
-  // permissions: there is no grant to hold, as they are in the huddle.
+  /**
+   * Whether the work running now came over the huddle's data channel, from
+   * a client mod. It is the user's own, as if they had used the player in
+   * Slack, and its audit records say how it came.
+   */
+  private fromDataChannel() {
+    const run = this.dataChannelRuns.getStore();
+    return Boolean(run && !run.done);
+  }
+
+  /**
+   * Does what a client mod asks as the player in Slack does it, as its
+   * user: the same handler as the button or dialog, with an interaction
+   * standing in for Slack's. What the handler would say in an ephemeral
+   * notice comes back as the answer instead, unless `notices` says to post
+   * them as usual.
+   */
+  private async viaPlayer(
+    userId: string,
+    actionId: string,
+    options: {
+      value?: string;
+      submit?: boolean;
+      state?: Interaction["state"];
+      metadata?: Record<string, unknown>;
+      notices?: "post";
+    } = {},
+  ) {
+    const run: DataChannelRun = {
+      notices: [],
+      done: false,
+      post: options.notices === "post",
+    };
+    try {
+      await this.dataChannelRuns.run(run, () =>
+        this.action(this.playerInteraction(userId, actionId, options)),
+      );
+    } finally {
+      // Timers it started carry on as the session's own.
+      run.done = true;
+    }
+    return run;
+  }
+
+  // An interaction as the player, or a dialog over it, would send one.
+  private playerInteraction(
+    userId: string,
+    actionId: string,
+    options: {
+      value?: string;
+      submit?: boolean;
+      state?: Interaction["state"];
+      metadata?: Record<string, unknown>;
+    },
+  ): Interaction {
+    return {
+      type: options.submit ? "view_submission" : "block_actions",
+      userId,
+      actionId,
+      value: options.value ?? "",
+      channelId: this.room.uiChannelId,
+      messageTs: this.uiTs ?? "",
+      triggerId: "",
+      // Stands in for the dialog that the queue's buttons and forms are in.
+      viewId: `data-channel:${userId}`,
+      viewHash: "",
+      metadata: JSON.stringify({ sessionId: this.id, ...options.metadata }),
+      state: options.state ?? {},
+    };
+  }
+
+  private answer(run: DataChannelRun): AgentResult {
+    return run.notices.length
+      ? { ok: false, error: run.notices[0]! }
+      : { ok: true };
+  }
+
+  // Runs what a client mod asks, through the player's own handlers.
   private async pluginCommand(
     userId: string,
     command: PluginCommand,
   ): Promise<AgentResult> {
-    // a session without a host lets someone in the huddle take it, as the
-    // player's button does
-    if (command.type === "claim_host") return this.agentClaimHost(userId);
-    const parsed = parseIntegrationMessage(
-      JSON.stringify({ ...command, v: 1 }),
-    );
-    if (!parsed.ok)
-      return { ok: false, error: parsed.message ?? "That command is invalid." };
     if (this.inactive())
       return { ok: false, error: "This session is not active." };
-    await this.primeManager(userId);
-    return this.runIntegrationCommand(userId, parsed.command);
+    const trackId = typeof command.trackId === "string" ? command.trackId : "";
+    const press = async (actionId: string, value?: string) =>
+      this.answer(await this.viaPlayer(userId, actionId, { value }));
+    switch (command.type) {
+      case "search":
+        return this.pluginSearch(userId, command.query);
+      case "add": {
+        const reference =
+          typeof command.reference === "string" ? command.reference.trim() : "";
+        if (!reference)
+          return { ok: false, error: "Search for a song, or paste a link." };
+        return press("add_track_to_queue", reference);
+      }
+      case "remove":
+        return press("remove_queue_track", trackId);
+      case "move":
+        return this.pluginMove(userId, trackId, command);
+      case "shuffle":
+        return press("shuffle_queue");
+      case "clear":
+        return press("clear_queue");
+      case "skip":
+        return press("next_track");
+      case "previous":
+        return press("previous_track");
+      case "toggle":
+        return press("toggle_playback");
+      case "pause":
+      case "resume":
+        // already as asked, for whoever may pause it
+        if (
+          this.current &&
+          (this.state === "paused") === (command.type === "pause")
+        ) {
+          await this.primeManager(userId);
+          return this.can(userId, "pause") ? { ok: true } : this.denied(userId);
+        }
+        return press("toggle_playback");
+      case "seek":
+        return this.pluginSeek(userId, command);
+      case "volume":
+        return this.pluginSetting(userId, "volume", { value: command.percent });
+      case "claim_host":
+        return press("claim_host", this.id);
+      case "play_something":
+        // video mode's suggests from Jellyfin, in a dialog only Slack opens
+        if (this.videoMode)
+          return {
+            ok: false,
+            error: "In video mode, Play something is in the player in Slack.",
+          };
+        return press("play_something", this.id);
+      case "keep":
+        return press("queue_keep_autoplay", trackId);
+      case "end":
+        return this.pluginEnd(userId, command);
+    }
+    return { ok: false, error: "That command is not available here." };
   }
 
-  // Changes one setting for a client mod, by its field in settings-schema.
+  // What Add songs' search offers as the user types.
+  private async pluginSearch(
+    userId: string,
+    query: unknown,
+  ): Promise<AgentResult> {
+    const text = typeof query === "string" ? query.trim() : "";
+    if (!text) return { ok: true, results: [] };
+    await this.primeManager(userId);
+    if (!this.can(userId, "add") && !this.can(userId, "add-bulk"))
+      return this.denied(userId);
+    try {
+      const options = (await this.suggestions(
+        this.playerInteraction(userId, "selection", { value: text }),
+      )) as { text: { text: string }; value: string }[];
+      return {
+        ok: true,
+        results: options.map((option) => ({
+          label: option.text.text,
+          reference: option.value,
+        })),
+      };
+    } catch (error) {
+      return { ok: false, error: message(error) };
+    }
+  }
+
+  // The queue's Move up and down and Play next, and Move to's position.
+  private async pluginMove(
+    userId: string,
+    trackId: string,
+    command: PluginCommand,
+  ) {
+    const run = (actionId: string, options = {}) =>
+      this.viaPlayer(userId, actionId, { value: trackId, ...options });
+    if (command.direction === "up" || command.direction === "down")
+      return this.answer(await run(`queue_move_${command.direction}`));
+    const position = command.playNext === true ? 1 : Number(command.position);
+    if (position === 1) return this.answer(await run("queue_play_next"));
+    return this.answer(
+      await run("move_queue_track", {
+        submit: true,
+        metadata: { trackId },
+        state: { position: { value: { value: String(command.position) } } },
+      }),
+    );
+  }
+
+  // Jump to's time, from where the client has the slider: `to`, or a
+  // relative `seconds`, as the bot API takes it.
+  private async pluginSeek(userId: string, command: PluginCommand) {
+    const current = this.current;
+    if (!current) return { ok: false, error: "Nothing is playing." };
+    const to =
+      typeof command.to === "number"
+        ? command.to
+        : typeof command.seconds === "number"
+          ? this.playbackPosition() + command.seconds
+          : undefined;
+    if (to === undefined || !Number.isFinite(to))
+      return { ok: false, error: "Say where to seek to." };
+    return this.answer(
+      await this.viaPlayer(userId, "jump_to_time", {
+        submit: true,
+        metadata: { entryId: current.id },
+        state: { time: { value: { value: formatClock(to) } } },
+      }),
+    );
+  }
+
+  // End session's dialog, submitted: maybe saving the session first. Its
+  // notice of how that went is posted as usual, since the session it would
+  // answer over is over.
+  private async pluginEnd(userId: string, command: PluginCommand) {
+    await this.primeRoles(userId, true);
+    if (!this.can(userId, "end-session")) return this.denied(userId);
+    const save =
+      command.save === "channel" || command.save === "user"
+        ? command.save
+        : "none";
+    await this.viaPlayer(userId, "end_session_confirm", {
+      submit: true,
+      notices: "post",
+      state: {
+        save_to: { choice: { selected_option: { value: save } } },
+        save_name: {
+          value: {
+            value: typeof command.name === "string" ? command.name : "",
+          },
+        },
+      },
+    });
+    return this.state === "ended"
+      ? { ok: true }
+      : { ok: false, error: "The session didn't end." };
+  }
+
+  // Changes one setting, by its field in settings-schema, as saving Settings
+  // with only that field changed does.
   private async pluginSetting(
     userId: string,
     setting: string,
@@ -2273,195 +2510,68 @@ export class Coordinator {
     if (this.inactive())
       return { ok: false, error: "This session is not active." };
     await this.primeManager(userId);
-    const { value } = change;
-    const text = typeof value === "string" ? value : undefined;
-    const on = typeof value === "boolean" ? value : undefined;
-    const list =
-      Array.isArray(value) && value.every((item) => typeof item === "string")
-        ? (value as string[])
-        : undefined;
-    const invalid = { ok: false as const, error: "That value is invalid." };
-    // only what Settings shows now: video's autoplay in music mode, say,
-    // would change nothing
-    const shown = settingFields({
-      access: { volume: true, configure: true, admin: true },
+    if (!this.canOpenSettings(userId)) return this.denied(userId);
+    // what Settings shows this user now
+    const field = settingFields({
+      access: {
+        volume: this.can(userId, "volume"),
+        configure: this.can(userId, "configure-settings"),
+        admin: this.settingsAdmin(userId),
+      },
       session: this.sessionSettings(),
-      user: this.scrobbling?.settings(userId, this.id),
-    });
-    if (!shown.some((field) => field.id === setting))
-      return { ok: false, error: "That setting is not available here." };
-    const update = (patch: Parameters<Coordinator["agentUpdateSettings"]>[1]) =>
-      this.agentUpdateSettings(userId, patch, undefined, "plugin");
-    switch (setting) {
-      case "volume": {
-        const percent =
-          typeof value === "number"
-            ? value
-            : text !== undefined && /^\d+(\.\d+)?$/.test(text)
-              ? Number(text)
-              : undefined;
-        if (percent === undefined) return invalid;
-        return this.agentSetVolume(userId, percent);
-      }
-      case "media_mode":
-        return text ? update({ mode: text as MediaMode }) : invalid;
-      case "display":
-        return text ? update({ displayMode: text as DisplayMode }) : invalid;
-      case "autoplay":
-        return text ? update({ autoplayMode: text as AutoplayMode }) : invalid;
-      case "video_autoplay":
-        return text === "off" || text === "related"
-          ? update({ videoAutoplay: text === "related" })
-          : invalid;
-      case "loop":
-        return text ? update({ loopMode: text as LoopMode }) : invalid;
-      case "transition":
-        return text
-          ? update({ transitionMode: text as TransitionMode })
-          : invalid;
-      case "ducking":
-        return text ? update({ duckingMode: text as DuckingMode }) : invalid;
-      case "anchor":
-        return on === undefined ? invalid : update({ anchorEnabled: on });
-      case "progress_bar":
-        return on === undefined ? invalid : update({ progressBar: on });
-      case "host":
-        return text ? update({ hostUserId: text }) : invalid;
-      case "permissions":
-        if (change.preset !== undefined)
-          return update({
-            permissionPreset: change.preset as keyof typeof permissionPresets,
-          });
-        return list ? update({ permissions: list }) : invalid;
-      case "huddle_mix":
-        return list
-          ? this.agentUpdateYourSettings(userId, { huddleMixSources: list })
-          : invalid;
-      case "session_scrobbling":
-        return on === undefined
-          ? invalid
-          : this.agentUpdateYourSettings(userId, { sessionScrobbling: on });
-      case "scrobbling_mode":
-        return text
-          ? this.agentUpdateYourSettings(userId, { scrobblingMode: text })
-          : invalid;
-      case "scrobble_to":
-        return list
-          ? this.agentUpdateYourSettings(userId, { scrobbleTo: list })
-          : invalid;
-      default:
-        return { ok: false, error: "That setting is not available here." };
-    }
-  }
-
-  /**
-   * Changes a user's own settings, those on Settings' You tab, as saving
-   * Settings does: the Huddle mix, scrobbling here, the default for new
-   * Huddles, and the services scrobbled to.
-   */
-  agentUpdateYourSettings(
-    userId: string,
-    patch: YourSettingsPatch,
-    source: "agent" | "plugin" = "plugin",
-  ): Promise<AgentResult> {
-    return this.enqueue(() => this.updateYourSettings(userId, patch, source));
-  }
-
-  private async updateYourSettings(
-    userId: string,
-    patch: YourSettingsPatch,
-    source: "agent" | "plugin",
-  ): Promise<AgentResult> {
-    if (this.inactive())
-      return { ok: false, error: "This session is not active." };
-    if (!this.isParticipantOrManager(userId))
-      return { ok: false, error: "Join the huddle before using the player." };
-    const scrobbling = this.scrobbling;
-    if (!scrobbling)
-      return { ok: false, error: "Scrobbling is not available on this bot." };
-    if (
-      patch.scrobblingMode !== undefined &&
-      !scrobblingModes.includes(patch.scrobblingMode as ScrobblingMode)
-    )
-      return { ok: false, error: "Invalid scrobbling mode." };
-    try {
-      const previous = this.scrobblingSnapshot(userId);
-      const settings = scrobbling.settings(userId, this.id);
-      if (patch.sessionScrobbling !== undefined && !settings.configured)
-        return {
-          ok: false,
-          error:
-            "Connect Last.fm or ListenBrainz in Settings before toggling session scrobbling.",
-        };
-      let newlyEnabled = false;
-      const mode = patch.scrobblingMode as ScrobblingMode | undefined;
-      if (mode && mode !== settings.mode) {
-        scrobbling.setMode(userId, mode);
-        // The mode is the default for new Huddles, so this session keeps
-        // scrobbling as it was.
-        if (settings.configured && patch.sessionScrobbling === undefined)
-          scrobbling.setSessionEnabled(
-            this.id,
-            userId,
-            Boolean(settings.sessionEnabled),
-          );
-      }
-      if (patch.scrobbleTo) {
-        const to = new Set(patch.scrobbleTo);
-        if (settings.lastFmConnected) {
-          newlyEnabled ||= to.has("lastfm") && !settings.lastFmEnabled;
-          scrobbling.setLastFmEnabled(userId, to.has("lastfm"));
+      ...(this.scrobbling
+        ? { user: this.scrobbling.settings(userId, this.id) }
+        : {}),
+    }).find((candidate) => candidate.id === setting);
+    if (!field)
+      return { ok: false, error: "You can't change that setting here." };
+    const value =
+      "preset" in change
+        ? field.kind === "multi"
+          ? field.presets?.find((preset) => preset.value === change.preset)
+              ?.permissions
+          : undefined
+        : change.value;
+    const invalid = { ok: false as const, error: "That value is invalid." };
+    switch (field.kind) {
+      case "select":
+        // any percent, as its steps grow to include the one it's at
+        if (field.id === "volume") {
+          const percent =
+            typeof value === "number"
+              ? value
+              : typeof value === "string" && /^\d+(\.\d+)?$/.test(value)
+                ? Number(value)
+                : NaN;
+          if (!(percent >= 0 && percent <= 100)) return invalid;
+          break;
         }
-        if (settings.listenBrainzConnected) {
-          newlyEnabled ||=
-            to.has("listenbrainz") && !settings.listenBrainzEnabled;
-          await scrobbling.setListenBrainz(
-            userId,
-            undefined,
-            to.has("listenbrainz"),
-          );
-        }
-      }
-      if (
-        patch.sessionScrobbling !== undefined &&
-        patch.sessionScrobbling !== settings.sessionEnabled
-      )
-        scrobbling.setSessionEnabled(this.id, userId, patch.sessionScrobbling);
-      if (patch.huddleMixSources) {
-        const chosen = new Set(patch.huddleMixSources);
-        scrobbling.setHuddleMixSources(
-          userId,
-          Object.fromEntries(
-            settings.huddleMixUsable.map((value) => [value, chosen.has(value)]),
-          ),
-        );
-      }
-      const sessionEnabled = scrobbling.sessionEnabled(this.id, userId);
-      if (!settings.sessionEnabled && sessionEnabled)
-        this.playbackScrobbling?.sessionEnabled(userId);
-      else if (newlyEnabled && sessionEnabled)
-        this.playbackScrobbling?.settingsEnabled(userId);
-      const changes = settingsChanges(
-        previous,
-        this.scrobblingSnapshot(userId),
-      );
-      if (changes.length) {
-        this.audit.record("settings.changed", userId, {
-          sessionId: this.id,
-          source,
-          changed: changedSettings(changes),
-          changes,
-        });
-        this.store.incrementUsage("settings");
-      }
-      return { ok: true, changed: changedSettings(changes) };
-    } catch (error) {
-      this.log.error(
-        { event: "scrobbling_settings_failed", userId, err: error },
-        "Could not change scrobbling settings",
-      );
-      return { ok: false, error: message(error) };
+        if (
+          typeof value !== "string" ||
+          !field.options.some((option) => option.value === value)
+        )
+          return invalid;
+        break;
+      case "toggle":
+        if (typeof value !== "boolean") return invalid;
+        break;
+      case "user":
+        if (typeof value !== "string") return invalid;
+        break;
+      case "multi":
+        if (
+          !Array.isArray(value) ||
+          !value.every((item) => typeof item === "string")
+        )
+          return invalid;
     }
+    return this.answer(
+      await this.viaPlayer(userId, "save_settings", {
+        submit: true,
+        metadata: this.hostId ? { hostId: this.hostId } : {},
+        state: fieldFormState(field, value as SettingFieldValue),
+      }),
+    );
   }
 
   participantIds() {
@@ -5398,31 +5508,40 @@ export class Coordinator {
         "That queue view is stale; reopen it.",
       );
     if (!(await this.require(interaction, "add"))) return;
+    await this.keepAutoplayEntry(interaction.userId, interaction.value);
+    this.queueChanged(interaction);
+  }
+
+  /**
+   * Keeps an autoplay pick in the queue as the user's own request. Returns
+   * whether there was such a pick.
+   */
+  private async keepAutoplayEntry(userId: string, trackId: string | undefined) {
     const entry = this.queue.find(
-      (track) => track.id === interaction.value && track.automatic,
+      (track) => track.id === trackId && track.automatic,
     );
-    if (!entry) return this.queueChanged(interaction);
+    if (!entry) return false;
     entry.automatic = false;
-    entry.requesterId = interaction.userId;
-    void this.slack.userName(interaction.userId);
+    entry.requesterId = userId;
+    void this.slack.userName(userId);
     delete entry.autoplayMode;
     delete entry.discovery;
     delete entry.autoplaySources;
     delete entry.listenerIds;
     this.store.setTrack(entry.id, {
       automatic: false,
-      requesterId: interaction.userId,
+      requesterId: userId,
     });
-    this.audit.record("track.added", interaction.userId, {
+    this.audit.record("track.added", userId, {
       sessionId: this.id,
       ...auditTrack(entry),
       reason: "autoplay_kept",
     });
     this.notifyTrack("queue.added", entry, { reason: "autoplay_kept" });
     this.store.incrementUsage("added");
-    void this.recommendations?.refreshUser(interaction.userId);
-    this.queueChanged(interaction);
+    void this.recommendations?.refreshUser(userId);
     await this.render();
+    return true;
   }
 
   private async moveEntry(
@@ -7068,6 +7187,18 @@ export class Coordinator {
     }
     if (!(await this.require(interaction, "configure-settings"))) return;
     if (this.current || this.queue.length || this.autoplayPending) return;
+    if (!this.startPlaySomething(interaction.userId))
+      await this.notice(
+        interaction.userId,
+        "Autoplay cannot start right now; add a song instead.",
+      );
+  }
+
+  /**
+   * Turns on the Huddle mix and has autoplay pick a song, for an idle
+   * session. Returns whether it started.
+   */
+  private startPlaySomething(userId: string) {
     if (this.loopMode !== "off") {
       this.loopMode = "off";
       this.store.setSession(this.id, { loopMode: "off" });
@@ -7076,16 +7207,12 @@ export class Coordinator {
       this.autoplayMode = "huddle";
       this.store.setSession(this.id, { autoplay: "huddle" });
     }
-    this.audit.record("autoplay.play_something", interaction.userId, {
+    this.audit.record("autoplay.play_something", userId, {
       sessionId: this.id,
       autoplayMode: this.autoplayMode,
     });
-    this.scheduleAutoplay(interaction.userId);
-    if (!this.autoplayPending)
-      await this.notice(
-        interaction.userId,
-        "Autoplay cannot start right now; add a song instead.",
-      );
+    this.scheduleAutoplay(userId);
+    return this.autoplayPending;
   }
 
   // The songs a saved session keeps: the one playing and those still to
@@ -8370,6 +8497,12 @@ export class Coordinator {
   // A notice is told in passing, often partway through a change to the
   // session, so one Slack refuses (ephemerals fail fast) never stops it.
   private async notice(user: string, text: string) {
+    // A client mod hears it as the answer to what it asked.
+    const run = this.dataChannelRuns.getStore();
+    if (run && !run.done && !run.post) {
+      run.notices.push(text);
+      return;
+    }
     await this.slack
       .ephemeral(this.room.uiChannelId, user, text, this.room.uiThreadTs)
       .catch((error) =>

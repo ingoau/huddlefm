@@ -139,7 +139,7 @@ The answer to a `command` or `setting`, with its `id`.
 }
 ```
 
-It names what it answers in `command` (the command's type) or `setting` (the field id). On success, `ok` is `true` and the rest is what the matching [bot API](bot-api.md#commands) command returns; a setting's lists what `changed`. `search` results are `results: { label, reference }[]`. Failures carry `error` and `message` as the bot API's do.
+It names what it answers in `command` (the command's type) or `setting` (the field id). On success, `ok` is `true`; `search` adds `results: { label, reference }[]`. A failure carries `message`, what the player would have told the user in Slack, and an `error` code where there is one.
 
 ## Clients to the bot
 
@@ -153,17 +153,36 @@ Asks for the session. The bot broadcasts `state` and answers the sender with `yo
 
 ### `command`
 
-Runs one of the [bot API commands](bot-api.md#commands) as the sender, with their own permissions in the session, and answers with a `result`. The command's fields are the bot API's. A client picks `id`, at most 64 characters; a message without a valid `id` gets no answer.
+Does what one of the player's buttons or dialogs does, as the sender: the bot runs the same code as for a click in Slack, with the sender's permissions, so it counts as theirs. The audit log notes `via: "data_channel"` on what it records. What the player would have said in an ephemeral notice is the `result`'s `message` instead. A client picks `id`, at most 64 characters; a message without a valid `id` gets no answer.
 
 ```json
 { "v": 1, "type": "command", "id": "r7", "command": { "type": "skip" } }
 ```
 
-These commands work here: `search`, `add`, `remove`, `move`, `shuffle`, `clear`, `skip`, `previous`, `toggle`, `pause`, `resume`, `seek`, `volume`, `end`, and `claim_host`, which makes the sender host when the session has none, as the player's Take over button does. `end` is answered by the final `state` instead, since the bot stops answering once the session is over.
+| `type`           | Fields                                                 | As the player's                                   |
+| ---------------- | ------------------------------------------------------ | ------------------------------------------------- |
+| `search`         | `query`                                                | Add songs' search, as it's typed                  |
+| `add`            | `reference`, from `search`, or a link                  | Add songs                                         |
+| `remove`         | `trackId`                                              | queue's Remove                                    |
+| `move`           | `trackId`, and `direction` (`up`/`down`) or `position` | queue's Move up, Move down, Play next and Move to |
+| `shuffle`        |                                                        | Shuffle                                           |
+| `clear`          |                                                        | Clear queue                                       |
+| `skip`           |                                                        | Next                                              |
+| `previous`       |                                                        | Previous                                          |
+| `toggle`         |                                                        | Play/pause                                        |
+| `pause`/`resume` |                                                        | Play/pause, when it isn't already so              |
+| `seek`           | `to`, in seconds                                       | Jump to                                           |
+| `volume`         | `percent`                                              | Settings' Volume                                  |
+| `claim_host`     |                                                        | Take over                                         |
+| `play_something` |                                                        | Play something, in music mode                     |
+| `keep`           | `trackId`, an autoplay pick                            | queue's Add to queue                              |
+| `end`            | `save` (`none`, `channel` or `user`), and maybe `name` | End session's dialog, saving the session if asked |
+
+`end` is answered by the final `state` instead, since the bot stops answering once the session is over; how saving went is posted in Slack, as for the dialog.
 
 ### `setting`
 
-Changes one setting, by its field `id`, as the sender, and answers with a `result`. Only the fields Settings shows now can be changed: video's autoplay only in video mode, for example. `value` takes the field's own shape: a string for `select` (and `user`), a boolean for `toggle`, and a list for `multi`. `volume` also takes a number.
+Changes one setting, by its field `id`, as the sender saving Settings with only that field changed would, and answers with a `result`. Only the fields Settings shows them now can be changed: video's autoplay only in video mode, for example. `value` takes the field's own shape: a string for `select` (and `user`), a boolean for `toggle`, and a list for `multi`. `volume` also takes a number.
 
 ```json
 { "v": 1, "type": "setting", "id": "r8", "setting": "loop", "value": "queue" }

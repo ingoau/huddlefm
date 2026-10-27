@@ -8475,7 +8475,7 @@ test("client mods sync the session over the data channel", async () => {
   });
 });
 
-test("client mods run commands with their own permissions", async () => {
+test("client mods use the player as their user, noted as over the data channel", async () => {
   const result = await pluginSetup();
   await result.coordinator.action(
     interaction(result.coordinator, "add_track_to_queue", "https://a"),
@@ -8515,16 +8515,78 @@ test("client mods run commands with their own permissions", async () => {
       id: "r2",
       command: "toggle",
       ok: true,
-      state: "paused",
     },
     expect.objectContaining({
       to: "stranger",
       id: "r3",
       ok: false,
-      error: "not_granted",
+      message: "Join the huddle before using the player.",
     }),
   ]);
+  // the user's own pause, as the player's button records it
+  expect(result.audit).toContainEqual([
+    "playback.paused",
+    "host",
+    expect.objectContaining({ via: "data_channel" }),
+  ]);
+  // and nothing posted in the thread for what the client was answered
+  expect(result.ephemeral).toEqual([]);
   await result.coordinator.endFromSlack();
+});
+
+test("client mods seek, move and end with a save as the player's dialogs do", async () => {
+  const result = await pluginSetup();
+  for (const link of ["https://a", "https://b", "https://a?2"])
+    await result.coordinator.action(
+      interaction(result.coordinator, "add_track_to_queue", link),
+    );
+  await Bun.sleep(0);
+  const status = result.coordinator.agentStatus("host") as {
+    queue: { id: string }[];
+  };
+  const last = status.queue.at(-1)!.id;
+  await result.send("host", { type: "sync" });
+  await result.send("host", {
+    type: "command",
+    id: "r1",
+    command: { type: "seek", to: 30 },
+  });
+  await result.send("host", {
+    type: "command",
+    id: "r2",
+    command: { type: "move", trackId: last, position: 1 },
+  });
+  await result.send("host", {
+    type: "command",
+    id: "r3",
+    command: { type: "end", save: "channel", name: "Friday" },
+  });
+  const ok = (id: string) =>
+    dataBroadcasts(result.media).find(
+      (message) => message.type === "result" && message.id === id,
+    )?.ok;
+  expect([ok("r1"), ok("r2")]).toEqual([true, true]);
+  for (const event of ["playback.seeked", "queue.reordered", "session.ended"])
+    expect(result.audit).toContainEqual([
+      event,
+      "host",
+      expect.objectContaining({ via: "data_channel" }),
+    ]);
+  expect(result.audit).toContainEqual([
+    "playback.seeked",
+    "host",
+    expect.objectContaining({ seconds: 30 }),
+  ]);
+  // as End session's dialog ends it
+  expect(result.audit).toContainEqual([
+    "session.ended",
+    "host",
+    expect.objectContaining({ reason: "ended by host" }),
+  ]);
+  expect(dataBroadcasts(result.media).at(-1)).toMatchObject({
+    type: "state",
+    session: { state: "ended" },
+  });
 });
 
 test("client mods can't send settings the modal wouldn't", async () => {
@@ -8603,7 +8665,7 @@ test("client mods change settings as the modal would", async () => {
   expect(result.audit).toContainEqual([
     "settings.changed",
     "host",
-    expect.objectContaining({ source: "plugin" }),
+    expect.objectContaining({ via: "data_channel" }),
   ]);
   // The guest hears what they may do now.
   expect(
