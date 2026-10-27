@@ -22,7 +22,7 @@ HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and
 - Video mode: watch YouTube videos together on a screen share in the huddle, with captions and chapters; links from other sites yt-dlp supports work too
 - Live streams: lofi radio and other live YouTube or Twitch streams play as they arrive, as audio in music mode and as video in video mode
 - Jellyfin: link your own Jellyfin servers with Quick Connect to search, browse shows and play from them, with resume points, chapters, audio languages and captions
-- A [Taut plugin](clients/taut/) that puts the controls, queue and settings in the huddle's own toolbar
+- Plugins for [Taut](clients/taut/) and [Slick](clients/slick/) that put the controls, queue and settings in the huddle's own toolbar
 - Support for simultaneous huddles
 - End of session recaps & a statistics canvas
 - Auto leave when inactive
