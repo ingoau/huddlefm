@@ -554,22 +554,26 @@ function Search(props: { platform: Platform; you: You | undefined }) {
     { label: string; reference: string }[]
   >([]);
   const [searching, setSearching] = React.useState(false);
+  // what the results shown were searched for
+  const [resultsFor, setResultsFor] = React.useState("");
   const latest = React.useRef(0);
 
   React.useEffect(() => {
     const text = query.trim();
+    // any change outdates a search still out
+    const ticket = ++latest.current;
     if (!text || isLink(text)) {
       setResults([]);
       setSearching(false);
       return;
     }
-    const ticket = ++latest.current;
     setSearching(true);
     const timer = setTimeout(() => {
       client.command({ type: "search", query: text }).then((result) => {
         if (ticket !== latest.current) return;
         setSearching(false);
         if (!say(result)) return;
+        setResultsFor(text);
         setResults(
           Array.isArray(result.results)
             ? (result.results as { label: string; reference: string }[])
@@ -598,7 +602,7 @@ function Search(props: { platform: Platform; you: You | undefined }) {
           if (event.key !== "Enter") return;
           const text = query.trim();
           if (isLink(text)) add(text);
-          else if (results[0]) add(results[0].reference);
+          else if (results[0] && resultsFor === text) add(results[0].reference);
         }}
       />
       {searching && <kit.Hint>Searching…</kit.Hint>}
@@ -901,11 +905,69 @@ function Settings(props: {
   );
 }
 
+/**
+ * Checkboxes that send their whole list. Ticks build on those not yet back
+ * in the bot's state, so ticking two quickly keeps both.
+ */
+function MultiField(props: {
+  field: Extract<SettingField, { kind: "multi" }>;
+  kit: Platform["kit"];
+  label: React.ReactNode;
+  hint: React.ReactNode;
+  /** resolves whether the bot took it */
+  onChange: (value: unknown) => Promise<boolean>;
+  onPreset: (preset: string) => void;
+}) {
+  const { field, kit } = props;
+  const [ticked, setTicked] = React.useState(field.value);
+  // the bot's word replaces what was ticked, once it comes
+  const confirmed = field.value.join("\n");
+  React.useEffect(() => setTicked(field.value), [confirmed]);
+  const toggle = (value: string, on: boolean) => {
+    const next = field.options
+      .map((option) => option.value)
+      .filter((option) => (option === value ? on : ticked.includes(option)));
+    setTicked(next);
+    props.onChange(next).then((ok) => {
+      if (!ok) setTicked(field.value);
+    });
+  };
+  return (
+    <div className="huddlefm-field">
+      {props.label}
+      {field.presets && (
+        <div className="huddlefm-presets">
+          {field.presets.map((preset) => (
+            <kit.Button
+              key={preset.value}
+              type="outline"
+              size="small"
+              onClick={() => props.onPreset(preset.value)}
+            >
+              {preset.label}
+            </kit.Button>
+          ))}
+        </div>
+      )}
+      {field.options.map((option) => (
+        <kit.Checkbox
+          key={option.value}
+          checked={ticked.includes(option.value)}
+          onChange={(checked) => toggle(option.value, checked)}
+          label={option.label}
+        />
+      ))}
+      {props.hint}
+    </div>
+  );
+}
+
 function Field(props: {
   field: SettingField;
   platform: Platform;
   participants: string[];
-  onChange: (value: unknown) => void;
+  /** resolves whether the bot took it */
+  onChange: (value: unknown) => Promise<boolean>;
   onPreset: (preset: string) => void;
 }) {
   const { field, platform } = props;
@@ -950,44 +1012,17 @@ function Field(props: {
           {hint()}
         </div>
       );
-    case "multi": {
-      const toggle = (value: string, on: boolean) =>
-        props.onChange(
-          field.options
-            .map((option) => option.value)
-            .filter((option) =>
-              option === value ? on : field.value.includes(option),
-            ),
-        );
+    case "multi":
       return (
-        <div className="huddlefm-field">
-          {label}
-          {field.presets && (
-            <div className="huddlefm-presets">
-              {field.presets.map((preset) => (
-                <kit.Button
-                  key={preset.value}
-                  type="outline"
-                  size="small"
-                  onClick={() => props.onPreset(preset.value)}
-                >
-                  {preset.label}
-                </kit.Button>
-              ))}
-            </div>
-          )}
-          {field.options.map((option) => (
-            <kit.Checkbox
-              key={option.value}
-              checked={field.value.includes(option.value)}
-              onChange={(checked) => toggle(option.value, checked)}
-              label={option.label}
-            />
-          ))}
-          {hint()}
-        </div>
+        <MultiField
+          field={field}
+          kit={kit}
+          label={label}
+          hint={hint()}
+          onChange={props.onChange}
+          onPreset={props.onPreset}
+        />
       );
-    }
     case "user":
       return (
         <div className="huddlefm-field">

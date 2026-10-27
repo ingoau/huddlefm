@@ -158,11 +158,11 @@ Runs one of the [bot API commands](bot-api.md#commands) as the sender, with thei
 { "v": 1, "type": "command", "id": "r7", "command": { "type": "skip" } }
 ```
 
-These commands work here: `search`, `add`, `remove`, `move`, `shuffle`, `clear`, `skip`, `previous`, `toggle`, `pause`, `resume`, `seek`, `volume`, `end`, and `claim_host`, which makes the sender host when the session has none, as the player's Take over button does.
+These commands work here: `search`, `add`, `remove`, `move`, `shuffle`, `clear`, `skip`, `previous`, `toggle`, `pause`, `resume`, `seek`, `volume`, `end`, and `claim_host`, which makes the sender host when the session has none, as the player's Take over button does. `end` is answered by the final `state` instead, since the bot stops answering once the session is over.
 
 ### `setting`
 
-Changes one setting, by its field `id`, as the sender, and answers with a `result`. `value` takes the field's own shape: a string for `select` (and `user`), a boolean for `toggle`, and a list for `multi`. `volume` also takes a number.
+Changes one setting, by its field `id`, as the sender, and answers with a `result`. Only the fields Settings shows now can be changed: video's autoplay only in video mode, for example. `value` takes the field's own shape: a string for `select` (and `user`), a boolean for `toggle`, and a list for `multi`. `volume` also takes a number.
 
 ```json
 { "v": 1, "type": "setting", "id": "r8", "setting": "loop", "value": "queue" }
@@ -199,4 +199,4 @@ The bot's settings modal is drawn from the same list (`src/settings-schema.ts`),
 
 ## Limits
 
-The bot answers each user's `command`, `setting` and `sync` at most 10 times a second, and drops the rest.
+The bot answers each user's `command`, `setting` and `sync` at most 10 times a second, and drops the rest. Searches reach YouTube, so a user's third `search` within a second is answered with `error: "rate_limited"`.

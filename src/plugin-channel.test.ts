@@ -231,6 +231,32 @@ describe("plugin channel", () => {
     expect(commands.length).toBe(12);
   });
 
+  test("lets each user search twice a second", async () => {
+    const { sent, commands, receive } = setup();
+    for (const id of ["a", "b", "c"])
+      await receive({
+        type: "command",
+        id,
+        command: { type: "search", query: "x" },
+      });
+    expect(commands).toHaveLength(2);
+    expect(sent.find((message) => message.id === "c")).toMatchObject({
+      ok: false,
+      error: "rate_limited",
+    });
+  });
+
+  test("stops sending state once everyone synced has left", async () => {
+    const { channel, sent, advance, receive } = setup();
+    await receive({ type: "sync" });
+    await advance(300);
+    channel.forget(user);
+    const before = sent.length;
+    channel.changed();
+    await advance(300);
+    expect(sent).toHaveLength(before);
+  });
+
   test("tells every synced user when what they may do changes", async () => {
     const { channel, sent, receive } = setup();
     await receive({ type: "sync" });

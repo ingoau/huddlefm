@@ -17,6 +17,10 @@ const CHUNK_TIMEOUT_MS = 5_000;
 /** How long to wait for the bot to answer a sync before asking again. */
 const SYNC_RETRY_MS = 4_000;
 const SYNC_RETRIES = 3;
+/** Quiet this long, and the client pings the bot to see it's still there. */
+const QUIET_MS = 20_000;
+/** Quiet this long, and the bot is taken to have gone. */
+const GONE_MS = 45_000;
 
 export type SettingOption = {
   value: string;
@@ -149,24 +153,38 @@ export class HuddleFMClient {
   /** the attendee whose state is believed, the bot's */
   private botAttendee: string | undefined;
   private syncTimer: ReturnType<typeof setTimeout> | undefined;
+  /** when the bot was last heard, by performance.now() */
+  private heardAt = 0;
+  private watchTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     /** the user this client runs as, to pick out messages meant for them */
     private selfUserId: () => string | undefined,
     private log: (text: string) => void = () => {},
+    /** the HuddleFM user the client mod knows, the only one believed then */
+    private knownBot: () => string | undefined = () => undefined,
   ) {}
 
   /** The huddle's data channel opened, with a way to send on it. */
   connect(send: (data: Uint8Array) => void) {
+    // another huddle's channel: nothing of the last session carries over
+    this.forget();
     this.send = send;
-    this.botAttendee = undefined;
     this.presence.set("waiting");
+    clearInterval(this.watchTimer);
+    this.watchTimer = setInterval(() => this.watch(), QUIET_MS / 2);
     this.sync();
   }
 
   /** The data channel closed. */
   disconnect() {
     this.send = undefined;
+    clearInterval(this.watchTimer);
+    this.forget();
+    this.presence.set("offline");
+  }
+
+  private forget() {
     this.botAttendee = undefined;
     this.botUserId = undefined;
     clearTimeout(this.syncTimer);
@@ -177,9 +195,38 @@ export class HuddleFMClient {
       request.resolve({ ok: false, error: "disconnected" });
       this.pending.delete(id);
     }
-    this.presence.set("offline");
     this.state.set(undefined);
     this.you.set(undefined);
+  }
+
+  /**
+   * A bot that crashed or was removed says nothing more, so a quiet one is
+   * pinged, and one that stays quiet is gone.
+   */
+  private watch() {
+    if (this.presence.get() !== "connected") return;
+    const quiet = performance.now() - this.heardAt;
+    if (quiet > GONE_MS) {
+      this.log("HuddleFM stopped answering");
+      this.closeSession();
+    } else if (quiet > QUIET_MS) this.post({ type: "ping" });
+  }
+
+  /**
+   * Whether a message is the bot's. Chime stamps each with its sender's
+   * Slack user, so once the bot's user is known only it is believed; before
+   * that, whoever sends state first is.
+   */
+  private fromBot({
+    attendeeId,
+    userId,
+  }: {
+    attendeeId: string;
+    userId?: string;
+  }) {
+    const bot = this.botUserId ?? this.knownBot();
+    if (bot) return userId === bot;
+    return !this.botAttendee || attendeeId === this.botAttendee;
   }
 
   /** The playback position now, counting time since the state arrived. */
@@ -256,9 +303,12 @@ export class HuddleFMClient {
   ) {
     if (typeof payload.to === "string" && payload.to !== this.selfUserId())
       return;
+    if (!this.fromBot({ attendeeId, userId })) return;
+    this.heardAt = performance.now();
     switch (payload.type) {
       case "hello": {
         this.botAttendee = attendeeId;
+        this.botUserId = userId;
         if (payload.protocol !== PROTOCOL) {
           this.log(`HuddleFM speaks protocol ${String(payload.protocol)}`);
           this.presence.set("incompatible");
@@ -266,15 +316,20 @@ export class HuddleFMClient {
         }
         // a bot that restarted counts its states from the start again
         this.state.set(undefined);
+        this.you.set(undefined);
+        this.presence.set("waiting");
         this.sync();
         return;
       }
       case "state": {
-        // the bot is whoever sends state first; others can't speak for it
-        if (this.botAttendee && attendeeId !== this.botAttendee) return;
+        const state = payload as unknown as SessionState;
+        if (
+          typeof state.seq !== "number" ||
+          typeof state.session?.state !== "string"
+        )
+          return;
         this.botAttendee = attendeeId;
         this.botUserId = userId;
-        const state = payload as unknown as SessionState;
         const current = this.state.get();
         if (current && state.seq < current.seq) return;
         clearTimeout(this.syncTimer);
@@ -294,13 +349,11 @@ export class HuddleFMClient {
         return;
       }
       case "you": {
-        if (this.botAttendee && attendeeId !== this.botAttendee) return;
         const { capabilities, admin, settings } = payload as unknown as You;
         this.you.set({ capabilities, admin, settings });
         return;
       }
       case "result": {
-        if (this.botAttendee && attendeeId !== this.botAttendee) return;
         const id = String(payload.id);
         const request = this.pending.get(id);
         if (!request) return;
@@ -347,6 +400,8 @@ export class HuddleFMClient {
       n > 64
     )
       return;
+    // only the bot's are put together, so no one else can make clients wait
+    if (!this.fromBot(sender)) return;
     const key = `${sender.attendeeId}/${id}`;
     let entry = this.chunks.get(key);
     if (!entry) {

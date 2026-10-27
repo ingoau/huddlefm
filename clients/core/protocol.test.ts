@@ -186,6 +186,46 @@ describe("HuddleFM client", () => {
     expect(huddlefm.presence.get()).toBe("waiting");
   });
 
+  test("once it knows the bot, no one else can speak for it", () => {
+    const { huddlefm, receive } = client();
+    receive(state(1));
+    const impostor = { attendee: "someone", external: "slack-R1-U0OTHER" };
+    receive({ type: "hello", protocol: 1 }, impostor);
+    receive(state(9), impostor);
+    expect(huddlefm.state.get()?.seq).toBe(1);
+    expect(huddlefm.botUserId).toBe("U0BOT");
+    // the bot itself, back as another attendee, is still believed
+    receive(state(2), { attendee: "bot-again", external: bot.external });
+    expect(huddlefm.state.get()?.seq).toBe(2);
+  });
+
+  test("believes only the HuddleFM the client mod knows", () => {
+    const sent: unknown[] = [];
+    const huddlefm = new HuddleFMClient(
+      () => self,
+      () => {},
+      () => "U0BOT",
+    );
+    huddlefm.connect((data) => sent.push(data));
+    for (const message of encodeMessages(state(1), "x"))
+      huddlefm.receive({
+        data: message,
+        senderAttendeeId: "someone",
+        senderExternalUserId: "slack-R1-U0OTHER",
+        throttled: false,
+      });
+    expect(huddlefm.state.get()).toBeUndefined();
+  });
+
+  test("a new channel forgets the last huddle's session", () => {
+    const { huddlefm, receive } = client();
+    receive(state(5));
+    huddlefm.connect(() => {});
+    expect(huddlefm.state.get()).toBeUndefined();
+    expect(huddlefm.botUserId).toBeUndefined();
+    expect(huddlefm.presence.get()).toBe("waiting");
+  });
+
   test("says when the bot speaks another protocol", () => {
     const { huddlefm, receive } = client();
     receive({ type: "hello", protocol: 2, features: [] });

@@ -378,6 +378,13 @@ function reshuffle<T>(items: T[]) {
   return shuffled;
 }
 
+type YourSettingsPatch = {
+  huddleMixSources?: string[];
+  sessionScrobbling?: boolean;
+  scrobblingMode?: string;
+  scrobbleTo?: string[];
+};
+
 export class Coordinator {
   readonly id: string;
   readonly participants = new Set<string>();
@@ -390,6 +397,8 @@ export class Coordinator {
   private current?: Entry;
   private state = "ready";
   private playbackSeconds = 0;
+  /** The media process's last position report, and when it came. */
+  private positionReport: { seconds: number; at: number } | undefined;
   private listenedSeconds = 0;
   private volume: number;
   private displayMode: DisplayMode = "default";
@@ -1195,7 +1204,12 @@ export class Coordinator {
       Number.isFinite(details.seconds)
     ) {
       this.countTime(details.seconds - this.playbackSeconds);
+      // A report away from where clients count to, after a seek it clamped
+      // say, is sent on to them.
+      const expected = this.playbackPosition();
       this.playbackSeconds = details.seconds;
+      this.positionReport = { seconds: details.seconds, at: Date.now() };
+      if (Math.abs(expected - details.seconds) > 1.5) this.plugins.changed();
       this.playbackScrobbling?.position(details.seconds);
       const current = this.current;
       if (current) {
@@ -1910,6 +1924,9 @@ export class Coordinator {
   ) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
+      // it may have ended while this waited its turn
+      if (this.inactive())
+        return { ok: false as const, error: "This session is not active." };
       if (!this.canUsePlayer(userId) && !this.settingsAdmin(userId))
         return {
           ok: false as const,
@@ -1985,7 +2002,8 @@ export class Coordinator {
       )
         return { ok: false as const, error: "Invalid autoplay mode." };
       const permissionPreset =
-        patch.permissionPreset === undefined
+        patch.permissionPreset === undefined ||
+        !Object.hasOwn(permissionPresets, patch.permissionPreset)
           ? undefined
           : permissionPresets[patch.permissionPreset];
       if (patch.permissionPreset !== undefined && !permissionPreset)
@@ -2004,7 +2022,7 @@ export class Coordinator {
       }
       // Back to music first, so the music settings asked for apply.
       if (patch.mode === "music") {
-        const blocked = await this.switchMediaMode(userId, "music", "agent");
+        const blocked = await this.switchMediaMode(userId, "music", source);
         if (blocked) return { ok: false as const, error: blocked };
       }
       const changed = await this.applySettings({
@@ -2019,7 +2037,7 @@ export class Coordinator {
           : undefined,
       });
       if (patch.mode === "video" && !this.videoMode) {
-        const blocked = await this.switchMediaMode(userId, "video", "agent");
+        const blocked = await this.switchMediaMode(userId, "video", source);
         if (blocked) return { ok: false as const, error: blocked };
         changed.push("mode=video");
         // Video's autoplay applies only once video mode is on.
@@ -2052,7 +2070,8 @@ export class Coordinator {
           changes,
         });
         this.store.incrementUsage("settings");
-        await this.render();
+        if (!before.anchorEnabled && this.anchorEnabled) await this.reanchor();
+        else await this.render();
         this.scheduleAutoplay();
       }
       return {
@@ -2160,7 +2179,7 @@ export class Coordinator {
         id: this.id,
         mode: this.mediaMode,
         state: this.state,
-        position: this.playbackSeconds,
+        position: this.playbackPosition(),
         volume: Math.round(this.volume * 100),
         hostId: this.hostId ?? null,
         allowed: capabilities.filter((value) => this.allowed.has(value)),
@@ -2185,6 +2204,22 @@ export class Coordinator {
         session: this.sessionSettings(),
       }),
     };
+  }
+
+  /**
+   * Where playback is now. Reports come every two seconds, so time since the
+   * last one counts, unless the position has been set since, by a seek say.
+   */
+  private playbackPosition() {
+    const report = this.positionReport;
+    if (
+      this.state !== "playing" ||
+      !report ||
+      report.seconds !== this.playbackSeconds
+    )
+      return this.playbackSeconds;
+    const at = report.seconds + (Date.now() - report.at) / 1000;
+    return Math.min(this.current?.duration ?? Infinity, at);
   }
 
   // What one user may do, and their own settings, as `you` carries them.
@@ -2240,12 +2275,26 @@ export class Coordinator {
         ? (value as string[])
         : undefined;
     const invalid = { ok: false as const, error: "That value is invalid." };
+    // only what Settings shows now: video's autoplay in music mode, say,
+    // would change nothing
+    const shown = settingFields({
+      access: { volume: true, configure: true, admin: true },
+      session: this.sessionSettings(),
+      user: this.scrobbling?.settings(userId, this.id),
+    });
+    if (!shown.some((field) => field.id === setting))
+      return { ok: false, error: "That setting is not available here." };
     const update = (patch: Parameters<Coordinator["agentUpdateSettings"]>[1]) =>
       this.agentUpdateSettings(userId, patch, undefined, "plugin");
     switch (setting) {
       case "volume": {
-        const percent = typeof value === "number" ? value : Number(text);
-        if (text === undefined && typeof value !== "number") return invalid;
+        const percent =
+          typeof value === "number"
+            ? value
+            : text !== undefined && /^\d+(\.\d+)?$/.test(text)
+              ? Number(text)
+              : undefined;
+        if (percent === undefined) return invalid;
         return this.agentSetVolume(userId, percent);
       }
       case "media_mode":
@@ -2304,16 +2353,21 @@ export class Coordinator {
    * Settings does: the Huddle mix, scrobbling here, the default for new
    * Huddles, and the services scrobbled to.
    */
-  async agentUpdateYourSettings(
+  agentUpdateYourSettings(
     userId: string,
-    patch: {
-      huddleMixSources?: string[];
-      sessionScrobbling?: boolean;
-      scrobblingMode?: string;
-      scrobbleTo?: string[];
-    },
+    patch: YourSettingsPatch,
     source: "agent" | "plugin" = "plugin",
   ): Promise<AgentResult> {
+    return this.enqueue(() => this.updateYourSettings(userId, patch, source));
+  }
+
+  private async updateYourSettings(
+    userId: string,
+    patch: YourSettingsPatch,
+    source: "agent" | "plugin",
+  ): Promise<AgentResult> {
+    if (this.inactive())
+      return { ok: false, error: "This session is not active." };
     if (!this.isParticipantOrManager(userId))
       return { ok: false, error: "Join the huddle before using the player." };
     const scrobbling = this.scrobbling;
@@ -2467,7 +2521,8 @@ export class Coordinator {
       this.participantsRevision++;
       this.sessionChanged();
       this.plugins.changed();
-      this.plugins.refreshYouFor(userId);
+      // out of the huddle, they're off its data channel too
+      this.plugins.forget(userId);
     }
     this.playbackScrobbling?.memberLeft(userId);
     if (this.state === "suspended" || userId === this.botUserId) return;
@@ -5154,7 +5209,10 @@ export class Coordinator {
 
   private seekBy(userId: string, offset: number) {
     const previous = this.playbackSeconds;
-    this.playbackSeconds = Math.max(0, previous + offset);
+    this.playbackSeconds = Math.min(
+      this.current?.duration ?? Infinity,
+      Math.max(0, previous + offset),
+    );
     this.sendMedia({ type: "seek", offset });
     this.plugins.changed();
     this.jellyfinUi?.playing(

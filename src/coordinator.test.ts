@@ -8527,6 +8527,39 @@ test("client mods run commands with their own permissions", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("client mods can't send settings the modal wouldn't", async () => {
+  const result = await pluginSetup();
+  await result.send("host", { type: "sync" });
+  const tries: [string, unknown, string?][] = [
+    ["volume", ""],
+    ["volume", " 1e1 "],
+    // only video mode shows video's autoplay
+    ["video_autoplay", "related"],
+    ["permissions", undefined, "toString"],
+  ];
+  for (const [index, [setting, value, preset]] of tries.entries())
+    await result.send("host", {
+      type: "setting",
+      id: `r${index}`,
+      setting,
+      ...(value === undefined ? {} : { value }),
+      ...(preset ? { preset } : {}),
+    });
+  const results = dataBroadcasts(result.media).filter(
+    (message) => message.type === "result",
+  );
+  expect(results.map((message) => message.ok)).toEqual([
+    false,
+    false,
+    false,
+    false,
+  ]);
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    volumePercent: 60,
+  });
+  await result.coordinator.endFromSlack();
+});
+
 test("client mods change settings as the modal would", async () => {
   const result = await pluginSetup();
   await result.send("host", { type: "sync" });

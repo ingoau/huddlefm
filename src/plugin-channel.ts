@@ -71,6 +71,8 @@ const stateIntervalMs = 250;
 /** How many messages each user may send in `rateWindowMs`. */
 const rateLimit = 10;
 const rateWindowMs = 1_000;
+/** Searches reach YouTube, so each user gets fewer: this many a window. */
+const searchLimit = 2;
 const maxIdLength = 64;
 const commandTypes = new Set<string>(pluginCommandTypes);
 
@@ -163,6 +165,13 @@ export class PluginChannel {
     if (this.users.has(userId)) void this.sendYou(userId);
   }
 
+  /** Forgets a user who left the huddle, who can't hear the channel now. */
+  forget(userId: string) {
+    this.users.delete(userId);
+    this.recent.delete(userId);
+    this.recent.delete(`${userId}/search`);
+  }
+
   /** Sends the last `state` now, if anyone is listening, and stops. */
   finish() {
     if (this.closed) return;
@@ -179,17 +188,17 @@ export class PluginChannel {
     this.stateTimer = undefined;
   }
 
-  private allow(userId: string) {
+  private allow(key: string, limit = rateLimit) {
     const now = this.now();
-    const times = (this.recent.get(userId) ?? []).filter(
+    const times = (this.recent.get(key) ?? []).filter(
       (at) => now - at < rateWindowMs,
     );
-    if (times.length >= rateLimit) {
-      this.recent.set(userId, times);
+    if (times.length >= limit) {
+      this.recent.set(key, times);
       return false;
     }
     times.push(now);
-    this.recent.set(userId, times);
+    this.recent.set(key, times);
     return true;
   }
 
@@ -237,6 +246,15 @@ export class PluginChannel {
         ok: false,
         error: "unknown_type",
         message: "That command is not available here.",
+      });
+    if (
+      command.type === "search" &&
+      !this.allow(`${userId}/search`, searchLimit)
+    )
+      return this.reply(userId, id, {
+        ok: false,
+        error: "rate_limited",
+        message: "Searching too fast; try again in a moment.",
       });
     await this.answer(userId, id, { command: command.type }, () =>
       this.host.command(userId, command as PluginCommand),

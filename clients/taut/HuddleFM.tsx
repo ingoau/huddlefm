@@ -9,6 +9,17 @@ import { panelCss } from "../core/styles.ts";
 const SLACK_WAIT_MS = 30_000;
 /** What a user's name has in it to be HuddleFM, for finding it to invite. */
 const BOT_SEARCH = "HuddleFM";
+const memberNames = (member: {
+  name?: string;
+  real_name?: string;
+  profile?: { display_name?: string; real_name?: string };
+}) =>
+  [
+    member.profile?.display_name,
+    member.profile?.real_name,
+    member.real_name,
+    member.name,
+  ].filter((name): name is string => Boolean(name));
 const isBotName = (name: string) =>
   name.toLowerCase().replace(/\s+/g, "").includes("huddlefm");
 /** The most users the search for HuddleFM returns. */
@@ -102,12 +113,13 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   private attached = new WeakSet<HuddlesSdk>();
   private unpatch: (() => void) | undefined;
   private stopped = false;
+  /** the HuddleFM Start invites, and the only one believed: chosen, or the first heard */
+  private botUser = this.api.storage.store<string>("botUserId", "");
   private client = new HuddleFMClient(
     () => this.api.members.getCurrentMemberId(),
     (text) => this.log(text),
+    () => this.botUser.get() || undefined,
   );
-  /** the HuddleFM Start invites: the one last heard, or chosen */
-  private botUser = this.api.storage.store<string>("botUserId", "");
 
   private platform: Platform = {
     client: this.client,
@@ -136,10 +148,22 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
 
   start() {
     this.api.setStyle(panelCss + pluginCss);
+    // with none chosen yet, the HuddleFM heard is kept, if it's named so:
+    // anyone in a huddle could claim to be it
     this.client.state.subscribe(() => {
       const bot = this.client.botUserId;
-      if (bot && bot !== this.botUser.get())
-        this.botUser.set(bot).catch(() => {});
+      if (!bot || this.botUser.get()) return;
+      this.api.members
+        .getMember(bot)
+        .then((member) => {
+          if (
+            member &&
+            !this.botUser.get() &&
+            memberNames(member).some(isBotName)
+          )
+            return this.botUser.set(bot);
+        })
+        .catch(() => {});
     });
     this.patchHuddleBars();
     this.api
@@ -300,17 +324,19 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
       win.addEventListener("resize", fit);
       return () => win.removeEventListener("resize", fit);
     }, []);
-    const open = (target: HTMLElement) =>
-      setAnchor((current) =>
-        current
+    // placed by the whole bar, which stays as the button in it changes
+    const open = (button: HTMLElement) =>
+      setAnchor((current) => {
+        const target = ref.current ?? button;
+        return current
           ? null
           : {
               target,
               bounds: target.getBoundingClientRect(),
               // the bar may be in the huddle's own window
               window: new WeakRef(target.ownerDocument.defaultView ?? window),
-            },
-      );
+            };
+      });
     return (
       <span className="taut-huddlefm-bar" ref={ref}>
         <PlayerBar
@@ -382,12 +408,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
         ({ members } = await search());
       }
       return (members ?? []).flatMap((member) => {
-        const names = [
-          member.profile?.display_name,
-          member.profile?.real_name,
-          member.real_name,
-          member.name,
-        ].filter((name): name is string => Boolean(name));
+        const names = memberNames(member);
         if (!member.id || member.deleted || !names.some(isBotName)) return [];
         const shown = names[0] ?? member.id;
         return [
@@ -494,10 +515,14 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
 
   private subscribe(sdk: HuddlesSdk) {
     if (this.stopped) return;
+    // this session's own facade: an old huddle's disconnect, coming after a
+    // new one has connected, mustn't take the new one down
+    let own: Facade | undefined;
     // called straight away if the session is already connected
     sdk.addDataChannelSubscriber({
       onConnectDatachannel: (facade) => {
         if (this.stopped) return;
+        own = facade;
         this.facade?.realtimeUnsubscribeFromReceiveDataMessage(TOPIC);
         // drops any callback from an earlier connect, the topic is ours alone
         facade.realtimeUnsubscribeFromReceiveDataMessage(TOPIC);
@@ -510,8 +535,10 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
         );
       },
       onDisconnectDataChannel: () => {
-        if (this.stopped) return;
-        this.facade?.realtimeUnsubscribeFromReceiveDataMessage(TOPIC);
+        own?.realtimeUnsubscribeFromReceiveDataMessage(TOPIC);
+        const current = own !== undefined && this.facade === own;
+        own = undefined;
+        if (this.stopped || !current) return;
         this.facade = undefined;
         this.client.disconnect();
       },
@@ -655,7 +682,10 @@ function slackKit(api: TautAPI): Kit {
     ),
     Hint: ({ children }) => <Hint>{children}</Hint>,
     Alert: ({ children }) => <InlineAlert>{children}</InlineAlert>,
-    confirm: ({ title, body, confirmText, danger }) =>
-      api.modal.confirm({ title, body, confirmText, danger }),
+    confirm: ({ title, body, confirmText, danger }) => {
+      // Slack's dialogs open in the main window, maybe behind the huddle's
+      window.focus();
+      return api.modal.confirm({ title, body, confirmText, danger });
+    },
   };
 }
