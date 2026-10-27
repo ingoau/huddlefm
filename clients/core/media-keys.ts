@@ -51,6 +51,8 @@ export class MediaKeys {
   /** the song each window shows, so it's only set again for a new one */
   private shown = new WeakMap<Window, string>();
   private players = new WeakMap<Window, HTMLAudioElement>();
+  /** takes back the listeners added to each window */
+  private listening = new Map<Window, AbortController>();
   private unsubscribe: (() => void) | undefined;
 
   constructor(
@@ -72,21 +74,35 @@ export class MediaKeys {
       this.silence(win, "remove");
     }
     this.windows.clear();
+    for (const controller of this.listening.values()) controller.abort();
+    this.listening.clear();
   }
 
   /** A window the huddle is shown in now. */
   add(win: Window) {
     const known = this.windows.delete(win);
     this.windows.add(win);
-    if (!known)
+    if (!known) {
+      const controller = new AbortController();
+      this.listening.set(win, controller);
+      const { signal } = controller;
       win.addEventListener(
         "pagehide",
         () => {
           this.windows.delete(win);
+          this.listening.get(win)?.abort();
+          this.listening.delete(win);
           this.update();
         },
-        { once: true },
+        { once: true, signal },
       );
+      // a window that couldn't play before it was used can once it is
+      for (const event of ["pointerdown", "keydown"])
+        win.addEventListener(event, () => this.update(), {
+          capture: true,
+          signal,
+        });
+    }
     this.update();
   }
 
@@ -98,12 +114,14 @@ export class MediaKeys {
     for (const win of this.windows) {
       const session = win.navigator?.mediaSession;
       if (!session) continue;
-      if (!state || !track) {
+      // only the window the browser sends the keys to: elsewhere, what
+      // else plays there keeps its own keys
+      if (!state || !track || win !== last) {
         this.clear(win);
         this.silence(win, "remove");
         continue;
       }
-      this.silence(win, win !== last ? "remove" : playing ? "play" : "pause");
+      this.silence(win, playing ? "play" : "pause");
       if (this.shown.get(win) !== track.id) {
         this.shown.set(win, track.id);
         // the window's own, as it's from the window it describes

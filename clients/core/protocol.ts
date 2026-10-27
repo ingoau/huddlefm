@@ -2,6 +2,7 @@
 // describes it, for any client mod. The mod hands it the channel's messages
 // and a way to send; this keeps the session's state and runs requests.
 
+import { Sealing } from "./seal.ts";
 import { Store } from "./store.ts";
 
 /** The data channel topic, and the protocol this client speaks. */
@@ -160,6 +161,12 @@ export class HuddleFMClient {
   /** when the bot was last heard, by performance.now() */
   private heardAt = 0;
   private watchTimer: ReturnType<typeof setInterval> | undefined;
+  /** opens what the bot seals for this user, which the huddle can't read */
+  private sealing: Sealing | undefined;
+  /** this client's public key, once it's made */
+  private key: string | undefined;
+  /** sealed messages, opened one at a time so they're handled in order */
+  private opening = Promise.resolve();
 
   constructor(
     /** the user this client runs as, to pick out messages meant for them */
@@ -167,7 +174,11 @@ export class HuddleFMClient {
     private log: (text: string) => void = () => {},
     /** the HuddleFM user the client mod knows, the only one believed then */
     private knownBot: () => string | undefined = () => undefined,
-  ) {}
+    options: { seal?: boolean } = {},
+  ) {
+    if (options.seal !== false && globalThis.crypto?.subtle)
+      this.sealing = new Sealing();
+  }
 
   /** The huddle's data channel opened, with a way to send on it. */
   connect(send: (data: Uint8Array) => void) {
@@ -360,6 +371,31 @@ export class HuddleFMClient {
         });
         return;
       }
+      case "sealed": {
+        const { key, iv, data } = payload;
+        const sealing = this.sealing;
+        if (
+          !sealing ||
+          typeof key !== "string" ||
+          typeof iv !== "string" ||
+          typeof data !== "string"
+        )
+          return;
+        this.opening = this.opening.then(async () => {
+          const inner = (await sealing.open({ key, iv, data })) as
+            Payload | undefined;
+          if (
+            !inner ||
+            inner.v !== VERSION ||
+            typeof inner.type !== "string" ||
+            inner.type === "sealed" ||
+            inner.to !== this.selfUserId()
+          )
+            return;
+          this.handle({ attendeeId, userId }, inner);
+        });
+        return;
+      }
       case "result": {
         const id = String(payload.id);
         const request = this.pending.get(id);
@@ -437,7 +473,21 @@ export class HuddleFMClient {
   /** Asks the bot for the session, again a few times while it doesn't answer. */
   private sync(attempt = 0) {
     clearTimeout(this.syncTimer);
-    if (!this.post({ type: "sync" })) return;
+    if (!this.send) return;
+    // with this client's key, once it's made, so what's for this user comes
+    // sealed
+    if (this.sealing && !this.key)
+      this.sealing
+        .publicKey()
+        .then((key) => {
+          this.key = key;
+          this.post({ type: "sync", key });
+        })
+        .catch(() => this.post({ type: "sync" }));
+    else if (
+      !this.post({ type: "sync", ...(this.key ? { key: this.key } : {}) })
+    )
+      return;
     if (attempt + 1 >= SYNC_RETRIES) return;
     this.syncTimer = setTimeout(() => {
       if (this.presence.get() === "waiting") this.sync(attempt + 1);

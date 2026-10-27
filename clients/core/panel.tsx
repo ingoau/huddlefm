@@ -21,6 +21,8 @@ const SEARCH_DELAY_MS = 300;
 const NOTICE_MS = 5_000;
 /** Seconds a keyboard seek moves by. */
 const SEEK_STEP = 5;
+/** How wide a slider's thumb is, in pixels, as styles.ts draws it. */
+const THUMB = 12;
 
 type Command = { type: string; [key: string]: unknown };
 
@@ -497,6 +499,11 @@ function NowPlaying(props: {
   const track = state.nowPlaying;
   const playing = state.session.state === "playing";
   const add = usePermission(platform, "add");
+  // music mode's turns on autoplay, a setting
+  const playSomething = usePermission(
+    platform,
+    state.session.mode === "video" ? "add" : "configure-settings",
+  );
   // what the player in Slack offers while nothing plays
   const idle = !track && !state.queue.length;
 
@@ -517,7 +524,7 @@ function NowPlaying(props: {
           </div>
           {idle && add.allowed && (
             <div className="huddlefm-now__start">
-              {state.session.mode !== "video" && (
+              {state.session.mode !== "video" && playSomething.allowed && (
                 <kit.Button
                   type="primary"
                   size="small"
@@ -622,6 +629,7 @@ function Progress({ platform, track }: { platform: Platform; track: Track }) {
           keyStep={SEEK_STEP}
           onChange={setHeld}
           onCommit={commit}
+          preview={clock}
         />
       )}
       <span className="huddlefm-progress__time">
@@ -649,6 +657,8 @@ function Slider(props: {
   onChange: (value: number) => void;
   /** when the drag or key press that moved it ends */
   onCommit: () => void;
+  /** what the point under the pointer stands for, shown above it */
+  preview?: (value: number) => string;
   className?: string;
 }) {
   const { value, min, max, keyStep, onChange, onCommit, why } = props;
@@ -677,6 +687,14 @@ function Slider(props: {
     event.preventDefault();
     onChange(Math.min(max, Math.max(min, value + by * keyStep)));
   };
+  // the point under the pointer, as a share of the way along
+  const [hover, setHover] = React.useState<number | undefined>();
+  const point = (event: React.PointerEvent<HTMLInputElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    // the thumb's centre stops half its width from each end
+    const share = (event.clientX - box.left - THUMB / 2) / (box.width - THUMB);
+    setHover(Math.min(1, Math.max(0, share)));
+  };
   const slider = (
     <input
       type="range"
@@ -696,6 +714,8 @@ function Slider(props: {
       onKeyUp={(event) => {
         if (steps[event.key]) onCommit();
       }}
+      onPointerMove={props.preview && !why ? point : undefined}
+      onPointerLeave={() => setHover(undefined)}
     />
   );
   return (
@@ -706,6 +726,18 @@ function Slider(props: {
         </props.platform.kit.Tooltip>
       ) : (
         slider
+      )}
+      {props.preview && hover !== undefined && !why && (
+        <span
+          className="huddlefm-slider__preview"
+          style={{
+            // kept within the bar, as the panel would scroll sideways for it
+            left: `clamp(24px, calc(${THUMB / 2}px + (100% - ${THUMB}px) * ${hover}), calc(100% - 24px))`,
+          }}
+          aria-hidden
+        >
+          {props.preview(min + hover * (max - min))}
+        </span>
       )}
     </span>
   );
@@ -1050,14 +1082,17 @@ function Queue(props: {
     const box = event.currentTarget.getBoundingClientRect();
     return event.clientY < box.top + box.height / 2 ? index : index + 1;
   };
+  // the gaps either side of the dragged song leave it where it is
+  const from = dragged
+    ? state.queue.findIndex((track) => track.id === dragged)
+    : -1;
+  const shownGap = gap === from || gap === from + 1 ? undefined : gap;
   const drop = () => {
     const trackId = dragged;
     const to = gap;
     setDragged(undefined);
     setGap(undefined);
     if (!trackId || to === undefined) return;
-    const from = state.queue.findIndex((track) => track.id === trackId);
-    // the gaps either side of it leave it where it is
     if (from < 0 || to === from || to === from + 1) return;
     // its place once it's out of the way, counting from 1
     const position = to > from ? to : to + 1;
@@ -1166,8 +1201,8 @@ function Queue(props: {
               key={track.id}
               className={[
                 "huddlefm-track",
-                gap === index && dragged && "huddlefm-track--gap-above",
-                gap === index + 1 &&
+                shownGap === index && dragged && "huddlefm-track--gap-above",
+                shownGap === index + 1 &&
                   dragged &&
                   index === state.queue.length - 1 &&
                   "huddlefm-track--gap-below",
@@ -1477,6 +1512,8 @@ function LoadSave(props: { platform: Platform; back: () => void }) {
   const [chosen, setChosen] = React.useState<string | undefined>();
   const [forget, setForget] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
+  // a second click, or a double-click on another save, while one loads
+  const busy = React.useRef(false);
   React.useEffect(() => {
     let current = true;
     client.command({ type: "saves" }).then((result) => {
@@ -1502,14 +1539,16 @@ function LoadSave(props: { platform: Platform; back: () => void }) {
       items: (saves ?? []).filter((item) => item.owner === owner),
     }))
     .filter((group) => group.items.length);
-  const load = async () => {
-    if (!save) return;
+  const load = async (chosen = save) => {
+    if (!chosen || busy.current) return;
+    busy.current = true;
     setLoading(true);
     const ok = await run(platform, {
       type: "load",
-      saveId: save.id,
-      forget: forget && save.deletable,
+      saveId: chosen.id,
+      forget: forget && chosen.deletable,
     });
+    busy.current = false;
     setLoading(false);
     if (ok) props.back();
   };
@@ -1540,7 +1579,7 @@ function LoadSave(props: { platform: Platform; back: () => void }) {
                       onClick={() => setChosen(item.id)}
                       onDoubleClick={() => {
                         setChosen(item.id);
-                        load();
+                        load(item);
                       }}
                     >
                       <span className="huddlefm-save__name">{item.name}</span>
@@ -1573,7 +1612,7 @@ function LoadSave(props: { platform: Platform; back: () => void }) {
               type="primary"
               size="small"
               disabled={!save || loading}
-              onClick={load}
+              onClick={() => load()}
             >
               {loading ? "Loading…" : "Load"}
             </kit.Button>

@@ -130,6 +130,8 @@ export type JellyfinHost = {
     settings: unknown,
   ): Promise<void>;
   audit(event: string, userId: string, fields: Record<string, unknown>): void;
+  /** The user's servers changed: one was linked, unlinked or let go. */
+  serversChanged?(userId: string): void;
 };
 
 // Slack refuses private metadata longer than this.
@@ -664,6 +666,7 @@ export class JellyfinUi {
         };
         this.attempts.delete(viewId);
         this.host.store.saveJellyfinServer(server);
+        this.host.serversChanged?.(interaction.userId);
         this.host.audit("jellyfin.linked", interaction.userId, {
           sessionId: this.id,
           serverId: server.serverId,
@@ -766,6 +769,7 @@ export class JellyfinUi {
     );
     if (!server) return;
     this.host.store.removeJellyfinServer(interaction.userId, server.serverId);
+    this.host.serversChanged?.(interaction.userId);
     this.host.audit("jellyfin.unlinked", interaction.userId, {
       sessionId: this.id,
       serverId: server.serverId,
@@ -841,6 +845,7 @@ export class JellyfinUi {
         };
       if (error instanceof JellyfinError && error.unauthorized) {
         this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+        this.host.serversChanged?.(server.userId);
         return {
           error: `HuddleFM’s link to ${server.name} stopped working. Link it again under Accounts and more in Slack.`,
           linkNeeded: true,
@@ -941,7 +946,7 @@ export class JellyfinUi {
             ...(startAt ? { startAt } : {}),
           },
         ],
-        plainText(addedText(item, startAt)),
+        `Added ${item.Name ?? "it"} to the queue${startAt ? `, from ${formatClock(startAt)}` : ""}.`,
       );
     }
     const children = (await jellyfin.children(server, item.Id)).filter(
@@ -1129,6 +1134,7 @@ export class JellyfinUi {
     }
     if (error instanceof JellyfinError && error.unauthorized) {
       this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+      this.host.serversChanged?.(server.userId);
       await this.update(
         viewId,
         this.messageView(
@@ -1551,6 +1557,7 @@ export class JellyfinUi {
     } catch (error) {
       if (error instanceof JellyfinError && error.unauthorized) {
         this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+        this.host.serversChanged?.(server.userId);
         throw new TrackError("No longer available");
       }
       if (
@@ -1646,6 +1653,7 @@ export class JellyfinUi {
       .catch((error) => {
         if (error instanceof JellyfinError && error.unauthorized)
           this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+        this.host.serversChanged?.(server.userId);
         this.host.log.debug(
           { event: "jellyfin_report_failed", report: event, err: error },
           "Could not report playback to Jellyfin",
@@ -1659,11 +1667,6 @@ const relinkText =
 
 function addedText(item: JellyfinItem, startAt?: number) {
   return `Added *${escape(item.Name ?? "it")}* to the queue${startAt ? `, from ${formatClock(startAt)}` : ""}.`;
-}
-
-/** A dialog's text without Slack's bold, for a client mod. */
-function plainText(text: string) {
-  return text.replaceAll("*", "");
 }
 
 function errorText(error: unknown) {

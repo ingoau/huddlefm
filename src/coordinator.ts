@@ -183,6 +183,17 @@ type SettingsChange = {
   draft?: FormState;
 };
 
+/**
+ * A notice's text as a client mod shows it: plain, without Slack's escapes
+ * for &, < and >.
+ */
+function plainNotice(text: string) {
+  return text
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}
+
 const endRestoreMs = 2 * 60_000;
 // How long a client mod's pick of Settings' tab waits for Settings to open
 // from its click on the player.
@@ -638,6 +649,8 @@ export class Coordinator {
         },
         audit: (event, userId, fields) =>
           this.audit.record(event, userId, fields),
+        // a client mod offers Jellyfin's search once it's linked
+        serversChanged: (userId) => this.plugins.refreshYouFor(userId),
       });
     this.playbackScrobbling = scrobbling?.playback(
       this.id,
@@ -2380,8 +2393,11 @@ export class Coordinator {
   }
 
   private answer(run: DataChannelRun): AgentResult {
-    if (run.notices.length) return { ok: false, error: run.notices[0]! };
-    return run.info.length ? { ok: true, message: run.info[0] } : { ok: true };
+    if (run.notices.length)
+      return { ok: false, error: plainNotice(run.notices[0]!) };
+    return run.info.length
+      ? { ok: true, message: plainNotice(run.info[0]!) }
+      : { ok: true };
   }
 
   // Runs what a client mod asks, through the player's own handlers.
@@ -2551,9 +2567,11 @@ export class Coordinator {
         ...(value.linkNeeded ? { linkNeeded: true } : {}),
       };
     if (run.notices.length) return this.answer(run);
+    // what the queue said, as "Added 3 of 10 songs", says it best
+    const message = run.info[0] ? plainNotice(run.info[0]) : value.message;
     return {
       ok: true,
-      ...(value.message ? { message: value.message } : {}),
+      ...(message ? { message } : {}),
       ...(value.choices ? { choices: value.choices } : {}),
     };
   }
@@ -2608,7 +2626,10 @@ export class Coordinator {
       id: item.id,
       title: item.title,
       ...(item.artist ? { artist: item.artist } : {}),
-      ...(item.artwork ? { artwork: item.artwork } : {}),
+      // only public pictures, as the state carries
+      ...(item.artwork?.startsWith("https://")
+        ? { artwork: item.artwork }
+        : {}),
       ...(group ? { group } : {}),
     });
     return {
@@ -2629,6 +2650,9 @@ export class Coordinator {
   // The saved sessions Load saved session offers the user.
   private async pluginSaves(userId: string): Promise<AgentResult> {
     await this.primeManager(userId);
+    // as Load saved session turns away whoever isn't in the huddle
+    if (!this.isParticipantOrManager(userId))
+      return { ok: false, error: "Join the huddle before using the player." };
     return {
       ok: true,
       saves: this.store
@@ -4057,11 +4081,15 @@ export class Coordinator {
   ) {
     const pending = await this.stageRequested(interaction, capability, items);
     if (!pending?.length) return false;
-    void Promise.all(
-      pending.map(({ entry, controller }) =>
-        this.prepareManual(entry, controller),
-      ),
-    );
+    const prepare = () =>
+      Promise.all(
+        pending.map(({ entry, controller }) =>
+          this.prepareManual(entry, controller),
+        ),
+      );
+    // how downloading goes is said in Slack, as for anyone
+    if (this.fromDataChannel()) this.dataChannelRuns.exit(() => void prepare());
+    else void prepare();
     return true;
   }
 
@@ -7887,22 +7915,28 @@ export class Coordinator {
       return { pending, note };
     });
     if (!loaded) return;
-    const prepared = Promise.all(
-      loaded.pending.map(({ entry, controller }) =>
-        this.prepareManual(entry, controller).catch((error) =>
-          this.log.warn(
-            {
-              event: "loaded_track_failure_unhandled",
-              entryId: entry.id,
-              err: error,
-            },
-            "Could not finish handling a loaded track",
+    const prepare = () =>
+      Promise.all(
+        loaded.pending.map(({ entry, controller }) =>
+          this.prepareManual(entry, controller).catch((error) =>
+            this.log.warn(
+              {
+                event: "loaded_track_failure_unhandled",
+                entryId: entry.id,
+                err: error,
+              },
+              "Could not finish handling a loaded track",
+            ),
           ),
         ),
-      ),
-    );
+      );
+    // A client mod hears once the songs are queued, as for Add songs.
+    const prepared = this.fromDataChannel()
+      ? void this.dataChannelRuns.exit(() => void prepare())
+      : prepare();
+    // it loaded, if not all of it: news rather than a failure
     if (loaded.note)
-      await this.notice(userId, loaded.note).catch((error) =>
+      await this.inform(userId, loaded.note).catch((error) =>
         this.log.warn(
           { event: "session_load_notice_failed", userId, err: error },
           "Could not tell the user how loading a saved session went",

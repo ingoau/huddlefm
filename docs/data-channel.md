@@ -101,11 +101,11 @@ The whole session, sent after every change (merged, at most every 250 ms) and af
 
 ## Bot to one user
 
-These carry `to`, the Slack user they are for. Other clients ignore them.
+These carry `to`, the Slack user they are for. Other clients ignore them, but everyone in the huddle hears them, so they come [sealed](#sealed) to a client that sent a key with its `sync`.
 
 ### `you`
 
-What one user may do, and their own settings. Sent after that user's `sync`, after they change any setting, and to everyone who has synced after the host or permissions change.
+What one user may do, and their own settings. Sent after that user's `sync`, after they change any setting, after they link, unlink or lose a Jellyfin server, and to everyone who has synced after the host or permissions change.
 
 ```json
 {
@@ -143,14 +143,31 @@ The answer to a `command` or `setting`, with its `id`.
 
 It names what it answers in `command` (the command's type) or `setting` (the field id). On success, `ok` is `true`, and some commands add what they found, as their rows below say. A failure carries `message`, what the player would have told the user in Slack, and an `error` code where there is one.
 
+### `sealed`
+
+What's for one user, sealed for one of their clients. Search results, saved sessions, recent songs and a Jellyfin library are theirs alone, so `you` and `result` come sealed to every client of that user that sent a key with its `sync`. While one of their clients sent none, as an older client, they come plainly too.
+
+```json
+{
+  "v": 1,
+  "type": "sealed",
+  "to": "U123",
+  "key": "BD9…",
+  "iv": "…",
+  "data": "…"
+}
+```
+
+`key` is the bot's P-256 public key for the session, raw and in base64. The client derives an AES-GCM key from it and its own private key by ECDH, and opens `data` with `iv` (both base64): the message inside is the whole `you` or `result`, with its own `v`, `type` and `to`. A client that can't open one ignores it, as one sealed for another of the user's clients. Chime stamps who sent each `sync`, so no one can put their key in place of another user's.
+
 ## Clients to the bot
 
 ### `sync`
 
-Asks for the session. The bot broadcasts `state` and answers the sender with `you`.
+Asks for the session. The bot broadcasts `state` and answers the sender with `you`. `key`, the client's P-256 public key, raw and in base64, has what's for this user come [sealed](#sealed).
 
 ```json
-{ "v": 1, "type": "sync" }
+{ "v": 1, "type": "sync", "key": "BHk…" }
 ```
 
 ### `command`
@@ -191,9 +208,9 @@ What some answer with, besides `ok`:
 
 - `search`: `results: { label, reference }[]`, each a `reference` for `add`.
 - `add`: `message` when it says how it went, as "Added 3 of 10 songs". Something on Jellyfin that needs picking first, like a show or a film left part way, answers with `choices: { label, reference }[]` instead, each another `add`. `linkNeeded: true` on a failure means the user hasn't linked that Jellyfin server; they link it in Slack.
-- `suggestions`: `recommended` and `recent`, each a list of `{ id, title, artist?, artwork? }`; recommendations also have their `group`, like `Discover`. Both are empty in video mode, as in Slack.
+- `suggestions`: `recommended` and `recent`, each a list of `{ id, title, artist?, artwork? }`; recommendations also have their `group`, like `Discover`. Both are empty in video mode, as in Slack, and for someone who can't add songs one at a time, as each adds one.
 - `saves`: `saves: { id, name, owner, songs, savedAt, deletable }[]`, newest first. `owner` is `channel` or `user`, `savedAt` is in milliseconds, and `deletable` says whether `forget` would delete it.
-- `lyrics`: `lines: { start, end, text, instrumental? }[]`, in milliseconds, and `synced`, whether they have times at all. No lyrics is an empty `lines`.
+- `lyrics`: `lines: { start, end, text, instrumental? }[]`, in milliseconds, `synced`, whether they have times at all, the `trackId` they're for and the `source` they came from. No lyrics is an empty `lines`, as in video mode and for live streams. A `trackId` that isn't playing any more is a failure.
 - `settings_tab` makes the user's next opening of Settings in Slack, within 15 seconds, start on that tab. A client sends it before it opens Settings from the player's button.
 
 ### `setting`

@@ -427,8 +427,24 @@ export const panelCss = `
   cursor: not-allowed;
 }
 .huddlefm-slider-wrap {
+  position: relative;
   display: flex;
   min-width: 0;
+}
+/* the time under the pointer, over a seek bar */
+.huddlefm-slider__preview {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--dt_color-surf-inv-pry, #1d1c1d);
+  color: var(--dt_color-content-inv-pry, #fff);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
 .huddlefm-slider-wrap > .huddlefm-slider,
 .huddlefm-slider-wrap > .huddlefm-off,
@@ -509,6 +525,8 @@ export const panelCss = `
   color: var(--dt_color-content-ter, #5e5d60);
 }
 .huddlefm-lyrics {
+  /* its lines' offsetTop counts from here, for scrolling to them */
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;

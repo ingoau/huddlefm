@@ -13,6 +13,8 @@ import { HuddleFMClient, TOPIC, type DataMessage } from "../core/protocol.ts";
 import { Store } from "../core/store.ts";
 import { panelCss } from "../core/styles.ts";
 
+/** How long Settings waits for the bot to note the tab it opens on. */
+const SETTINGS_TAB_WAIT_MS = 2_000;
 /** How long to wait for Slack's huddle code before saying it's missing. */
 const SLACK_WAIT_MS = 30_000;
 /** What a user's name has in it to be HuddleFM, for finding it to invite. */
@@ -568,7 +570,12 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     if (!player) return false;
     // the tab it opens on, which the bot takes from the click that follows;
     // a bot without it opens where it always does
-    if (tab) await this.client.command({ type: "settings_tab", tab });
+    if (tab)
+      // not waited on long: Settings opens on its usual tab rather than late
+      await Promise.race([
+        this.client.command({ type: "settings_tab", tab }),
+        new Promise((resolve) => setTimeout(resolve, SETTINGS_TAB_WAIT_MS)),
+      ]);
     const message = this.api.messages.getRawMessage(player.channel, player.ts);
     const found = findButton(
       (message?.blocks ?? []) as Block[],

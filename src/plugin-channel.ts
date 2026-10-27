@@ -1,4 +1,5 @@
 import { mapAgentError } from "./integration.ts";
+import { seal, sealingKeys, sharedKey } from "./plugin-seal.ts";
 
 /*
  * The bot's half of the data channel protocol in docs/data-channel.md, which
@@ -109,6 +110,12 @@ export class PluginChannel {
   // Users who have synced, so the ones to tell when what they may do changes.
   private users = new Set<string>();
   private recent = new Map<string, number[]>();
+  /**
+   * Each user's clients, by attendee, with the key what's for them is
+   * sealed with, or null for one that sent none.
+   */
+  private keys = new Map<string, Map<string, CryptoKey | null>>();
+  private sealing = sealingKeys();
   private closed = false;
   private now: () => number;
   private setTimer: (run: () => void, ms: number) => unknown;
@@ -135,7 +142,7 @@ export class PluginChannel {
   /** A message from the media process: `{ userId, attendeeId, payload }`. */
   receive(details: unknown) {
     if (this.closed || !isRecord(details)) return;
-    const { userId, payload } = details;
+    const { userId, attendeeId, payload } = details;
     if (typeof userId !== "string" || !isRecord(payload)) return;
     const type = payload.type;
     if (type !== "sync" && type !== "command" && type !== "setting") return;
@@ -143,7 +150,12 @@ export class PluginChannel {
       this.log("plugin_message_dropped", { userId, messageType: type });
       return;
     }
-    if (type === "sync") return this.sync(userId);
+    if (type === "sync")
+      return this.sync(
+        userId,
+        typeof attendeeId === "string" ? attendeeId : "",
+        payload.key,
+      );
     if (!validId(payload.id)) return;
     if (type === "command") return this.command(userId, payload.id, payload);
     return this.setting(userId, payload.id, payload);
@@ -176,6 +188,7 @@ export class PluginChannel {
   /** Forgets a user who left the huddle, who can't hear the channel now. */
   forget(userId: string) {
     this.users.delete(userId);
+    this.keys.delete(userId);
     this.recent.delete(userId);
     this.recent.delete(`${userId}/search`);
   }
@@ -210,10 +223,36 @@ export class PluginChannel {
     return true;
   }
 
-  private sync(userId: string) {
+  private async sync(userId: string, attendeeId: string, key: unknown) {
+    const shared =
+      key === undefined
+        ? null
+        : ((await sharedKey((await this.sealing).privateKey, key)) ?? null);
+    if (this.closed) return;
+    const clients = this.keys.get(userId) ?? new Map();
+    clients.set(attendeeId, shared);
+    this.keys.set(userId, clients);
     this.users.add(userId);
     this.changed();
     void this.sendYou(userId);
+  }
+
+  /**
+   * Sends what's for one user: sealed for each of their clients with a key,
+   * and plainly too while any of theirs has none, as an older client.
+   */
+  private async sendTo(userId: string, body: Record<string, unknown>) {
+    const message = { ...body, to: userId };
+    const clients = [...(this.keys.get(userId)?.values() ?? [])];
+    if (!clients.length || clients.includes(null)) this.host.send(message);
+    const keys = clients.filter((key): key is CryptoKey => key !== null);
+    if (!keys.length) return;
+    const { publicKey } = await this.sealing;
+    for (const key of keys) {
+      const sealed = await seal(key, { v: 1, ...message });
+      if (this.closed) return;
+      this.host.send({ type: "sealed", to: userId, key: publicKey, ...sealed });
+    }
   }
 
   private sendState() {
@@ -233,7 +272,7 @@ export class PluginChannel {
   private async sendYou(userId: string) {
     try {
       const you = await this.host.you(userId);
-      if (!this.closed) this.host.send({ type: "you", to: userId, ...you });
+      if (!this.closed) await this.sendTo(userId, { type: "you", ...you });
     } catch (error) {
       this.log("plugin_you_failed", { userId, err: error });
     }
@@ -317,6 +356,8 @@ export class PluginChannel {
 
   private reply(userId: string, id: string, body: Record<string, unknown>) {
     if (this.closed) return;
-    this.host.send({ type: "result", to: userId, id, ...body });
+    void this.sendTo(userId, { type: "result", id, ...body }).catch((error) =>
+      this.log("plugin_reply_failed", { userId, err: error }),
+    );
   }
 }
