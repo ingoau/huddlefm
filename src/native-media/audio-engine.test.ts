@@ -133,6 +133,18 @@ describe("AudioEngine", () => {
     expect(decoders.at(-1)!.start).toBe(20);
   });
 
+  test("reports positions on after seeking back", () => {
+    const { engine, run, of } = setup();
+    engine.handle(play("a", { duration: 30 }));
+    run(25);
+    // both past the five seconds, so nothing else starts the reports over
+    engine.handle({ type: "seek", seconds: 10 });
+    run(5);
+    expect(
+      Math.floor(of("playback_position").at(-1)!.details.seconds),
+    ).toBeGreaterThan(10);
+  });
+
   test("the file's own duration replaces the listed one once probed", async () => {
     const probed: string[] = [];
     const { engine, of } = setup(31.5, async (url) => {
