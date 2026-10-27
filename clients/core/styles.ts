@@ -48,7 +48,7 @@ export const panelCss = `
   display: flex;
   flex-direction: column;
   gap: 16px;
-  width: 360px;
+  width: 400px;
   max-height: min(600px, 75vh);
   padding: 16px;
   box-sizing: border-box;
