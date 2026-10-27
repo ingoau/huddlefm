@@ -325,7 +325,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
   }) => {
     this.client.state.use();
     const bot = this.botUserId();
-    const patch = React.useMemo(() => withoutPeer(bot), [bot]);
+    const patch = withoutPeerShared(bot);
     const { StateView } = this.api.redux;
     return <StateView patch={patch}>{children}</StateView>;
   };
@@ -770,52 +770,103 @@ const TILE_VIEWS = [
 
 type Peer = { userId?: string; isConnected?: boolean };
 type Call = { pendingUsers?: Record<string, unknown> };
+type Canvas = { lastInviteStatusByUser?: Record<string, unknown> };
 type HuddleState = {
   peers?: { byId?: Record<string, Peer> };
   allCalls?: { byId?: Record<string, Call> };
+  huddlesCanvas?: { byHuddleId?: Record<string, Canvas> };
 };
+
+/** `byId` with each entry `map` changes replaced, or itself if none was. */
+function mapById<T>(
+  byId: Record<string, T> | undefined,
+  map: (entry: T) => T,
+): Record<string, T> | undefined {
+  let out = byId;
+  for (const [id, entry] of Object.entries(byId ?? {})) {
+    const mapped = entry && map(entry);
+    if (mapped !== entry) out = { ...out, [id]: mapped };
+  }
+  return out;
+}
+
+/** `entry` with `userId` left out of its `key`, or itself if it isn't there. */
+function omitUser<T, K extends keyof T>(entry: T, key: K, userId: string): T {
+  const users = entry[key] as Record<string, unknown> | undefined;
+  if (!users || !(userId in users)) return entry;
+  const { [userId]: _, ...rest } = users;
+  return { ...entry, [key]: rest };
+}
+
+/** `byId` mapped by `map`, again only when Slack replaces it. */
+function memoById<T>(map: (entry: T) => T) {
+  let input: Record<string, T> | undefined;
+  let output: Record<string, T> | undefined;
+  return (byId: Record<string, T> | undefined) => {
+    if (byId !== input) {
+      input = byId;
+      output = mapById(byId, map);
+    }
+    return output;
+  };
+}
+
+/** `state` with `slice`'s `key` set to `value`, if it isn't already. */
+function withEntries<S, K extends keyof S>(
+  state: S,
+  slice: K,
+  key: string,
+  value: unknown,
+): S {
+  const current = state[slice] as Record<string, unknown> | undefined;
+  if (current?.[key] === value) return state;
+  return { ...state, [slice]: { ...current, [key]: value } };
+}
 
 /**
  * A view of Slack's state where `userId` hasn't connected yet: Slack lists a
- * peer once it has, and it's left out of the call's invites, which would
- * list it as joining. Screen shares come from every peer, so they stay.
+ * peer once it has, and it's left out of the call's invites and the huddle's
+ * invite answers, which would list it as joining or declined. Screen shares
+ * come from every peer, so they stay.
  */
-function withoutPeer(userId: string | undefined) {
-  let peersIn: Record<string, Peer> | undefined;
-  let peersOut: Record<string, Peer> | undefined;
-  let callsIn: Record<string, Call> | undefined;
-  let callsOut: Record<string, Call> | undefined;
+function withoutPeer(userId: string) {
+  const peers = memoById<Peer>((peer) =>
+    peer.userId === userId && peer.isConnected !== undefined
+      ? { ...peer, isConnected: undefined }
+      : peer,
+  );
+  const calls = memoById<Call>((call) =>
+    omitUser(call, "pendingUsers", userId),
+  );
+  const canvases = memoById<Canvas>((canvas) =>
+    omitUser(canvas, "lastInviteStatusByUser", userId),
+  );
   return <S extends HuddleState>(state: S): S => {
-    if (!userId || !state) return state;
-    const peers = state.peers?.byId;
-    if (peers !== peersIn) {
-      peersIn = peers;
-      peersOut = peers;
-      for (const [id, peer] of Object.entries(peers ?? {}))
-        if (peer?.userId === userId && peer.isConnected !== undefined)
-          peersOut = { ...peersOut, [id]: { ...peer, isConnected: undefined } };
-    }
-    const calls = state.allCalls?.byId;
-    if (calls !== callsIn) {
-      callsIn = calls;
-      callsOut = calls;
-      for (const [id, call] of Object.entries(calls ?? {}))
-        if (call?.pendingUsers && userId in call.pendingUsers) {
-          const { [userId]: _, ...pendingUsers } = call.pendingUsers;
-          callsOut = { ...callsOut, [id]: { ...call, pendingUsers } };
-        }
-    }
-    if (peersOut === peers && callsOut === calls) return state;
-    return {
-      ...state,
-      peers:
-        peersOut === peers ? state.peers : { ...state.peers, byId: peersOut },
-      allCalls:
-        callsOut === calls
-          ? state.allCalls
-          : { ...state.allCalls, byId: callsOut },
-    };
+    if (!state) return state;
+    let out = withEntries(state, "peers", "byId", peers(state.peers?.byId));
+    out = withEntries(out, "allCalls", "byId", calls(state.allCalls?.byId));
+    return withEntries(
+      out,
+      "huddlesCanvas",
+      "byHuddleId",
+      canvases(state.huddlesCanvas?.byHuddleId),
+    );
   };
+}
+
+const unchanged = <S,>(state: S) => state;
+let sharedPatch:
+  { userId: string; patch: (state: HuddleState) => HuddleState } | undefined;
+
+/**
+ * One patch for every view, so Slack's selectors, which remember only their
+ * last input, see the same peers from all of them.
+ */
+function withoutPeerShared(userId: string | undefined) {
+  if (!userId) return unchanged;
+  if (sharedPatch?.userId !== userId)
+    sharedPatch = { userId, patch: withoutPeer(userId) };
+  return sharedPatch.patch;
 }
 
 /** A button in a message's blocks, with the block it's in, nested or not. */
