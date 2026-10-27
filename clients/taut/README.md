@@ -40,8 +40,8 @@ To work on it, link `HuddleFM.tsx` and `../core` into a Taut checkout (`plugins/
 
 ## How it's put together
 
-- `../core/` has no Taut in it: the protocol client (`protocol.ts`), the bar and popover (`panel.tsx`), which draw with a kit of Slack components the mod hands in (`kit.ts`), and the media keys (`media-keys.ts`). A plugin for another client mod, like Slick, can reuse it with its own kit.
-- `HuddleFM.tsx` is the Taut side: the data channel, the kit, and the patches that place the bar and hide the tile, the captions and the player message.
+- `../core/` has no Taut in it, and the [Slick plugin](../slick/) shares all of it: the protocol client (`protocol.ts`), the bar and popover (`panel.tsx`), which draw with a kit of Slack components (`kit.ts`), the media keys (`media-keys.ts`), and `mod.tsx`, which has the data channel, the kit made of Slack's components, and the patches that place the bar and hide the tile, the captions and the player message.
+- `HuddleFM.tsx` is the Taut side: its options, and the `Host` it hands `mod.tsx`, Taut's way of reaching Slack's components, store, members and messages.
 
 ### Reaching the data channel
 

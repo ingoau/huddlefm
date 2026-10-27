@@ -1,0 +1,61 @@
+name: Slick plugin
+
+on:
+  push:
+    paths:
+      - "clients/**"
+      - ".github/workflows/slick-plugin.yml"
+  pull_request:
+    paths:
+      - "clients/**"
+      - ".github/workflows/slick-plugin.yml"
+  workflow_dispatch:
+
+env:
+  # The Slick commit the plugin is checked and built against. Bump it to pick
+  # up changes to Slick's plugin API or bundler.
+  SLICK_REF: 22f132927ae5dcde4a52164234aa50210780ed26
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: 3kh0/slick
+          ref: ${{ env.SLICK_REF }}
+          path: slick
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: slick
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      # A user plugin may only import its own files, so the plugin and ../core
+      # go in one folder, beside each other as they are in clients/, with an
+      # index.tsx for Slick to build from. There it's checked as one of
+      # Slick's own plugins, against its types; its lint rules cover the
+      # Slick side, as Taut's cover core. Core's tests run with the bot's.
+      - run: |
+          mkdir -p src/plugins/HuddleFM/slick src/plugins/HuddleFM/core
+          cp ../clients/slick/HuddleFM.tsx src/plugins/HuddleFM/slick/
+          cp ../clients/core/*.ts ../clients/core/*.tsx src/plugins/HuddleFM/core/
+          rm src/plugins/HuddleFM/core/*.test.ts
+          echo 'export { default } from "./slick/HuddleFM.tsx";' > src/plugins/HuddleFM/index.tsx
+          bun run typecheck
+          bun run lint src/plugins/HuddleFM/slick src/plugins/HuddleFM/index.tsx
+          bun run build:plugin src/plugins/HuddleFM ../dist/HuddleFM.js
+        working-directory: slick
+      - uses: actions/upload-artifact@v7
+        with:
+          name: huddlefm-slick-plugin
+          path: |
+            dist/HuddleFM.js
+            dist/HuddleFM.user.js
+          if-no-files-found: error
