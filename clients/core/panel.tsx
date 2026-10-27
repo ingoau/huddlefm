@@ -42,6 +42,32 @@ export function say(result: Result) {
   return result.ok;
 }
 
+/**
+ * Shows the whole of a line of text marked `data-fulltext` that's cut
+ * short, as a song title too long for its room, as its tooltip while it's
+ * hovered, and none when it all fits.
+ */
+function useFullText(ref: React.RefObject<HTMLElement | null>) {
+  // again after every render, as what the ref holds can change: the bar's
+  // song only has it while there's room for the song
+  React.useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const over = (event: Event) => {
+      const element = (event.target as Element | null)?.closest?.(
+        "[data-fulltext]",
+      ) as HTMLElement | null;
+      if (!element || !root.contains(element)) return;
+      const cut =
+        element.scrollWidth > element.clientWidth ||
+        element.scrollHeight > element.clientHeight;
+      element.title = cut ? (element.textContent ?? "") : "";
+    };
+    root.addEventListener("mouseover", over);
+    return () => root.removeEventListener("mouseover", over);
+  });
+}
+
 function can(you: You | undefined, capability: string) {
   return Boolean(you?.capabilities.includes(capability));
 }
@@ -224,6 +250,7 @@ export function PlayerBar(props: {
   const { Icon, Tooltip, IconButton } = platform.kit;
   const state = platform.client.state.use();
   const ref = React.useRef<HTMLDivElement>(null);
+  useFullText(ref);
   const track = state?.nowPlaying;
   const playing = state?.session.state === "playing";
   const pause = usePermission(platform, "pause");
@@ -286,10 +313,10 @@ export function PlayerBar(props: {
       >
         <Artwork platform={platform} track={track} size={28} />
         <span className="huddlefm-bar__text">
-          <span className="huddlefm-bar__title">
+          <span className="huddlefm-bar__title" data-fulltext>
             {track ? track.title : "Nothing playing"}
           </span>
-          <span className="huddlefm-bar__artist">
+          <span className="huddlefm-bar__artist" data-fulltext>
             {track ? track.artist : "Add a song"}
           </span>
         </span>
@@ -323,6 +350,8 @@ export function PlayerBar(props: {
 /** Everything else, for the popover the bar opens. */
 export function Panel({ platform }: { platform: Platform }) {
   const { client, kit } = platform;
+  const root = React.useRef<HTMLDivElement>(null);
+  useFullText(root);
   const state = client.state.use();
   const you = client.you.use();
   const presence = client.presence.use();
@@ -410,7 +439,7 @@ export function Panel({ platform }: { platform: Platform }) {
   );
 
   return (
-    <div className="huddlefm-panel">
+    <div className="huddlefm-panel" ref={root}>
       {problem && <kit.Alert>{problem}</kit.Alert>}
       {body}
     </div>
@@ -534,10 +563,10 @@ function NowPlaying(props: {
       <div className="huddlefm-now__top">
         <Artwork platform={platform} track={track} size={64} />
         <div className="huddlefm-now__text">
-          <div className="huddlefm-now__title">
+          <div className="huddlefm-now__title" data-fulltext>
             {track ? track.title : "Nothing playing"}
           </div>
-          <div className="huddlefm-now__artist">
+          <div className="huddlefm-now__artist" data-fulltext>
             {track
               ? track.artist
               : add.allowed
@@ -1025,7 +1054,9 @@ function Search(props: {
                 className="c-button-unstyled huddlefm-result"
                 onClick={() => add({ reference: result.reference })}
               >
-                <span className="huddlefm-result__label">{result.label}</span>
+                <span className="huddlefm-result__label" data-fulltext>
+                  {result.label}
+                </span>
                 <kit.Icon name="plus" size={16} />
               </button>
             </li>
@@ -1121,9 +1152,11 @@ function Discover(props: { platform: Platform; back: () => void }) {
               >
                 <Artwork platform={platform} track={item} size={36} />
                 <span className="huddlefm-result__label">
-                  <span className="huddlefm-result__title">{item.title}</span>
+                  <span className="huddlefm-result__title" data-fulltext>
+                    {item.title}
+                  </span>
                   {item.artist && (
-                    <span className="huddlefm-result__artist">
+                    <span className="huddlefm-result__artist" data-fulltext>
                       {item.artist}
                     </span>
                   )}
@@ -1381,8 +1414,10 @@ function Queue(props: {
             >
               <Artwork platform={platform} track={track} size={36} />
               <div className="huddlefm-track__text">
-                <div className="huddlefm-track__title">{track.title}</div>
-                <div className="huddlefm-track__meta">
+                <div className="huddlefm-track__title" data-fulltext>
+                  {track.title}
+                </div>
+                <div className="huddlefm-track__meta" data-fulltext>
                   {track.artist}
                   {track.artist ? " · " : ""}
                   <AddedBy platform={platform} track={track} />
@@ -1711,7 +1746,9 @@ function LoadSave(props: { platform: Platform; back: () => void }) {
                         load(item);
                       }}
                     >
-                      <span className="huddlefm-save__name">{item.name}</span>
+                      <span className="huddlefm-save__name" data-fulltext>
+                        {item.name}
+                      </span>
                       <span className="huddlefm-save__meta">
                         {item.songs === 1 ? "1 song" : `${item.songs} songs`}
                         {" · "}
