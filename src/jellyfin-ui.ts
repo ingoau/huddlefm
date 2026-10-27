@@ -71,6 +71,17 @@ type JellyfinState = {
 /** A Jellyfin item queued with where to start it. */
 export type QueuedItem = TrackMetadata & { startAt?: number };
 
+/**
+ * What picking something for a client mod did: said how it went, gave more
+ * to pick from, or failed. `linkNeeded` is a link to a server not linked yet.
+ */
+export type JellyfinPick = {
+  message?: string;
+  choices?: { label: string; reference: string }[];
+  error?: string;
+  linkNeeded?: boolean;
+};
+
 /** What the Jellyfin dialogs need from the session they belong to. */
 export type JellyfinHost = {
   sessionId: string;
@@ -119,6 +130,8 @@ export type JellyfinHost = {
     settings: unknown,
   ): Promise<void>;
   audit(event: string, userId: string, fields: Record<string, unknown>): void;
+  /** The user's servers changed: one was linked, unlinked or let go. */
+  serversChanged?(userId: string): void;
 };
 
 // Slack refuses private metadata longer than this.
@@ -653,6 +666,7 @@ export class JellyfinUi {
         };
         this.attempts.delete(viewId);
         this.host.store.saveJellyfinServer(server);
+        this.host.serversChanged?.(interaction.userId);
         this.host.audit("jellyfin.linked", interaction.userId, {
           sessionId: this.id,
           serverId: server.serverId,
@@ -755,6 +769,7 @@ export class JellyfinUi {
     );
     if (!server) return;
     this.host.store.removeJellyfinServer(interaction.userId, server.serverId);
+    this.host.serversChanged?.(interaction.userId);
     this.host.audit("jellyfin.unlinked", interaction.userId, {
       sessionId: this.id,
       serverId: server.serverId,
@@ -799,6 +814,173 @@ export class JellyfinUi {
     }
     await this.open(view.id, interaction, server, parsed.itemId);
     return true;
+  }
+
+  /**
+   * A search result or choice from a client mod, which has no dialog to
+   * browse in: plays what plays, adds an album's or folder's items, and for
+   * the rest answers with what to pick from next, as the dialogs would show
+   * it: where to start something left part way, a show's seasons, a season's
+   * episodes. What the queue says goes in notices, as for the dialogs.
+   */
+  async pick(interaction: Interaction, value: string): Promise<JellyfinPick> {
+    const parsed = parseItemValue(value);
+    if (!parsed) return { error: "That Jellyfin item can't be found." };
+    const server = this.host.store.jellyfinServer(
+      interaction.userId,
+      parsed.serverId,
+    );
+    if (!server || server.revoked)
+      return {
+        error:
+          "That server isn’t linked any more. Link it again under Accounts and more in Slack.",
+        linkNeeded: true,
+      };
+    try {
+      return await this.pickItem(interaction, server, parsed);
+    } catch (error) {
+      if (error instanceof JellyfinError && error.status === 403)
+        return {
+          error: "Your Jellyfin account isn’t allowed to play that.",
+        };
+      if (error instanceof JellyfinError && error.unauthorized) {
+        this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+        this.host.serversChanged?.(server.userId);
+        return {
+          error: `HuddleFM’s link to ${server.name} stopped working. Link it again under Accounts and more in Slack.`,
+          linkNeeded: true,
+        };
+      }
+      this.host.log.warn(
+        {
+          event: "jellyfin_open_failed",
+          serverId: server.serverId,
+          err: error,
+        },
+        "Could not open the Jellyfin item",
+      );
+      return { error: errorText(error) };
+    }
+  }
+
+  /**
+   * A pasted Jellyfin link from a client mod: its item, when its server is
+   * linked. Linking shows a code to approve, which stays in Slack's own
+   * dialogs: everyone in the huddle hears the data channel.
+   */
+  async pickLink(
+    interaction: Interaction,
+    link: JellyfinLink,
+  ): Promise<JellyfinPick> {
+    let serverId = link.serverId;
+    if (!serverId)
+      try {
+        serverId = (await this.host.jellyfin.publicInfo(link.baseUrl)).id;
+      } catch (error) {
+        return { error: errorText(error) };
+      }
+    const server = this.host.store.jellyfinServer(interaction.userId, serverId);
+    if (!server || server.revoked)
+      return {
+        error:
+          "Link this Jellyfin server first, under Accounts and more in Slack.",
+        linkNeeded: true,
+      };
+    return this.pick(interaction, itemValue("open", serverId, link.itemId));
+  }
+
+  private async pickItem(
+    interaction: Interaction,
+    server: LinkedServer,
+    parsed: NonNullable<ReturnType<typeof parseItemValue>>,
+  ): Promise<JellyfinPick> {
+    const { jellyfin } = this.host;
+    const item = await jellyfin.item(server, parsed.itemId);
+    const choice = (action: string, label: string, of: JellyfinItem) => ({
+      label: shorten(label, 75),
+      reference: itemValue(action, server.serverId, of.Id),
+    });
+    const queue = async (
+      capability: "add" | "add-bulk",
+      items: QueuedItem[],
+      text: string,
+    ) =>
+      (await this.host.queue(interaction, capability, items))
+        ? { message: text }
+        : {};
+    if (item.Type === "Series") {
+      const seasons = await jellyfin.seasons(server, item.Id);
+      if (!seasons.length) return { error: "That show has no seasons yet." };
+      // one season is its episodes
+      if (seasons.length > 1)
+        return {
+          choices: seasons
+            .slice(0, 100)
+            .map((season) =>
+              choice(
+                "open",
+                season.Name ?? `Season ${season.IndexNumber ?? ""}`,
+                season,
+              ),
+            ),
+        };
+      return this.episodeChoices(server, item.Id, seasons[0]!.Id, choice);
+    }
+    if (item.Type === "Season" && item.SeriesId)
+      return this.episodeChoices(server, item.SeriesId, item.Id, choice);
+    if (isPlayable(item)) {
+      const resume = resumeSeconds(item);
+      if (parsed.action === "open" && resume)
+        return {
+          choices: [
+            choice("resume", `Resume from ${formatClock(resume)}`, item),
+            choice("start", "Start from the beginning", item),
+          ],
+        };
+      const startAt = parsed.action === "resume" ? resume : undefined;
+      return queue(
+        "add",
+        [
+          {
+            ...itemTrack(server.serverId, item),
+            ...(startAt ? { startAt } : {}),
+          },
+        ],
+        `Added ${item.Name ?? "it"} to the queue${startAt ? `, from ${formatClock(startAt)}` : ""}.`,
+      );
+    }
+    const children = (await jellyfin.children(server, item.Id)).filter(
+      isPlayable,
+    );
+    if (!children.length) return { error: "There’s nothing in that to play." };
+    return queue(
+      "add-bulk",
+      children.map((child) => itemTrack(server.serverId, child)),
+      `Added ${children.length} ${children.length === 1 ? "item" : "items"} from ${item.Name ?? "it"} to the queue.`,
+    );
+  }
+
+  private async episodeChoices(
+    server: LinkedServer,
+    seriesId: string,
+    seasonId: string,
+    choice: (
+      action: string,
+      label: string,
+      of: JellyfinItem,
+    ) => { label: string; reference: string },
+  ): Promise<JellyfinPick> {
+    const episodes = await this.host.jellyfin.episodes(
+      server,
+      seriesId,
+      seasonId,
+    );
+    if (!episodes.length) return { error: "That season has no episodes yet." };
+    return {
+      choices: episodes
+        .slice(0, episodeLimit)
+        .map((episode) => choice("open", itemLabel(episode), episode)),
+    };
   }
 
   private async chooseItem(interaction: Interaction) {
@@ -952,6 +1134,7 @@ export class JellyfinUi {
     }
     if (error instanceof JellyfinError && error.unauthorized) {
       this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+      this.host.serversChanged?.(server.userId);
       await this.update(
         viewId,
         this.messageView(
@@ -1374,6 +1557,7 @@ export class JellyfinUi {
     } catch (error) {
       if (error instanceof JellyfinError && error.unauthorized) {
         this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+        this.host.serversChanged?.(server.userId);
         throw new TrackError("No longer available");
       }
       if (
@@ -1469,6 +1653,7 @@ export class JellyfinUi {
       .catch((error) => {
         if (error instanceof JellyfinError && error.unauthorized)
           this.host.store.revokeJellyfinServer(server.userId, server.serverId);
+        this.host.serversChanged?.(server.userId);
         this.host.log.debug(
           { event: "jellyfin_report_failed", report: event, err: error },
           "Could not report playback to Jellyfin",

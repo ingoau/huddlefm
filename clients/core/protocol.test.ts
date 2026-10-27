@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { encodeMessages } from "../../src/native-media/data-channel.ts";
+import { seal, sealingKeys, sharedKey } from "../../src/plugin-seal.ts";
 import { HuddleFMClient, type DataMessage } from "./protocol.ts";
 
 const self = "U0SELF";
@@ -7,7 +8,9 @@ const bot = { attendee: "bot-attendee", external: "slack-R1-U0BOT" };
 
 function client() {
   const sent: Record<string, unknown>[] = [];
-  const huddlefm = new HuddleFMClient(() => self);
+  const huddlefm = new HuddleFMClient(() => self, undefined, undefined, {
+    seal: false,
+  });
   huddlefm.connect((data) =>
     sent.push(JSON.parse(new TextDecoder().decode(data))),
   );
@@ -112,7 +115,8 @@ describe("HuddleFM client", () => {
       }),
     );
     const at = huddlefm.receivedAt;
-    expect(huddlefm.position(at + 5_000)).toBe(15);
+    // the clock's times are fractions, so a few digits along it rounds
+    expect(huddlefm.position(at + 5_000)).toBeCloseTo(15, 6);
     expect(huddlefm.position(at + 60_000)).toBe(30);
   });
 
@@ -230,5 +234,52 @@ describe("HuddleFM client", () => {
     const { huddlefm, receive } = client();
     receive({ type: "hello", protocol: 2, features: [] });
     expect(huddlefm.presence.get()).toBe("incompatible");
+  });
+
+  test("sends its key with sync, and opens what's sealed for it", async () => {
+    const sent: Record<string, any>[] = [];
+    const huddlefm = new HuddleFMClient(() => self);
+    huddlefm.connect((data) =>
+      sent.push(JSON.parse(new TextDecoder().decode(data))),
+    );
+    for (let i = 0; i < 50 && !sent.length; i++) await Bun.sleep(5);
+    // read before matching it, which puts the matcher in its place
+    const clientKey = sent[0]?.key;
+    expect(sent[0]).toMatchObject({ type: "sync", key: expect.any(String) });
+    const bot = await sealingKeys();
+    const key = (await sharedKey(bot.privateKey, clientKey)) as CryptoKey;
+    const deliver = async (payload: Record<string, unknown>, to = self) => {
+      for (const data of encodeMessages(
+        {
+          type: "sealed",
+          to,
+          key: bot.publicKey,
+          ...(await seal(key, { v: 1, ...payload })),
+        },
+        String(Math.random()),
+      ))
+        huddlefm.receive({
+          data,
+          senderAttendeeId: "bot-attendee",
+          senderExternalUserId: "slack-R1-U0BOT",
+          throttled: false,
+        });
+      await Bun.sleep(10);
+    };
+    const you = { capabilities: ["add"], admin: false, settings: [] };
+    // sealed for someone else's user, inside: ignored
+    await deliver({ type: "you", to: "U0OTHER", ...you });
+    expect(huddlefm.you.get()).toBeUndefined();
+    await deliver({ type: "you", to: self, ...you });
+    expect(huddlefm.you.get()).toEqual(you);
+  });
+
+  test("syncs again when the bot asks", () => {
+    const { sent, receive } = client();
+    sent.length = 0;
+    receive({ type: "resync", to: "U0OTHER" });
+    expect(sent).toEqual([]);
+    receive({ type: "resync", to: self });
+    expect(sent).toEqual([{ type: "sync", v: 1 }]);
   });
 });

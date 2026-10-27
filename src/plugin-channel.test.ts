@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Sealing } from "../clients/core/seal.ts";
 import {
   PluginChannel,
   type AgentResult,
@@ -56,10 +57,27 @@ function setup() {
     }
     await Bun.sleep(0);
   };
-  const receive = async (payload: Record<string, unknown>, from = user) => {
+  // a client syncs before anything else, as a real one does
+  const synced = new Set<string>();
+  const receive = async (
+    payload: Record<string, unknown>,
+    from = user,
+    attendeeId = "a",
+  ) => {
+    if (payload.type !== "sync" && !synced.has(from)) {
+      synced.add(from);
+      channel.receive({
+        userId: from,
+        attendeeId,
+        payload: { v: 1, type: "sync" },
+      });
+      await Bun.sleep(0);
+      sent.length = 0;
+    }
+    if (payload.type === "sync") synced.add(from);
     channel.receive({
       userId: from,
-      attendeeId: "a",
+      attendeeId,
       payload: { v: 1, ...payload },
     });
     await Bun.sleep(0);
@@ -76,6 +94,88 @@ function setup() {
 }
 
 describe("plugin channel", () => {
+  test("seals what's for one user to their client's key", async () => {
+    const { sent, receive } = setup();
+    const client = new Sealing();
+    await receive({ type: "sync", key: await client.publicKey() });
+    await Bun.sleep(20);
+    await receive({ type: "command", id: "r1", command: { type: "skip" } });
+    await Bun.sleep(20);
+    // nothing for the user goes out plainly
+    expect(sent.filter((message) => message.type === "you")).toEqual([]);
+    expect(sent.filter((message) => message.type === "result")).toEqual([]);
+    const sealed = sent.filter((message) => message.type === "sealed");
+    expect(sealed).toHaveLength(2);
+    const opened = await Promise.all(
+      sealed.map((message) => client.open(message as any)),
+    );
+    expect(opened).toEqual([
+      expect.objectContaining({ v: 1, type: "you", to: user }),
+      expect.objectContaining({ v: 1, type: "result", to: user, id: "r1" }),
+    ]);
+    // another client can't open them
+    expect(await new Sealing().open(sealed[0] as any)).toBeUndefined();
+    expect(sealed[0]).toMatchObject({ to: user, key: expect.any(String) });
+  });
+
+  test("answers plainly too while one of the user's clients has no key", async () => {
+    const { sent, receive } = setup();
+    const client = new Sealing();
+    await receive({ type: "sync", key: await client.publicKey() }, user, "a");
+    await receive({ type: "sync" }, user, "b");
+    await Bun.sleep(20);
+    sent.length = 0;
+    await receive({ type: "command", id: "r1", command: { type: "skip" } });
+    await Bun.sleep(20);
+    expect(sent.map((message) => message.type).sort()).toEqual([
+      "result",
+      "sealed",
+    ]);
+  });
+
+  test("seals an answer to a command sent before the key is worked out", async () => {
+    const { sent, receive } = setup();
+    const client = new Sealing();
+    const key = await client.publicKey();
+    // no wait between them
+    await receive({ type: "sync", key });
+    await receive({ type: "command", id: "r1", command: { type: "skip" } });
+    await Bun.sleep(30);
+    expect(sent.filter((message) => message.type === "result")).toEqual([]);
+    const opened = await Promise.all(
+      sent
+        .filter((message) => message.type === "sealed")
+        .map((message) => client.open(message as any)),
+    );
+    // in the order they were sent
+    expect(opened.map((message: any) => message?.type)).toEqual([
+      "you",
+      "result",
+    ]);
+  });
+
+  test("asks a user it has forgotten to sync, rather than answer plainly", async () => {
+    const { channel, sent, receive } = setup();
+    await receive({ type: "sync", key: await new Sealing().publicKey() });
+    await Bun.sleep(20);
+    channel.forget(user);
+    sent.length = 0;
+    channel.receive({
+      userId: user,
+      attendeeId: "a",
+      payload: { v: 1, type: "command", id: "r1", command: { type: "skip" } },
+    });
+    await Bun.sleep(20);
+    expect(sent).toEqual([{ type: "resync", to: user }]);
+  });
+
+  test("takes a key that isn't one as no key", async () => {
+    const { sent, receive } = setup();
+    await receive({ type: "sync", key: "not a key" });
+    await Bun.sleep(20);
+    expect(sent.map((message) => message.type)).toContain("you");
+  });
+
   test("sends nothing until a client syncs, then state and its you", async () => {
     const { channel, sent, advance, receive } = setup();
     channel.changed();
@@ -215,6 +315,9 @@ describe("plugin channel", () => {
 
   test("lets each user send 10 messages a second", async () => {
     const { commands, advance, receive } = setup();
+    await receive({ type: "sync" });
+    await receive({ type: "sync" }, "U999");
+    await advance(1_000);
     for (let i = 0; i < 12; i++)
       await receive({
         type: "command",
