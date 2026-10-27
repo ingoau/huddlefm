@@ -334,6 +334,12 @@ export function Panel({ platform }: { platform: Platform }) {
   // a new session, or none, starts from the song playing
   const sessionId = state?.session.id;
   React.useEffect(() => setView("main"), [sessionId]);
+  // what Add songs offers is for adding songs, in music mode
+  const discoverable = state?.session.mode === "music" && can(you, "add");
+  React.useEffect(() => {
+    if (!discoverable)
+      setView((shown) => (shown === "discover" ? "main" : shown));
+  }, [discoverable]);
   // lyrics are for a song playing in music mode
   const lyrical = Boolean(
     state?.nowPlaying &&
@@ -375,11 +381,7 @@ export function Panel({ platform }: { platform: Platform }) {
         platform={platform}
         you={you}
         // as in Slack, video mode has no recommendations or recent songs
-        openDiscover={
-          state.session.mode === "music" && can(you, "add")
-            ? () => setView("discover")
-            : undefined
-        }
+        openDiscover={discoverable ? () => setView("discover") : undefined}
       />
       {lyrical ? (
         <kit.Tabs
@@ -819,7 +821,9 @@ function Volume({ platform, volume }: { platform: Platform; volume: number }) {
     if (held === undefined) return;
     const percent = held;
     setHeld(undefined);
-    if (percent === volume) return;
+    // against what's shown: dragged back to the old volume before the bot
+    // took the last change is a change too
+    if (percent === (sent ?? volume)) return;
     setSent(percent);
     platform.client.command({ type: "volume", percent }).then((result) => {
       // refused, it's the old volume again; taken, the state brings it
