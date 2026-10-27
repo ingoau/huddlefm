@@ -9,6 +9,12 @@ export const protocolVersion = 1;
 export const maxDataBytes = 2048;
 /** The least time between two pongs to one attendee. */
 const pongIntervalMs = 1_000;
+/** The version of the messages in docs/data-channel.md that `hello` names. */
+export const dataProtocol = 1;
+/** What the bot offers clients, as `hello` lists it. */
+export const dataFeatures = ["state", "commands", "search", "settings"];
+// Room left in a chunk for its envelope, so each one stays under the limit.
+const chunkEnvelopeBytes = 128;
 
 /** A message on the topic, as JSON. */
 export type DataPayload = { v: number; type: string; [key: string]: unknown };
@@ -40,6 +46,46 @@ export function encodePayload(payload: Record<string, unknown>) {
   return data;
 }
 
+/**
+ * A payload as the data messages that carry it: itself when it fits, or else
+ * `chunk`s, each a slice of its JSON text that fits once wrapped.
+ */
+/** The most chunks a message may take; clients drop larger ones. */
+export const maxChunks = 64;
+
+export function encodeMessages(payload: Record<string, unknown>, id: string) {
+  const text = JSON.stringify({ ...payload, v: protocolVersion });
+  const whole = new TextEncoder().encode(text);
+  if (whole.length <= maxDataBytes) return [whole];
+  const slices: string[] = [];
+  const budget = maxDataBytes - chunkEnvelopeBytes - id.length;
+  let start = 0;
+  while (start < text.length) {
+    // Slices are cut by UTF-16 code unit and measured as JSON-escaped UTF-8,
+    // backing off until one fits, without splitting a surrogate pair.
+    let end = Math.min(text.length, start + budget);
+    while (end > start) {
+      const code = text.charCodeAt(end - 1);
+      const splitsPair = code >= 0xd800 && code <= 0xdbff && end < text.length;
+      if (
+        !splitsPair &&
+        new TextEncoder().encode(JSON.stringify(text.slice(start, end)))
+          .length <= budget
+      )
+        break;
+      end -= splitsPair ? 1 : Math.max(1, Math.ceil((end - start) / 8));
+    }
+    if (end <= start) throw new Error("Data message cannot be chunked");
+    slices.push(text.slice(start, end));
+    start = end;
+  }
+  if (slices.length > maxChunks)
+    throw new Error(`Data message needs ${slices.length} chunks`);
+  return slices.map((data, i) =>
+    encodePayload({ type: "chunk", id, i, n: slices.length, data }),
+  );
+}
+
 function decodePayload(base64: string | undefined) {
   if (!base64) return;
   try {
@@ -57,11 +103,12 @@ function decodePayload(base64: string | undefined) {
 /**
  * HuddleFM's messages over the Chime data channel. Chime stamps each with its
  * sender, so a message names the Slack user who sent it without any token.
- * For now the bot announces itself and answers pings, so a client can tell
- * the channel works both ways.
+ * The bot answers pings here and hands every other message to `onMessage`;
+ * docs/data-channel.md describes the messages.
  */
 export class DataChannel {
   private lastPong = new Map<string, number>();
+  private chunkIds = 0;
 
   constructor(
     private selfId: string,
@@ -86,18 +133,24 @@ export class DataChannel {
       const userId = slackUserId(message.sender_external_user_id);
       const payload = decodePayload(message.data);
       if (!attendeeId || !userId || !payload) continue;
-      this.onMessage({ payload, attendeeId, userId });
       if (payload.type === "ping") this.pong(payload, attendeeId, userId);
+      else this.onMessage({ payload, attendeeId, userId });
     }
   }
 
   /** Tells clients already in the Huddle that the bot is here. */
   announce() {
-    return this.broadcast({ type: "hello" });
+    return this.broadcast({
+      type: "hello",
+      protocol: dataProtocol,
+      features: dataFeatures,
+    });
   }
 
+  /** Sends a payload to everyone, in chunks when it is too large for one. */
   broadcast(payload: Record<string, unknown>) {
-    return this.send(encodePayload(payload));
+    const id = (this.chunkIds++).toString(36);
+    return encodeMessages(payload, id).every((data) => this.send(data));
   }
 
   private pong(ping: DataPayload, attendeeId: string, userId: string) {

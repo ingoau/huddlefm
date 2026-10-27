@@ -479,6 +479,8 @@ export class AudioEngine {
     );
     deck.seek(clamped);
     deck.pastRestartThreshold = deck.position > 5;
+    // reports count on from here, even back before the last one
+    deck.lastReportedSecond = Math.floor(deck.position);
     this.emit("playback_position", {
       entryId: this.currentId,
       seconds: deck.position,

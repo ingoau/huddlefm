@@ -1,5 +1,5 @@
 {
-  // Taut's bundler reads the tsconfig nearest the plugin. Taut plugins use
+  // Taut's bundler reads the tsconfig nearest each file. Client mods use
   // Slack's React as a global, so JSX is React.createElement, not the
   // automatic runtime the app's tsconfig sets.
   "compilerOptions": {

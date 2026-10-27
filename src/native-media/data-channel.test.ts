@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   DataChannel,
   dataTopic,
+  encodeMessages,
+  maxChunks,
   encodePayload,
   maxDataBytes,
   slackUserId,
@@ -86,14 +88,21 @@ describe("data channel", () => {
   test("answers a ping with a pong naming its sender", () => {
     const { data, sent, received } = channel();
     data.handle(frame([{ data: json({ v: 1, type: "ping", id: "abc" }) }]));
+    expect(received).toEqual([]);
+    expect(sent).toEqual([{ type: "pong", id: "abc", to: "U0456DEF", v: 1 }]);
+  });
+
+  test("hands other messages on with their sender", () => {
+    const { data, sent, received } = channel();
+    data.handle(frame([{ data: json({ v: 1, type: "sync" }) }]));
     expect(received).toEqual([
       {
-        payload: { v: 1, type: "ping", id: "abc" },
+        payload: { v: 1, type: "sync" },
         attendeeId: "user-attendee",
         userId: "U0456DEF",
       },
     ]);
-    expect(sent).toEqual([{ type: "pong", id: "abc", to: "U0456DEF", v: 1 }]);
+    expect(sent).toEqual([]);
   });
 
   test("pongs each attendee at most once a second", () => {
@@ -112,13 +121,13 @@ describe("data channel", () => {
     const { data, received } = channel();
     data.handle(
       frame([
-        { topic: "data-channel", data: json({ v: 1, type: "ping" }) },
-        { data: json({ v: 2, type: "ping" }) },
+        { topic: "data-channel", data: json({ v: 1, type: "sync" }) },
+        { data: json({ v: 2, type: "sync" }) },
         { data: json({ v: 1 }) },
         { data: new TextEncoder().encode("{") },
         {
           sender_external_user_id: "nobody",
-          data: json({ v: 1, type: "ping" }),
+          data: json({ v: 1, type: "sync" }),
         },
       ]),
     );
@@ -140,12 +149,56 @@ describe("data channel", () => {
     expect(throttled()).toBe(1);
   });
 
-  test("announces itself and refuses messages Chime would", () => {
+  test("announces itself with its protocol and features", () => {
     const { data, sent } = channel();
     data.announce();
-    expect(sent).toEqual([{ type: "hello", v: 1 }]);
+    expect(sent).toEqual([
+      {
+        type: "hello",
+        protocol: 1,
+        features: ["state", "commands", "search", "settings"],
+        v: 1,
+      },
+    ]);
     expect(() =>
-      data.broadcast({ type: "big", text: "x".repeat(maxDataBytes) }),
+      encodePayload({ type: "big", text: "x".repeat(maxDataBytes) }),
     ).toThrow();
+  });
+
+  test("sends a message too large for one in chunks that fit", () => {
+    const { data, sent } = channel();
+    // Wide characters and escapes, so a slice's size isn't its length.
+    const text = 'ü😀"\n'.repeat(900);
+    expect(data.broadcast({ type: "state", text })).toBe(true);
+    const chunks = sent as {
+      type: string;
+      id: string;
+      i: number;
+      n: number;
+      data: string;
+    }[];
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.type === "chunk")).toBe(true);
+    expect(chunks.map((chunk) => chunk.i)).toEqual(
+      chunks.map((_, index) => index),
+    );
+    expect(new Set(chunks.map((chunk) => `${chunk.id}/${chunk.n}`)).size).toBe(
+      1,
+    );
+    expect(JSON.parse(chunks.map((chunk) => chunk.data).join(""))).toEqual({
+      type: "state",
+      text,
+      v: 1,
+    });
+    for (const bytes of encodeMessages({ type: "state", text }, "zz"))
+      expect(bytes.length).toBeLessThanOrEqual(maxDataBytes);
+    // Each message gets its own id.
+    data.broadcast({ type: "state", text });
+    expect((sent.at(-1) as { id: string }).id).not.toBe(chunks[0]!.id);
+  });
+
+  test("won't chunk a message past what clients put back together", () => {
+    const text = "x".repeat(maxDataBytes * (maxChunks + 1));
+    expect(() => encodeMessages({ type: "state", text }, "zz")).toThrow();
   });
 });
