@@ -47,8 +47,11 @@ export default class HuddleFM extends SlickPlugin<typeof settings> {
 
   async start() {
     const { api, config } = this;
-    // read before anything can choose one, so a choice isn't overwritten
-    const botUser = new Store(await api.storage.get<string>("botUserId", ""));
+    // Slick's storage is shared by every workspace, and each has its own
+    // HuddleFM, so it's kept by the user you are there. It's read before
+    // anything can choose one, so a choice isn't overwritten.
+    const botUserKey = `botUserId:${api.members.getCurrentMemberId() ?? ""}`;
+    const botUser = new Store(await api.storage.get<string>(botUserKey, ""));
     if (!api.isActive()) return;
     const huddle = activeHuddle(api);
     this.mod = new HuddleFMMod({
@@ -86,7 +89,7 @@ export default class HuddleFM extends SlickPlugin<typeof settings> {
         get: botUser.get,
         set: (userId) => {
           botUser.set(userId);
-          api.storage.set("botUserId", userId).catch(() => {});
+          api.storage.set(botUserKey, userId).catch(() => {});
         },
         use: () => botUser.use(),
       },

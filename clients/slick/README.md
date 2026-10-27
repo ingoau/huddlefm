@@ -16,7 +16,7 @@ In **Slick Settings → Plugins → HuddleFM**, the same as Taut's:
 The **Slick plugin** workflow builds it on every change here: download the `huddlefm-slick-plugin` artifact of its latest run. It has `HuddleFM.js`, for the desktop app and the browser extension, and `HuddleFM.user.js`, for the userscript.
 
 - **Desktop**: **Slick Settings → Plugins → Install plugin…**, and pick `HuddleFM.js`.
-- **Browser extension**: **Install plugin file…** under the Slick toolbar button's Plugins tab. Chromium also needs **Allow User Scripts** on in the extension's details. Reload Slack after.
+- **Browser extension**: in the Slick toolbar button's Plugins tab, click **Allow user plugins**, then **Install plugin file…**. Chromium also needs **Allow User Scripts** on in the extension's details. Reload Slack after. The Firefox Add-ons version can't run user plugins; Slick's self-hosted `.xpi` can.
 - **Userscript**: install `HuddleFM.user.js` in Violentmonkey beside Slick.
 
 Turn it on and join a huddle with HuddleFM. In DevTools (`Ctrl`+`Alt`+`I`, `Cmd`+`Option`+`I`), the plugin logs with `[slick] [HuddleFM]`.
@@ -39,5 +39,5 @@ That writes `dist/plugins/HuddleFM.js` and `HuddleFM.user.js`. With the folder t
 `HuddleFM.tsx` is the Slick side: its settings, and the `Host` it hands `../core/mod.tsx`. Where Taut has something Slick doesn't, it does without Taut:
 
 - Slack's components Slick doesn't offer, like `Popover`, `Checkbox` and `TabsWithWindow`, it finds itself, by name and, for names other components share, by the markup they draw, as Taut does.
-- The bot it remembers is kept in Slick's plugin storage, and read before anything can choose one.
+- The bot it remembers is kept in Slick's plugin storage, by the user you are in each workspace, as Slick's storage is shared by all of them.
 - **Start HuddleFM** finds the huddle you're in with Slack's `getActiveHuddleChannelId` selector, found by its name. Taut also learns selector names Slack gives its debugger, which a user plugin starts too late to; if a Slack release drops the name, **Start HuddleFM** says it couldn't invite HuddleFM, and the rest works as ever.
