@@ -2373,10 +2373,23 @@ export class Coordinator {
       case "search":
         return this.pluginSearch(userId, command.query);
       case "add": {
-        const reference =
+        let reference =
           typeof command.reference === "string" ? command.reference.trim() : "";
         if (!reference)
           return { ok: false, error: "Search for a song, or paste a link." };
+        // A link stands for itself as Add songs' search has it, so a playlist
+        // is added as one, under its permission.
+        if (/^https?:\/\//i.test(reference)) {
+          const found = await this.pluginSearch(userId, reference);
+          const first = (
+            found.results as { reference: string }[] | undefined
+          )?.[0];
+          if (!first)
+            return found.ok
+              ? { ok: false, error: "Nothing was found at that link." }
+              : found;
+          reference = first.reference;
+        }
         // Jellyfin's are linked in a dialog only Slack opens
         if (
           parseJellyfinLink(this.tracks.referencedUrl?.(reference) ?? reference)

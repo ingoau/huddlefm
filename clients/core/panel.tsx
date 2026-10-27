@@ -1005,8 +1005,11 @@ function EndSession(props: { platform: Platform; back: () => void }) {
           <kit.TextInput
             value={name}
             onChange={setName}
-            placeholder="Named for today, if left empty"
+            placeholder="Named for its first song, if left empty"
           />
+          <kit.Hint>
+            Saving under a name you have used before replaces that save.
+          </kit.Hint>
         </div>
       )}
       <div className="huddlefm-settings__footer">

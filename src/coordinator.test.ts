@@ -8402,6 +8402,9 @@ async function pluginSetup() {
     }),
     prepare: async (metadata: { sourceId: string }) =>
       `${metadata.sourceId}.opus`,
+    suggestions: async (query: string) => [
+      { text: { type: "plain_text", text: `Link: ${query}` }, value: query },
+    ],
   } as unknown as TrackCatalog;
   const result = setup(tracks);
   await result.coordinator.start();
@@ -8587,6 +8590,24 @@ test("client mods seek, move and end with a save as the player's dialogs do", as
     type: "state",
     session: { state: "ended" },
   });
+});
+
+test("client mods add a pasted link as Add songs' search has it", async () => {
+  const result = await pluginSetup();
+  await result.send("host", {
+    type: "command",
+    id: "r1",
+    command: { type: "add", reference: "https://b" },
+  });
+  expect(dataBroadcasts(result.media)).toContainEqual(
+    expect.objectContaining({ type: "result", id: "r1", ok: true }),
+  );
+  await result.send("host", { type: "sync" });
+  const state = dataBroadcasts(result.media).findLast(
+    (message) => message.type === "state",
+  )!;
+  expect(state).toMatchObject({ nowPlaying: { title: "B" } });
+  await result.coordinator.endFromSlack();
 });
 
 test("client mods hear what the player's buttons would quietly pass over", async () => {
