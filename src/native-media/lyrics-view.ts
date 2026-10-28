@@ -146,7 +146,13 @@ type Item = LineItem | DotsItem | CreditsItem;
 
 export type LyricsCredits = { songwriters?: string[]; source?: string };
 
-type Piece = { text: string; start: number; end: number };
+type Piece = {
+  text: string;
+  start: number;
+  end: number;
+  /** A row may break before it, though no space comes first. */
+  breakBefore?: boolean;
+};
 
 const empIn = cubicBezier(0.2, 0.4, 0.58, 1);
 const empOut = cubicBezier(0.3, 0, 0.58, 1);
@@ -356,6 +362,7 @@ export class LyricsView {
               : undefined,
             timed: item.main.timed,
             rows: item.main.rows,
+            right: item.right,
             scale: item.scale.target,
             shown: item.shown.target,
           }
@@ -1311,6 +1318,64 @@ function wrapText(context: SKRSContext2D, text: string, width: number) {
   return rows;
 }
 
+/** Chinese and Japanese, which put no spaces between words. */
+const spacelessScript =
+  "\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\u3000-\\u303f\\u30fc\\uff00-\\uffef";
+const spaceless = new RegExp(`[${spacelessScript}]`, "u");
+const spacelessStart = new RegExp(`^[${spacelessScript}]`, "u");
+const spacelessEnd = new RegExp(`[${spacelessScript}]$`, "u");
+/** Closing marks and small kana, which a row may not start with. */
+const noRowStart =
+  /^[、。，．・：；？！ー〜…‥」』）】〉》〕｝ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰ-ㇿ々ゝゞヽヾ,.!?:;)\]}]/u;
+/** Opening marks, which a row may not end with. */
+const noRowEnd = /[「『（【〈《〔｛([{]$/u;
+const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+
+/**
+ * Splits pieces where a row may break between Chinese or Japanese words,
+ * which have no spaces to break at. A piece split in two shares its time out
+ * by length, so it is still swept at the same pace.
+ */
+function splitSpaceless(pieces: Piece[]): Piece[] {
+  const text = pieces.map((piece) => piece.text).join("");
+  if (!spaceless.test(text)) return pieces;
+  const breaks = new Set<number>();
+  for (const { index } of wordSegmenter.segment(text)) {
+    const before = text.slice(0, index);
+    const after = text.slice(index);
+    if (
+      index > 0 &&
+      (spacelessEnd.test(before) || spacelessStart.test(after)) &&
+      !/\s$/.test(before) &&
+      !/^\s/.test(after) &&
+      !noRowStart.test(after) &&
+      !noRowEnd.test(before)
+    )
+      breaks.add(index);
+  }
+  const split: Piece[] = [];
+  let offset = 0;
+  for (const piece of pieces) {
+    const cuts = [...breaks]
+      .filter((at) => at > offset && at < offset + piece.text.length)
+      .map((at) => at - offset);
+    const bounds = [0, ...cuts, piece.text.length];
+    const length = piece.text.length;
+    for (let index = 0; index < bounds.length - 1; index++) {
+      const from = bounds[index]!;
+      const to = bounds[index + 1]!;
+      split.push({
+        text: piece.text.slice(from, to),
+        start: lerp(piece.start, piece.end, from / length),
+        end: lerp(piece.start, piece.end, to / length),
+        breakBefore: breaks.has(offset + from),
+      });
+    }
+    offset += length;
+  }
+  return split;
+}
+
 type BlockBox = {
   left: number;
   width: number;
@@ -1395,8 +1460,8 @@ function layoutBlock(
   const syllables: Syllable[] = [];
   const words: Word[] = [];
   let word: Word | undefined;
-  for (const piece of pieces) {
-    if (!word || /^\s/.test(piece.text)) {
+  for (const piece of splitSpaceless(pieces)) {
+    if (!word || /^\s/.test(piece.text) || piece.breakBefore) {
       word = {
         start: piece.start,
         end: piece.end,

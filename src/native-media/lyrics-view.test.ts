@@ -123,6 +123,36 @@ describe("lyrics view", () => {
     });
   });
 
+  test("wraps lines without spaces between words, like Japanese", () => {
+    const text = "あとちょっとで分かりかけていたのに";
+    const items = new LyricsView(
+      [
+        // Timed in two syllables, and line synced as one piece.
+        line(1_000, 2_000, [
+          part("あとちょっとで", 1_000, 1_000),
+          part("分かりかけていたのに", 2_000, 1_000),
+        ]),
+        line(3_000, 2_000, undefined, { words: text }),
+        line(5_000, 2_000, undefined, {
+          words: "ねえ、「行こうよ」って言ったのに",
+        }),
+      ],
+      400,
+    ).describe();
+    for (const item of items) {
+      expect(item.rows).toBeGreaterThan(1);
+      expect(item.right).toBeLessThanOrEqual(400);
+    }
+    expect(items[0]).toMatchObject({ text, timed: true });
+    expect(items[1]).toMatchObject({ text, timed: false });
+    // No row starts with a small kana or closing mark, or ends on an opening one.
+    for (const item of items)
+      for (const word of item.visual!) {
+        expect(word).not.toMatch(/^[、。」ょっ]/);
+        expect(word).not.toMatch(/「$/);
+      }
+  });
+
   test("romanizes only lines in other scripts", () => {
     const view = new LyricsView(
       [
