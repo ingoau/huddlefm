@@ -13,7 +13,7 @@ In **Slick Settings → Plugins → HuddleFM**, the same as Taut's:
 
 ## Build and install
 
-The **Client plugins** workflow builds it on every change here: download the `huddlefm-slick-plugin` artifact of its latest run. It has `HuddleFM.js`, for the desktop app and the browser extension, and `HuddleFM.user.js`, for the userscript.
+Download it, built from `main`, from [the website](https://ingoau.github.io/huddlefm/#plugins), or copy its links there: `HuddleFM.js`, for the desktop app and the browser extension, and `HuddleFM.user.js`, for the userscript. The **Client plugins** workflow also builds both for every branch and pull request that changes them, as the `huddlefm-slick-plugin` artifact.
 
 - **Desktop**: **Slick Settings → Plugins → Install plugin…**, and pick `HuddleFM.js`.
 - **Browser extension**: in the Slick toolbar button's Plugins tab, click **Allow user plugins**, then **Install plugin file…**. Chromium also needs **Allow User Scripts** on in the extension's details. Reload Slack after. The Firefox Add-ons version can't run user plugins; Slick's self-hosted `.xpi` can.
