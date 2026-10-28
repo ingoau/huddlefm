@@ -92,13 +92,13 @@ const pluginSection = `<section id="plugins">
     .join("\n  ")}
 </section>`;
 
-// The plugins go before Self hosting, after what HuddleFM does.
+// The README's Client plugins section, under Features, becomes the downloads.
 const content = html(body).replace(
-  '<h2 id="self-hosting">',
-  (h) => `${pluginSection}\n${h}`,
+  /<h2 id="client-plugins">[\s\S]*?(?=<h2 )/,
+  () => `${pluginSection}\n`,
 );
 if (!content.includes('id="plugins"'))
-  throw new Error("README.md has no Self hosting section");
+  throw new Error("README.md has no Client plugins section");
 
 const page = template
   .replace("{{warning}}", () => html(warning))
