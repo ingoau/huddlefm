@@ -94,7 +94,7 @@ const pluginSection = `<section id="plugins">
 
 // The README's Client plugins section, under Features, becomes the downloads.
 const content = html(body).replace(
-  /<h2 id="client-plugins">[\s\S]*?(?=<h2 )/,
+  /<h2 id="client-plugins">[\s\S]*?(?=<h2 |$)/,
   () => `${pluginSection}\n`,
 );
 if (!content.includes('id="plugins"'))
