@@ -1,0 +1,55 @@
+name: Website
+
+# The README and the latest Taut and Slick plugins, on GitHub Pages. Pages
+# must be set to deploy from GitHub Actions in the repository's settings.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  plugins:
+    uses: ./.github/workflows/client-plugins.yml
+    permissions:
+      contents: read
+
+  build:
+    needs: plugins
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      # For Lexend, which the site serves itself.
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v8
+        with:
+          name: huddlefm-taut-plugin
+          path: _site/plugins/taut
+      - uses: actions/download-artifact@v8
+        with:
+          name: huddlefm-slick-plugin
+          path: _site/plugins/slick
+      - run: bun site/build.ts
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
