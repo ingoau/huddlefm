@@ -28,7 +28,7 @@ In Slack's **Preferences → Taut → HuddleFM**:
 
 ## Build and install
 
-The **Client plugins** workflow builds it on every change here: download `HuddleFM.js` from the `huddlefm-taut-plugin` artifact of its latest run. To build it yourself, from a checkout of Taut after `npm install`:
+Download `HuddleFM.js`, built from `main`, from [the website](https://ingoau.github.io/huddlefm/#plugins), or copy its link there. The **Client plugins** workflow also builds it for every branch and pull request that changes it, as the `huddlefm-taut-plugin` artifact. To build it yourself, from a checkout of Taut after `npm install`:
 
 ```sh
 npm run build:user-plugin -- /path/to/huddlefm/clients/taut/HuddleFM.tsx

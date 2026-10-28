@@ -1,9 +1,11 @@
 name: Client plugins
 
 # The Taut and Slick plugins, built in parallel. They share clients/core, so
-# a change to it builds both.
+# a change to it builds both. On main, the Website workflow calls this to
+# publish them, so a push there doesn't build them again.
 on:
   push:
+    branches-ignore: [main]
     paths:
       - "clients/**"
       - ".github/workflows/client-plugins.yml"
@@ -12,6 +14,7 @@ on:
       - "clients/**"
       - ".github/workflows/client-plugins.yml"
   workflow_dispatch:
+  workflow_call:
 
 env:
   # The Taut and Slick commits the plugins are checked and built against.

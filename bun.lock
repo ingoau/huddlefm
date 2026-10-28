@@ -24,6 +24,7 @@
         "zod": "^4.5.4",
       },
       "devDependencies": {
+        "@fontsource-variable/lexend": "^5.3.0",
         "@types/bun": "latest",
         "prettier": "^3.9.6",
       },
@@ -62,6 +63,8 @@
     "@braccato/parsers": ["@braccato/parsers@0.2.0", "", { "dependencies": { "@braccato/types": "^1.0.0", "fast-xml-parser": "^5.10.1" } }, "sha512-vHdNv7t1DQnKw7tWTc/AfrGsK/nHLiihqM/xLm0gbTE+iN9WNKsupQ/jAeheQHaQQzZNCYnZicnXb5cxiXjqwg=="],
 
     "@braccato/types": ["@braccato/types@1.0.0", "", {}, "sha512-BHrCdJ5Uuc8IYJJqKT/4ULHkkbL8lk6KtAhfrx8bh3gC/huYwLDTBtOQAQSMriu3yMhV7TSvDd8L0loB5b1oeA=="],
+
+    "@fontsource-variable/lexend": ["@fontsource-variable/lexend@5.3.0", "", {}, "sha512-3SXtiZ8rFbT0oaPzEboCG5RM3jtyhpNxandh1jWNLqvrJRfV/eP3R+GGw+o5e3hS1uqmAGutKxSvaWG5oyrimA=="],
 
     "@fontsource/inter": ["@fontsource/inter@5.3.0", "", {}, "sha512-RofMylZmjlJEfELXeNHFWBRcSs75rGU/6bV2S2jfnvv/3rPXPGe0LgUJTklcHZ9lM4OZmAVFhcJPnACfb91A3g=="],
 
