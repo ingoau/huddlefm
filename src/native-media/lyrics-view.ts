@@ -63,6 +63,13 @@ type Syllable = {
   rtl?: boolean;
   /** For a shaped word: the part of it this syllable lights, left to right. */
   clip?: [number, number];
+  /**
+   * For a piece of a syllable cut where a row may break: the share of the
+   * whole syllable's width it covers, which the sweep crosses in its turn.
+   */
+  part?: [number, number];
+  /** A row may break before it, inside its word. */
+  breakBefore?: boolean;
 };
 type Word = {
   start: number;
@@ -146,13 +153,7 @@ type Item = LineItem | DotsItem | CreditsItem;
 
 export type LyricsCredits = { songwriters?: string[]; source?: string };
 
-type Piece = {
-  text: string;
-  start: number;
-  end: number;
-  /** A row may break before it, though no space comes first. */
-  breakBefore?: boolean;
-};
+type Piece = { text: string; start: number; end: number };
 
 const empIn = cubicBezier(0.2, 0.4, 0.58, 1);
 const empOut = cubicBezier(0.3, 0, 0.58, 1);
@@ -362,7 +363,26 @@ export class LyricsView {
               : undefined,
             timed: item.main.timed,
             rows: item.main.rows,
+            /** Each row's text, as it reads. */
+            rowTexts: Array.from({ length: item.main.rows }, (_, row) =>
+              item.main.syllables
+                .filter((value) => value.row === row)
+                .sort((a, b) => a.x - b.x)
+                .map((value) => value.text)
+                .join("")
+                .trim(),
+            ),
             right: item.right,
+            /** The words that glow, and each syllable's timing. */
+            glow: item.main.words
+              .filter((word) => word.emphasis)
+              .map((word) =>
+                item.main.syllables
+                  .slice(word.first, word.last + 1)
+                  .map((value) => value.text)
+                  .join(""),
+              ),
+            times: item.main.syllables.map((value) => [value.start, value.end]),
             scale: item.scale.target,
             shown: item.shown.target,
           }
@@ -930,17 +950,23 @@ export class LyricsView {
     if (!block.timed) {
       // No syllable timing: the whole line lights at once, never swept.
       context.fillStyle = white(sung);
+      const baselineOf = (syllable: Syllable) =>
+        syllable.row * block.rowHeight + size * 0.95;
       for (const word of block.words) {
-        const baseline =
-          block.syllables[word.first]!.row * block.rowHeight + size * 0.95;
+        // A shaped word is never cut, so it sits on one row; other words
+        // may wrap, and each of their syllables sits on its own row.
         if (word.shaped)
-          context.fillText(word.shaped.text, word.shaped.x, baseline);
+          context.fillText(
+            word.shaped.text,
+            word.shaped.x,
+            baselineOf(block.syllables[word.first]!),
+          );
         else
           for (const syllable of block.syllables.slice(
             word.first,
             word.last + 1,
           ))
-            context.fillText(syllable.text, syllable.x, baseline);
+            context.fillText(syllable.text, syllable.x, baselineOf(syllable));
       }
       return;
     }
@@ -950,12 +976,17 @@ export class LyricsView {
       const word = block.words[syllable.word]!;
       const baseline = syllable.row * block.rowHeight + size * 0.95;
       const span = syllable.end - syllable.start;
-      const progress =
+      let progress =
         span > 0
           ? clamp((time - syllable.start) / span)
           : time >= syllable.start
             ? 1
             : 0;
+      // A piece of a syllable cut at a row break is swept in its turn.
+      if (syllable.part && syllable.part[1] > syllable.part[0]) {
+        const [from, to] = syllable.part;
+        progress = clamp((progress - from) / (to - from));
+      }
       const paint = (target: SKRSContext2D) => {
         target.font = context.font;
         target.textBaseline = "alphabetic";
@@ -1056,14 +1087,25 @@ export class LyricsView {
     const emphasis = word.emphasis!;
     const size = block.size;
     const strength = motion.emphasis;
-    const letters = block.syllables
-      .slice(word.first, word.last + 1)
-      .flatMap((value) => value.glyphs ?? []);
-    const count = Math.max(1, letters.length);
+    const own = block.syllables.slice(word.first, word.last + 1);
+    const count = Math.max(
+      1,
+      own.reduce((sum, value) => sum + (value.glyphs?.length ?? 0), 0),
+    );
+    // Letters swell in turn across the whole word, but spread about the
+    // middle of their own row when the word wraps.
+    const rowCount = Math.max(
+      1,
+      own
+        .filter((value) => value.row === syllable.row)
+        .reduce((sum, value) => sum + (value.glyphs?.length ?? 0), 0),
+    );
     let index = 0;
-    for (const value of block.syllables.slice(word.first, word.last + 1)) {
+    let rowIndex = 0;
+    for (const value of own) {
       if (value === syllable) break;
       index += value.glyphs?.length ?? 0;
+      if (value.row === syllable.row) rowIndex += value.glyphs?.length ?? 0;
     }
     for (const glyph of syllable.glyphs!) {
       const delay = word.start + (emphasis.duration / 2.5 / count) * index;
@@ -1071,7 +1113,7 @@ export class LyricsView {
       const swell = emphasisCurve(x) * bright;
       const amount = emphasis.amount * strength;
       const scale = 1 + swell * 0.1 * amount;
-      const offsetX = -swell * 0.03 * amount * (count / 2 - index) * size;
+      const offsetX = -swell * 0.03 * amount * (rowCount / 2 - rowIndex) * size;
       const floatProgress = clamp(
         (time - (delay - 400)) / (emphasis.duration * 1.4),
       );
@@ -1109,6 +1151,7 @@ export class LyricsView {
         { dx: offsetX, dy: offsetY, scale, pivotX: centreX, pivotY: centreY },
       );
       index++;
+      rowIndex++;
     }
   }
 
@@ -1324,23 +1367,27 @@ const spacelessScript =
 const spaceless = new RegExp(`[${spacelessScript}]`, "u");
 const spacelessStart = new RegExp(`^[${spacelessScript}]`, "u");
 const spacelessEnd = new RegExp(`[${spacelessScript}]$`, "u");
-/** Closing marks and small kana, which a row may not start with. */
+/**
+ * Closing marks, small kana and marks that lean on the letter before, which a
+ * row may not start with, in full and half width.
+ */
 const noRowStart =
-  /^[、。，．・：；？！ー〜…‥」』）】〉》〕｝ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰ-ㇿ々ゝゞヽヾ,.!?:;)\]}]/u;
+  /^[、。，．・：；？！ー〜～…‥」』）】〉》〕〗〙〟］｝”’ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰ-ㇿ々ゝゞヽヾ｡｣､･ｧ-ｰﾞﾟ,.!?:;)\]}]/u;
 /** Opening marks, which a row may not end with. */
-const noRowEnd = /[「『（【〈《〔｛([{]$/u;
+const noRowEnd = /[「『（【〈《〔〖〘〝［｛“‘｢([{]$/u;
 const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+const letterSegmenter = new Intl.Segmenter();
 
 /**
- * Splits pieces where a row may break between Chinese or Japanese words,
- * which have no spaces to break at. A piece split in two shares its time out
- * by length, so it is still swept at the same pace.
+ * Where a row may break between Chinese or Japanese words, which have no
+ * spaces to break at, or between any of their letters, as offsets into the
+ * text.
  */
-function splitSpaceless(pieces: Piece[]): Piece[] {
-  const text = pieces.map((piece) => piece.text).join("");
-  if (!spaceless.test(text)) return pieces;
+function spacelessBreaks(text: string, letters = false) {
   const breaks = new Set<number>();
-  for (const { index } of wordSegmenter.segment(text)) {
+  if (!spaceless.test(text)) return breaks;
+  const segmenter = letters ? letterSegmenter : wordSegmenter;
+  for (const { index } of segmenter.segment(text)) {
     const before = text.slice(0, index);
     const after = text.slice(index);
     if (
@@ -1353,27 +1400,59 @@ function splitSpaceless(pieces: Piece[]): Piece[] {
     )
       breaks.add(index);
   }
-  const split: Piece[] = [];
+  return breaks;
+}
+
+/**
+ * Cuts syllables where a row may break inside a word, at offsets into the
+ * block's text. The pieces keep their syllable's timing and word, so the word
+ * rises and glows as one, and each piece's sweep runs in its share of the
+ * syllable's time.
+ */
+function cutAtBreaks(
+  context: SKRSContext2D,
+  syllables: Syllable[],
+  words: Word[],
+  breaks: Set<number>,
+) {
+  const starts = new Set(words.map((word) => word.first));
+  const cut: Syllable[] = [];
   let offset = 0;
-  for (const piece of pieces) {
-    const cuts = [...breaks]
-      .filter((at) => at > offset && at < offset + piece.text.length)
-      .map((at) => at - offset);
-    const bounds = [0, ...cuts, piece.text.length];
-    const length = piece.text.length;
-    for (let index = 0; index < bounds.length - 1; index++) {
-      const from = bounds[index]!;
-      const to = bounds[index + 1]!;
-      split.push({
-        text: piece.text.slice(from, to),
-        start: lerp(piece.start, piece.end, from / length),
-        end: lerp(piece.start, piece.end, to / length),
-        breakBefore: breaks.has(offset + from),
+  for (const [index, syllable] of syllables.entries()) {
+    const word = words[syllable.word]!;
+    const { text } = syllable;
+    if (starts.has(index)) word.first = cut.length;
+    const bounds = word.shaped
+      ? [0, text.length]
+      : [
+          0,
+          ...[...breaks]
+            .filter((at) => at > offset && at < offset + text.length)
+            .sort((a, b) => a - b)
+            .map((at) => at - offset),
+          text.length,
+        ];
+    const share = (at: number) =>
+      syllable.width > 0
+        ? context.measureText(text.slice(0, at)).width / syllable.width
+        : at / text.length;
+    for (let piece = 0; piece < bounds.length - 1; piece++) {
+      const from = bounds[piece]!;
+      const to = bounds[piece + 1]!;
+      const slice = text.slice(from, to);
+      cut.push({
+        ...syllable,
+        text: slice,
+        width: context.measureText(slice).width,
+        part: bounds.length > 2 ? [share(from), share(to)] : undefined,
+        breakBefore:
+          piece > 0 || (!starts.has(index) && breaks.has(offset + from)),
       });
     }
-    offset += length;
+    word.last = cut.length - 1;
+    offset += text.length;
   }
-  return split;
+  return cut;
 }
 
 type BlockBox = {
@@ -1457,11 +1536,11 @@ function layoutBlock(
   const { weight = 700, tone = lyricTone, emphasis = true } = box;
   context.font = `${weight} ${box.size}px ${fonts()}`;
   const rtl = isRtl(pieces.map((piece) => piece.text).join(""));
-  const syllables: Syllable[] = [];
+  let syllables: Syllable[] = [];
   const words: Word[] = [];
   let word: Word | undefined;
-  for (const piece of splitSpaceless(pieces)) {
-    if (!word || /^\s/.test(piece.text) || piece.breakBefore) {
+  for (const piece of pieces) {
+    if (!word || /^\s/.test(piece.text)) {
       word = {
         start: piece.start,
         end: piece.end,
@@ -1493,6 +1572,45 @@ function layoutBlock(
   for (const [index, value] of words.entries())
     if (rtl || directions[index] === "rtl")
       value.shaped = { text: texts[index]!, x: 0 };
+  // What rows are made of: whole words, unless one is wider than a row and
+  // can break inside, like Chinese and Japanese. Measured once: the balanced
+  // wrap below tries a dozen widths.
+  const measureUnits = () => {
+    const units: { word: number; first: number; last: number }[] = [];
+    for (const [index, syllable] of syllables.entries()) {
+      if (index === words[syllable.word]!.first || syllable.breakBefore)
+        units.push({ word: syllable.word, first: index, last: index });
+      else units.at(-1)!.last = index;
+    }
+    const widths = units.map((unit) =>
+      words[unit.word]!.shaped
+        ? context.measureText(texts[unit.word]!).width
+        : syllables
+            .slice(unit.first, unit.last + 1)
+            .reduce((sum, syllable) => sum + syllable.width, 0),
+    );
+    const trailings = units.map((unit) => {
+      const last = syllables[unit.last]!;
+      return last.width - context.measureText(last.text.trimEnd()).width;
+    });
+    return { units, widths, trailings };
+  };
+  let { units, widths, trailings } = measureUnits();
+  const overflows = () =>
+    widths.some((width, index) => width - trailings[index]! > box.width);
+  // Between words first, and between letters if a word is still too wide,
+  // like a long run of katakana.
+  const whole = syllables;
+  const spans = words.map((value) => [value.first, value.last] as const);
+  for (const letters of [false, true]) {
+    if (!overflows()) break;
+    const breaks = spacelessBreaks(texts.join(""), letters);
+    if (!breaks.size) continue;
+    for (const [index, [first, last]] of spans.entries())
+      Object.assign(words[index]!, { first, last });
+    syllables = cutAtBreaks(context, whole, words, breaks);
+    ({ units, widths, trailings } = measureUnits());
+  }
   // Glyph positions for the words that will glow. Shaped words do not:
   // their letters join, so they cannot swell one by one.
   for (const [index, value] of words.entries()) {
@@ -1518,23 +1636,10 @@ function layoutBlock(
       });
     }
   }
-
-  // Measured once: the balanced wrap below tries a dozen widths.
-  const widths = words.map((value, index) =>
-    value.shaped
-      ? context.measureText(texts[index]!).width
-      : syllables
-          .slice(value.first, value.last + 1)
-          .reduce((sum, syllable) => sum + syllable.width, 0),
-  );
-  const trailings = words.map((value) => {
-    const last = syllables[value.last]!;
-    return last.width - context.measureText(last.text.trimEnd()).width;
-  });
   const wrap = (limit: number) => {
     const rows: number[][] = [[]];
     let x = 0;
-    for (let index = 0; index < words.length; index++) {
+    for (let index = 0; index < units.length; index++) {
       const width = widths[index]!;
       if (x > 0 && x + width - trailings[index]! > limit) {
         rows.push([]);
@@ -1558,7 +1663,7 @@ function layoutBlock(
   }
   for (const [rowIndex, row] of rows.entries()) {
     const order = visualOrder(
-      row.map((index) => directions[index]),
+      row.map((index) => directions[units[index]!.word]),
       rtl,
     ).map((value) => row[value]!);
     // The space after the word at the line's end, which is the leftmost one
@@ -1571,17 +1676,25 @@ function layoutBlock(
       (box.align === "right" ? box.width - rowWidth + trailing : 0) -
       (rtl ? trailing : 0);
     for (const index of order) {
-      const value = words[index]!;
+      const unit = units[index]!;
+      const value = words[unit.word]!;
       const first = x;
       x += widths[index]!;
       if (value.shaped) {
-        placeShaped(context, value, syllables, first, rtl, directions[index]);
+        placeShaped(
+          context,
+          value,
+          syllables,
+          first,
+          rtl,
+          directions[unit.word],
+        );
         for (const syllable of syllables.slice(value.first, value.last + 1))
           syllable.row = rowIndex;
         continue;
       }
       let left = first;
-      for (const syllable of syllables.slice(value.first, value.last + 1)) {
+      for (const syllable of syllables.slice(unit.first, unit.last + 1)) {
         syllable.x = left;
         syllable.row = rowIndex;
         left += syllable.width;

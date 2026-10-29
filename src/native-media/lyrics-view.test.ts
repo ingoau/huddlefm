@@ -147,9 +147,82 @@ describe("lyrics view", () => {
     expect(items[1]).toMatchObject({ text, timed: false });
     // No row starts with a small kana or closing mark, or ends on an opening one.
     for (const item of items)
-      for (const word of item.visual!) {
-        expect(word).not.toMatch(/^[、。」ょっ]/);
-        expect(word).not.toMatch(/「$/);
+      for (const row of item.rowTexts!) {
+        expect(row).not.toMatch(/^[、。」ょっ]/);
+        expect(row).not.toMatch(/「$/);
+      }
+  });
+
+  test("a wrapped Japanese line glows and is timed as it is unwrapped", () => {
+    // No spaces, so the line is one word, held long enough to glow.
+    const lines = [
+      line(1_000, 4_000, [
+        part("あとちょっとで", 1_000, 1_000),
+        part("分かりかけていたのに", 2_000, 3_000),
+      ]),
+    ];
+    const [whole] = new LyricsView(lines, 2_000).describe();
+    expect(whole).toMatchObject({
+      rows: 1,
+      glow: ["あとちょっとで分かりかけていたのに"],
+      times: [
+        [1_000, 2_000],
+        [2_000, 5_000],
+      ],
+    });
+    const [wrapped] = new LyricsView(lines, 300).describe();
+    expect(wrapped!.rows).toBeGreaterThan(1);
+    expect(wrapped!.right).toBeLessThanOrEqual(300);
+    expect(wrapped!.glow).toEqual(whole!.glow);
+    // Cut pieces keep their whole syllable's time, never a share of it.
+    expect(wrapped!.times!.length).toBeGreaterThan(2);
+    for (const time of wrapped!.times!)
+      expect(whole!.times).toContainEqual(time);
+  });
+
+  test("draws each row of a wrapped line-synced Japanese line on its own row", () => {
+    // How many bands of text the drawn view has, top to bottom.
+    const bands = (lines: Lyric[], width: number) => {
+      const view = new LyricsView(lines, width);
+      const canvas = createCanvas(width, 400);
+      const context = canvas.getContext("2d");
+      for (let seconds = 1; seconds <= 3; seconds += 1 / 24)
+        view.update(seconds, 1 / 24, 400);
+      view.draw(context, 400);
+      const { data } = context.getImageData(0, 0, width, 400);
+      let count = 0;
+      let inked = false;
+      for (let y = 0; y < 400; y++) {
+        let row = false;
+        for (let x = 0; x < width && !row; x++)
+          row = data[(y * width + x) * 4 + 3]! > 64;
+        if (row && !inked) count++;
+        inked = row;
+      }
+      return count;
+    };
+    const lines = [
+      line(1_000, 4_000, undefined, {
+        words: "あとちょっとで分かりかけていたのに",
+      }),
+    ];
+    expect(bands(lines, 2_000)).toBe(1);
+    expect(bands(lines, 300)).toBeGreaterThan(1);
+  });
+
+  test("keeps Chinese quotes, wave dashes and halfwidth kana with their text", () => {
+    const lines = [
+      "他说“我们一起走吧”然后就离开了这个城市",
+      "ずっと待ってる～ずっと待ってる～ずっと",
+      "ｱｲｼﾃﾙｯﾃｲｯﾀﾉﾆﾓｳｲﾁﾄﾞｷｲﾃﾎｼｲｰ",
+    ].map((words, index) => line(index * 2_000, 2_000, undefined, { words }));
+    for (let width = 100; width <= 400; width += 10)
+      for (const item of new LyricsView(lines, width).describe()) {
+        expect(item.right).toBeLessThanOrEqual(width);
+        for (const row of item.rowTexts!) {
+          expect(row).not.toMatch(/^[”’～〜ｯｰﾞﾟｧ-ｮ]/);
+          expect(row).not.toMatch(/[“‘]$/);
+        }
       }
   });
 
