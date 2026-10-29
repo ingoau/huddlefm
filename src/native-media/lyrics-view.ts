@@ -950,17 +950,23 @@ export class LyricsView {
     if (!block.timed) {
       // No syllable timing: the whole line lights at once, never swept.
       context.fillStyle = white(sung);
+      const baselineOf = (syllable: Syllable) =>
+        syllable.row * block.rowHeight + size * 0.95;
       for (const word of block.words) {
-        const baseline =
-          block.syllables[word.first]!.row * block.rowHeight + size * 0.95;
+        // A shaped word is never cut, so it sits on one row; other words
+        // may wrap, and each of their syllables sits on its own row.
         if (word.shaped)
-          context.fillText(word.shaped.text, word.shaped.x, baseline);
+          context.fillText(
+            word.shaped.text,
+            word.shaped.x,
+            baselineOf(block.syllables[word.first]!),
+          );
         else
           for (const syllable of block.syllables.slice(
             word.first,
             word.last + 1,
           ))
-            context.fillText(syllable.text, syllable.x, baseline);
+            context.fillText(syllable.text, syllable.x, baselineOf(syllable));
       }
       return;
     }
@@ -1081,14 +1087,25 @@ export class LyricsView {
     const emphasis = word.emphasis!;
     const size = block.size;
     const strength = motion.emphasis;
-    const letters = block.syllables
-      .slice(word.first, word.last + 1)
-      .flatMap((value) => value.glyphs ?? []);
-    const count = Math.max(1, letters.length);
+    const own = block.syllables.slice(word.first, word.last + 1);
+    const count = Math.max(
+      1,
+      own.reduce((sum, value) => sum + (value.glyphs?.length ?? 0), 0),
+    );
+    // Letters swell in turn across the whole word, but spread about the
+    // middle of their own row when the word wraps.
+    const rowCount = Math.max(
+      1,
+      own
+        .filter((value) => value.row === syllable.row)
+        .reduce((sum, value) => sum + (value.glyphs?.length ?? 0), 0),
+    );
     let index = 0;
-    for (const value of block.syllables.slice(word.first, word.last + 1)) {
+    let rowIndex = 0;
+    for (const value of own) {
       if (value === syllable) break;
       index += value.glyphs?.length ?? 0;
+      if (value.row === syllable.row) rowIndex += value.glyphs?.length ?? 0;
     }
     for (const glyph of syllable.glyphs!) {
       const delay = word.start + (emphasis.duration / 2.5 / count) * index;
@@ -1096,7 +1113,7 @@ export class LyricsView {
       const swell = emphasisCurve(x) * bright;
       const amount = emphasis.amount * strength;
       const scale = 1 + swell * 0.1 * amount;
-      const offsetX = -swell * 0.03 * amount * (count / 2 - index) * size;
+      const offsetX = -swell * 0.03 * amount * (rowCount / 2 - rowIndex) * size;
       const floatProgress = clamp(
         (time - (delay - 400)) / (emphasis.duration * 1.4),
       );
@@ -1134,6 +1151,7 @@ export class LyricsView {
         { dx: offsetX, dy: offsetY, scale, pivotX: centreX, pivotY: centreY },
       );
       index++;
+      rowIndex++;
     }
   }
 

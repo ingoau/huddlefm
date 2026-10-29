@@ -180,6 +180,36 @@ describe("lyrics view", () => {
       expect(whole!.times).toContainEqual(time);
   });
 
+  test("draws each row of a wrapped line-synced Japanese line on its own row", () => {
+    // How many bands of text the drawn view has, top to bottom.
+    const bands = (lines: Lyric[], width: number) => {
+      const view = new LyricsView(lines, width);
+      const canvas = createCanvas(width, 400);
+      const context = canvas.getContext("2d");
+      for (let seconds = 1; seconds <= 3; seconds += 1 / 24)
+        view.update(seconds, 1 / 24, 400);
+      view.draw(context, 400);
+      const { data } = context.getImageData(0, 0, width, 400);
+      let count = 0;
+      let inked = false;
+      for (let y = 0; y < 400; y++) {
+        let row = false;
+        for (let x = 0; x < width && !row; x++)
+          row = data[(y * width + x) * 4 + 3]! > 64;
+        if (row && !inked) count++;
+        inked = row;
+      }
+      return count;
+    };
+    const lines = [
+      line(1_000, 4_000, undefined, {
+        words: "あとちょっとで分かりかけていたのに",
+      }),
+    ];
+    expect(bands(lines, 2_000)).toBe(1);
+    expect(bands(lines, 300)).toBeGreaterThan(1);
+  });
+
   test("keeps Chinese quotes, wave dashes and halfwidth kana with their text", () => {
     const lines = [
       "他说“我们一起走吧”然后就离开了这个城市",
