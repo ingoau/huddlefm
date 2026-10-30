@@ -22,7 +22,7 @@ import {
   vttToSrt,
   type Chapter,
 } from "./videos.ts";
-import { firstArtist } from "./artist.ts";
+import { creditedArtists, firstArtist } from "./artist.ts";
 import {
   isJellyfinStreamLink,
   parseJellyfinLink,
@@ -1145,12 +1145,27 @@ export class TrackCatalog {
     if (!query) return;
     const songs = await this.music.searchSongs(query);
     if (!Array.isArray(songs) || !songs.length) return;
-    const needle = normalizeToken(artist);
+    // A song YouTube Music does not have still returns results, just other
+    // songs, so one is only taken when it is recognisably the one asked for:
+    // by any of its artists, or failing that by its title, which catches an
+    // artist credited in another script ("照井順政", "Yoshimasa Terui").
+    const wanted = creditedArtists(artist).map(normalizeToken).filter(Boolean);
+    const wantedTitle = normalizeToken(coreTitle(title));
     const match =
-      songs.find((song) => {
-        const name = normalizeToken(song.artist?.name ?? "");
-        return name && (name.includes(needle) || needle.includes(name));
-      }) ?? songs[0];
+      songs.find((song) =>
+        creditedArtists(song.artist?.name ?? "").some((credit) => {
+          const name = normalizeToken(credit);
+          return wanted.some(
+            (needle) =>
+              name && (name.includes(needle) || needle.includes(name)),
+          );
+        }),
+      ) ??
+      songs.find(
+        (song) =>
+          wantedTitle &&
+          normalizeToken(coreTitle(song.name ?? "")) === wantedTitle,
+      );
     if (!match?.videoId || !isYoutubeVideoId(match.videoId)) return;
     return songMetadata(match);
   }

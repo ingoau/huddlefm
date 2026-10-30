@@ -1,4 +1,4 @@
-import { firstArtist } from "./artist.ts";
+import { artistSeparator, firstArtist } from "./artist.ts";
 import { logger } from "./logger.ts";
 import {
   usableHuddleMixSources,
@@ -230,13 +230,7 @@ export function stripCredits(title: string) {
 }
 
 export function primaryArtist(artist: string) {
-  return (
-    artist
-      .split(
-        /\s*(?:,|&|\+|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*/i,
-      )[0]
-      ?.trim() || artist
-  );
+  return artist.split(artistSeparator)[0]?.trim() || artist;
 }
 
 export function mergeTaste(tracks: TasteContribution[]): ScoredTrack[] {
@@ -323,16 +317,25 @@ export function applySkipPenalties(
 ) {
   const penalties = skipSets(skipped);
   return tracks
-    .map((track) => {
-      let { score } = track;
-      if (track.sourceId && penalties.sourceIds.has(track.sourceId))
-        score *= 0.05;
-      if (penalties.keys.has(keyOf(track))) score *= 0.1;
-      if (penalties.artists.has(normalizeToken(firstArtist(track.artist))))
-        score *= 0.35;
-      return { ...track, score };
-    })
+    .map((track) => ({
+      ...track,
+      score: track.score * skipPenalty(track, penalties),
+    }))
     .sort((a, b) => b.score - a.score);
+}
+
+// How much a session's skips weigh a track down, as a multiplier.
+function skipPenalty(
+  track: { title: string; artist: string; sourceId?: string },
+  penalties: ReturnType<typeof skipSets>,
+) {
+  let penalty = 1;
+  if (track.sourceId && penalties.sourceIds.has(track.sourceId))
+    penalty *= 0.05;
+  if (penalties.keys.has(keyOf(track))) penalty *= 0.1;
+  if (penalties.artists.has(normalizeToken(firstArtist(track.artist))))
+    penalty *= 0.35;
+  return penalty;
 }
 
 // Draws `count` items without replacement, each pick weighted by `weight`.
@@ -680,6 +683,14 @@ export class RecommendationCatalog {
         track.score *= options.fatigue.multiplier(track, listeners);
     ranked.sort((a, b) => b.score - a.score);
     const recentKeys = new Set((options.recent ?? []).map(keyOf));
+    const penalties = skipSets(options.skipped);
+    const penaltyOf = (track: {
+      title: string;
+      artist: string;
+      sourceId?: string;
+    }) =>
+      skipPenalty(track, penalties) *
+      (options.fatigue?.multiplier(track, listeners) ?? 1);
     const eligible = ranked.filter((track) => !recentKeys.has(keyOf(track)));
     const isDiscovery = (track: ScoredTrack) => !known.has(keyOf(track));
     // A track is credited to the listeners whose taste put it forward, or,
@@ -725,6 +736,7 @@ export class RecommendationCatalog {
       for (const candidate of resolved) {
         excluded.add(candidate.metadata.sourceId);
         taken.add(keyOf(candidate.track));
+        if (!this.keepsResolvedName(candidate, penaltyOf, recentKeys)) continue;
         results.push(finish(candidate));
       }
     };
@@ -758,6 +770,24 @@ export class RecommendationCatalog {
       );
     }
     return results;
+  }
+
+  // Penalties are scored on the name a track was recommended under, but a
+  // search can resolve it to a song filed under another name, and skips and
+  // plays are remembered under the song that actually played. So a track that
+  // resolved to a different name is weighed again under it: dropped if the
+  // room has just heard it, and otherwise kept only as often as the extra
+  // penalty that name carries allows, like the score-weighted draw would.
+  private keepsResolvedName(
+    { track, metadata }: Resolved,
+    penaltyOf: (track: TasteTrack) => number,
+    recentKeys: ReadonlySet<string>,
+  ) {
+    const key = keyOf(metadata);
+    if (key === keyOf(track)) return true;
+    if (recentKeys.has(key)) return false;
+    const extra = penaltyOf(metadata) / Math.max(penaltyOf(track), 1e-9);
+    return extra >= 1 || this.random() < extra;
   }
 
   // A score-weighted draw of one listener's songs, each song's contributions
