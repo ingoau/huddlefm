@@ -1313,6 +1313,39 @@ test("searchSong matches any artist in a combined credit", async () => {
     );
 });
 
+test("searchSong does not match an artist on a shared word or a shared title", async () => {
+  const catalog = testCatalog();
+  const results: { name: string; artist: string }[] = [];
+  Reflect.set(catalog, "music", {
+    searchSongs: async () =>
+      results.map(({ name, artist }) => ({
+        videoId: "abcdefghijk",
+        name,
+        artist: { name: artist },
+        thumbnails: [],
+      })),
+  });
+  for (const [requested, found, title] of [
+    ["Florence + the Machine", "Rage Against the Machine", "Bulls"],
+    ["Simon & Garfunkel", "Paul Simon", "Graceland"],
+    ["Arcade Fire", "Earth, Wind & Fire", "September"],
+    ["Moderat", "M", "Bad Kingdom"],
+    // The same title by another artist in the same script is another song.
+    ["The xx", "Someone Else", "Intro"],
+  ]) {
+    results.splice(0, results.length, { name: title!, artist: found! });
+    expect(await catalog.searchSong(title!, requested!)).toBeUndefined();
+  }
+  results.splice(0, results.length, {
+    name: "Dog Days Are Over",
+    artist: "Florence + the Machine",
+  });
+  expect(
+    (await catalog.searchSong("Dog Days Are Over", "Florence + the Machine"))
+      ?.sourceId,
+  ).toBe("abcdefghijk");
+});
+
 test("searchSong falls back to the title when the artist is credited differently", async () => {
   const catalog = testCatalog();
   Reflect.set(catalog, "music", {

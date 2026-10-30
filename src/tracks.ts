@@ -489,6 +489,26 @@ export function isYoutubeVideoId(id: string) {
 const combiningMark = /\p{M}/u;
 const latinBase = /[a-z0-9]/;
 
+const latinScript = /\p{Script=Latin}/u;
+
+// Whether two artist credits name the same act: one whole credit inside the
+// other as whole words ("Kenshi Yonezu" in "Kenshi Yonezu, Hikaru Utada"),
+// or one artist credited in both. Pieces must match exactly, so a band named
+// with a separator ("Florence + the Machine") does not match whoever shares
+// a word of it ("Rage Against the Machine").
+function sameArtist(a: string, b: string) {
+  const left = normalizeToken(a);
+  const right = normalizeToken(b);
+  if (!left || !right) return false;
+  if (` ${left} `.includes(` ${right} `) || ` ${right} `.includes(` ${left} `))
+    return true;
+  const credits = new Set(creditedArtists(a).map(normalizeToken));
+  return creditedArtists(b).some((credit) => {
+    const name = normalizeToken(credit);
+    return name !== "" && credits.has(name);
+  });
+}
+
 export function normalizeToken(value: string) {
   let folded = "";
   let afterLatin = false;
@@ -1147,23 +1167,16 @@ export class TrackCatalog {
     if (!Array.isArray(songs) || !songs.length) return;
     // A song YouTube Music does not have still returns results, just other
     // songs, so one is only taken when it is recognisably the one asked for:
-    // by any of its artists, or failing that by its title, which catches an
-    // artist credited in another script ("照井順政", "Yoshimasa Terui").
-    const wanted = creditedArtists(artist).map(normalizeToken).filter(Boolean);
+    // by its artist, or, when the two credit the artist in different scripts
+    // ("照井順政", "Yoshimasa Terui"), by its title.
     const wantedTitle = normalizeToken(coreTitle(title));
     const match =
-      songs.find((song) =>
-        creditedArtists(song.artist?.name ?? "").some((credit) => {
-          const name = normalizeToken(credit);
-          return wanted.some(
-            (needle) =>
-              name && (name.includes(needle) || needle.includes(name)),
-          );
-        }),
-      ) ??
+      songs.find((song) => sameArtist(song.artist?.name ?? "", artist)) ??
       songs.find(
         (song) =>
           wantedTitle &&
+          latinScript.test(song.artist?.name ?? "") !==
+            latinScript.test(artist) &&
           normalizeToken(coreTitle(song.name ?? "")) === wantedTitle,
       );
     if (!match?.videoId || !isYoutubeVideoId(match.videoId)) return;
