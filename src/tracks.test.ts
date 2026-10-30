@@ -1266,6 +1266,109 @@ test("searchSong prefers an artist match from YouTube Music results", async () =
   });
 });
 
+test("searchSong takes nothing when no result is the song asked for", async () => {
+  const catalog = testCatalog();
+  Reflect.set(catalog, "music", {
+    searchSongs: async () => [
+      {
+        videoId: "2qrEsVvAxrA",
+        name: "My Cousin Is My Wife",
+        artist: { name: "Biscuit Beats" },
+        thumbnails: [],
+      },
+      {
+        videoId: "7_Oe3XpR0cQ",
+        name: "Cousin Earl (37.233333, -115.808333)",
+        artist: { name: "The Dead Milkmen" },
+        thumbnails: [],
+      },
+    ],
+  });
+  expect(
+    await catalog.searchSong("my cousin earl", "wtfpreston"),
+  ).toBeUndefined();
+});
+
+test("searchSong matches any artist in a combined credit", async () => {
+  const catalog = testCatalog();
+  const song = (videoId: string, artist: string) => ({
+    videoId,
+    name: "JANE DOE",
+    artist: { name: artist },
+    thumbnails: [],
+  });
+  Reflect.set(catalog, "music", {
+    searchSongs: async () => [
+      song("otherothero", "Cover Band"),
+      song("abcdefghijk", "Kenshi Yonezu & Hikaru Utada"),
+    ],
+  });
+  for (const artist of [
+    "Kenshi Yonezu, Hikaru Utada",
+    "Hikaru Utada feat. Kenshi Yonezu",
+    "Kenshi Yonezu",
+  ])
+    expect((await catalog.searchSong("JANE DOE", artist))?.sourceId).toBe(
+      "abcdefghijk",
+    );
+});
+
+test("searchSong does not match an artist on a shared word or a shared title", async () => {
+  const catalog = testCatalog();
+  const results: { name: string; artist: string }[] = [];
+  Reflect.set(catalog, "music", {
+    searchSongs: async () =>
+      results.map(({ name, artist }) => ({
+        videoId: "abcdefghijk",
+        name,
+        artist: { name: artist },
+        thumbnails: [],
+      })),
+  });
+  for (const [requested, found, title] of [
+    ["Florence + the Machine", "Rage Against the Machine", "Bulls"],
+    ["Simon & Garfunkel", "Paul Simon", "Graceland"],
+    ["Arcade Fire", "Earth, Wind & Fire", "September"],
+    ["Moderat", "M", "Bad Kingdom"],
+    // The same title by another artist in the same script is another song.
+    ["The xx", "Someone Else", "Intro"],
+  ]) {
+    results.splice(0, results.length, { name: title!, artist: found! });
+    expect(await catalog.searchSong(title!, requested!)).toBeUndefined();
+  }
+  results.splice(0, results.length, {
+    name: "Dog Days Are Over",
+    artist: "Florence + the Machine",
+  });
+  expect(
+    (await catalog.searchSong("Dog Days Are Over", "Florence + the Machine"))
+      ?.sourceId,
+  ).toBe("abcdefghijk");
+});
+
+test("searchSong falls back to the title when the artist is credited differently", async () => {
+  const catalog = testCatalog();
+  Reflect.set(catalog, "music", {
+    searchSongs: async () => [
+      {
+        videoId: "otherothero",
+        name: "The Eldest Brother",
+        artist: { name: "Someone Else" },
+        thumbnails: [],
+      },
+      {
+        videoId: "abcdefghijk",
+        name: "Malevolent Shrine (feat. Choir)",
+        artist: { name: "Yoshimasa Terui" },
+        thumbnails: [],
+      },
+    ],
+  });
+  expect(
+    (await catalog.searchSong("Malevolent Shrine", "照井順政"))?.sourceId,
+  ).toBe("abcdefghijk");
+});
+
 test("offers and expands albums only for bulk searches", async () => {
   const catalog = testCatalog();
   Reflect.set(catalog, "music", {

@@ -1545,6 +1545,99 @@ test("huddle mix pushes down what these listeners already heard elsewhere", asyn
   weary.store.close();
 });
 
+test("a track that resolves to another song is weighed again under that song's name", async () => {
+  // Last.fm knows a song YouTube Music does not have, and the search turns
+  // it into a different one; the skips are remembered under that one.
+  const build = (random: () => number) => {
+    const store = new Store(":memory:");
+    addPastTrack(store, "host", "my cousin earl", "wtfpreston", "earl");
+    addPastTrack(store, "host", "Other", "Band", "other");
+    const catalog = new RecommendationCatalog(
+      store,
+      {
+        searchSong: async (title: string) =>
+          title === "my cousin earl"
+            ? fakeSong("My Cousin Is My Wife", "Biscuit Beats")
+            : fakeSong(title, "Band"),
+        upNextTracks: async () => [],
+      } satisfies RecommendationTracks,
+      { random },
+      (async (_input: unknown) =>
+        new Response("{}", { status: 404 })) as unknown as typeof fetch,
+    );
+    return { store, catalog };
+  };
+  const titles = (candidates: { metadata: { title: string } }[]) =>
+    candidates.map((track) => track.metadata.title).sort();
+  const now = Date.now();
+  const skipped = new FatigueIndex(
+    [],
+    [1, 2, 3].map((day) => ({
+      userId: "host",
+      title: "My Cousin Is My Wife",
+      artist: "Biscuit Beats",
+      weight: 1,
+      skippedAt: now - day * 24 * 60 * 60_000,
+    })),
+    [],
+    now,
+  );
+
+  const fresh = build(() => 0.5);
+  expect(
+    titles(await fresh.catalog.autoplayCandidates({ userIds: ["host"] })),
+  ).toEqual(["My Cousin Is My Wife", "Other"]);
+  fresh.store.close();
+
+  // Skipped three times, it now comes back only a fifth as often.
+  const weary = build(() => 0.5);
+  expect(
+    titles(
+      await weary.catalog.autoplayCandidates({
+        userIds: ["host"],
+        fatigue: skipped,
+      }),
+    ),
+  ).toEqual(["Other"]);
+  weary.store.close();
+  const lucky = build(() => 0.1);
+  expect(
+    titles(
+      await lucky.catalog.autoplayCandidates({
+        userIds: ["host"],
+        fatigue: skipped,
+      }),
+    ),
+  ).toEqual(["My Cousin Is My Wife", "Other"]);
+  lucky.store.close();
+
+  // Skipped earlier in this Huddle under its real name.
+  const skippedHere = build(() => 0.5);
+  expect(
+    titles(
+      await skippedHere.catalog.autoplayCandidates({
+        userIds: ["host"],
+        skipped: {
+          tracks: [{ title: "My Cousin Is My Wife", artist: "Biscuit Beats" }],
+        },
+      }),
+    ),
+  ).toEqual(["Other"]);
+  skippedHere.store.close();
+
+  // Just heard in this Huddle under its real name, it is out regardless.
+  const heard = build(() => 0);
+  expect(
+    titles(
+      await heard.catalog.autoplayCandidates({
+        userIds: ["host"],
+        recent: [{ title: "My Cousin Is My Wife", artist: "Biscuit Beats" }],
+      }),
+    ),
+  ).toEqual(["Other"]);
+  heard.store.close();
+});
+
 test("huddle mix ignores fatigue carried by listeners who are not here", async () => {
   const store = new Store(":memory:");
   addPastTrack(store, "host", "Alpha", "First Band", "alphaalphaa");
