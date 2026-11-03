@@ -1315,6 +1315,21 @@ test("channel defaults keep only settings that are still valid", () => {
   expect(store.channelDefaults("C1")).toBeUndefined();
 });
 
+test("remembers which channels auto join their Huddles", () => {
+  const store = new Store(":memory:");
+  expect(store.channelAutoJoin("C1")).toBeUndefined();
+  const before = Date.now();
+  store.setChannelAutoJoin("C1", "U1");
+  store.setChannelAutoJoin("C1", "U2");
+  const enabled = store.channelAutoJoin("C1")!;
+  expect(enabled.enabledBy).toBe("U2");
+  expect(enabled.enabledAt).toBeGreaterThanOrEqual(before);
+  expect(store.channelAutoJoin("C2")).toBeUndefined();
+  store.setChannelAutoJoin("C1", undefined);
+  expect(store.channelAutoJoin("C1")).toBeUndefined();
+  store.close();
+});
+
 test("remembers who saved a channel's defaults", () => {
   const store = new Store(":memory:");
   expect(store.channelDefaultsSaved("C1")).toBeUndefined();

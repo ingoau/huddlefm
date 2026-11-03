@@ -848,6 +848,13 @@ export class Store {
         updated_by TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      -- Channels whose new Huddles the bot joins by itself, as a channel
+      -- manager chose in Settings.
+      CREATE TABLE IF NOT EXISTS channel_auto_join (
+        channel_id TEXT PRIMARY KEY,
+        enabled_by TEXT NOT NULL,
+        enabled_at INTEGER NOT NULL
+      );
       -- Sessions kept when they ended, their queue and settings but never
       -- their permissions, for a later session to pick back up: saved to the
       -- Huddle's channel, where anyone there can load them, or to the account
@@ -2290,6 +2297,37 @@ export class Store {
     this.db
       .query("DELETE FROM channel_defaults WHERE channel_id = ?")
       .run(channelId);
+  }
+
+  /** Who turned on auto join for the channel, and when, if it is on. */
+  channelAutoJoin(
+    channelId: string,
+  ): { enabledBy: string; enabledAt: number } | undefined {
+    const row = this.db
+      .query(
+        "SELECT enabled_by, enabled_at FROM channel_auto_join WHERE channel_id = ?",
+      )
+      .get(channelId) as { enabled_by: string; enabled_at: number } | null;
+    return row
+      ? { enabledBy: row.enabled_by, enabledAt: row.enabled_at }
+      : undefined;
+  }
+
+  setChannelAutoJoin(channelId: string, userId: string | undefined) {
+    if (!userId) {
+      this.db
+        .query("DELETE FROM channel_auto_join WHERE channel_id = ?")
+        .run(channelId);
+      return;
+    }
+    this.db
+      .query(
+        `INSERT INTO channel_auto_join (channel_id, enabled_by, enabled_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT (channel_id) DO UPDATE SET enabled_by = excluded.enabled_by,
+          enabled_at = excluded.enabled_at`,
+      )
+      .run(channelId, userId, Date.now());
   }
 
   setPermission(sessionId: string, capability: string, allowed: boolean) {

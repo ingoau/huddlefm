@@ -80,6 +80,14 @@ export type HuddleEvent =
       userId: string;
       text: string;
     }
+  | {
+      type: "HuddleStarted";
+      channelId: string;
+      threadTs: string;
+      callId: string;
+      creatorUserId?: string;
+      participantIds: string[];
+    }
   | { type: "MemberLeft"; callId: string; userId: string }
   | { type: "MemberJoined"; callId: string; userId: string }
   | { type: "ChannelLeft"; channelId: string }
@@ -772,6 +780,38 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
           ...(typeof event.bot_id === "string" ? { botId: event.bot_id } : {}),
         };
       return;
+    }
+    // Slack posts a Huddle's thread root in its channel as the Huddle starts.
+    if (
+      subtype === "huddle_thread" &&
+      channelId &&
+      typeof event.ts === "string" &&
+      (!event.thread_ts || event.thread_ts === event.ts)
+    ) {
+      const room = event.room as Record<string, unknown> | undefined;
+      const endedAt = Number(room?.date_end ?? 0);
+      if (
+        !room ||
+        typeof room.id !== "string" ||
+        !room.id ||
+        room.has_ended === true ||
+        (Number.isFinite(endedAt) && endedAt > 0)
+      )
+        return;
+      const creator =
+        typeof room.created_by === "string"
+          ? room.created_by
+          : typeof event.user === "string"
+            ? event.user
+            : undefined;
+      return {
+        type: "HuddleStarted",
+        channelId,
+        threadTs: event.ts,
+        callId: room.id,
+        ...(creator ? { creatorUserId: creator } : {}),
+        participantIds: participantIds(room.participants),
+      };
     }
     if (!subtype && event.thread_ts && event.user) {
       return {

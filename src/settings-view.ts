@@ -297,6 +297,8 @@ export type SettingsViewOptions = {
     admin: boolean;
     endSession: boolean;
     saveDefaults: boolean;
+    // Whether the viewer may turn the channel's auto join on or off.
+    autoJoin: boolean;
   };
   session: SessionSettingsView;
   user: UserSettingsView;
@@ -307,6 +309,8 @@ export type SettingsViewOptions = {
     defaults?: { savedBy: string; savedAt: number };
     // The channel's saved sessions the viewer may delete.
     saves: ChannelSaveView[];
+    // Who turned on joining every new Huddle in the channel, when it is on.
+    autoJoin?: { enabledBy: string; enabledAt: number };
   };
   integrations: { userId: string; requestId: string; permissions: string[] }[];
 };
@@ -322,7 +326,7 @@ export function visibleSettingsTabs(
       : tab === "session"
         ? access.volume || access.configure || access.endSession
         : tab === "channel"
-          ? access.saveDefaults || channel.saves.length > 0
+          ? access.saveDefaults || access.autoJoin || channel.saves.length > 0
           : access.admin,
   );
 }
@@ -705,7 +709,33 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
 function channelBlocks(options: SettingsViewOptions) {
   const { access, channel, sessionId: value } = options;
   const defaults = channel.defaults;
+  const autoJoin = channel.autoJoin;
   return [
+    ...when(
+      access.autoJoin,
+      { type: "header", text: plain("Auto join") },
+      {
+        type: "section",
+        block_id: "channel_auto_join",
+        text: {
+          type: "mrkdwn",
+          text: autoJoin
+            ? `*On.* I join every new Huddle in this channel by myself. Turned on by <@${autoJoin.enabledBy}> ${slackDate(autoJoin.enabledAt)}.`
+            : "*Off.* I join a Huddle in this channel when someone invites me.",
+        },
+        accessory: autoJoin
+          ? button("disable_channel_auto_join", plain("Turn off"), { value })
+          : button("enable_channel_auto_join", plain("Turn on"), {
+              value,
+              style: "primary",
+              confirm: confirm(
+                "Turn on auto join?",
+                "I'll join every new Huddle in this channel as it starts, without waiting for an invite.",
+                "Turn on",
+              ),
+            }),
+      },
+    ),
     ...when(
       access.saveDefaults,
       { type: "header", text: plain("Channel defaults") },

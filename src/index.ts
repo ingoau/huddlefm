@@ -540,6 +540,7 @@ async function joinHuddle(
   inviteFreeWilly?: Record<string, unknown>,
   restored?: SavedSession,
   resumeActorId?: string,
+  autoJoined = false,
 ) {
   if (shuttingDown) throw new Error("HuddleFM is shutting down");
   if (
@@ -586,7 +587,9 @@ async function joinHuddle(
         config.forcedCompanionChannelIds.has(channelId),
       );
     } catch (error) {
-      if (callId) await slackHuddle.decline(channelId, callId).catch(() => {});
+      // Only an invitation has anything to decline.
+      if (callId && inviteFreeWilly)
+        await slackHuddle.decline(channelId, callId).catch(() => {});
       await slackApp
         .dm(
           inviterUserId,
@@ -613,6 +616,10 @@ async function joinHuddle(
       callId && inviteFreeWilly
         ? await slackHuddle.joinInvited(channelId, callId, inviteFreeWilly)
         : await slackHuddle.join(channelId);
+    // Joining by channel takes whatever Huddle is there now, which may not
+    // be the one asked for if it ended in the meantime.
+    if (callId && joined.huddleCallId !== callId)
+      throw new Error("The Huddle ended before HuddleFM could join it");
     const huddleThreadTs = joined.uiThreadTs;
     preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
       (userId) => !config.excludedUserIds.has(userId),
@@ -717,6 +724,7 @@ async function joinHuddle(
           .length,
       jellyfin,
     ));
+    coordinator.autoJoined = autoJoined;
     try {
       if (restored) await coordinator.resume(resumeActorId);
       else await coordinator.start();
@@ -1260,6 +1268,62 @@ async function joinMentionedHuddle(
   return true;
 }
 
+// Joins a Huddle as it starts in a channel whose managers turned on auto
+// join, with whoever started it as the inviter.
+async function autoJoinHuddle(
+  event: Extract<
+    import("./slack-huddle.ts").HuddleEvent,
+    { type: "HuddleStarted" }
+  >,
+) {
+  if (shuttingDown || !store.channelAutoJoin(event.channelId)) return;
+  if (
+    joiningChannels.has(event.channelId) ||
+    joiningCalls.has(event.callId) ||
+    runtimeForCall(event.callId) ||
+    [...runtimes.values()].some(
+      (runtime) => runtime.sourceChannelId === event.channelId,
+    )
+  )
+    return;
+  const inviterUserId = [event.creatorUserId, ...event.participantIds].find(
+    (userId): userId is string =>
+      Boolean(userId) &&
+      userId !== botUserId &&
+      !config.excludedUserIds.has(userId!),
+  );
+  if (!inviterUserId) return;
+  // Joining a channel with no Huddle in it would start one, so a Huddle that
+  // ended as soon as it began is left alone.
+  const room = await slackHuddle.activeHuddleRoom(
+    event.channelId,
+    event.threadTs,
+  );
+  if (room?.callId !== event.callId) return;
+  log.info(
+    {
+      event: "huddle_auto_join",
+      channelId: event.channelId,
+      callId: event.callId,
+      inviterUserId,
+    },
+    "Joining a new Huddle in an auto join channel",
+  );
+  captureAnalytics("huddle.auto_joined", {
+    distinctId: inviterUserId,
+    properties: { channelId: event.channelId, callId: event.callId },
+  });
+  await joinHuddle(
+    event.channelId,
+    inviterUserId,
+    event.callId,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+}
+
 const server = Bun.serve({
   hostname: config.bindAddress,
   port: config.port,
@@ -1553,6 +1617,20 @@ await slackHuddle.start((event) => {
       event.callId,
       event.freeWilly,
     ).catch(() => {});
+    return;
+  }
+  if (event.type === "HuddleStarted") {
+    void autoJoinHuddle(event).catch((error) =>
+      log.warn(
+        {
+          event: "huddle_auto_join_failed",
+          channelId: event.channelId,
+          callId: event.callId,
+          err: error,
+        },
+        "Could not auto join a new Huddle",
+      ),
+    );
     return;
   }
   if (event.type === "ThreadActivity") {
