@@ -363,19 +363,6 @@ const entries: Entry[] = [
     value: ({ session }) => session.anchorEnabled,
   },
   {
-    id: "communism",
-    tab: "host",
-    label: "Communism mode",
-    optional: true,
-    requires: "admin",
-    kind: "toggle",
-    text: "Everyone can do everything, and nobody takes over as host",
-    hint: "Lasts until the session ends",
-    // Once on, it can't be turned off.
-    visible: hierarchy,
-    value: ({ session }) => session.communism,
-  },
-  {
     id: "host",
     tab: "host",
     label: "Transfer host",

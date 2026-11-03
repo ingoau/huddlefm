@@ -1677,27 +1677,27 @@ test("first current participant claims a vacant host role", async () => {
 test("communism mode lets everyone do everything but take over as host", async () => {
   const test = setup();
   await test.coordinator.start();
-  const save = (userId: string, enabled: boolean, hostId = "host") =>
+  const start = (userId: string) =>
     test.coordinator.action({
-      ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+      ...interaction(test.coordinator, "start_communism", test.coordinator.id),
       userId,
-      metadata: JSON.stringify({ sessionId: test.coordinator.id, hostId }),
-      state: {
-        communism: {
-          enabled: { selected_options: enabled ? [{ value: "enabled" }] : [] },
-        },
-      },
     });
 
   // Only the host can start it.
-  await save("guest", true);
+  await start("guest");
   expect(test.sessions).not.toContainEqual({ communism: true });
+  expect(test.ephemeral.at(-1)).toBe("Only the host can start communism mode.");
   expect(await test.coordinator.agentStatus("guest")).toMatchObject({
     yourCapabilities: ["add", "remove-own"],
   });
 
-  await save("host", true);
+  await start("host");
   expect(test.sessions).toContainEqual({ communism: true });
+  expect(test.audit).toContainEqual([
+    "communism.started",
+    "host",
+    { sessionId: test.coordinator.id },
+  ]);
   const player = JSON.stringify(test.updates.at(-1));
   expect(player).toContain("☭ Communism mode");
   expect(player).not.toContain("Host: <@host>");
@@ -1727,8 +1727,6 @@ test("communism mode lets everyone do everything but take over as host", async (
   });
 
   // Nobody can turn it off; only ending the session does.
-  await save("guest", false, "");
-  expect(test.sessions).not.toContainEqual({ communism: false });
   expect(
     await test.coordinator.agentUpdateSettings("guest", { communism: false }),
   ).toMatchObject({ ok: false });

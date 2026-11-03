@@ -1495,7 +1495,11 @@ function Settings(props: {
   // Jellyfin's linked in Slack, so it has a place on You whatever else does
   const jellyfin = you?.jellyfin !== undefined && platform.openSlackSettings;
   const shown = groups.filter(
-    (group) => group.fields.length || (group.title === "You" && jellyfin),
+    (group) =>
+      group.fields.length ||
+      (group.title === "You" && jellyfin) ||
+      // communism mode's Host tab has no fields, but says it's on
+      (group.title === "Host" && you?.admin),
   );
   const [tab, setTab] = React.useState(shown[0]?.title ?? "You");
   // a tab that's gone, as Host when someone else becomes host, falls back
@@ -1546,6 +1550,30 @@ function Settings(props: {
             ? "Search it from the search box, under Jellyfin."
             : "Play from your own Jellyfin server. Linking shows a code to approve, so it happens in Slack, where only you see it."}
         </kit.Hint>
+      </div>
+    ),
+    // last, as there is no going back from it
+    group.title === "Host" && you?.admin && !state.session.communism && (
+      <div key="start_communism" className="huddlefm-field">
+        <div>
+          <kit.Button
+            type="outline"
+            size="small"
+            onClick={async () => {
+              if (
+                await kit.confirm({
+                  title: "Start communism mode?",
+                  body: "Everyone in the huddle will be able to do everything, and nobody will be able to take over as host. It can't be turned off: it lasts until the session ends.",
+                  confirmText: "Start",
+                  danger: true,
+                })
+              )
+                run(platform, { type: "start_communism" });
+            }}
+          >
+            Start communism mode
+          </kit.Button>
+        </div>
       </div>
     ),
   ];

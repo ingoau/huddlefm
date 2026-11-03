@@ -108,7 +108,7 @@ test("communism mode's Host tab only says so", () => {
   expect(block(host, "communism_active")?.text.text).toContain(
     "Communism mode is active",
   );
-  expect(block(host, "communism")).toBeUndefined();
+  expect(block(host, "communism_actions")).toBeUndefined();
   expect(block(host, "host")).toBeUndefined();
   expect(JSON.stringify(host)).not.toContain("apply_permission_preset");
   expect(
@@ -120,6 +120,16 @@ test("communism mode's Host tab only says so", () => {
   const usual = settingsView({ ...base, tab: "host" });
   expect(block(usual, "communism_active")).toBeUndefined();
   expect(block(usual, "host")).toBeDefined();
+  // Starting it is the tab's last thing, and asks first.
+  expect(usual.blocks.at(-1)).toMatchObject({
+    block_id: "communism_actions",
+    elements: [
+      {
+        action_id: "start_communism",
+        confirm: { title: { text: "Start communism mode?" } },
+      },
+    ],
+  });
 });
 
 test("a tab shows the edits a draft kept for it", () => {

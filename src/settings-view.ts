@@ -374,12 +374,32 @@ export function settingsView(options: SettingsViewOptions) {
         : tab === "channel"
           ? channelBlocks(options)
           : hostBlocks(options, form);
+  // Last on the Host tab, as there is no going back from it.
+  const communismBlocks = when(
+    tab === "host" && access.admin && !options.session.communism,
+    { type: "divider" },
+    actions("communism_actions", [
+      button("start_communism", plain("Start communism mode"), {
+        style: "danger",
+        value: options.sessionId,
+        confirm: confirm(
+          "Start communism mode?",
+          "Everyone in the huddle will be able to do everything, and nobody will be able to take over as host. It can't be turned off: it lasts until the session ends.",
+          "Start",
+        ),
+      }),
+    ]),
+  );
   const integrationBlocks =
     tab === "host" && access.admin
       ? integrationSettingsBlocks({
           sessionId: options.sessionId,
           grants: options.integrations,
-          maxBlocks: slackModalBlockLimit - tabBlocks.length - content.length,
+          maxBlocks:
+            slackModalBlockLimit -
+            tabBlocks.length -
+            content.length -
+            communismBlocks.length,
           page: options.integrationPage,
         })
       : [];
@@ -404,7 +424,13 @@ export function settingsView(options: SettingsViewOptions) {
     title: plain("HuddleFM settings"),
     submit: plain("Save"),
     close: plain("Cancel"),
-    blocks: [...tabBlocks, ...noticeBlocks, ...content, ...integrationBlocks],
+    blocks: [
+      ...tabBlocks,
+      ...noticeBlocks,
+      ...content,
+      ...integrationBlocks,
+      ...communismBlocks,
+    ],
   };
 }
 

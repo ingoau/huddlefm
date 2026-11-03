@@ -1219,6 +1219,7 @@ export class Coordinator {
         save_channel_defaults: () => this.saveChannelDefaults(interaction),
         clear_channel_defaults: () => this.clearChannelDefaults(interaction),
         claim_host: () => this.claimHost(interaction),
+        start_communism: () => this.startCommunismFromSettings(interaction),
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
@@ -2514,6 +2515,8 @@ export class Coordinator {
         return this.pluginSetting(userId, "volume", { value: command.percent });
       case "claim_host":
         return press("claim_host", this.id);
+      case "start_communism":
+        return press("start_communism", this.id);
       case "play_something":
         // video mode's suggests from Jellyfin, in a dialog only Slack opens
         if (this.videoMode)
@@ -7191,14 +7194,10 @@ export class Coordinator {
     // Edits made on other tabs count as much as those on screen.
     const state = this.settingsContext(interaction).draft;
     const admin = this.settingsAdmin(interaction.userId);
-    // Communism mode only ever starts; ending the session ends it.
-    const communism =
-      admin && !this.communism && checked(state.communism?.enabled) === true;
     // Communism mode has no host to hand over or permissions to set, so a
     // draft made before it began has neither to apply.
     const hierarchy = admin && !this.communism;
-    const nextHost =
-      hierarchy && !communism ? state.host?.user?.selected_user : undefined;
+    const nextHost = hierarchy ? state.host?.user?.selected_user : undefined;
     if (nextHost === this.botUserId)
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
@@ -7252,7 +7251,6 @@ export class Coordinator {
       if (blocked) await this.notice(interaction.userId, blocked);
     }
     if (nextHost) this.setHost(nextHost);
-    if (communism) this.startCommunism();
     if (this.scrobbling) {
       try {
         const userSettings = this.scrobbling.settings(
@@ -7473,7 +7471,7 @@ export class Coordinator {
       defaults.permissions = capabilities.filter((capability) =>
         allowed.has(capability),
       );
-      defaults.communism = checked(state.communism?.enabled) ?? this.communism;
+      defaults.communism = this.communism;
     }
     this.store.setChannelDefaults(this.roomId, defaults, interaction.userId);
     this.audit.record("channel_defaults.saved", interaction.userId, {
@@ -7532,6 +7530,24 @@ export class Coordinator {
         this.allowed.has(capability),
       );
     this.plugins.refreshYou();
+  }
+
+  // Settings' Start communism mode button, past its confirmation.
+  private async startCommunismFromSettings(interaction: Interaction) {
+    if (interaction.value !== this.id) return;
+    if (!this.settingsAdmin(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "Only the host can start communism mode.",
+      );
+    if (!this.startCommunism())
+      return this.notice(interaction.userId, "Communism mode is already on.");
+    this.audit.record("communism.started", interaction.userId, {
+      sessionId: this.id,
+    });
+    this.store.incrementUsage("settings");
+    await this.render();
+    if (interaction.viewId) await this.updateSettings(interaction);
   }
 
   private startCommunism() {
