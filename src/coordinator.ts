@@ -3387,7 +3387,16 @@ export class Coordinator {
         ok: false,
         error: "session_inactive",
       });
-    if (!this.hostId)
+    // Communism mode's host may have left for good, and anyone in the
+    // huddle may approve, so someone there is asked instead.
+    const approver =
+      this.hostId ??
+      (this.communism
+        ? [...this.participants].find(
+            (userId) => userId !== this.botUserId && !this.isExcluded(userId),
+          )
+        : undefined);
+    if (!approver)
       return this.replyIntegration(options, {
         ok: false,
         error: "no_host",
@@ -3432,14 +3441,14 @@ export class Coordinator {
     try {
       await this.slack.ephemeral(
         this.room.uiChannelId,
-        this.hostId,
+        approver,
         text,
         this.room.uiThreadTs,
         blocks,
       );
     } catch (error) {
       try {
-        await this.slack.dm(this.hostId, text, { blocks });
+        await this.slack.dm(approver, text, { blocks });
       } catch (fallbackError) {
         this.dropPending(pending);
         this.log.warn(

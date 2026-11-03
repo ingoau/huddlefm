@@ -5434,6 +5434,40 @@ function requestValue(calls: unknown[][]) {
   return accept?.value ?? "";
 }
 
+test("communism mode asks someone in the huddle to approve a bot once the host leaves", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "start_communism", test.coordinator.id),
+  });
+  await test.coordinator.memberLeft("host");
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["pause"],
+      events: ["track"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  expect(test.ephemeralCalls.at(-1)?.[1]).toBe("guest");
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "guest",
+    actionId: "integration_accept",
+    value: requestValue(test.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(test.coordinator.hasGrant("Ubot")).toBeTrue();
+  await test.coordinator.endFromSlack();
+});
+
 test("integration control requires host approval and grants without huddle membership", async () => {
   const test = setup();
   await test.coordinator.start();
