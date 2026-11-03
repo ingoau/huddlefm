@@ -540,6 +540,7 @@ async function joinHuddle(
   inviteFreeWilly?: Record<string, unknown>,
   restored?: SavedSession,
   resumeActorId?: string,
+  autoJoined = false,
 ) {
   if (shuttingDown) throw new Error("HuddleFM is shutting down");
   if (
@@ -723,6 +724,7 @@ async function joinHuddle(
           .length,
       jellyfin,
     ));
+    coordinator.autoJoined = autoJoined;
     try {
       if (restored) await coordinator.resume(resumeActorId);
       else await coordinator.start();
@@ -1311,7 +1313,15 @@ async function autoJoinHuddle(
     distinctId: inviterUserId,
     properties: { channelId: event.channelId, callId: event.callId },
   });
-  await joinHuddle(event.channelId, inviterUserId, event.callId);
+  await joinHuddle(
+    event.channelId,
+    inviterUserId,
+    event.callId,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
 }
 
 const server = Bun.serve({

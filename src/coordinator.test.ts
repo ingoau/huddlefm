@@ -276,6 +276,40 @@ test("coalesces queued player renders", async () => {
   await result.coordinator.endFromSlack();
 });
 
+test("the player says it auto joined until a song is added", async () => {
+  const plain = setup();
+  await plain.coordinator.start();
+  expect(JSON.stringify(plain.posted[0])).not.toContain("auto_joined_");
+  await plain.coordinator.endFromSlack();
+
+  const result = setup();
+  result.coordinator.autoJoined = true;
+  await result.coordinator.start();
+  expect(JSON.stringify(result.posted[0])).toContain(
+    "I joined by myself, as auto join is on for this channel.",
+  );
+  Reflect.set(result.coordinator, "queue", [
+    {
+      id: "first",
+      requesterId: "host",
+      sourceInput: "first",
+      canonicalUrl: "first",
+      sourceId: "first",
+      title: "First",
+      artist: "Artist",
+      status: "ready",
+    },
+  ]);
+  Reflect.get(result.coordinator, "render").call(result.coordinator);
+  await Reflect.get(result.coordinator, "settlePlayer").call(
+    result.coordinator,
+  );
+  expect(result.updates.length).toBeGreaterThan(0);
+  expect(JSON.stringify(result.updates.at(-1))).toContain("First");
+  expect(JSON.stringify(result.updates.at(-1))).not.toContain("auto_joined_");
+  await result.coordinator.endFromSlack();
+});
+
 test("moves controls to a replacement channel", async () => {
   const result = setup();
   await result.coordinator.start();

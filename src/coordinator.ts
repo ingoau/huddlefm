@@ -426,6 +426,9 @@ const pluginQueueMax = 100;
 export class Coordinator {
   readonly id: string;
   readonly participants = new Set<string>();
+  // Whether the bot joined by itself, as the channel has auto join on, which
+  // the player says until the first song is added.
+  autoJoined = false;
   // Bumped whenever tracked membership actually changes, so a reconciliation
   // can tell that its snapshot of Slack's participant list went stale while
   // it was in flight.
@@ -8444,6 +8447,17 @@ export class Coordinator {
                   }),
                 ]),
               )),
+          ...when(
+            this.autoJoined &&
+              !current &&
+              !next &&
+              !this.history.length &&
+              !this.autoplayPending,
+            context(
+              `auto_joined_${id}`,
+              "I joined by myself, as auto join is on for this channel. Channel managers can turn it off in Settings.",
+            ),
+          ),
           context(
             `volume_status_${id}`,
             `${this.videoMode ? "Video mode · " : ""}Volume: ${Math.round(this.volume * 10_000) / 100}%${this.communism ? " · ☭ Communism mode" : this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
