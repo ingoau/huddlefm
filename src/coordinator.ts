@@ -441,6 +441,11 @@ export class Coordinator {
   private playbackSeconds = 0;
   /** What client mods asked for, while it runs. */
   private dataChannelRuns = new AsyncLocalStorage<DataChannelRun>();
+  // The bot running a bot API command now, so its audit records say so.
+  private integrationRuns = new AsyncLocalStorage<{
+    userId: string;
+    done: boolean;
+  }>();
   // The tab a client mod asked Settings to open on, by user, for the click
   // on the player that opens it next.
   private settingsTabs = new Map<string, { tab: SettingsTab; until: number }>();
@@ -617,7 +622,7 @@ export class Coordinator {
             ? details
             : this.fromDataChannel(actorId)
               ? { ...details, via: "data_channel" }
-              : actorId && this.integrations.has(actorId)
+              : this.fromIntegration(actorId)
                 ? { ...details, via: "integration" }
                 : details,
         ),
@@ -2402,6 +2407,11 @@ export class Coordinator {
     return run;
   }
 
+  private fromIntegration(actorId?: string) {
+    const run = this.integrationRuns.getStore();
+    return Boolean(actorId && run && !run.done && run.userId === actorId);
+  }
+
   /**
    * Runs work for a client mod as its user, with what it would say in an
    * ephemeral notice kept for the answer.
@@ -3675,7 +3685,15 @@ export class Coordinator {
       // Commands check permissions synchronously, and a grant holder may also
       // be a workspace admin.
       await this.primeManager(userId);
-      result = await this.runIntegrationCommand(userId, command);
+      const run = { userId, done: false };
+      try {
+        result = await this.integrationRuns.run(run, () =>
+          this.runIntegrationCommand(userId, command),
+        );
+      } finally {
+        // Timers it started carry on as the session's own.
+        run.done = true;
+      }
     } catch (error) {
       result = { ok: false, error: message(error) };
     }

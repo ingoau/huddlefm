@@ -5590,6 +5590,13 @@ test("bot control requests, answers, commands and releases are audited", async (
     "Dbot",
   );
   expect(find("track.added")?.[2]).toMatchObject({ via: "integration" });
+  // The same user acting another way is not tagged as the bot API.
+  await test.coordinator.agentAdd("Ubot", "ref_song", undefined, {
+    awaitPreparation: false,
+  });
+  const added = events().filter(([event]) => event === "track.added");
+  expect(added).toHaveLength(2);
+  expect(added[1]![2].via).toBeUndefined();
   await test.coordinator.handleIntegrationCommand(
     "Ubot",
     { type: "pause" },

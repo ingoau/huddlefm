@@ -298,7 +298,15 @@ async function handleIntegrationDm(event: {
     });
   const parsed = parseIntegrationMessage(event.text);
   if (!parsed.ok) {
-    if (parsed.error === "ignored") return;
+    if (parsed.error === "ignored") {
+      // Chat is ignored, but JSON that doesn't parse was meant for us.
+      if (/^\s*[{[]/.test(event.text))
+        captureAnalytics("integration.message_invalid", {
+          distinctId: event.userId,
+          properties: { error: "invalid_json" },
+        });
+      return;
+    }
     const { ok: _ok, error, ...rest } = parsed;
     captureAnalytics("integration.message_invalid", {
       distinctId: event.userId,
