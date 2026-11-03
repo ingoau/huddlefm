@@ -1620,7 +1620,7 @@ function Settings(props: {
         )}
         {can(you, "end-session") && (
           <kit.Button type="danger" size="small" onClick={props.end}>
-            End session
+            {state.session.communism ? "End our session" : "End session"}
           </kit.Button>
         )}
       </div>
@@ -1636,6 +1636,7 @@ function Settings(props: {
 function EndSession(props: { platform: Platform; back: () => void }) {
   const { platform } = props;
   const { kit } = platform;
+  const ours = Boolean(platform.client.state.use()?.session.communism);
   const [save, setSave] = React.useState("none");
   const [name, setName] = React.useState("");
   const options = [
@@ -1647,10 +1648,11 @@ function EndSession(props: { platform: Platform; back: () => void }) {
     <section className="huddlefm-end">
       <header className="huddlefm-settings__header">
         <kit.IconButton label="Back" icon="arrow-left" onClick={props.back} />
-        <span>End session?</span>
+        <span>{ours ? "End our session?" : "End session?"}</span>
       </header>
       <p className="huddlefm-end__text">
-        This stops the music and ends the session for everyone.
+        This stops the music and ends {ours ? "our" : "the"} session for
+        everyone.
       </p>
       <div className="huddlefm-field">
         <div className="huddlefm-field__label">Save for next time</div>

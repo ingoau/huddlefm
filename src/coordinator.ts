@@ -2029,7 +2029,7 @@ export class Coordinator {
         (patch.hostUserId !== undefined ||
           patch.permissionPreset !== undefined ||
           patch.permissions !== undefined ||
-          patch.communism !== undefined) &&
+          patch.communism === true) &&
         !this.settingsAdmin(userId)
       )
         return {
@@ -2050,11 +2050,6 @@ export class Coordinator {
         };
       if (patch.communism !== undefined && typeof patch.communism !== "boolean")
         return { ok: false as const, error: "Invalid communism mode." };
-      if (patch.communism === false && this.communism)
-        return {
-          ok: false as const,
-          error: "Communism mode only ends when the session does.",
-        };
       if (
         (patch.displayMode !== undefined ||
           patch.autoplay !== undefined ||
@@ -2153,7 +2148,8 @@ export class Coordinator {
         this.setHost(patch.hostUserId);
         changed.push(`hostId=${patch.hostUserId}`);
       }
-      if (patch.communism && this.startCommunism())
+      // `false` changes nothing: it can't be turned off, only started.
+      if (patch.communism === true && this.startCommunism(userId))
         changed.push("communism=true");
       if (changed.length) {
         const changes = settingsChanges(before, this.settingsSnapshot());
@@ -7182,8 +7178,10 @@ export class Coordinator {
     };
     if (
       metadata.sessionId !== this.id ||
-      // A client mod's change is one field, checked as it applies.
+      // A client mod's change is one field, checked as it applies. In
+      // communism mode the host, who may leave, changes nobody's access.
       (!this.fromDataChannel() &&
+        !this.communism &&
         (metadata.hostId || undefined) !== this.hostId) ||
       !this.canOpenSettings(interaction.userId)
     )
@@ -7198,6 +7196,16 @@ export class Coordinator {
     // draft made before it began has neither to apply.
     const hierarchy = admin && !this.communism;
     const nextHost = hierarchy ? state.host?.user?.selected_user : undefined;
+    const draftedPermissions = state.permissions?.selected?.selected_options;
+    const dropped =
+      admin &&
+      this.communism &&
+      ((state.host?.user?.selected_user ?? this.hostId) !== this.hostId ||
+        (draftedPermissions !== undefined &&
+          (draftedPermissions.length !== this.allowed.size ||
+            draftedPermissions.some(
+              (option) => !this.allowed.has(option.value ?? ""),
+            ))));
     if (nextHost === this.botUserId)
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
@@ -7251,6 +7259,11 @@ export class Coordinator {
       if (blocked) await this.notice(interaction.userId, blocked);
     }
     if (nextHost) this.setHost(nextHost);
+    if (dropped)
+      await this.notice(
+        interaction.userId,
+        "Communism mode is on, so the host and permissions weren't changed.",
+      );
     if (this.scrobbling) {
       try {
         const userSettings = this.scrobbling.settings(
@@ -7513,7 +7526,7 @@ export class Coordinator {
     const metadata = parseMetadata(interaction.metadata);
     if (
       metadata.sessionId !== this.id ||
-      (metadata.hostId || undefined) !== this.hostId
+      (!this.communism && (metadata.hostId || undefined) !== this.hostId)
     ) {
       await this.notice(interaction.userId, "Settings are stale; reopen them.");
       return false;
@@ -7540,20 +7553,18 @@ export class Coordinator {
         interaction.userId,
         "Only the host can start communism mode.",
       );
-    if (!this.startCommunism())
+    if (!this.startCommunism(interaction.userId))
       return this.notice(interaction.userId, "Communism mode is already on.");
-    this.audit.record("communism.started", interaction.userId, {
-      sessionId: this.id,
-    });
-    this.store.incrementUsage("settings");
     await this.render();
     if (interaction.viewId) await this.updateSettings(interaction);
   }
 
-  private startCommunism() {
+  private startCommunism(userId: string) {
     if (this.communism) return false;
     this.communism = true;
     this.store.setSession(this.id, { communism: true });
+    this.audit.record("communism.started", userId, { sessionId: this.id });
+    this.store.incrementUsage("settings");
     this.plugins.refreshYou();
     return true;
   }

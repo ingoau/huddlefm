@@ -1726,11 +1726,43 @@ test("communism mode lets everyone do everything but take over as host", async (
     ok: false,
   });
 
-  // Nobody can turn it off; only ending the session does.
+  // Nobody can turn it off; only ending the session does. Asking to is a
+  // no-op, so an agent passing `false` along with a setting still works.
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", {
+      loopMode: "queue",
+      communism: false,
+    }),
+  ).toMatchObject({ ok: true, communism: true });
+  expect(JSON.stringify(test.updates.at(-1))).toContain("☭ Communism mode");
+  await test.coordinator.endFromSlack();
+});
+
+test("a guest passing communism off to the agent is not refused", async () => {
+  const test = setup();
+  await test.coordinator.start();
   expect(
     await test.coordinator.agentUpdateSettings("guest", { communism: false }),
+  ).toMatchObject({ ok: true, communism: false });
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", { communism: true }),
   ).toMatchObject({ ok: false });
-  expect(JSON.stringify(test.updates.at(-1))).toContain("☭ Communism mode");
+  await test.coordinator.endFromSlack();
+});
+
+test("a client mod's host can start communism mode", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const command = (userId: string) =>
+    Reflect.get(test.coordinator, "pluginCommand").call(
+      test.coordinator,
+      userId,
+      { type: "start_communism" },
+    );
+  expect(await command("guest")).toMatchObject({ ok: false });
+  expect(test.coordinator.communismMode).toBeFalse();
+  expect(await command("host")).toMatchObject({ ok: true });
+  expect(test.coordinator.communismMode).toBeTrue();
   await test.coordinator.endFromSlack();
 });
 
