@@ -612,13 +612,14 @@ export class Coordinator {
         auditLog.record(
           event,
           actorId,
-          this.fromDataChannel(actorId)
-            ? { ...details, via: "data_channel" }
-            : actorId &&
-                !event.startsWith("integration.") &&
-                this.integrations.has(actorId)
-              ? { ...details, via: "integration" }
-              : details,
+          // The bot control events say who acted themselves.
+          event.startsWith("integration.")
+            ? details
+            : this.fromDataChannel(actorId)
+              ? { ...details, via: "data_channel" }
+              : actorId && this.integrations.has(actorId)
+                ? { ...details, via: "integration" }
+                : details,
         ),
     };
     this.id = restored?.id ?? crypto.randomUUID();
@@ -3495,7 +3496,6 @@ export class Coordinator {
     // Communism mode has no host to ask, and anyone in the huddle may answer,
     // so it asks everyone in the thread.
     if (this.communism) {
-      this.auditIntegrationRequested(pending, "thread");
       try {
         pending.promptTs = await this.post(
           this.room.uiChannelId,
@@ -3503,9 +3503,10 @@ export class Coordinator {
           text,
           blocks,
         );
+        this.auditIntegrationRequested(pending, "thread");
       } catch (error) {
+        this.auditIntegrationRejected(pending, "host_unreachable");
         this.dropPending(pending);
-        this.auditIntegrationRejected(options, "host_unreachable", requestId);
         this.log.warn(
           { event: "integration_prompt_failed", err: error },
           "Could not post integration control request",
@@ -3532,8 +3533,8 @@ export class Coordinator {
         await this.slack.dm(hostId, text, { blocks });
         this.auditIntegrationRequested(pending, "dm");
       } catch (fallbackError) {
+        this.auditIntegrationRejected(pending, "host_unreachable");
         this.dropPending(pending);
-        this.auditIntegrationRejected(options, "host_unreachable", requestId);
         this.log.warn(
           {
             event: "integration_prompt_failed",
@@ -3559,6 +3560,9 @@ export class Coordinator {
     },
     promptedVia: "thread" | "ephemeral" | "dm",
   ) {
+    // Prompting waits on Slack, and the request may be replaced, answered or
+    // dropped meanwhile, which records its own outcome.
+    if (this.pendingIntegrations.get(pending.userId)?.id !== pending.id) return;
     this.audit.record("integration.requested", pending.userId, {
       sessionId: this.id,
       requestId: pending.id,
@@ -3571,10 +3575,20 @@ export class Coordinator {
   }
 
   private auditIntegrationRejected(
-    options: { userId: string; channel: string; permissions: string[] },
+    options: {
+      userId: string;
+      channel: string;
+      permissions: string[];
+      id?: string;
+    },
     reason: "session_inactive" | "no_host" | "host_unreachable",
-    requestId?: string,
   ) {
+    const requestId = options.id;
+    if (
+      requestId &&
+      this.pendingIntegrations.get(options.userId)?.id !== requestId
+    )
+      return;
     this.audit.record("integration.request_rejected", options.userId, {
       sessionId: this.id,
       ...(requestId ? { requestId } : {}),
@@ -3807,6 +3821,22 @@ export class Coordinator {
         interaction,
         `Declined <@${pending.userId}>'s control request.`,
       );
+    }
+    // A bot that asks again while it holds a grant swaps the old one out.
+    const previous = this.integrations.get(pending.userId);
+    if (previous) {
+      this.audit.record("integration.ended", undefined, {
+        sessionId: this.id,
+        integrationId: pending.userId,
+        requestId: previous.requestId,
+        reason: "replaced",
+        heldMs: Date.now() - previous.grantedAt,
+      });
+      if (previous.promptTs !== pending.promptTs)
+        void this.closePrompt(
+          previous.promptTs,
+          `<@${pending.userId}> replaced this control with a new grant.`,
+        );
     }
     this.integrations.set(pending.userId, {
       permissions: new Set(pending.permissions),

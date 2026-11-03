@@ -5680,6 +5680,100 @@ test("declined, replaced and abandoned bot control requests are audited", async 
   ]);
 });
 
+test("replaced, revoked and ended bot control grants are audited", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const events = () =>
+    test.audit as [string, string | undefined, Record<string, unknown>][];
+  const ends = () =>
+    events().filter(([event]) =>
+      ["integration.ended", "integration.revoked"].includes(event),
+    );
+  const grant = async (ts: string) => {
+    await test.coordinator.handleIntegrationCommand(
+      "Ubot",
+      { type: "request_control", channel: "channel", permissions: ["add"] },
+      ts,
+      "Dbot",
+    );
+    const value = requestValue(test.ephemeralCalls);
+    await test.coordinator.action({
+      type: "block_actions",
+      userId: "host",
+      actionId: "integration_accept",
+      value,
+      channelId: "channel",
+      messageTs: "ephemeral",
+      triggerId: "",
+      metadata: "",
+      state: {},
+    });
+    return value;
+  };
+  await grant("9.0");
+  const value = await grant("10.0");
+  expect(ends()).toMatchObject([
+    [
+      "integration.ended",
+      undefined,
+      { reason: "replaced", integrationId: "Ubot" },
+    ],
+  ]);
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_revoke",
+    value,
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(ends().at(-1)).toMatchObject([
+    "integration.revoked",
+    "host",
+    { integrationId: "Ubot", heldMs: expect.any(Number) },
+  ]);
+  await grant("11.0");
+  await test.coordinator.endFromSlack();
+  expect(ends().at(-1)).toMatchObject([
+    "integration.ended",
+    undefined,
+    { reason: "session_ended", integrationId: "Ubot" },
+  ]);
+  expect(
+    events().filter(([event]) => event === "integration.granted"),
+  ).toHaveLength(3);
+});
+
+test("a bot control request that cannot reach the host is only rejected", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "slack", {
+    ...Reflect.get(test.coordinator, "slack"),
+    ephemeral: async () => {
+      throw new Error("no");
+    },
+    dm: async (...args: unknown[]) => {
+      if (args[0] === "host") throw new Error("no");
+    },
+  });
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "request_control", channel: "channel", permissions: ["add"] },
+    "9.0",
+    "Dbot",
+  );
+  const control = (test.audit as [string][]).filter(([event]) =>
+    event.startsWith("integration."),
+  );
+  expect(control).toMatchObject([
+    ["integration.request_rejected", "Ubot", { reason: "host_unreachable" }],
+  ]);
+  await test.coordinator.endFromSlack();
+});
+
 function requestValue(calls: unknown[][]) {
   const blocks = calls.at(-1)?.[4] as {
     elements?: { action_id?: string; value?: string }[];
