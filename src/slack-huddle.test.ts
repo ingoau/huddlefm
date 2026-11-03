@@ -315,6 +315,22 @@ test("normalizes a Huddle starting in a channel", () => {
   expect(
     normalizeRealtimeEvent({ ...started, room: undefined }),
   ).toBeUndefined();
+  expect(
+    normalizeRealtimeEvent({
+      ...started,
+      room: { ...started.room, date_end: 2 },
+    }),
+  ).toBeUndefined();
+  // An edit to the thread root is not a Huddle starting.
+  expect(
+    normalizeRealtimeEvent({
+      type: "message",
+      subtype: "message_changed",
+      channel: "C123",
+      ts: "3.0",
+      message: started,
+    }),
+  ).toBeUndefined();
 });
 
 test("only accepts active Huddle thread roots", () => {

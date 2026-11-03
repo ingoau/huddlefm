@@ -586,7 +586,9 @@ async function joinHuddle(
         config.forcedCompanionChannelIds.has(channelId),
       );
     } catch (error) {
-      if (callId) await slackHuddle.decline(channelId, callId).catch(() => {});
+      // Only an invitation has anything to decline.
+      if (callId && inviteFreeWilly)
+        await slackHuddle.decline(channelId, callId).catch(() => {});
       await slackApp
         .dm(
           inviterUserId,
@@ -613,6 +615,10 @@ async function joinHuddle(
       callId && inviteFreeWilly
         ? await slackHuddle.joinInvited(channelId, callId, inviteFreeWilly)
         : await slackHuddle.join(channelId);
+    // Joining by channel takes whatever Huddle is there now, which may not
+    // be the one asked for if it ended in the meantime.
+    if (callId && joined.huddleCallId !== callId)
+      throw new Error("The Huddle ended before HuddleFM could join it");
     const huddleThreadTs = joined.uiThreadTs;
     preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
       (userId) => !config.excludedUserIds.has(userId),
@@ -1285,6 +1291,13 @@ async function autoJoinHuddle(
       !config.excludedUserIds.has(userId!),
   );
   if (!inviterUserId) return;
+  // Joining a channel with no Huddle in it would start one, so a Huddle that
+  // ended as soon as it began is left alone.
+  const room = await slackHuddle.activeHuddleRoom(
+    event.channelId,
+    event.threadTs,
+  );
+  if (room?.callId !== event.callId) return;
   log.info(
     {
       event: "huddle_auto_join",
@@ -1597,7 +1610,17 @@ await slackHuddle.start((event) => {
     return;
   }
   if (event.type === "HuddleStarted") {
-    void autoJoinHuddle(event).catch(() => {});
+    void autoJoinHuddle(event).catch((error) =>
+      log.warn(
+        {
+          event: "huddle_auto_join_failed",
+          channelId: event.channelId,
+          callId: event.callId,
+          err: error,
+        },
+        "Could not auto join a new Huddle",
+      ),
+    );
     return;
   }
   if (event.type === "ThreadActivity") {
