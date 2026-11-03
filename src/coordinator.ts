@@ -535,6 +535,8 @@ export class Coordinator {
       dmChannelId: string;
       requestTs: string;
       requestId: string;
+      // The thread message communism mode asked everyone with.
+      promptTs?: string;
     }
   >();
   private pendingIntegrations = new Map<
@@ -548,6 +550,7 @@ export class Coordinator {
       requestTs: string;
       channel: string;
       timer: ReturnType<typeof setTimeout>;
+      promptTs?: string;
     }
   >();
 
@@ -705,6 +708,8 @@ export class Coordinator {
       const defaults = store.channelDefaults(this.roomId);
       if (defaults) this.applyChannelDefaults(defaults);
     }
+    // Communism mode has no host, however the session came to be in it.
+    if (this.communism) this.hostId = undefined;
     this.log.info(
       {
         event: "created",
@@ -3387,25 +3392,32 @@ export class Coordinator {
         ok: false,
         error: "session_inactive",
       });
-    // Communism mode's host may have left for good, and anyone in the
-    // huddle may approve, so someone there is asked instead.
-    const approver =
-      this.hostId ??
-      (this.communism
-        ? [...this.participants].find(
-            (userId) => userId !== this.botUserId && !this.isExcluded(userId),
-          )
-        : undefined);
-    if (!approver)
+    if (!this.hostId && !this.communism)
       return this.replyIntegration(options, {
         ok: false,
         error: "no_host",
         message: "This session has no host to approve the request.",
       });
     const existing = this.pendingIntegrations.get(options.userId);
-    if (existing) this.dropPending(existing);
+    if (existing) {
+      this.dropPending(existing);
+      void this.closePrompt(
+        existing.promptTs,
+        `<@${existing.userId}> replaced this control request with a new one.`,
+      );
+    }
     const requestId = crypto.randomUUID();
-    const pending = {
+    const pending: {
+      id: string;
+      userId: string;
+      permissions: string[];
+      events: string[];
+      dmChannelId: string;
+      requestTs: string;
+      channel: string;
+      timer: ReturnType<typeof setTimeout>;
+      promptTs?: string;
+    } = {
       id: requestId,
       userId: options.userId,
       permissions: options.permissions,
@@ -3417,6 +3429,10 @@ export class Coordinator {
         const current = this.pendingIntegrations.get(options.userId);
         if (current?.id !== requestId) return;
         this.pendingIntegrations.delete(options.userId);
+        void this.closePrompt(
+          current.promptTs,
+          `<@${options.userId}>'s control request expired.`,
+        );
         void this.replyIntegration(options, {
           ok: true,
           type: "grant_expired",
@@ -3429,7 +3445,7 @@ export class Coordinator {
       }, integrationGrantTimeoutMs),
     };
     this.pendingIntegrations.set(options.userId, pending);
-    const text = `<@${options.userId}> wants to control this session.`;
+    const text = `<@${options.userId}> wants to control ${this.communism ? "our" : "this"} session.`;
     const blocks = integrationRequestBlocks({
       sessionId: this.id,
       requestId,
@@ -3438,17 +3454,41 @@ export class Coordinator {
       permissions: options.permissions,
       events: options.events,
     });
+    // Communism mode has no host to ask, and anyone in the huddle may answer,
+    // so it asks everyone in the thread.
+    if (this.communism) {
+      try {
+        pending.promptTs = await this.post(
+          this.room.uiChannelId,
+          this.room.uiThreadTs,
+          text,
+          blocks,
+        );
+      } catch (error) {
+        this.dropPending(pending);
+        this.log.warn(
+          { event: "integration_prompt_failed", err: error },
+          "Could not post integration control request",
+        );
+        return this.replyIntegration(options, {
+          ok: false,
+          error: "host_unreachable",
+        });
+      }
+      return;
+    }
+    const hostId = this.hostId!;
     try {
       await this.slack.ephemeral(
         this.room.uiChannelId,
-        approver,
+        hostId,
         text,
         this.room.uiThreadTs,
         blocks,
       );
     } catch (error) {
       try {
-        await this.slack.dm(approver, text, { blocks });
+        await this.slack.dm(hostId, text, { blocks });
       } catch (fallbackError) {
         this.dropPending(pending);
         this.log.warn(
@@ -3464,6 +3504,25 @@ export class Coordinator {
         });
       }
     }
+  }
+
+  // Rewrites a control request communism mode posted in the thread, once
+  // it's answered or gone, so nobody presses its buttons after.
+  private async closePrompt(
+    promptTs: string | undefined,
+    text: string,
+    blocks?: unknown[],
+  ) {
+    if (!promptTs) return false;
+    await this.slack
+      .update(this.room.uiChannelId, promptTs, text, blocks ?? [section(text)])
+      .catch((error) =>
+        this.log.warn(
+          { event: "integration_prompt_update_failed", err: error },
+          "Could not update integration control request",
+        ),
+      );
+    return true;
   }
 
   async handleIntegrationCommand(
@@ -3491,6 +3550,10 @@ export class Coordinator {
           error: "not_granted",
         });
       this.integrations.delete(userId);
+      void this.closePrompt(
+        grant.promptTs,
+        `<@${userId}> gave up control of our session.`,
+      );
       await this.render();
       return this.replyIntegration(target, {
         ok: true,
@@ -3614,7 +3677,12 @@ export class Coordinator {
     const parsed = parseIntegrationActionValue(interaction.value);
     if (!parsed) return;
     if (!this.settingsAdmin(interaction.userId))
-      return this.notice(interaction.userId, "Only the host can approve that.");
+      return this.notice(
+        interaction.userId,
+        this.communism
+          ? "Join the huddle to answer that."
+          : "Only the host can approve that.",
+      );
     if (interaction.actionId === "integration_revoke")
       return this.revokeIntegration(parsed.requestId, interaction);
     const pending = [...this.pendingIntegrations.values()].find(
@@ -3631,6 +3699,8 @@ export class Coordinator {
         ok: true,
         type: "grant_declined",
       });
+      const text = `<@${interaction.userId}> declined <@${pending.userId}>'s control request.`;
+      if (await this.closePrompt(pending.promptTs, text)) return;
       return this.replaceOriginal(
         interaction,
         `Declined <@${pending.userId}>'s control request.`,
@@ -3643,6 +3713,7 @@ export class Coordinator {
       dmChannelId: pending.dmChannelId,
       requestTs: pending.requestTs,
       requestId: pending.id,
+      ...(pending.promptTs ? { promptTs: pending.promptTs } : {}),
     });
     const status = this.integrationStatus(pending.userId);
     await this.replyIntegration(pending, {
@@ -3653,15 +3724,30 @@ export class Coordinator {
       events: pending.events,
     });
     await this.render();
+    const granted = integrationGrantedBlocks({
+      sessionId: this.id,
+      requestId: pending.id,
+      userId: pending.userId,
+      permissions: pending.permissions,
+    });
+    if (
+      await this.closePrompt(
+        pending.promptTs,
+        `<@${interaction.userId}> granted <@${pending.userId}> control of our session.`,
+        [
+          context(
+            `integration_granted_by_${pending.id}`,
+            `Granted by <@${interaction.userId}>`,
+          ),
+          ...granted,
+        ],
+      )
+    )
+      return;
     await this.replaceOriginal(
       interaction,
       `Granted <@${pending.userId}> control of this session.`,
-      integrationGrantedBlocks({
-        sessionId: this.id,
-        requestId: pending.id,
-        userId: pending.userId,
-        permissions: pending.permissions,
-      }),
+      granted,
     );
   }
 
@@ -3697,10 +3783,12 @@ export class Coordinator {
       { ok: true, type: "grant_revoked" },
     );
     await this.render();
-    await this.replaceOriginal(
-      interaction,
-      `Revoked <@${userId}>'s control of this session.`,
-    );
+    const revoked = `<@${interaction.userId}> revoked <@${userId}>'s control of our session.`;
+    if (!(await this.closePrompt(grant.promptTs, revoked)))
+      await this.replaceOriginal(
+        interaction,
+        `Revoked <@${userId}>'s control of this session.`,
+      );
     if (interaction.viewId && interaction.viewHash)
       await this.updateSettings(interaction);
   }
@@ -3764,8 +3852,19 @@ export class Coordinator {
 
   private dropIntegrations(event: "session.ended" | "session.suspended") {
     this.notifyIntegrations(event);
+    const ended =
+      event === "session.ended" ? "the session ended" : "HuddleFM restarted";
+    for (const [userId, grant] of this.integrations)
+      void this.closePrompt(
+        grant.promptTs,
+        `<@${userId}>'s control ended when ${ended}.`,
+      );
     for (const pending of this.pendingIntegrations.values()) {
       clearTimeout(pending.timer);
+      void this.closePrompt(
+        pending.promptTs,
+        `<@${pending.userId}>'s control request expired when ${ended}.`,
+      );
       void this.replyIntegration(pending, {
         ok: true,
         type: "grant_expired",
@@ -7572,6 +7671,7 @@ export class Coordinator {
     if (this.communism) return false;
     this.communism = true;
     this.store.setSession(this.id, { communism: true });
+    if (this.hostId) this.setHost(undefined);
     this.audit.record("communism.started", userId, { sessionId: this.id });
     this.store.incrementUsage("settings");
     this.plugins.refreshYou();

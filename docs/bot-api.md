@@ -22,7 +22,7 @@ Send a top-level DM:
 
 `channel` is required. It must be the huddle source channel, the controls channel, or the companion channel. A miss returns `session_not_found` with no other session details.
 
-A valid request has no immediate success reply. The host gets an ephemeral prompt listing **readable** permission and event names. After they accept, decline, or the request expires (five minutes), HuddleFM replies in a thread under your command (`thread_ts` plus JSON `replyTo`).
+A valid request has no immediate success reply. The host gets an ephemeral prompt listing **readable** permission and event names. In communism mode, which has no host, the prompt is posted in the session's thread instead, and anyone in the huddle may answer it. After they accept, decline, or the request expires (five minutes), HuddleFM replies in a thread under your command (`thread_ts` plus JSON `replyTo`).
 
 ```json
 {

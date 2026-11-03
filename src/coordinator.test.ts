@@ -2768,6 +2768,8 @@ test("communism mode lasts through a restart", async () => {
   expect(saved?.communism).toBeTrue();
   const result = setup(undefined, undefined, saved, undefined, store);
   expect(result.coordinator.communismMode).toBeTrue();
+  // Its host, if it had one, is not one any more.
+  expect(Reflect.get(result.coordinator, "hostId")).toBeUndefined();
 });
 
 test("a new session starts with its channel's saved defaults", async () => {
@@ -5434,37 +5436,94 @@ function requestValue(calls: unknown[][]) {
   return accept?.value ?? "";
 }
 
-test("communism mode asks someone in the huddle to approve a bot once the host leaves", async () => {
+test("communism mode asks everyone in the thread to approve a bot", async () => {
   const test = setup();
   await test.coordinator.start();
   await test.coordinator.action({
     ...interaction(test.coordinator, "start_communism", test.coordinator.id),
   });
-  await test.coordinator.memberLeft("host");
-  await test.coordinator.handleIntegrationCommand(
-    "Ubot",
-    {
-      type: "request_control",
-      channel: "channel",
-      permissions: ["pause"],
-      events: ["track"],
-    },
-    "9.0",
-    "Dbot",
-  );
-  expect(test.ephemeralCalls.at(-1)?.[1]).toBe("guest");
+  const updates = test.updates as unknown[][];
+  const ephemerals = test.ephemeralCalls.length;
+  const request = () =>
+    test.coordinator.handleIntegrationCommand(
+      "Ubot",
+      {
+        type: "request_control",
+        channel: "channel",
+        permissions: ["pause"],
+        events: ["track"],
+      },
+      "9.0",
+      "Dbot",
+    );
+  await request();
+  // Posted in the thread for everyone, not to anyone privately.
+  expect(test.ephemeralCalls).toHaveLength(ephemerals);
+  const prompt = (test.posted as unknown[][]).at(-1)!;
+  expect(prompt[2]).toBe("<@Ubot> wants to control our session.");
+  const promptTs = String(test.posted.length);
+  const value = (
+    prompt[3] as { elements?: { action_id?: string; value?: string }[] }[]
+  )
+    .flatMap((block) => block.elements ?? [])
+    .find((element) => element.action_id === "integration_accept")!.value!;
   await test.coordinator.action({
     type: "block_actions",
     userId: "guest",
     actionId: "integration_accept",
-    value: requestValue(test.ephemeralCalls),
+    value,
     channelId: "channel",
-    messageTs: "ephemeral",
+    messageTs: promptTs,
     triggerId: "",
     metadata: "",
     state: {},
   });
   expect(test.coordinator.hasGrant("Ubot")).toBeTrue();
+  // The message says who answered, so nobody answers it again.
+  const answered = updates.find((update) => update[1] === promptTs)!;
+  expect(answered[2]).toBe("<@guest> granted <@Ubot> control of our session.");
+  expect(JSON.stringify(answered[3])).not.toContain("integration_accept");
+
+  // A new request's message is closed once the session ends.
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "guest",
+    actionId: "integration_revoke",
+    value,
+    channelId: "channel",
+    messageTs: promptTs,
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(test.coordinator.hasGrant("Ubot")).toBeFalse();
+  expect(updates.at(-1)?.[2]).toBe(
+    "<@guest> revoked <@Ubot>'s control of our session.",
+  );
+  await request();
+  const second = String(test.posted.length);
+  await test.coordinator.endFromSlack();
+  expect(
+    updates.some(
+      (update) =>
+        update[1] === second &&
+        update[2] ===
+          "<@Ubot>'s control request expired when the session ended.",
+    ),
+  ).toBeTrue();
+});
+
+test("starting communism mode leaves the session without a host", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "start_communism", test.coordinator.id),
+  });
+  expect(test.sessions).toContainEqual({ hostId: null });
+  expect(await test.coordinator.agentStatus("host")).toMatchObject({
+    hostId: null,
+    youAreHost: false,
+  });
   await test.coordinator.endFromSlack();
 });
 

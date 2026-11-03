@@ -95,7 +95,7 @@ The whole session, sent after every change (merged, at most every 250 ms) and af
 - `session.state` is `ready` (nothing playing), `playing`, `paused`, `ended`, or `suspended` (the bot is restarting and will pick the session up again). The last `state` before the bot stops answering says `ended` or `suspended`.
 - `session.position` is the playback position in seconds when the message was sent. While `playing`, a client adds the time since it received the message.
 - `session.volume` is in percent, rounded.
-- `session.communism` is whether communism mode is on: everyone in the huddle may do everything, `allowed` doesn't apply, and nobody can take over as host (`claim_host` fails). Once on, it lasts until the session ends.
+- `session.communism` is whether communism mode is on: everyone in the huddle may do everything, `allowed` doesn't apply, and there is no host: `hostId` is `null` and `claim_host` fails. Once on, it lasts until the session ends.
 - `session.player` is the HuddleFM message in the huddle's thread, which a client can hide while it shows its own controls, or `null` before it is posted.
 - `participants` are the Slack users in the huddle, without the bot.
 - `nowPlaying` is `null` when nothing is playing. `artwork` is a public URL, or absent.
