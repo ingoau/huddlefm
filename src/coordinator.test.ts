@@ -142,6 +142,8 @@ function setup(
       sessionSaves: () => [],
       channelDefaults: () => undefined,
       channelDefaultsSaved: () => undefined,
+      channelAutoJoin: () => undefined,
+      setChannelAutoJoin: () => {},
       setPermission: (_id: string, capability: string, allowed: boolean) => {
         permissions.push({ capability, allowed });
       },
@@ -2473,10 +2475,15 @@ test("a channel manager who sees no settings cannot save them as defaults", asyn
   );
   await result.coordinator.start();
   await result.act("guest", "open_settings");
+  // The Channel tab shows for auto join, without the defaults.
   expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([
     "you",
     "session",
+    "channel",
   ]);
+  expect(channelButtons(await settingsTab(result, "guest", "channel"))).toEqual(
+    [],
+  );
   await pressInSettings(result, "guest", "save_channel_defaults", {
     permissions: { selected: { selected_options: [{ value: "clear" }] } },
   });
@@ -2484,6 +2491,66 @@ test("a channel manager who sees no settings cannot save them as defaults", asyn
     "Only channel managers can change defaults for this channel.",
   );
   expect(store.channelDefaults("channel")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});
+
+test("channel managers turn the channel's auto join on and off", async () => {
+  const store = new Store(":memory:");
+  const result = channelManagerSetup(
+    ["guest"],
+    new Set(),
+    "end",
+    undefined,
+    store,
+  );
+  await result.coordinator.start();
+  await result.act("guest", "open_settings");
+  const autoJoinButton = (view: unknown) =>
+    JSON.stringify(view).match(/"(enable|disable)_channel_auto_join"/)?.[1];
+  expect(autoJoinButton(await settingsTab(result, "guest", "channel"))).toBe(
+    "enable",
+  );
+
+  await pressInSettings(
+    result,
+    "host",
+    "enable_channel_auto_join",
+    {},
+    "host",
+    {
+      tab: "channel",
+    },
+  );
+  expect(result.ephemeral).toContain(
+    "Only channel managers can change auto join for this channel.",
+  );
+  expect(store.channelAutoJoin("channel")).toBeUndefined();
+
+  await pressInSettings(
+    result,
+    "guest",
+    "enable_channel_auto_join",
+    {},
+    "host",
+    {
+      tab: "channel",
+    },
+  );
+  expect(store.channelAutoJoin("channel")?.enabledBy).toBe("guest");
+  expect(autoJoinButton(result.updatedModals.at(-1)![2])).toBe("disable");
+
+  await pressInSettings(
+    result,
+    "guest",
+    "disable_channel_auto_join",
+    {},
+    "host",
+    { tab: "channel" },
+  );
+  expect(store.channelAutoJoin("channel")).toBeUndefined();
+  expect(result.ephemeral).toContain(
+    "Auto join is off. I’ll join Huddles in this channel when invited.",
+  );
   await result.coordinator.endFromSlack();
 });
 

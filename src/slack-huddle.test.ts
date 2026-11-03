@@ -280,6 +280,43 @@ test("normalizes top-level DMs including bot messages", () => {
   ).toBeUndefined();
 });
 
+test("normalizes a Huddle starting in a channel", () => {
+  const started = {
+    type: "message",
+    subtype: "huddle_thread",
+    channel: "C123",
+    ts: "1.0",
+    user: "U9",
+    room: {
+      id: "R123",
+      created_by: "U1",
+      has_ended: false,
+      date_end: 0,
+      participants: ["U1"],
+    },
+  };
+  expect(normalizeRealtimeEvent(started)).toEqual({
+    type: "HuddleStarted",
+    channelId: "C123",
+    threadTs: "1.0",
+    callId: "R123",
+    creatorUserId: "U1",
+    participantIds: ["U1"],
+  });
+  expect(
+    normalizeRealtimeEvent({
+      ...started,
+      room: { ...started.room, has_ended: true },
+    }),
+  ).toBeUndefined();
+  expect(
+    normalizeRealtimeEvent({ ...started, thread_ts: "0.5" }),
+  ).toBeUndefined();
+  expect(
+    normalizeRealtimeEvent({ ...started, room: undefined }),
+  ).toBeUndefined();
+});
+
 test("only accepts active Huddle thread roots", () => {
   const active = {
     ok: true,

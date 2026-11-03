@@ -17,6 +17,7 @@ const access = {
   admin: false,
   endSession: false,
   saveDefaults: false,
+  autoJoin: false,
 };
 
 function options(
@@ -79,6 +80,12 @@ test("each tab shows only to those who can change something on it", () => {
       channel: { saves: [] },
     }),
   ).toEqual(["you", "channel", "host"]);
+  expect(
+    visibleSettingsTabs({
+      access: { ...access, autoJoin: true },
+      channel: { saves: [] },
+    }),
+  ).toEqual(["you", "channel"]);
 });
 
 test("Settings opens on the session's tab, and a lone tab has no tab bar", () => {
@@ -277,6 +284,46 @@ test("the Channel tab says who saved the defaults and lists saves to delete", ()
     action_id: "delete_channel_save",
     value: "save-1",
   });
+});
+
+test("channel managers turn auto join on and off from the Channel tab", () => {
+  const off = settingsView(
+    options({ access: { ...access, autoJoin: true }, tab: "channel" }),
+  );
+  const offBlock = block(off, "channel_auto_join")!;
+  expect(offBlock.text.text).toContain("*Off.*");
+  expect(offBlock.accessory).toMatchObject({
+    action_id: "enable_channel_auto_join",
+    value: "session",
+  });
+  expect(offBlock.accessory.confirm).toBeDefined();
+  expect(block(off, "channel_defaults_saved")).toBeUndefined();
+
+  const on = settingsView(
+    options({
+      access: { ...access, autoJoin: true },
+      tab: "channel",
+      channel: {
+        saves: [],
+        autoJoin: { enabledBy: "U1", enabledAt: Date.UTC(2026, 9, 1) },
+      },
+    }),
+  );
+  const onBlock = block(on, "channel_auto_join")!;
+  expect(onBlock.text.text).toContain("Turned on by <@U1>");
+  expect(onBlock.accessory).toMatchObject({
+    action_id: "disable_channel_auto_join",
+  });
+
+  const viewer = settingsView(
+    options({
+      tab: "channel",
+      channel: {
+        saves: [{ id: "s", name: "Mix", savedBy: "U", savedAt: 0, songs: 1 }],
+      },
+    }),
+  );
+  expect(block(viewer, "channel_auto_join")).toBeUndefined();
 });
 
 test("volume is picked in the player's steps, keeping a volume between them", () => {

@@ -294,6 +294,8 @@ const channelRoleActions = new Set([
   "open_settings",
   "save_channel_defaults",
   "clear_channel_defaults",
+  "enable_channel_auto_join",
+  "disable_channel_auto_join",
   "delete_channel_save",
   "load_session_save",
   ...settingsTabs.map((tab) => `${settingsTabActionPrefix}${tab}`),
@@ -1223,6 +1225,10 @@ export class Coordinator {
         },
         save_channel_defaults: () => this.saveChannelDefaults(interaction),
         clear_channel_defaults: () => this.clearChannelDefaults(interaction),
+        enable_channel_auto_join: () =>
+          this.setChannelAutoJoin(interaction, true),
+        disable_channel_auto_join: () =>
+          this.setChannelAutoJoin(interaction, false),
         claim_host: () => this.claimHost(interaction),
         start_communism: () => this.startCommunismFromSettings(interaction),
         continue_lastfm: () => this.continueLastFm(interaction),
@@ -3204,11 +3210,9 @@ export class Coordinator {
   // The role lookups that would have to ask Slack before the user's next
   // permission check. Roles that only end the session matter only for an
   // action that can end it, and only for users who could not end it anyway.
-  // Channel managers also save the channel's defaults and delete its saved
-  // sessions from Settings, so its Channel tab asks whenever channel managers
-  // are granted anything and the user can see settings to save or the
-  // channel has saves to delete. A workspace admin lookup still pending could
-  // grant them that, so it asks then too.
+  // Channel managers also turn auto join on or off, save the channel's
+  // defaults and delete its saved sessions from Settings, so its Channel tab
+  // asks whenever channel managers are granted anything.
   private roleLookups(
     userId: string,
     ending: boolean,
@@ -3228,11 +3232,7 @@ export class Coordinator {
       channelDefaults &&
       managers?.permissions !== "none" &&
       !this.roomId.startsWith("D") &&
-      userId !== this.config.managerUserId &&
-      (lookups.length > 0 ||
-        this.savableDefaults(userId).length > 0 ||
-        this.store.sessionSaves([{ type: "channel", id: this.roomId }]).length >
-          0);
+      userId !== this.config.managerUserId;
     if (
       managers &&
       (matters(managers.permissions) || savesDefaults) &&
@@ -3289,7 +3289,9 @@ export class Coordinator {
       interaction.actionId === "end_session" ||
       interaction.actionId === "open_end_session" ||
       interaction.actionId === "save_channel_defaults" ||
-      interaction.actionId === "clear_channel_defaults"
+      interaction.actionId === "clear_channel_defaults" ||
+      interaction.actionId === "enable_channel_auto_join" ||
+      interaction.actionId === "disable_channel_auto_join"
     );
   }
 
@@ -3307,8 +3309,16 @@ export class Coordinator {
   // in a channel starts with, from the settings they can see. A direct
   // message has no channel to save for.
   private canSaveChannelDefaults(userId: string) {
+    return (
+      this.savableDefaults(userId).length > 0 && this.managesChannel(userId)
+    );
+  }
+
+  // Channel managers, and the configured manager, also choose whether the bot
+  // joins every new Huddle in the channel, whatever they may do in the
+  // session itself.
+  private managesChannel(userId: string) {
     if (this.isExcluded(userId) || this.roomId.startsWith("D")) return false;
-    if (!this.savableDefaults(userId).length) return false;
     return (
       userId === this.config.managerUserId ||
       this.channelManagers?.isManager(this.roomId, userId) === true
@@ -6800,6 +6810,7 @@ export class Coordinator {
         admin: this.settingsAdmin(userId),
         endSession: this.can(userId, "end-session"),
         saveDefaults,
+        autoJoin: this.managesChannel(userId),
       },
       session: this.sessionSettings(),
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
@@ -6809,6 +6820,11 @@ export class Coordinator {
         ...(saved && this.store.channelDefaults(this.roomId)
           ? { defaults: saved }
           : {}),
+        ...defined({
+          autoJoin: this.managesChannel(userId)
+            ? this.store.channelAutoJoin(this.roomId)
+            : undefined,
+        }),
         saves: this.store
           .sessionSaves([{ type: "channel", id: this.roomId }])
           .filter((save) => this.canDeleteSave(userId, save))
@@ -7618,6 +7634,38 @@ export class Coordinator {
     await this.notice(
       interaction.userId,
       "Cleared. New sessions in this channel will start with the usual settings.",
+    );
+  }
+
+  // Turns joining every new Huddle in the channel on or off. Unlike the
+  // defaults it takes nothing from the session, so only the user's role is
+  // checked again.
+  private async setChannelAutoJoin(interaction: Interaction, on: boolean) {
+    if (!this.managesChannel(interaction.userId))
+      return this.notice(
+        interaction.userId,
+        "Only channel managers can change auto join for this channel.",
+      );
+    if (parseMetadata(interaction.metadata).sessionId !== this.id)
+      return this.notice(
+        interaction.userId,
+        "Settings are stale; reopen them.",
+      );
+    this.store.setChannelAutoJoin(
+      this.roomId,
+      on ? interaction.userId : undefined,
+    );
+    this.audit.record(
+      on ? "channel_auto_join.enabled" : "channel_auto_join.disabled",
+      interaction.userId,
+      { sessionId: this.id, channelId: this.roomId },
+    );
+    if (interaction.viewId) await this.updateSettings(interaction);
+    await this.notice(
+      interaction.userId,
+      on
+        ? "Auto join is on. I’ll join every new Huddle in this channel."
+        : "Auto join is off. I’ll join Huddles in this channel when invited.",
     );
   }
 
