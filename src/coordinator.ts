@@ -325,6 +325,8 @@ function throwIfAborted(signal?: AbortSignal) {
 // What the person who pressed the like button hears back. Nobody else sees it,
 // so it says what the like is for rather than announcing it to the room.
 const likedNotice = "This will be recommended to you more";
+const communismHostNotice =
+  "Communism mode is on, so nobody can take over as host.";
 
 // Hosts song.link can match to other streaming services. Of the sources the
 // bot plays, that is YouTube and SoundCloud.
@@ -456,6 +458,10 @@ export class Coordinator {
   private captions = false;
   // The bar along the bottom of a playing video, in video mode.
   private progressBar = true;
+  // Communism mode: everyone in the huddle may do everything, and nobody
+  // takes over as host. Once on, it lasts until the session ends, through a
+  // restart, but a saved session never carries it.
+  private communism = false;
   private watchedSeconds = 0;
   // Other people's screen shares in the huddle, as media last counted them.
   private contentShares = 0;
@@ -682,6 +688,7 @@ export class Coordinator {
       this.mediaMode = restored.mediaMode ?? "music";
       this.captions = restored.captions ?? false;
       this.progressBar = restored.progressBar ?? true;
+      this.communism = restored.communism ?? false;
       this.watchedSeconds = restored.watchedSeconds ?? 0;
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
@@ -737,6 +744,7 @@ export class Coordinator {
         displayMode: this.displayMode,
         anchorEnabled: this.anchorEnabled,
         progressBar: this.progressBar,
+        communism: this.communism,
       });
       this.setPermissions(this.allowed);
       // Media joined with the configured volume and ducking, and its own
@@ -853,6 +861,7 @@ export class Coordinator {
     this.duckingMode = defaults.duckingMode ?? this.duckingMode;
     this.anchorEnabled = defaults.anchorEnabled ?? this.anchorEnabled;
     this.progressBar = defaults.progressBar ?? this.progressBar;
+    this.communism = defaults.communism ?? this.communism;
     if (defaults.permissions) this.allowed = new Set(defaults.permissions);
     this.channelDefaultsApplied = true;
     this.log.info(
@@ -864,6 +873,10 @@ export class Coordinator {
   /** Whether the session is in video mode. */
   get videoMode() {
     return this.mediaMode === "video";
+  }
+
+  get communismMode() {
+    return this.communism;
   }
 
   // Video mode stops applying the music settings without changing them: no
@@ -1375,12 +1388,16 @@ export class Coordinator {
       loopMode: this.loopMode,
       anchorEnabled: this.anchorEnabled,
       hostId: this.hostId ?? null,
+      communism: this.communism,
       youAreHost: host,
-      yourCapabilities: host
-        ? "all (host/manager)"
-        : grant
-          ? [...grant.permissions]
-          : [...this.allowed],
+      yourCapabilities:
+        this.communism && !grant && this.can(userId, "add")
+          ? "all (communism mode)"
+          : host
+            ? "all (host/manager)"
+            : grant
+              ? [...grant.permissions]
+              : [...this.allowed],
       nowPlaying: current
         ? {
             id: current.id,
@@ -1972,6 +1989,7 @@ export class Coordinator {
       permissions?: string[];
       hostUserId?: string;
       mode?: MediaMode;
+      communism?: boolean;
     },
     signal?: AbortSignal,
   ) {
@@ -2009,12 +2027,32 @@ export class Coordinator {
       if (
         (patch.hostUserId !== undefined ||
           patch.permissionPreset !== undefined ||
-          patch.permissions !== undefined) &&
+          patch.permissions !== undefined ||
+          patch.communism !== undefined) &&
         !this.settingsAdmin(userId)
       )
         return {
           ok: false as const,
-          error: "Only the host can change permissions or transfer host.",
+          error:
+            "Only the host can change permissions, start communism mode or transfer host.",
+        };
+      if (
+        (patch.hostUserId !== undefined ||
+          patch.permissionPreset !== undefined ||
+          patch.permissions !== undefined) &&
+        (this.communism || patch.communism === true)
+      )
+        return {
+          ok: false as const,
+          error:
+            "Communism mode is on: everyone can already do everything, and nobody can take over as host.",
+        };
+      if (patch.communism !== undefined && typeof patch.communism !== "boolean")
+        return { ok: false as const, error: "Invalid communism mode." };
+      if (patch.communism === false && this.communism)
+        return {
+          ok: false as const,
+          error: "Communism mode only ends when the session does.",
         };
       if (
         (patch.displayMode !== undefined ||
@@ -2114,6 +2152,8 @@ export class Coordinator {
         this.setHost(patch.hostUserId);
         changed.push(`hostId=${patch.hostUserId}`);
       }
+      if (patch.communism && this.startCommunism())
+        changed.push("communism=true");
       if (changed.length) {
         const changes = settingsChanges(before, this.settingsSnapshot());
         this.audit.record("settings.changed", userId, {
@@ -2139,6 +2179,7 @@ export class Coordinator {
         duckingMode: this.duckingMode,
         anchorEnabled: this.anchorEnabled,
         hostId: this.hostId ?? null,
+        communism: this.communism,
         permissions: [...this.allowed],
       };
     });
@@ -2147,6 +2188,8 @@ export class Coordinator {
   async agentClaimHost(userId: string, signal?: AbortSignal) {
     return this.enqueue(async () => {
       throwIfAborted(signal);
+      if (this.communism)
+        return { ok: false as const, error: communismHostNotice };
       if (this.hostId)
         return { ok: false as const, error: "Host already claimed." };
       if (userId === this.botUserId || !this.participants.has(userId))
@@ -2235,6 +2278,7 @@ export class Coordinator {
         position: this.playbackPosition(),
         volume: Math.round(this.volume * 100),
         hostId: this.hostId ?? null,
+        communism: this.communism,
         allowed: capabilities.filter((value) => this.allowed.has(value)),
         loopMode: this.loopMode,
         queueLimit: this.config.queueLimit,
@@ -3099,7 +3143,9 @@ export class Coordinator {
     return (
       this.isManager(userId) ||
       (this.participants.has(userId) &&
-        (userId === this.hostId || this.allowed.has(capability)))
+        (this.communism ||
+          userId === this.hostId ||
+          this.allowed.has(capability)))
     );
   }
 
@@ -3265,10 +3311,14 @@ export class Coordinator {
     );
   }
 
+  // Host powers. In communism mode everyone in the huddle holds them, but
+  // for changing the host or permissions, which communism mode does without.
   private settingsAdmin(userId: string) {
     return (
       !this.isExcluded(userId) &&
-      (userId === this.hostId || this.isManager(userId))
+      (userId === this.hostId ||
+        this.isManager(userId) ||
+        (this.communism && this.participants.has(userId)))
     );
   }
 
@@ -3555,10 +3605,7 @@ export class Coordinator {
   private async integrationAction(interaction: Interaction) {
     const parsed = parseIntegrationActionValue(interaction.value);
     if (!parsed) return;
-    if (
-      interaction.userId !== this.hostId &&
-      !this.isManager(interaction.userId)
-    )
+    if (!this.settingsAdmin(interaction.userId))
       return this.notice(interaction.userId, "Only the host can approve that.");
     if (interaction.actionId === "integration_revoke")
       return this.revokeIntegration(parsed.requestId, interaction);
@@ -6688,6 +6735,7 @@ export class Coordinator {
       duckingMode: this.duckingMode,
       anchorEnabled: this.anchorEnabled,
       progressBar: this.progressBar,
+      communism: this.communism,
       allowed: this.allowed,
     };
   }
@@ -7096,6 +7144,7 @@ export class Coordinator {
       duckingMode: this.duckingMode,
       anchorEnabled: this.anchorEnabled,
       progressBar: this.progressBar,
+      communism: this.communism,
       permissions: [...this.allowed].sort(),
     };
   }
@@ -7142,7 +7191,14 @@ export class Coordinator {
     // Edits made on other tabs count as much as those on screen.
     const state = this.settingsContext(interaction).draft;
     const admin = this.settingsAdmin(interaction.userId);
-    const nextHost = admin ? state.host?.user?.selected_user : undefined;
+    // Communism mode only ever starts; ending the session ends it.
+    const communism =
+      admin && !this.communism && checked(state.communism?.enabled) === true;
+    // Communism mode has no host to hand over or permissions to set, so a
+    // draft made before it began has neither to apply.
+    const hierarchy = admin && !this.communism;
+    const nextHost =
+      hierarchy && !communism ? state.host?.user?.selected_user : undefined;
     if (nextHost === this.botUserId)
       return this.notice(interaction.userId, "HuddleFM cannot be the host.");
     if (nextHost && !this.participants.has(nextHost))
@@ -7176,7 +7232,7 @@ export class Coordinator {
         progressBar: checked(state.progress_bar?.enabled),
       });
     // A preset only fills in the checkboxes, so they are all that is saved.
-    const chosen = admin
+    const chosen = hierarchy
       ? state.permissions?.selected?.selected_options
       : undefined;
     if (chosen)
@@ -7196,6 +7252,7 @@ export class Coordinator {
       if (blocked) await this.notice(interaction.userId, blocked);
     }
     if (nextHost) this.setHost(nextHost);
+    if (communism) this.startCommunism();
     if (this.scrobbling) {
       try {
         const userSettings = this.scrobbling.settings(
@@ -7416,6 +7473,7 @@ export class Coordinator {
       defaults.permissions = capabilities.filter((capability) =>
         allowed.has(capability),
       );
+      defaults.communism = checked(state.communism?.enabled) ?? this.communism;
     }
     this.store.setChannelDefaults(this.roomId, defaults, interaction.userId);
     this.audit.record("channel_defaults.saved", interaction.userId, {
@@ -7474,6 +7532,14 @@ export class Coordinator {
         this.allowed.has(capability),
       );
     this.plugins.refreshYou();
+  }
+
+  private startCommunism() {
+    if (this.communism) return false;
+    this.communism = true;
+    this.store.setSession(this.id, { communism: true });
+    this.plugins.refreshYou();
+    return true;
   }
 
   private async hostLeft() {
@@ -7677,11 +7743,13 @@ export class Coordinator {
       type: "modal",
       callback_id: "end_session_confirm",
       private_metadata: JSON.stringify({ sessionId: this.id }),
-      title: plain("End session?"),
+      title: plain(this.communism ? "End our session?" : "End session?"),
       submit: plain("End"),
       close: plain("Cancel"),
       blocks: [
-        section("This stops playback and ends the session."),
+        section(
+          `This stops playback and ends ${this.communism ? "our" : "the"} session.`,
+        ),
         input(
           "save_to",
           "Save for next time",
@@ -7741,13 +7809,14 @@ export class Coordinator {
       owner ? { save: { owner, name } } : {},
     );
     if (this.state !== "ended") return;
+    const session = this.communism ? "Our session" : "The session";
     const text = !owner
-      ? "The session has ended."
+      ? `${session} has ended.`
       : saved
-        ? `The session has ended and was saved as “${escape(name)}”.`
+        ? `${session} has ended and was saved as “${escape(name)}”.`
         : alreadyEnded
-          ? "The session had already ended, so it was not saved."
-          : "The session has ended, but it could not be saved.";
+          ? `${session} had already ended, so it was not saved.`
+          : `${session} has ended, but it could not be saved.`;
     // Settings stays open under the dialog; say why its controls are gone.
     if (interaction.previousViewId)
       await this.slack
@@ -7954,6 +8023,8 @@ export class Coordinator {
       (interaction.messageTs && interaction.messageTs !== this.uiTs)
     )
       return this.notice(interaction.userId, "That takeover request is stale.");
+    if (this.communism)
+      return this.notice(interaction.userId, communismHostNotice);
     if (this.hostId)
       return this.notice(interaction.userId, "Host already claimed.");
     if (
@@ -8191,7 +8262,7 @@ export class Coordinator {
               )),
           context(
             `volume_status_${id}`,
-            `${this.videoMode ? "Video mode · " : ""}Volume: ${Math.round(this.volume * 10_000) / 100}%${this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
+            `${this.videoMode ? "Video mode · " : ""}Volume: ${Math.round(this.volume * 10_000) / 100}%${this.communism ? " · ☭ Communism mode" : this.hostId ? ` · Host: <@${this.hostId}>` : " · No host"}${
               this.integrations.size
                 ? ` · Controlling: ${[...this.integrations.keys()].map((id) => `<@${id}>`).join(", ")}`
                 : ""
@@ -8232,7 +8303,7 @@ export class Coordinator {
           actions(`actions_${id}`, [
             button("view_full_queue", plain("Queue"), { value }),
             ...when(
-              !this.hostId,
+              !this.hostId && !this.communism,
               button("claim_host", plain("Take over"), { value }),
             ),
             button("open_settings", plain("Settings"), { value }),
@@ -9100,7 +9171,10 @@ export class Coordinator {
               "Could not delete ended player message",
             ),
           );
-        const text = `Session ended: ${reason}`;
+        // Whoever ends a communism mode session, there is no host to have.
+        const text = this.communism
+          ? `Our session ended: ${reason === "ended by host" ? "ended by the people" : reason}`
+          : `Session ended: ${reason}`;
         const blocks = this.recapBlocks(text);
         const timestamp = await this.post(
           this.room.uiChannelId,
@@ -9162,7 +9236,7 @@ export class Coordinator {
     blocks.push({
       type: "container",
       block_id: `recap_${this.id}`,
-      title: plain("Session recap"),
+      title: plain(this.communism ? "Our session recap" : "Session recap"),
       is_collapsible: true,
       default_collapsed: true,
       child_blocks: [
@@ -9180,7 +9254,9 @@ export class Coordinator {
             `*Most repeated artist:* ${escape(topArtist)} (${songCount(topSongs.length)})`,
             `*Longest song:* ${longest ? `${escape(longest.title)} · ${elapsed(longest.duration!)}` : "Unknown"}`,
             `*Average song length:* ${timed.length ? elapsed(average) : "Unknown"}`,
-            `*Session host:* ${this.hostId ? `<@${this.hostId}>` : "None"}`,
+            this.communism
+              ? "*Session host:* Nobody, it was communism mode"
+              : `*Session host:* ${this.hostId ? `<@${this.hostId}>` : "None"}`,
           ].join("\n"),
         ),
         ...sectionBlocks(

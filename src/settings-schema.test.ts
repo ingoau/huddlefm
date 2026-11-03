@@ -18,6 +18,7 @@ const session: SessionSettingsView = {
   duckingMode: "gentle",
   anchorEnabled: false,
   progressBar: true,
+  communism: false,
   allowed: new Set(["add", "skip"]),
 };
 
@@ -52,6 +53,7 @@ test("fields follow the viewer's access and the session's mode", () => {
     "transition",
     "ducking",
     "anchor",
+    "communism",
     "host",
     "permissions",
   ]);
@@ -65,8 +67,21 @@ test("fields follow the viewer's access and the session's mode", () => {
     "loop",
     "progress_bar",
     "anchor",
+    "communism",
     "host",
     "permissions",
+  ]);
+  // Communism mode has no host to change or permissions to set, and can't
+  // be turned off.
+  expect(ids({ session: { ...session, communism: true } })).toEqual([
+    "media_mode",
+    "volume",
+    "display",
+    "autoplay",
+    "loop",
+    "transition",
+    "ducking",
+    "anchor",
   ]);
 });
 

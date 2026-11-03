@@ -89,7 +89,7 @@ Bots request the same capability IDs huddle participants can get. The host must 
 | `clear`              | Clear queue                                                 |
 | `end-session`        | End session                                                 |
 
-Never grantable: transfer or claim host, change the session permission preset, or personal scrobbling. `settings` never accepts `permissionPreset` or `hostUserId`.
+Never grantable: transfer or claim host, change the session permission preset, start communism mode, or personal scrobbling. `settings` never accepts `permissionPreset`, `hostUserId` or `communism`.
 
 Controllers do not need to be in the huddle. Multiple bots can hold grants at once. The player shows them next to Host as `Controlling: <@bot>`.
 

@@ -1674,6 +1674,68 @@ test("first current participant claims a vacant host role", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("communism mode lets everyone do everything but take over as host", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const save = (userId: string, enabled: boolean, hostId = "host") =>
+    test.coordinator.action({
+      ...interaction(test.coordinator, "save_settings", "", "view_submission"),
+      userId,
+      metadata: JSON.stringify({ sessionId: test.coordinator.id, hostId }),
+      state: {
+        communism: {
+          enabled: { selected_options: enabled ? [{ value: "enabled" }] : [] },
+        },
+      },
+    });
+
+  // Only the host can start it.
+  await save("guest", true);
+  expect(test.sessions).not.toContainEqual({ communism: true });
+  expect(await test.coordinator.agentStatus("guest")).toMatchObject({
+    yourCapabilities: ["add", "remove-own"],
+  });
+
+  await save("host", true);
+  expect(test.sessions).toContainEqual({ communism: true });
+  const player = JSON.stringify(test.updates.at(-1));
+  expect(player).toContain("☭ Communism mode");
+  expect(player).not.toContain("Host: <@host>");
+  expect(await test.coordinator.agentStatus("guest")).toMatchObject({
+    yourCapabilities: "all (communism mode)",
+  });
+  // Everything but the host and the permissions it does without.
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", { loopMode: "track" }),
+  ).toMatchObject({ ok: true, communism: true });
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", {
+      hostUserId: "guest",
+    }),
+  ).toMatchObject({ ok: false });
+  expect(
+    await test.coordinator.agentUpdateSettings("host", {
+      permissionPreset: "host-only",
+    }),
+  ).toMatchObject({ ok: false });
+
+  // A vacant host stays vacant.
+  await test.coordinator.memberLeft("host");
+  expect(JSON.stringify(test.updates.at(-1))).not.toContain("claim_host");
+  expect(await test.coordinator.agentClaimHost("guest")).toMatchObject({
+    ok: false,
+  });
+
+  // Nobody can turn it off; only ending the session does.
+  await save("guest", false, "");
+  expect(test.sessions).not.toContainEqual({ communism: false });
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", { communism: false }),
+  ).toMatchObject({ ok: false });
+  expect(JSON.stringify(test.updates.at(-1))).toContain("☭ Communism mode");
+  await test.coordinator.endFromSlack();
+});
+
 test("downloads do not block End and are cancelled", async () => {
   let signal: AbortSignal | undefined;
   const tracks = {
@@ -2301,6 +2363,7 @@ test("the configured manager can save and clear the channel's defaults", async (
     duckingMode: "gentle",
     anchorEnabled: true,
     progressBar: true,
+    communism: false,
     permissions: ["add", "remove-own"],
   });
   expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });
@@ -2645,6 +2708,36 @@ test("a restored session keeps its own settings over the channel's defaults", as
   expect(Reflect.get(coordinator, "autoplayMode")).toBe("off");
   expect([...Reflect.get(coordinator, "allowed")]).toEqual(["add"]);
   expect(Reflect.get(coordinator, "channelDefaultsApplied")).toBeFalse();
+});
+
+test("communism mode lasts through a restart", async () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.4,
+  });
+  store.setSession("saved", { communism: true });
+  store.suspendSession(
+    "saved",
+    {
+      state: "paused",
+      playbackSeconds: 0,
+      displayMode: "default",
+      anchorEnabled: false,
+      queue: [],
+    },
+    180_000,
+  );
+  const saved = store.resumableSessions(1, 180_000).sessions[0];
+  expect(saved?.communism).toBeTrue();
+  const result = setup(undefined, undefined, saved, undefined, store);
+  expect(result.coordinator.communismMode).toBeTrue();
 });
 
 test("a new session starts with its channel's saved defaults", async () => {
@@ -4651,7 +4744,7 @@ test("only the host can fill in a permission preset", async () => {
     {},
     "host",
     { tab: "host" },
-    "communism",
+    "collaborative",
   );
   expect(test.updatedModals).toEqual([]);
   expect(test.ephemeral.at(-1)).toBe("Only the host can change permissions.");

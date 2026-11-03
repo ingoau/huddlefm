@@ -601,17 +601,23 @@ function NowPlaying(props: {
           onClick={props.openSettings}
         />
       </div>
-      {!state.session.hostId && (
+      {state.session.communism ? (
         <div className="huddlefm-host">
-          <span>Nobody is host right now.</span>
-          <kit.Button
-            type="outline"
-            size="small"
-            onClick={() => run(platform, { type: "claim_host" })}
-          >
-            Take over
-          </kit.Button>
+          <span>☭ Communism mode: everyone can do everything.</span>
         </div>
+      ) : (
+        !state.session.hostId && (
+          <div className="huddlefm-host">
+            <span>Nobody is host right now.</span>
+            <kit.Button
+              type="outline"
+              size="small"
+              onClick={() => run(platform, { type: "claim_host" })}
+            >
+              Take over
+            </kit.Button>
+          </div>
+        )
       )}
       {track && <Progress platform={platform} track={track} />}
       <div className="huddlefm-controls">
@@ -1497,6 +1503,14 @@ function Settings(props: {
     ? tab
     : (shown[0]?.title ?? "You");
   const fields = (group: (typeof groups)[number]) => [
+    group.title === "Host" && state.session.communism && (
+      <div key="communism" className="huddlefm-field">
+        <kit.Hint>
+          Communism mode is active. Everyone in the huddle can do everything,
+          and nobody can take over as host, until the session ends.
+        </kit.Hint>
+      </div>
+    ),
     ...group.fields.map((field) => (
       <React.Fragment key={field.id}>
         {field.section && (
@@ -1549,7 +1563,11 @@ function Settings(props: {
           onChange={setTab}
           tabs={shown.map((group) => ({
             id: group.title,
-            title: group.title,
+            // communism mode's session is everyone's
+            title:
+              group.title === "Session" && state.session.communism
+                ? "Our session"
+                : group.title,
             content: (
               <div className="huddlefm-settings__tab">{fields(group)}</div>
             ),

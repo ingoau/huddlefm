@@ -107,6 +107,10 @@ const tabLabels: Record<SettingsTab, string> = {
   channel: "Channel",
   host: "Host",
 };
+// Communism mode's session is everyone's.
+function tabLabel(tab: SettingsTab, communism: boolean) {
+  return communism && tab === "session" ? "Our session" : tabLabels[tab];
+}
 // Each tab's button is its own action, as Slack wants the IDs in a block to
 // differ.
 export const settingsTabActionPrefix = "settings_tab_";
@@ -347,10 +351,14 @@ export function settingsView(options: SettingsViewOptions) {
     actions(
       "settings_tabs",
       tabs.map((item) =>
-        button(`${settingsTabActionPrefix}${item}`, plain(tabLabels[item]), {
-          value: item,
-          ...(item === tab ? { style: "primary" } : {}),
-        }),
+        button(
+          `${settingsTabActionPrefix}${item}`,
+          plain(tabLabel(item, options.session.communism)),
+          {
+            value: item,
+            ...(item === tab ? { style: "primary" } : {}),
+          },
+        ),
       ),
     ),
   );
@@ -658,10 +666,11 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
       actions("session_actions", [
         // Ending asks in a dialog of its own rather than a confirmation,
         // which cannot carry the choice to save the session.
-        button("open_end_session", plain("End session"), {
-          style: "danger",
-          value,
-        }),
+        button(
+          "open_end_session",
+          plain(options.session.communism ? "End our session" : "End session"),
+          { style: "danger", value },
+        ),
       ]),
     ),
   ];
@@ -750,7 +759,18 @@ export function submittedScrobbleServices(
 }
 
 function hostBlocks(options: SettingsViewOptions, form: FormState) {
-  return settingBlocks(options, form, "host");
+  // Communism mode has no host to change or permissions to hand out, and
+  // lasts until the session ends; the tab only says so.
+  return [
+    ...when(
+      options.session.communism,
+      section(
+        "☭ *Communism mode is active.* Everyone in the huddle can do everything, and nobody can take over as host, until the session ends.",
+        "communism_active",
+      ),
+    ),
+    ...settingBlocks(options, form, "host"),
+  ];
 }
 
 function youBlocks(options: SettingsViewOptions, form: FormState) {
