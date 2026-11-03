@@ -107,6 +107,7 @@ import {
   integrationGrantTimeoutMs,
   integrationReply,
   integrationRequestBlocks,
+  mapAgentError,
   parseIntegrationActionValue,
   parseIntegrationSettingsPage,
   sessionMatchesChannel,
@@ -440,6 +441,11 @@ export class Coordinator {
   private playbackSeconds = 0;
   /** What client mods asked for, while it runs. */
   private dataChannelRuns = new AsyncLocalStorage<DataChannelRun>();
+  // The bot running a bot API command now, so its audit records say so.
+  private integrationRuns = new AsyncLocalStorage<{
+    userId: string;
+    done: boolean;
+  }>();
   // The tab a client mod asked Settings to open on, by user, for the click
   // on the player that opens it next.
   private settingsTabs = new Map<string, { tab: SettingsTab; until: number }>();
@@ -540,6 +546,7 @@ export class Coordinator {
       dmChannelId: string;
       requestTs: string;
       requestId: string;
+      grantedAt: number;
       // The thread message communism mode asked everyone with.
       promptTs?: string;
     }
@@ -554,6 +561,7 @@ export class Coordinator {
       dmChannelId: string;
       requestTs: string;
       channel: string;
+      requestedAt: number;
       timer: ReturnType<typeof setTimeout>;
       promptTs?: string;
     }
@@ -609,9 +617,14 @@ export class Coordinator {
         auditLog.record(
           event,
           actorId,
-          this.fromDataChannel(actorId)
-            ? { ...details, via: "data_channel" }
-            : details,
+          // The bot control events say who acted themselves.
+          event.startsWith("integration.")
+            ? details
+            : this.fromDataChannel(actorId)
+              ? { ...details, via: "data_channel" }
+              : this.fromIntegration(actorId)
+                ? { ...details, via: "integration" }
+                : details,
         ),
     };
     this.id = restored?.id ?? crypto.randomUUID();
@@ -2394,6 +2407,11 @@ export class Coordinator {
     return run;
   }
 
+  private fromIntegration(actorId?: string) {
+    const run = this.integrationRuns.getStore();
+    return Boolean(actorId && run && !run.done && run.userId === actorId);
+  }
+
   /**
    * Runs work for a client mod as its user, with what it would say in an
    * ephemeral notice kept for the answer.
@@ -3400,20 +3418,29 @@ export class Coordinator {
     dmChannelId: string;
     requestTs: string;
   }) {
-    if (this.inactive())
+    if (this.inactive()) {
+      this.auditIntegrationRejected(options, "session_inactive");
       return this.replyIntegration(options, {
         ok: false,
         error: "session_inactive",
       });
-    if (!this.hostId && !this.communism)
+    }
+    if (!this.hostId && !this.communism) {
+      this.auditIntegrationRejected(options, "no_host");
       return this.replyIntegration(options, {
         ok: false,
         error: "no_host",
         message: "This session has no host to approve the request.",
       });
+    }
     const existing = this.pendingIntegrations.get(options.userId);
     if (existing) {
       this.dropPending(existing);
+      this.audit.record("integration.request_replaced", options.userId, {
+        sessionId: this.id,
+        requestId: existing.id,
+        waitedMs: Date.now() - existing.requestedAt,
+      });
       void this.closePrompt(
         existing.promptTs,
         `<@${existing.userId}> replaced this control request with a new one.`,
@@ -3429,6 +3456,7 @@ export class Coordinator {
       requestTs: string;
       channel: string;
       timer: ReturnType<typeof setTimeout>;
+      requestedAt: number;
       promptTs?: string;
     } = {
       id: requestId,
@@ -3438,10 +3466,18 @@ export class Coordinator {
       dmChannelId: options.dmChannelId,
       requestTs: options.requestTs,
       channel: options.channel,
+      requestedAt: Date.now(),
       timer: setTimeout(() => {
         const current = this.pendingIntegrations.get(options.userId);
         if (current?.id !== requestId) return;
         this.pendingIntegrations.delete(options.userId);
+        this.audit.record("integration.request_expired", undefined, {
+          sessionId: this.id,
+          integrationId: options.userId,
+          requestId,
+          reason: "timeout",
+          waitedMs: Date.now() - current.requestedAt,
+        });
         void this.closePrompt(
           current.promptTs,
           `<@${options.userId}>'s control request expired.`,
@@ -3477,7 +3513,9 @@ export class Coordinator {
           text,
           blocks,
         );
+        this.auditIntegrationRequested(pending, "thread");
       } catch (error) {
+        this.auditIntegrationRejected(pending, "host_unreachable");
         this.dropPending(pending);
         this.log.warn(
           { event: "integration_prompt_failed", err: error },
@@ -3499,10 +3537,13 @@ export class Coordinator {
         this.room.uiThreadTs,
         blocks,
       );
+      this.auditIntegrationRequested(pending, "ephemeral");
     } catch (error) {
       try {
         await this.slack.dm(hostId, text, { blocks });
+        this.auditIntegrationRequested(pending, "dm");
       } catch (fallbackError) {
+        this.auditIntegrationRejected(pending, "host_unreachable");
         this.dropPending(pending);
         this.log.warn(
           {
@@ -3517,6 +3558,54 @@ export class Coordinator {
         });
       }
     }
+  }
+
+  private auditIntegrationRequested(
+    pending: {
+      id: string;
+      userId: string;
+      channel: string;
+      permissions: string[];
+      events: string[];
+    },
+    promptedVia: "thread" | "ephemeral" | "dm",
+  ) {
+    // Prompting waits on Slack, and the request may be replaced, answered or
+    // dropped meanwhile, which records its own outcome.
+    if (this.pendingIntegrations.get(pending.userId)?.id !== pending.id) return;
+    this.audit.record("integration.requested", pending.userId, {
+      sessionId: this.id,
+      requestId: pending.id,
+      channel: pending.channel,
+      permissions: pending.permissions,
+      events: pending.events,
+      communism: this.communism,
+      promptedVia,
+    });
+  }
+
+  private auditIntegrationRejected(
+    options: {
+      userId: string;
+      channel: string;
+      permissions: string[];
+      id?: string;
+    },
+    reason: "session_inactive" | "no_host" | "host_unreachable",
+  ) {
+    const requestId = options.id;
+    if (
+      requestId &&
+      this.pendingIntegrations.get(options.userId)?.id !== requestId
+    )
+      return;
+    this.audit.record("integration.request_rejected", options.userId, {
+      sessionId: this.id,
+      ...(requestId ? { requestId } : {}),
+      channel: options.channel,
+      permissions: options.permissions,
+      reason,
+    });
   }
 
   // Rewrites a control request communism mode posted in the thread, once
@@ -3563,6 +3652,11 @@ export class Coordinator {
           error: "not_granted",
         });
       this.integrations.delete(userId);
+      this.audit.record("integration.released", userId, {
+        sessionId: this.id,
+        requestId: grant.requestId,
+        heldMs: Date.now() - grant.grantedAt,
+      });
       void this.closePrompt(
         grant.promptTs,
         `<@${userId}> gave up control of our session.`,
@@ -3591,10 +3685,28 @@ export class Coordinator {
       // Commands check permissions synchronously, and a grant holder may also
       // be a workspace admin.
       await this.primeManager(userId);
-      result = await this.runIntegrationCommand(userId, command);
+      const run = { userId, done: false };
+      try {
+        result = await this.integrationRuns.run(run, () =>
+          this.runIntegrationCommand(userId, command),
+        );
+      } finally {
+        // Timers it started carry on as the session's own.
+        run.done = true;
+      }
     } catch (error) {
       result = { ok: false, error: message(error) };
     }
+    // Status is polled, and says nothing about what the bot did.
+    if (command.type !== "status")
+      this.audit.record("integration.command", userId, {
+        sessionId: this.id,
+        type: command.type,
+        ok: result.ok,
+        ...(result.ok
+          ? {}
+          : { error: mapAgentError(String(result.error ?? "failed")) }),
+      });
     return this.slack.dm(
       userId,
       wrapIntegrationResult(command.type, requestTs, result),
@@ -3707,7 +3819,16 @@ export class Coordinator {
         "That control request is no longer pending.",
       );
     this.dropPending(pending);
+    const answer = {
+      sessionId: this.id,
+      integrationId: pending.userId,
+      requestId: pending.id,
+      permissions: pending.permissions,
+      communism: this.communism,
+      waitedMs: Date.now() - pending.requestedAt,
+    };
     if (interaction.actionId === "integration_decline") {
+      this.audit.record("integration.declined", interaction.userId, answer);
       await this.replyIntegration(pending, {
         ok: true,
         type: "grant_declined",
@@ -3719,6 +3840,22 @@ export class Coordinator {
         `Declined <@${pending.userId}>'s control request.`,
       );
     }
+    // A bot that asks again while it holds a grant swaps the old one out.
+    const previous = this.integrations.get(pending.userId);
+    if (previous) {
+      this.audit.record("integration.ended", undefined, {
+        sessionId: this.id,
+        integrationId: pending.userId,
+        requestId: previous.requestId,
+        reason: "replaced",
+        heldMs: Date.now() - previous.grantedAt,
+      });
+      if (previous.promptTs !== pending.promptTs)
+        void this.closePrompt(
+          previous.promptTs,
+          `<@${pending.userId}> replaced this control with a new grant.`,
+        );
+    }
     this.integrations.set(pending.userId, {
       permissions: new Set(pending.permissions),
       events: new Set(pending.events),
@@ -3726,7 +3863,12 @@ export class Coordinator {
       dmChannelId: pending.dmChannelId,
       requestTs: pending.requestTs,
       requestId: pending.id,
+      grantedAt: Date.now(),
       ...(pending.promptTs ? { promptTs: pending.promptTs } : {}),
+    });
+    this.audit.record("integration.granted", interaction.userId, {
+      ...answer,
+      events: pending.events,
     });
     const status = this.integrationStatus(pending.userId);
     await this.replyIntegration(pending, {
@@ -3787,6 +3929,12 @@ export class Coordinator {
       );
     const [userId, grant] = entry;
     this.integrations.delete(userId);
+    this.audit.record("integration.revoked", interaction.userId, {
+      sessionId: this.id,
+      integrationId: userId,
+      requestId,
+      heldMs: Date.now() - grant.grantedAt,
+    });
     await this.replyIntegration(
       {
         userId,
@@ -3867,13 +4015,29 @@ export class Coordinator {
     this.notifyIntegrations(event);
     const ended =
       event === "session.ended" ? "the session ended" : "HuddleFM restarted";
-    for (const [userId, grant] of this.integrations)
+    const reason = event === "session.ended" ? "session_ended" : "suspended";
+    for (const [userId, grant] of this.integrations) {
+      this.audit.record("integration.ended", undefined, {
+        sessionId: this.id,
+        integrationId: userId,
+        requestId: grant.requestId,
+        reason,
+        heldMs: Date.now() - grant.grantedAt,
+      });
       void this.closePrompt(
         grant.promptTs,
         `<@${userId}>'s control ended when ${ended}.`,
       );
+    }
     for (const pending of this.pendingIntegrations.values()) {
       clearTimeout(pending.timer);
+      this.audit.record("integration.request_expired", undefined, {
+        sessionId: this.id,
+        integrationId: pending.userId,
+        requestId: pending.id,
+        reason,
+        waitedMs: Date.now() - pending.requestedAt,
+      });
       void this.closePrompt(
         pending.promptTs,
         `<@${pending.userId}>'s control request expired when ${ended}.`,

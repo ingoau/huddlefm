@@ -298,8 +298,20 @@ async function handleIntegrationDm(event: {
     });
   const parsed = parseIntegrationMessage(event.text);
   if (!parsed.ok) {
-    if (parsed.error === "ignored") return;
+    if (parsed.error === "ignored") {
+      // Chat is ignored, but JSON that doesn't parse was meant for us.
+      if (/^\s*[{[]/.test(event.text))
+        captureAnalytics("integration.message_invalid", {
+          distinctId: event.userId,
+          properties: { error: "invalid_json" },
+        });
+      return;
+    }
     const { ok: _ok, error, ...rest } = parsed;
+    captureAnalytics("integration.message_invalid", {
+      distinctId: event.userId,
+      properties: { error },
+    });
     await reply({ ok: false, error, ...rest });
     return;
   }
@@ -330,6 +342,10 @@ async function handleIntegrationDm(event: {
     return;
   }
   if (command.type === "request_control") {
+    captureAnalytics("integration.command_unrouted", {
+      distinctId: event.userId,
+      properties: { type: command.type, error: "session_not_found" },
+    });
     await reply({ ok: false, error: "session_not_found" });
     return;
   }
@@ -342,6 +358,10 @@ async function handleIntegrationDm(event: {
         : granted.length > 1
           ? "channel_required"
           : "not_granted";
+  captureAnalytics("integration.command_unrouted", {
+    distinctId: event.userId,
+    properties: { type: command.type, error },
+  });
   await reply({ ok: false, type: command.type, error });
 }
 
