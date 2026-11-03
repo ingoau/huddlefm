@@ -107,6 +107,7 @@ import {
   integrationGrantTimeoutMs,
   integrationReply,
   integrationRequestBlocks,
+  mapAgentError,
   parseIntegrationActionValue,
   parseIntegrationSettingsPage,
   sessionMatchesChannel,
@@ -540,6 +541,7 @@ export class Coordinator {
       dmChannelId: string;
       requestTs: string;
       requestId: string;
+      grantedAt: number;
       // The thread message communism mode asked everyone with.
       promptTs?: string;
     }
@@ -554,6 +556,7 @@ export class Coordinator {
       dmChannelId: string;
       requestTs: string;
       channel: string;
+      requestedAt: number;
       timer: ReturnType<typeof setTimeout>;
       promptTs?: string;
     }
@@ -611,7 +614,11 @@ export class Coordinator {
           actorId,
           this.fromDataChannel(actorId)
             ? { ...details, via: "data_channel" }
-            : details,
+            : actorId &&
+                !event.startsWith("integration.") &&
+                this.integrations.has(actorId)
+              ? { ...details, via: "integration" }
+              : details,
         ),
     };
     this.id = restored?.id ?? crypto.randomUUID();
@@ -3400,20 +3407,29 @@ export class Coordinator {
     dmChannelId: string;
     requestTs: string;
   }) {
-    if (this.inactive())
+    if (this.inactive()) {
+      this.auditIntegrationRejected(options, "session_inactive");
       return this.replyIntegration(options, {
         ok: false,
         error: "session_inactive",
       });
-    if (!this.hostId && !this.communism)
+    }
+    if (!this.hostId && !this.communism) {
+      this.auditIntegrationRejected(options, "no_host");
       return this.replyIntegration(options, {
         ok: false,
         error: "no_host",
         message: "This session has no host to approve the request.",
       });
+    }
     const existing = this.pendingIntegrations.get(options.userId);
     if (existing) {
       this.dropPending(existing);
+      this.audit.record("integration.request_replaced", options.userId, {
+        sessionId: this.id,
+        requestId: existing.id,
+        waitedMs: Date.now() - existing.requestedAt,
+      });
       void this.closePrompt(
         existing.promptTs,
         `<@${existing.userId}> replaced this control request with a new one.`,
@@ -3429,6 +3445,7 @@ export class Coordinator {
       requestTs: string;
       channel: string;
       timer: ReturnType<typeof setTimeout>;
+      requestedAt: number;
       promptTs?: string;
     } = {
       id: requestId,
@@ -3438,10 +3455,18 @@ export class Coordinator {
       dmChannelId: options.dmChannelId,
       requestTs: options.requestTs,
       channel: options.channel,
+      requestedAt: Date.now(),
       timer: setTimeout(() => {
         const current = this.pendingIntegrations.get(options.userId);
         if (current?.id !== requestId) return;
         this.pendingIntegrations.delete(options.userId);
+        this.audit.record("integration.request_expired", undefined, {
+          sessionId: this.id,
+          integrationId: options.userId,
+          requestId,
+          reason: "timeout",
+          waitedMs: Date.now() - current.requestedAt,
+        });
         void this.closePrompt(
           current.promptTs,
           `<@${options.userId}>'s control request expired.`,
@@ -3470,6 +3495,7 @@ export class Coordinator {
     // Communism mode has no host to ask, and anyone in the huddle may answer,
     // so it asks everyone in the thread.
     if (this.communism) {
+      this.auditIntegrationRequested(pending, "thread");
       try {
         pending.promptTs = await this.post(
           this.room.uiChannelId,
@@ -3479,6 +3505,7 @@ export class Coordinator {
         );
       } catch (error) {
         this.dropPending(pending);
+        this.auditIntegrationRejected(options, "host_unreachable", requestId);
         this.log.warn(
           { event: "integration_prompt_failed", err: error },
           "Could not post integration control request",
@@ -3499,11 +3526,14 @@ export class Coordinator {
         this.room.uiThreadTs,
         blocks,
       );
+      this.auditIntegrationRequested(pending, "ephemeral");
     } catch (error) {
       try {
         await this.slack.dm(hostId, text, { blocks });
+        this.auditIntegrationRequested(pending, "dm");
       } catch (fallbackError) {
         this.dropPending(pending);
+        this.auditIntegrationRejected(options, "host_unreachable", requestId);
         this.log.warn(
           {
             event: "integration_prompt_failed",
@@ -3517,6 +3547,41 @@ export class Coordinator {
         });
       }
     }
+  }
+
+  private auditIntegrationRequested(
+    pending: {
+      id: string;
+      userId: string;
+      channel: string;
+      permissions: string[];
+      events: string[];
+    },
+    promptedVia: "thread" | "ephemeral" | "dm",
+  ) {
+    this.audit.record("integration.requested", pending.userId, {
+      sessionId: this.id,
+      requestId: pending.id,
+      channel: pending.channel,
+      permissions: pending.permissions,
+      events: pending.events,
+      communism: this.communism,
+      promptedVia,
+    });
+  }
+
+  private auditIntegrationRejected(
+    options: { userId: string; channel: string; permissions: string[] },
+    reason: "session_inactive" | "no_host" | "host_unreachable",
+    requestId?: string,
+  ) {
+    this.audit.record("integration.request_rejected", options.userId, {
+      sessionId: this.id,
+      ...(requestId ? { requestId } : {}),
+      channel: options.channel,
+      permissions: options.permissions,
+      reason,
+    });
   }
 
   // Rewrites a control request communism mode posted in the thread, once
@@ -3563,6 +3628,11 @@ export class Coordinator {
           error: "not_granted",
         });
       this.integrations.delete(userId);
+      this.audit.record("integration.released", userId, {
+        sessionId: this.id,
+        requestId: grant.requestId,
+        heldMs: Date.now() - grant.grantedAt,
+      });
       void this.closePrompt(
         grant.promptTs,
         `<@${userId}> gave up control of our session.`,
@@ -3595,6 +3665,16 @@ export class Coordinator {
     } catch (error) {
       result = { ok: false, error: message(error) };
     }
+    // Status is polled, and says nothing about what the bot did.
+    if (command.type !== "status")
+      this.audit.record("integration.command", userId, {
+        sessionId: this.id,
+        type: command.type,
+        ok: result.ok,
+        ...(result.ok
+          ? {}
+          : { error: mapAgentError(String(result.error ?? "failed")) }),
+      });
     return this.slack.dm(
       userId,
       wrapIntegrationResult(command.type, requestTs, result),
@@ -3707,7 +3787,16 @@ export class Coordinator {
         "That control request is no longer pending.",
       );
     this.dropPending(pending);
+    const answer = {
+      sessionId: this.id,
+      integrationId: pending.userId,
+      requestId: pending.id,
+      permissions: pending.permissions,
+      communism: this.communism,
+      waitedMs: Date.now() - pending.requestedAt,
+    };
     if (interaction.actionId === "integration_decline") {
+      this.audit.record("integration.declined", interaction.userId, answer);
       await this.replyIntegration(pending, {
         ok: true,
         type: "grant_declined",
@@ -3726,7 +3815,12 @@ export class Coordinator {
       dmChannelId: pending.dmChannelId,
       requestTs: pending.requestTs,
       requestId: pending.id,
+      grantedAt: Date.now(),
       ...(pending.promptTs ? { promptTs: pending.promptTs } : {}),
+    });
+    this.audit.record("integration.granted", interaction.userId, {
+      ...answer,
+      events: pending.events,
     });
     const status = this.integrationStatus(pending.userId);
     await this.replyIntegration(pending, {
@@ -3787,6 +3881,12 @@ export class Coordinator {
       );
     const [userId, grant] = entry;
     this.integrations.delete(userId);
+    this.audit.record("integration.revoked", interaction.userId, {
+      sessionId: this.id,
+      integrationId: userId,
+      requestId,
+      heldMs: Date.now() - grant.grantedAt,
+    });
     await this.replyIntegration(
       {
         userId,
@@ -3867,13 +3967,29 @@ export class Coordinator {
     this.notifyIntegrations(event);
     const ended =
       event === "session.ended" ? "the session ended" : "HuddleFM restarted";
-    for (const [userId, grant] of this.integrations)
+    const reason = event === "session.ended" ? "session_ended" : "suspended";
+    for (const [userId, grant] of this.integrations) {
+      this.audit.record("integration.ended", undefined, {
+        sessionId: this.id,
+        integrationId: userId,
+        requestId: grant.requestId,
+        reason,
+        heldMs: Date.now() - grant.grantedAt,
+      });
       void this.closePrompt(
         grant.promptTs,
         `<@${userId}>'s control ended when ${ended}.`,
       );
+    }
     for (const pending of this.pendingIntegrations.values()) {
       clearTimeout(pending.timer);
+      this.audit.record("integration.request_expired", undefined, {
+        sessionId: this.id,
+        integrationId: pending.userId,
+        requestId: pending.id,
+        reason,
+        waitedMs: Date.now() - pending.requestedAt,
+      });
       void this.closePrompt(
         pending.promptTs,
         `<@${pending.userId}>'s control request expired when ${ended}.`,

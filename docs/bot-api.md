@@ -118,3 +118,7 @@ Subscribe in `request_control`. Events are top-level DMs (not threaded):
 | `session`        | `session.ended`, `session.suspended`                                                 |
 
 Grants are not restored after a restart. Listen for `session.ended` / `session.suspended` and send `request_control` again.
+
+## Audit log
+
+The audit log (and analytics, when PostHog is configured) records each step of a grant: `integration.requested`, `integration.request_rejected`, `integration.request_replaced`, `integration.request_expired`, `integration.granted`, `integration.declined`, `integration.revoked`, `integration.released` and `integration.ended`. Each command a grant holder sends, other than `status`, is recorded as `integration.command` with its `type`, whether it succeeded, and its `error` code. What a command changes is recorded as it would be for a person, under the bot's user ID, with `via: "integration"`. Answers are recorded under the person who pressed the button, with the bot as `integrationId`.

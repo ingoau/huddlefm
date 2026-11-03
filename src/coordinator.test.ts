@@ -5527,6 +5527,159 @@ test("agentUpdateSettings validates the full patch before mutating", async () =>
   await test.coordinator.endFromSlack();
 });
 
+test("bot control requests, answers, commands and releases are audited", async () => {
+  const test = setup({
+    resolve: async () => ({
+      sourceId: "song",
+      title: "Song",
+      artist: "Artist",
+      duration: 120,
+    }),
+    prepare: async () => "track.opus",
+  } as never);
+  await test.coordinator.start();
+  const events = () =>
+    test.audit as [string, string | undefined, Record<string, unknown>][];
+  const find = (name: string) => events().find(([event]) => event === name);
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    {
+      type: "request_control",
+      channel: "channel",
+      permissions: ["add"],
+      events: ["queue"],
+    },
+    "9.0",
+    "Dbot",
+  );
+  expect(find("integration.requested")).toMatchObject([
+    "integration.requested",
+    "Ubot",
+    {
+      channel: "channel",
+      permissions: ["add"],
+      events: ["queue"],
+      promptedVia: "ephemeral",
+      communism: false,
+    },
+  ]);
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_accept",
+    value: requestValue(test.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  const granted = find("integration.granted");
+  expect(granted?.[1]).toBe("host");
+  expect(granted?.[2]).toMatchObject({
+    integrationId: "Ubot",
+    permissions: ["add"],
+    events: ["queue"],
+  });
+  expect(typeof granted?.[2].waitedMs).toBe("number");
+
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "add", reference: "ref_song" },
+    "10.0",
+    "Dbot",
+  );
+  expect(find("track.added")?.[2]).toMatchObject({ via: "integration" });
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "pause" },
+    "11.0",
+    "Dbot",
+  );
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "status" },
+    "12.0",
+    "Dbot",
+  );
+  const commands = events().filter(
+    ([event]) => event === "integration.command",
+  );
+  expect(commands.map(([, actor, details]) => [actor, details])).toEqual([
+    ["Ubot", expect.objectContaining({ type: "add", ok: true })],
+    [
+      "Ubot",
+      expect.objectContaining({
+        type: "pause",
+        ok: false,
+        error: "missing_permission",
+      }),
+    ],
+  ]);
+
+  await test.coordinator.handleIntegrationCommand(
+    "Ubot",
+    { type: "release_control" },
+    "13.0",
+    "Dbot",
+  );
+  expect(find("integration.released")).toMatchObject([
+    "integration.released",
+    "Ubot",
+    { heldMs: expect.any(Number) },
+  ]);
+  await test.coordinator.endFromSlack();
+});
+
+test("declined, replaced and abandoned bot control requests are audited", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const events = () =>
+    test.audit as [string, string | undefined, Record<string, unknown>][];
+  const request = (ts: string) =>
+    test.coordinator.handleIntegrationCommand(
+      "Ubot",
+      { type: "request_control", channel: "channel", permissions: ["add"] },
+      ts,
+      "Dbot",
+    );
+  await request("9.0");
+  await request("10.0");
+  expect(
+    events().find(([event]) => event === "integration.request_replaced"),
+  ).toMatchObject(["integration.request_replaced", "Ubot", {}]);
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "host",
+    actionId: "integration_decline",
+    value: requestValue(test.ephemeralCalls),
+    channelId: "channel",
+    messageTs: "ephemeral",
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(
+    events().find(([event]) => event === "integration.declined"),
+  ).toMatchObject(["integration.declined", "host", { integrationId: "Ubot" }]);
+
+  await request("11.0");
+  await test.coordinator.endFromSlack();
+  expect(
+    events().find(([event]) => event === "integration.request_expired"),
+  ).toMatchObject([
+    "integration.request_expired",
+    undefined,
+    { integrationId: "Ubot", reason: "session_ended" },
+  ]);
+  await request("12.0");
+  expect(events().at(-1)).toMatchObject([
+    "integration.request_rejected",
+    "Ubot",
+    { reason: "session_inactive" },
+  ]);
+});
+
 function requestValue(calls: unknown[][]) {
   const blocks = calls.at(-1)?.[4] as {
     elements?: { action_id?: string; value?: string }[];
