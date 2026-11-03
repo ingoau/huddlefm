@@ -54,6 +54,7 @@ The whole session, sent after every change (merged, at most every 250 ms) and af
     "position": 63.2,
     "volume": 50,
     "hostId": "U123",
+    "communism": false,
     "allowed": ["add", "remove-own"],
     "loopMode": "off",
     "queueLimit": 50,
@@ -94,6 +95,7 @@ The whole session, sent after every change (merged, at most every 250 ms) and af
 - `session.state` is `ready` (nothing playing), `playing`, `paused`, `ended`, or `suspended` (the bot is restarting and will pick the session up again). The last `state` before the bot stops answering says `ended` or `suspended`.
 - `session.position` is the playback position in seconds when the message was sent. While `playing`, a client adds the time since it received the message.
 - `session.volume` is in percent, rounded.
+- `session.communism` is whether communism mode is on: everyone in the huddle may do everything, `allowed` doesn't apply, and there is no host: `hostId` is `null` and `claim_host` fails. Once on, it lasts until the session ends.
 - `session.player` is the HuddleFM message in the huddle's thread, which a client can hide while it shows its own controls, or `null` before it is posted.
 - `participants` are the Slack users in the huddle, without the bot.
 - `nowPlaying` is `null` when nothing is playing. `artwork` is a public URL, or absent.
@@ -186,29 +188,30 @@ Does what one of the player's buttons or dialogs does, as the sender: the bot ru
 { "v": 1, "type": "command", "id": "r7", "command": { "type": "skip" } }
 ```
 
-| `type`           | Fields                                                                                        | As the player's                                   |
-| ---------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `search`         | `query`, and `source: "jellyfin"` for theirs                                                  | Add songs' search, as it's typed                  |
-| `add`            | `reference`, from `search`, or a link; or `recent` or `recommend`, an `id` from `suggestions` | Add songs                                         |
-| `suggestions`    |                                                                                               | Add songs' recommendations and recent songs       |
-| `remove`         | `trackId`                                                                                     | queue's Remove                                    |
-| `move`           | `trackId`, and `direction` (`up`/`down`) or `position`                                        | queue's Move up, Move down, Play next and Move to |
-| `shuffle`        |                                                                                               | Shuffle                                           |
-| `clear`          |                                                                                               | Clear queue                                       |
-| `skip`           |                                                                                               | Next                                              |
-| `previous`       |                                                                                               | Previous                                          |
-| `toggle`         |                                                                                               | Play/pause                                        |
-| `pause`/`resume` |                                                                                               | Play/pause, when it isn't already so              |
-| `seek`           | `to`, in seconds                                                                              | Jump to                                           |
-| `volume`         | `percent`                                                                                     | Settings' Volume                                  |
-| `claim_host`     |                                                                                               | Take over                                         |
-| `play_something` |                                                                                               | Play something, in music mode                     |
-| `keep`           | `trackId`, an autoplay pick                                                                   | queue's Add to queue                              |
-| `end`            | `save` (`none`, `channel` or `user`), and maybe `name`                                        | End session's dialog, saving the session if asked |
-| `saves`          |                                                                                               | Load saved session's list                         |
-| `load`           | `saveId`, and `forget: true` to delete it after                                               | Load saved session                                |
-| `lyrics`         | `trackId`, the song playing                                                                   | the video card's lyrics                           |
-| `settings_tab`   | `tab`: `you`, `session`, `channel` or `host`                                                  | Settings' tabs, for its next opening in Slack     |
+| `type`            | Fields                                                                                        | As the player's                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `search`          | `query`, and `source: "jellyfin"` for theirs                                                  | Add songs' search, as it's typed                                     |
+| `add`             | `reference`, from `search`, or a link; or `recent` or `recommend`, an `id` from `suggestions` | Add songs                                                            |
+| `suggestions`     |                                                                                               | Add songs' recommendations and recent songs                          |
+| `remove`          | `trackId`                                                                                     | queue's Remove                                                       |
+| `move`            | `trackId`, and `direction` (`up`/`down`) or `position`                                        | queue's Move up, Move down, Play next and Move to                    |
+| `shuffle`         |                                                                                               | Shuffle                                                              |
+| `clear`           |                                                                                               | Clear queue                                                          |
+| `skip`            |                                                                                               | Next                                                                 |
+| `previous`        |                                                                                               | Previous                                                             |
+| `toggle`          |                                                                                               | Play/pause                                                           |
+| `pause`/`resume`  |                                                                                               | Play/pause, when it isn't already so                                 |
+| `seek`            | `to`, in seconds                                                                              | Jump to                                                              |
+| `volume`          | `percent`                                                                                     | Settings' Volume                                                     |
+| `claim_host`      |                                                                                               | Take over                                                            |
+| `start_communism` |                                                                                               | Settings' Start communism mode, for whoever may change host settings |
+| `play_something`  |                                                                                               | Play something, in music mode                                        |
+| `keep`            | `trackId`, an autoplay pick                                                                   | queue's Add to queue                                                 |
+| `end`             | `save` (`none`, `channel` or `user`), and maybe `name`                                        | End session's dialog, saving the session if asked                    |
+| `saves`           |                                                                                               | Load saved session's list                                            |
+| `load`            | `saveId`, and `forget: true` to delete it after                                               | Load saved session                                                   |
+| `lyrics`          | `trackId`, the song playing                                                                   | the video card's lyrics                                              |
+| `settings_tab`    | `tab`: `you`, `session`, `channel` or `host`                                                  | Settings' tabs, for its next opening in Slack                        |
 
 `end` is answered by the final `state` instead, since the bot stops answering once the session is over; how saving went is posted in Slack, as for the dialog.
 

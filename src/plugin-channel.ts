@@ -28,6 +28,7 @@ export const pluginCommandTypes = [
   "volume",
   "end",
   "claim_host",
+  "start_communism",
   "play_something",
   "keep",
   "suggestions",

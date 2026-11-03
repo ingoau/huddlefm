@@ -38,6 +38,7 @@ function options(
       duckingMode: "gentle",
       anchorEnabled: false,
       progressBar: true,
+      communism: false,
       allowed: new Set(["add"]),
     },
     user: defaultUserSettings,
@@ -96,6 +97,39 @@ test("Settings opens on the session's tab, and a lone tab has no tab bar", () =>
   expect(
     block(settingsView(options({ access, tab: "host" })), "huddle_mix"),
   ).toBeDefined();
+});
+
+test("communism mode's Host tab only says so", () => {
+  const base = options({
+    access: { ...access, volume: true, configure: true, admin: true },
+  });
+  const communism = { ...base, session: { ...base.session, communism: true } };
+  const host = settingsView({ ...communism, tab: "host" });
+  expect(block(host, "communism_active")?.text.text).toContain(
+    "Communism mode is active",
+  );
+  expect(block(host, "communism_actions")).toBeUndefined();
+  expect(block(host, "host")).toBeUndefined();
+  expect(JSON.stringify(host)).not.toContain("apply_permission_preset");
+  expect(
+    block(host, "settings_tabs")!.elements.map(
+      (element: { text: { text: string } }) => element.text.text,
+    ),
+  ).toContain("Our session");
+
+  const usual = settingsView({ ...base, tab: "host" });
+  expect(block(usual, "communism_active")).toBeUndefined();
+  expect(block(usual, "host")).toBeDefined();
+  // Starting it is the tab's last thing, and asks first.
+  expect(usual.blocks.at(-1)).toMatchObject({
+    block_id: "communism_actions",
+    elements: [
+      {
+        action_id: "start_communism",
+        confirm: { title: { text: "Start communism mode?" } },
+      },
+    ],
+  });
 });
 
 test("a tab shows the edits a draft kept for it", () => {

@@ -107,6 +107,10 @@ const tabLabels: Record<SettingsTab, string> = {
   channel: "Channel",
   host: "Host",
 };
+// Communism mode's session is everyone's.
+function tabLabel(tab: SettingsTab, communism: boolean) {
+  return communism && tab === "session" ? "Our session" : tabLabels[tab];
+}
 // Each tab's button is its own action, as Slack wants the IDs in a block to
 // differ.
 export const settingsTabActionPrefix = "settings_tab_";
@@ -347,10 +351,14 @@ export function settingsView(options: SettingsViewOptions) {
     actions(
       "settings_tabs",
       tabs.map((item) =>
-        button(`${settingsTabActionPrefix}${item}`, plain(tabLabels[item]), {
-          value: item,
-          ...(item === tab ? { style: "primary" } : {}),
-        }),
+        button(
+          `${settingsTabActionPrefix}${item}`,
+          plain(tabLabel(item, options.session.communism)),
+          {
+            value: item,
+            ...(item === tab ? { style: "primary" } : {}),
+          },
+        ),
       ),
     ),
   );
@@ -366,12 +374,32 @@ export function settingsView(options: SettingsViewOptions) {
         : tab === "channel"
           ? channelBlocks(options)
           : hostBlocks(options, form);
+  // Last on the Host tab, as there is no going back from it.
+  const communismBlocks = when(
+    tab === "host" && access.admin && !options.session.communism,
+    { type: "divider" },
+    actions("communism_actions", [
+      button("start_communism", plain("Start communism mode"), {
+        style: "danger",
+        value: options.sessionId,
+        confirm: confirm(
+          "Start communism mode?",
+          "Everyone in the huddle will be able to do everything, and nobody will be able to take over as host. It can't be turned off: it lasts until the session ends.",
+          "Start",
+        ),
+      }),
+    ]),
+  );
   const integrationBlocks =
     tab === "host" && access.admin
       ? integrationSettingsBlocks({
           sessionId: options.sessionId,
           grants: options.integrations,
-          maxBlocks: slackModalBlockLimit - tabBlocks.length - content.length,
+          maxBlocks:
+            slackModalBlockLimit -
+            tabBlocks.length -
+            content.length -
+            communismBlocks.length,
           page: options.integrationPage,
         })
       : [];
@@ -396,7 +424,13 @@ export function settingsView(options: SettingsViewOptions) {
     title: plain("HuddleFM settings"),
     submit: plain("Save"),
     close: plain("Cancel"),
-    blocks: [...tabBlocks, ...noticeBlocks, ...content, ...integrationBlocks],
+    blocks: [
+      ...tabBlocks,
+      ...noticeBlocks,
+      ...content,
+      ...integrationBlocks,
+      ...communismBlocks,
+    ],
   };
 }
 
@@ -658,10 +692,11 @@ function sessionBlocks(options: SettingsViewOptions, form: FormState) {
       actions("session_actions", [
         // Ending asks in a dialog of its own rather than a confirmation,
         // which cannot carry the choice to save the session.
-        button("open_end_session", plain("End session"), {
-          style: "danger",
-          value,
-        }),
+        button(
+          "open_end_session",
+          plain(options.session.communism ? "End our session" : "End session"),
+          { style: "danger", value },
+        ),
       ]),
     ),
   ];
@@ -685,7 +720,7 @@ function channelBlocks(options: SettingsViewOptions) {
           value,
           confirm: confirm(
             "Save channel defaults?",
-            "New sessions in this channel will start with the settings and permissions shown in Settings, including changes not saved yet.",
+            `New sessions in this channel will start with the settings and permissions shown in Settings, including changes not saved yet${options.session.communism ? ", and in communism mode, which can't be turned off" : ""}.`,
             "Save",
           ),
         }),
@@ -750,7 +785,18 @@ export function submittedScrobbleServices(
 }
 
 function hostBlocks(options: SettingsViewOptions, form: FormState) {
-  return settingBlocks(options, form, "host");
+  // Communism mode has no host to change or permissions to hand out, and
+  // lasts until the session ends; the tab only says so.
+  return [
+    ...when(
+      options.session.communism,
+      section(
+        "☭ *Communism mode is active.* Everyone in the huddle can do everything, and nobody can take over as host, until the session ends.",
+        "communism_active",
+      ),
+    ),
+    ...settingBlocks(options, form, "host"),
+  ];
 }
 
 function youBlocks(options: SettingsViewOptions, form: FormState) {

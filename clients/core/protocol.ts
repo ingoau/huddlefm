@@ -72,6 +72,8 @@ export type SessionState = {
     position: number;
     volume: number;
     hostId: string | null;
+    /** everyone may do everything, and nobody takes over as host */
+    communism?: boolean;
     allowed: string[];
     loopMode?: string;
     queueLimit?: number;

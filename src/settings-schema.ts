@@ -42,6 +42,8 @@ export type SessionSettingsView = {
   duckingMode: DuckingMode;
   anchorEnabled: boolean;
   progressBar: boolean;
+  // Everyone may do everything, and nobody takes over as host.
+  communism: boolean;
   allowed: ReadonlySet<string>;
 };
 
@@ -158,7 +160,6 @@ const presetLabels: Record<keyof typeof permissionPresets, string> = {
   default: "Default",
   "host-only": "Host only",
   collaborative: "Collaborative",
-  communism: "Communism",
 };
 
 export function scrobblingModeLabel(mode: ScrobblingMode) {
@@ -227,6 +228,7 @@ type Entry = FieldBase & {
 const music = ({ session }: SettingsContext) => session.mediaMode === "music";
 const video = ({ session }: SettingsContext) => session.mediaMode !== "music";
 const always = () => true;
+const hierarchy = ({ session }: SettingsContext) => !session.communism;
 
 const entries: Entry[] = [
   {
@@ -367,7 +369,7 @@ const entries: Entry[] = [
     optional: true,
     requires: "admin",
     kind: "user",
-    visible: always,
+    visible: hierarchy,
     value: ({ session }) => session.hostId ?? null,
   },
   {
@@ -378,7 +380,7 @@ const entries: Entry[] = [
     requires: "admin",
     section: "Permissions",
     kind: "multi",
-    visible: always,
+    visible: hierarchy,
     value: ({ session }) =>
       capabilities.filter((value) => session.allowed.has(value)),
     options: () =>

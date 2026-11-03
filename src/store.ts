@@ -24,7 +24,6 @@ export const permissionPresets = {
   collaborative: capabilities.filter(
     (capability) => capability !== "clear" && capability !== "end-session",
   ),
-  communism: capabilities,
 };
 
 /** Music, or watching videos together on a screen share. */
@@ -85,6 +84,7 @@ export type ChannelDefaults = {
   duckingMode?: DuckingMode;
   anchorEnabled?: boolean;
   progressBar?: boolean;
+  communism?: boolean;
   permissions?: Capability[];
 };
 
@@ -113,6 +113,8 @@ export function parseChannelDefaults(
     defaults.anchorEnabled = saved.anchorEnabled;
   if (typeof saved.progressBar === "boolean")
     defaults.progressBar = saved.progressBar;
+  if (typeof saved.communism === "boolean")
+    defaults.communism = saved.communism;
   if (Array.isArray(saved.permissions))
     defaults.permissions = capabilities.filter((capability) =>
       (saved.permissions as unknown[]).includes(capability),
@@ -304,6 +306,9 @@ export type SavedSession = {
   mediaMode: MediaMode;
   captions: boolean;
   progressBar?: boolean;
+  // Everyone in the huddle may do everything, and nobody takes over as host.
+  // Kept through a restart, but never in a saved session.
+  communism?: boolean;
   playbackSeconds: number;
   listenedSeconds: number;
   watchedSeconds: number;
@@ -381,6 +386,7 @@ const sessionColumns = {
   mediaMode: "media_mode",
   captions: "captions",
   progressBar: "progress_bar",
+  communism: "communism",
   watchedSeconds: "watched_seconds",
 };
 
@@ -446,6 +452,7 @@ const addedColumns = [
   ["sessions", "progress_bar", "INTEGER NOT NULL DEFAULT 1"],
   ["sessions", "video_autoplay", "INTEGER NOT NULL DEFAULT 0"],
   ["tracks", "related_video", "INTEGER NOT NULL DEFAULT 0"],
+  ["sessions", "communism", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -1063,6 +1070,7 @@ export class Store {
       mediaMode?: MediaMode;
       captions?: boolean;
       progressBar?: boolean;
+      communism?: boolean;
       watchedSeconds?: number;
     },
   ) {
@@ -1457,6 +1465,7 @@ export class Store {
           mediaMode: modeOf(mediaModes, row.media_mode) ?? "music",
           captions: Boolean(row.captions),
           progressBar: Boolean(row.progress_bar ?? 1),
+          communism: Boolean(row.communism),
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
           watchedSeconds: Number(row.watched_seconds ?? 0),

@@ -1674,6 +1674,98 @@ test("first current participant claims a vacant host role", async () => {
   await test.coordinator.endFromSlack();
 });
 
+test("communism mode lets everyone do everything but take over as host", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const start = (userId: string) =>
+    test.coordinator.action({
+      ...interaction(test.coordinator, "start_communism", test.coordinator.id),
+      userId,
+    });
+
+  // Only the host can start it.
+  await start("guest");
+  expect(test.sessions).not.toContainEqual({ communism: true });
+  expect(test.ephemeral.at(-1)).toBe("Only the host can start communism mode.");
+  expect(await test.coordinator.agentStatus("guest")).toMatchObject({
+    yourCapabilities: ["add", "remove-own"],
+  });
+
+  await start("host");
+  expect(test.sessions).toContainEqual({ communism: true });
+  expect(test.audit).toContainEqual([
+    "communism.started",
+    "host",
+    { sessionId: test.coordinator.id },
+  ]);
+  const player = JSON.stringify(test.updates.at(-1));
+  expect(player).toContain("☭ Communism mode");
+  expect(player).not.toContain("Host: <@host>");
+  expect(await test.coordinator.agentStatus("guest")).toMatchObject({
+    yourCapabilities: "all (communism mode)",
+  });
+  // Everything but the host and the permissions it does without.
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", { loopMode: "track" }),
+  ).toMatchObject({ ok: true, communism: true });
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", {
+      hostUserId: "guest",
+    }),
+  ).toMatchObject({ ok: false });
+  expect(
+    await test.coordinator.agentUpdateSettings("host", {
+      permissionPreset: "host-only",
+    }),
+  ).toMatchObject({ ok: false });
+
+  // A vacant host stays vacant.
+  await test.coordinator.memberLeft("host");
+  expect(JSON.stringify(test.updates.at(-1))).not.toContain("claim_host");
+  expect(await test.coordinator.agentClaimHost("guest")).toMatchObject({
+    ok: false,
+  });
+
+  // Nobody can turn it off; only ending the session does. Asking to is a
+  // no-op, so an agent passing `false` along with a setting still works.
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", {
+      loopMode: "queue",
+      communism: false,
+    }),
+  ).toMatchObject({ ok: true, communism: true });
+  expect(JSON.stringify(test.updates.at(-1))).toContain("☭ Communism mode");
+  await test.coordinator.endFromSlack();
+});
+
+test("a guest passing communism off to the agent is not refused", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", { communism: false }),
+  ).toMatchObject({ ok: true, communism: false });
+  expect(
+    await test.coordinator.agentUpdateSettings("guest", { communism: true }),
+  ).toMatchObject({ ok: false });
+  await test.coordinator.endFromSlack();
+});
+
+test("a client mod's host can start communism mode", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const command = (userId: string) =>
+    Reflect.get(test.coordinator, "pluginCommand").call(
+      test.coordinator,
+      userId,
+      { type: "start_communism" },
+    );
+  expect(await command("guest")).toMatchObject({ ok: false });
+  expect(test.coordinator.communismMode).toBeFalse();
+  expect(await command("host")).toMatchObject({ ok: true });
+  expect(test.coordinator.communismMode).toBeTrue();
+  await test.coordinator.endFromSlack();
+});
+
 test("downloads do not block End and are cancelled", async () => {
   let signal: AbortSignal | undefined;
   const tracks = {
@@ -2301,6 +2393,7 @@ test("the configured manager can save and clear the channel's defaults", async (
     duckingMode: "gentle",
     anchorEnabled: true,
     progressBar: true,
+    communism: false,
     permissions: ["add", "remove-own"],
   });
   expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });
@@ -2645,6 +2738,38 @@ test("a restored session keeps its own settings over the channel's defaults", as
   expect(Reflect.get(coordinator, "autoplayMode")).toBe("off");
   expect([...Reflect.get(coordinator, "allowed")]).toEqual(["add"]);
   expect(Reflect.get(coordinator, "channelDefaultsApplied")).toBeFalse();
+});
+
+test("communism mode lasts through a restart", async () => {
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.4,
+  });
+  store.setSession("saved", { communism: true });
+  store.suspendSession(
+    "saved",
+    {
+      state: "paused",
+      playbackSeconds: 0,
+      displayMode: "default",
+      anchorEnabled: false,
+      queue: [],
+    },
+    180_000,
+  );
+  const saved = store.resumableSessions(1, 180_000).sessions[0];
+  expect(saved?.communism).toBeTrue();
+  const result = setup(undefined, undefined, saved, undefined, store);
+  expect(result.coordinator.communismMode).toBeTrue();
+  // Its host, if it had one, is not one any more.
+  expect(Reflect.get(result.coordinator, "hostId")).toBeUndefined();
 });
 
 test("a new session starts with its channel's saved defaults", async () => {
@@ -4651,7 +4776,7 @@ test("only the host can fill in a permission preset", async () => {
     {},
     "host",
     { tab: "host" },
-    "communism",
+    "collaborative",
   );
   expect(test.updatedModals).toEqual([]);
   expect(test.ephemeral.at(-1)).toBe("Only the host can change permissions.");
@@ -5310,6 +5435,97 @@ function requestValue(calls: unknown[][]) {
     .find((element) => element.action_id === "integration_accept");
   return accept?.value ?? "";
 }
+
+test("communism mode asks everyone in the thread to approve a bot", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "start_communism", test.coordinator.id),
+  });
+  const updates = test.updates as unknown[][];
+  const ephemerals = test.ephemeralCalls.length;
+  const request = () =>
+    test.coordinator.handleIntegrationCommand(
+      "Ubot",
+      {
+        type: "request_control",
+        channel: "channel",
+        permissions: ["pause"],
+        events: ["track"],
+      },
+      "9.0",
+      "Dbot",
+    );
+  await request();
+  // Posted in the thread for everyone, not to anyone privately.
+  expect(test.ephemeralCalls).toHaveLength(ephemerals);
+  const prompt = (test.posted as unknown[][]).at(-1)!;
+  expect(prompt[2]).toBe("<@Ubot> wants to control our session.");
+  const promptTs = String(test.posted.length);
+  const value = (
+    prompt[3] as { elements?: { action_id?: string; value?: string }[] }[]
+  )
+    .flatMap((block) => block.elements ?? [])
+    .find((element) => element.action_id === "integration_accept")!.value!;
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "guest",
+    actionId: "integration_accept",
+    value,
+    channelId: "channel",
+    messageTs: promptTs,
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(test.coordinator.hasGrant("Ubot")).toBeTrue();
+  // The message says who answered, so nobody answers it again.
+  const answered = updates.find((update) => update[1] === promptTs)!;
+  expect(answered[2]).toBe("<@guest> granted <@Ubot> control of our session.");
+  expect(JSON.stringify(answered[3])).not.toContain("integration_accept");
+
+  // A new request's message is closed once the session ends.
+  await test.coordinator.action({
+    type: "block_actions",
+    userId: "guest",
+    actionId: "integration_revoke",
+    value,
+    channelId: "channel",
+    messageTs: promptTs,
+    triggerId: "",
+    metadata: "",
+    state: {},
+  });
+  expect(test.coordinator.hasGrant("Ubot")).toBeFalse();
+  expect(updates.at(-1)?.[2]).toBe(
+    "<@guest> revoked <@Ubot>'s control of our session.",
+  );
+  await request();
+  const second = String(test.posted.length);
+  await test.coordinator.endFromSlack();
+  expect(
+    updates.some(
+      (update) =>
+        update[1] === second &&
+        update[2] ===
+          "<@Ubot>'s control request expired when the session ended.",
+    ),
+  ).toBeTrue();
+});
+
+test("starting communism mode leaves the session without a host", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await test.coordinator.action({
+    ...interaction(test.coordinator, "start_communism", test.coordinator.id),
+  });
+  expect(test.sessions).toContainEqual({ hostId: null });
+  expect(await test.coordinator.agentStatus("host")).toMatchObject({
+    hostId: null,
+    youAreHost: false,
+  });
+  await test.coordinator.endFromSlack();
+});
 
 test("integration control requires host approval and grants without huddle membership", async () => {
   const test = setup();

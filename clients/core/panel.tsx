@@ -601,17 +601,23 @@ function NowPlaying(props: {
           onClick={props.openSettings}
         />
       </div>
-      {!state.session.hostId && (
+      {state.session.communism ? (
         <div className="huddlefm-host">
-          <span>Nobody is host right now.</span>
-          <kit.Button
-            type="outline"
-            size="small"
-            onClick={() => run(platform, { type: "claim_host" })}
-          >
-            Take over
-          </kit.Button>
+          <span>☭ Communism mode: everyone can do everything.</span>
         </div>
+      ) : (
+        !state.session.hostId && (
+          <div className="huddlefm-host">
+            <span>Nobody is host right now.</span>
+            <kit.Button
+              type="outline"
+              size="small"
+              onClick={() => run(platform, { type: "claim_host" })}
+            >
+              Take over
+            </kit.Button>
+          </div>
+        )
       )}
       {track && <Progress platform={platform} track={track} />}
       <div className="huddlefm-controls">
@@ -1489,7 +1495,11 @@ function Settings(props: {
   // Jellyfin's linked in Slack, so it has a place on You whatever else does
   const jellyfin = you?.jellyfin !== undefined && platform.openSlackSettings;
   const shown = groups.filter(
-    (group) => group.fields.length || (group.title === "You" && jellyfin),
+    (group) =>
+      group.fields.length ||
+      (group.title === "You" && jellyfin) ||
+      // communism mode's Host tab has no fields, but says it's on
+      (group.title === "Host" && you?.admin),
   );
   const [tab, setTab] = React.useState(shown[0]?.title ?? "You");
   // a tab that's gone, as Host when someone else becomes host, falls back
@@ -1497,6 +1507,14 @@ function Settings(props: {
     ? tab
     : (shown[0]?.title ?? "You");
   const fields = (group: (typeof groups)[number]) => [
+    group.title === "Host" && state.session.communism && (
+      <div key="communism" className="huddlefm-field">
+        <kit.Hint>
+          Communism mode is active. Everyone in the huddle can do everything,
+          and nobody can take over as host, until the session ends.
+        </kit.Hint>
+      </div>
+    ),
     ...group.fields.map((field) => (
       <React.Fragment key={field.id}>
         {field.section && (
@@ -1534,6 +1552,30 @@ function Settings(props: {
         </kit.Hint>
       </div>
     ),
+    // last, as there is no going back from it
+    group.title === "Host" && you?.admin && !state.session.communism && (
+      <div key="start_communism" className="huddlefm-field">
+        <div>
+          <kit.Button
+            type="outline"
+            size="small"
+            onClick={async () => {
+              if (
+                await kit.confirm({
+                  title: "Start communism mode?",
+                  body: "Everyone in the huddle will be able to do everything, and nobody will be able to take over as host. It can't be turned off: it lasts until the session ends.",
+                  confirmText: "Start",
+                  danger: true,
+                })
+              )
+                run(platform, { type: "start_communism" });
+            }}
+          >
+            Start communism mode
+          </kit.Button>
+        </div>
+      </div>
+    ),
   ];
 
   return (
@@ -1549,7 +1591,11 @@ function Settings(props: {
           onChange={setTab}
           tabs={shown.map((group) => ({
             id: group.title,
-            title: group.title,
+            // communism mode's session is everyone's
+            title:
+              group.title === "Session" && state.session.communism
+                ? "Our session"
+                : group.title,
             content: (
               <div className="huddlefm-settings__tab">{fields(group)}</div>
             ),
@@ -1574,7 +1620,7 @@ function Settings(props: {
         )}
         {can(you, "end-session") && (
           <kit.Button type="danger" size="small" onClick={props.end}>
-            End session
+            {state.session.communism ? "End our session" : "End session"}
           </kit.Button>
         )}
       </div>
@@ -1590,6 +1636,7 @@ function Settings(props: {
 function EndSession(props: { platform: Platform; back: () => void }) {
   const { platform } = props;
   const { kit } = platform;
+  const ours = Boolean(platform.client.state.use()?.session.communism);
   const [save, setSave] = React.useState("none");
   const [name, setName] = React.useState("");
   const options = [
@@ -1601,10 +1648,11 @@ function EndSession(props: { platform: Platform; back: () => void }) {
     <section className="huddlefm-end">
       <header className="huddlefm-settings__header">
         <kit.IconButton label="Back" icon="arrow-left" onClick={props.back} />
-        <span>End session?</span>
+        <span>{ours ? "End our session?" : "End session?"}</span>
       </header>
       <p className="huddlefm-end__text">
-        This stops the music and ends the session for everyone.
+        This stops the music and ends {ours ? "our" : "the"} session for
+        everyone.
       </p>
       <div className="huddlefm-field">
         <div className="huddlefm-field__label">Save for next time</div>

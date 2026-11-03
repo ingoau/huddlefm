@@ -101,6 +101,12 @@ const settingsSchema = z.object({
     .string()
     .optional()
     .describe("Transfer host to this Slack user id"),
+  communism: z
+    .boolean()
+    .optional()
+    .describe(
+      "Start communism mode: everyone in the huddle can do everything, and nobody can take over as host. It lasts until the session ends and can't be turned off.",
+    ),
 });
 
 // What video mode adds: Jump to and captions, as on the player.
@@ -246,8 +252,8 @@ export function agentTools(coordinator: Coordinator, userId: string) {
     }),
     update_settings: tool({
       description: video
-        ? "Change session settings the user is allowed to configure (mode, autoplay of related videos, loop, keep-player-at-bottom, permission preset, or host). Display, transitions and ducking are paused in video mode."
-        : "Change session settings the user is allowed to configure (mode, display, autoplay, loop, transitions, keep-player-at-bottom, permission preset, or host).",
+        ? "Change session settings the user is allowed to configure (mode, autoplay of related videos, loop, keep-player-at-bottom, permission preset, host, or communism mode). Display, transitions and ducking are paused in video mode."
+        : "Change session settings the user is allowed to configure (mode, display, autoplay, loop, transitions, keep-player-at-bottom, permission preset, host, or communism mode).",
       // Video mode leaves the music's own settings out of the schema.
       inputSchema: video
         ? (settingsSchema
@@ -267,7 +273,7 @@ export function agentTools(coordinator: Coordinator, userId: string) {
         coordinator.agentUpdateSettings(userId, input, abortSignal),
     }),
     claim_host: action(
-      "Claim host when there is currently no host.",
+      "Claim host when there is currently no host. Not possible in communism mode.",
       (signal) => coordinator.agentClaimHost(userId, signal),
     ),
     set_session_scrobbling: tool({
@@ -370,7 +376,11 @@ ${
   options.coordinator.videoMode
     ? "The session is in video mode: people watch videos together on a screen share. Autoplay, Huddle mix, lyrics, crossfades, ducking and scrobbling are paused until the host switches back to music mode."
     : `The session is in music mode. A video link added here plays as audio unless add_tracks is given withVideoMode. Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`
-}
+}${
+        options.coordinator.communismMode
+          ? "\nCommunism mode is on: everyone in the huddle can do everything, and nobody can take over as host. Call it our session."
+          : ""
+      }
 Loop modes: ${loopModes.join(", ")}.`,
       tools: agentTools(options.coordinator, options.userId),
       stopWhen: stepCountIs(10),
