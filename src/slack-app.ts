@@ -3,6 +3,11 @@ import { logger } from "./logger.ts";
 
 const log = logger.child({ component: "slack-app" });
 
+// The bot's messages link to what they show, such as a video's Open video
+// link, and an unfurled YouTube embed would bury the controls under a player
+// nobody needs.
+const noUnfurls = { unfurl_links: false, unfurl_media: false } as const;
+
 // Deletion outcomes after which the message can never be removed by retrying.
 const deleteSettledErrors = new Set([
   "message_not_found",
@@ -227,6 +232,7 @@ export class SlackAppAdapter {
       thread_ts: threadTs || undefined,
       text,
       blocks: blocks as never,
+      ...noUnfurls,
     });
     if (!result.ts) throw new Error("chat.postMessage returned no timestamp");
     log.debug(
@@ -255,6 +261,9 @@ export class SlackAppAdapter {
       ts,
       text,
       blocks: blocks as never,
+      // Not in chat.update's documented arguments, but an edit is unfurled
+      // like a new message, so it carries them too.
+      ...(noUnfurls as object),
     });
     log.debug(
       { event: "message_updated", channelId: channel, messageTs: ts },
@@ -464,6 +473,7 @@ export class SlackAppAdapter {
       text,
       thread_ts: options?.threadTs,
       blocks: options?.blocks as never,
+      ...noUnfurls,
     });
     log.debug(
       {
