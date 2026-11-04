@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setSystemTime, test } from "bun:test";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { Store } from "./store.ts";
 
@@ -135,6 +135,44 @@ test("sends now playing immediately and queues scrobbles at the listening thresh
         (call) => JSON.parse(call.body).payload[0].track_metadata.artist_name,
       ),
   ).toEqual(["Artist, Featured Artist", "Artist, Featured Artist"]);
+  store.close();
+});
+
+test("a looped track scrobbles every time it is heard", async () => {
+  const store = new Store(":memory:");
+  store.setListenBrainzToken("user", "token", "user");
+  store.setListenBrainzEnabled("user", true);
+  const dispatcher = new ScrobbleDispatcher(store, {}, (async () =>
+    Response.json({ status: "ok" })) as unknown as typeof fetch);
+  const playback = dispatcher.playback("session", "bot");
+  const track = {
+    id: "track",
+    requesterId: "user",
+    title: "Title",
+    artist: "Artist",
+    duration: 40,
+  };
+  try {
+    for (const start of [1_000_000, 1_040_000, 1_080_000]) {
+      setSystemTime(start);
+      playback.start(track, ["user"]);
+      for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+      // A loop finishes the track before starting it again.
+      playback.finish();
+    }
+  } finally {
+    setSystemTime();
+  }
+  await Bun.sleep(0);
+  expect(
+    store.db
+      .query("SELECT listened_at FROM scrobbles ORDER BY listened_at")
+      .all(),
+  ).toEqual([
+    { listened_at: 1000 },
+    { listened_at: 1040 },
+    { listened_at: 1080 },
+  ]);
   store.close();
 });
 

@@ -767,7 +767,7 @@ export class Store {
         next_attempt_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
         confirmed INTEGER NOT NULL DEFAULT 0,
-        UNIQUE (session_id, track_id, user_id, service)
+        UNIQUE (session_id, track_id, user_id, service, listened_at)
       );
       CREATE TABLE IF NOT EXISTS usage_counters (
         event TEXT PRIMARY KEY,
@@ -922,6 +922,7 @@ export class Store {
     for (const [table, column, definition] of addedColumns)
       this.ensureColumn(table, column, definition);
     this.migrateAutoplayModes();
+    this.migrateScrobblesPerListen();
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
@@ -2605,6 +2606,48 @@ export class Store {
       )
       .run();
     this.completeMigration("autoplay-modes-v1");
+  }
+
+  // Scrobbles were once unique per track in a session, so a looped track
+  // only ever scrobbled once. Each listen of it is its own scrobble now.
+  private migrateScrobblesPerListen() {
+    if (this.migrated("scrobbles-per-listen-v1")) return;
+    const table = this.db
+      .query(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scrobbles'",
+      )
+      .get() as { sql: string } | null;
+    if (table && !table.sql.includes("listened_at)"))
+      this.db.transaction(() => {
+        this.db.run(`
+          CREATE TABLE scrobbles_new (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            service TEXT NOT NULL,
+            listened_at INTEGER NOT NULL,
+            track TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (session_id, track_id, user_id, service, listened_at)
+          );
+          INSERT INTO scrobbles_new
+            (id, session_id, track_id, user_id, service, listened_at, track,
+             status, attempts, next_attempt_at, created_at, confirmed)
+          SELECT id, session_id, track_id, user_id, service, listened_at, track,
+             status, attempts, next_attempt_at, created_at, confirmed
+          FROM scrobbles;
+          DROP TABLE scrobbles;
+          ALTER TABLE scrobbles_new RENAME TO scrobbles;
+          CREATE INDEX IF NOT EXISTS scrobbles_pending
+            ON scrobbles(status, next_attempt_at, listened_at, created_at);
+        `);
+      })();
+    this.completeMigration("scrobbles-per-listen-v1");
   }
 
   private migrated(name: string) {
