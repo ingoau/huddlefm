@@ -122,6 +122,7 @@ async function setup() {
       return { id: viewId };
     },
     userName: async (userId: string) => `Name ${userId}`,
+    displayName: async (userId: string) => `Name ${userId}`,
     dm: async () => undefined,
   } as unknown as SlackAppAdapter;
   const tracks = {

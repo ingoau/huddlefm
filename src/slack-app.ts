@@ -194,7 +194,7 @@ export class SlackAppAdapter {
   private socket?: WebSocket;
   private web: WebClient;
   private interactive: WebClient;
-  private names = new Map<string, Promise<string>>();
+  private names = new Map<string, Promise<{ full: string; display: string }>>();
   private publicChannels = new Map<string, Promise<boolean>>();
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
@@ -422,28 +422,44 @@ export class SlackAppAdapter {
     return known;
   }
 
-  userName(userId: string) {
+  // One lookup serves both names.
+  private profile(userId: string) {
     const cached = this.names.get(userId);
     if (cached) return cached;
-    const name = this.web.users
+    const names = this.web.users
       .info({ user: userId })
-      .then(
-        (result) =>
+      .then((result) => {
+        const display = result.user?.profile?.display_name?.trim();
+        const full =
           result.user?.profile?.real_name?.trim() ||
-          result.user?.real_name?.trim() ||
-          result.user?.profile?.display_name?.trim() ||
-          result.user?.name ||
-          userId,
-      )
+          result.user?.real_name?.trim();
+        const handle = result.user?.name || userId;
+        return {
+          full: full || display || handle,
+          display: display || full || handle,
+        };
+      })
       .catch((error) => {
         log.warn(
           { event: "user_lookup_failed", userId, err: error },
           "Slack user lookup failed",
         );
-        return userId;
+        // Not kept, so the next song asks Slack again.
+        this.names.delete(userId);
+        return { full: userId, display: userId };
       });
-    this.names.set(userId, name);
-    return name;
+    this.names.set(userId, names);
+    return names;
+  }
+
+  async userName(userId: string) {
+    return (await this.profile(userId)).full;
+  }
+
+  // The name people go by, for what other listeners see, such as who added
+  // the playing song.
+  async displayName(userId: string) {
+    return (await this.profile(userId)).display;
   }
 
   // Owners can do everything an admin can, so every flag counts as admin.

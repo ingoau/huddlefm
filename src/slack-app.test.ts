@@ -229,3 +229,36 @@ test("heartbeat closes a real connection whose peer stops responding", async () 
     server.stop(true);
   }
 });
+
+test("names a listener by display name, and keeps full names for records", async () => {
+  const adapter = new SlackAppAdapter({ xapp: "xapp-1", xoxp: "xoxp-1" });
+  const profiles: Record<string, unknown> = {
+    U1: {
+      name: "ada",
+      profile: { real_name: "Ada Lovelace", display_name: "Ada" },
+    },
+    U2: { name: "bob", profile: { real_name: "Bob Smith", display_name: " " } },
+    U3: { name: "cy", profile: {} },
+  };
+  let calls = 0;
+  let failing = true;
+  Reflect.set(adapter, "web", {
+    users: {
+      info: async ({ user }: { user: string }) => {
+        calls++;
+        if (user === "U4" && failing) throw new Error("socket hang up");
+        return { user: profiles[user] ?? { name: "dee" } };
+      },
+    },
+  });
+  expect(await adapter.displayName("U1")).toBe("Ada");
+  expect(await adapter.userName("U1")).toBe("Ada Lovelace");
+  expect(calls).toBe(1);
+  expect(await adapter.displayName("U2")).toBe("Bob Smith");
+  expect(await adapter.displayName("U3")).toBe("cy");
+  expect(await adapter.userName("U3")).toBe("cy");
+  // A failed lookup is tried again rather than kept.
+  expect(await adapter.displayName("U4")).toBe("U4");
+  failing = false;
+  expect(await adapter.displayName("U4")).toBe("dee");
+});

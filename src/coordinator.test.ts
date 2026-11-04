@@ -100,6 +100,7 @@ function setup(
       };
     },
     userName: (userId: string) => Promise.resolve(`Name ${userId}`),
+    displayName: (userId: string) => Promise.resolve(`Display ${userId}`),
     dm: async (...args: unknown[]) => {
       dms.push(args);
     },
@@ -8676,6 +8677,11 @@ test("songs whose adder took their name off them name nobody", async () => {
     anonymous,
   );
   expect(play.requesterLabel).toBe("Added by a listener");
+  const named = await Reflect.get(result.coordinator, "playMessage").call(
+    result.coordinator,
+    queued("c", { requesterId: "guest" }),
+  );
+  expect(named.requesterLabel).toBe("Added by Display guest");
   Reflect.set(result.coordinator, "history", [
     anonymous,
     queued("b", { requesterId: "guest", status: "played" }),
