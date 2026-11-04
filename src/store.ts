@@ -259,6 +259,7 @@ type SavedTrack = {
   fadeInSeconds?: number;
   fadeOutSeconds?: number;
   gainDb?: number;
+  plays?: number;
   queuePosition?: number;
 };
 
@@ -310,8 +311,6 @@ export type SavedSession = {
   // Kept through a restart, but never in a saved session.
   communism?: boolean;
   playbackSeconds: number;
-  // Which play of the current track this is, counting its loops.
-  currentPlay?: number;
   listenedSeconds: number;
   watchedSeconds: number;
   resumeUntil: number;
@@ -390,7 +389,6 @@ const sessionColumns = {
   progressBar: "progress_bar",
   communism: "communism",
   watchedSeconds: "watched_seconds",
-  currentPlay: "current_play",
 };
 
 const trackColumns = {
@@ -410,6 +408,7 @@ const trackColumns = {
   form: "media_form",
   isVideo: "is_video",
   gainDb: "gain_db",
+  plays: "plays",
 };
 
 const addedColumns = [
@@ -456,8 +455,9 @@ const addedColumns = [
   ["sessions", "video_autoplay", "INTEGER NOT NULL DEFAULT 0"],
   ["tracks", "related_video", "INTEGER NOT NULL DEFAULT 0"],
   ["sessions", "communism", "INTEGER NOT NULL DEFAULT 0"],
-  // Which play of a looping track this is, and so which scrobble it makes.
-  ["sessions", "current_play", "INTEGER NOT NULL DEFAULT 0"],
+  // How many times the track has started playing, counting its loops: each
+  // play is its own scrobble.
+  ["tracks", "plays", "INTEGER NOT NULL DEFAULT 0"],
   ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
@@ -548,6 +548,7 @@ function savedTrack(track: Row) {
     fadeInSeconds: numeric(track.fade_in_seconds),
     fadeOutSeconds: numeric(track.fade_out_seconds),
     gainDb: numeric(track.gain_db),
+    plays: numeric(track.plays) || undefined,
     queuePosition: numeric(track.queue_position),
   } satisfies SavedTrack);
 }
@@ -1087,7 +1088,6 @@ export class Store {
       progressBar?: boolean;
       communism?: boolean;
       watchedSeconds?: number;
-      currentPlay?: number;
     },
   ) {
     const { sql, values } = assignments(sessionColumns, fields);
@@ -1483,7 +1483,6 @@ export class Store {
           progressBar: Boolean(row.progress_bar ?? 1),
           communism: Boolean(row.communism),
           playbackSeconds: Number(row.playback_seconds),
-          currentPlay: Number(row.current_play ?? 0),
           listenedSeconds: Number(row.listened_seconds),
           watchedSeconds: Number(row.watched_seconds ?? 0),
           resumeUntil: deadline,
@@ -2248,6 +2247,7 @@ export class Store {
       form?: MediaForm | null;
       isVideo?: boolean;
       gainDb?: number | null;
+      plays?: number;
     },
   ) {
     const { sql, values } = assignments(trackColumns, fields);

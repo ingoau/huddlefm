@@ -255,6 +255,8 @@ type Entry = TrackMetadata & {
   download?: boolean;
   /** Where to start playing, when not from the top: a resumed item. */
   startAt?: number;
+  /** How many times it has started playing, counting loops: each play scrobbles. */
+  plays?: number;
   /** The audio and captions picked for a Jellyfin item. */
   jellyfinTracks?: { audioStreamIndex?: number; subtitleStreamIndex?: number };
   /** What the prepared file holds. */
@@ -439,9 +441,6 @@ export class Coordinator {
   private current?: Entry;
   private state = "ready";
   private playbackSeconds = 0;
-  // Counts the plays in this session, so each one, a loop or a track brought
-  // back with Previous, scrobbles again while a resumed play does not.
-  private currentPlay = 0;
   /** What client mods asked for, while it runs. */
   private dataChannelRuns = new AsyncLocalStorage<DataChannelRun>();
   // The bot running a bot API command now, so its audit records say so.
@@ -702,7 +701,6 @@ export class Coordinator {
     if (restored) {
       this.state = restored.state;
       this.playbackSeconds = restored.playbackSeconds;
-      this.currentPlay = restored.currentPlay ?? 0;
       this.listenedSeconds = restored.listenedSeconds ?? 0;
       this.autoplayMode = restored.autoplay;
       this.videoAutoplay = restored.videoAutoplay ?? false;
@@ -5227,8 +5225,11 @@ export class Coordinator {
     this.queue.splice(this.queue.indexOf(next), 1);
     this.queueChanged();
     this.current = next;
-    // A resumed item starts where it was left, and is the same play.
-    if (next.startAt === undefined) this.currentPlay++;
+    // A resumed item starts where it was left, and carries on the same play.
+    if (next.startAt === undefined || !next.plays) {
+      next.plays = (next.plays ?? 0) + 1;
+      this.store.setTrack(next.id, { plays: next.plays });
+    }
     this.playbackSeconds = next.live ? 0 : (next.startAt ?? 0);
     next.startAt = undefined;
     next.status = "playing";
@@ -5252,7 +5253,6 @@ export class Coordinator {
     this.store.setSession(this.id, {
       status: "playing",
       playbackSeconds: this.playbackSeconds,
-      currentPlay: this.currentPlay,
     });
     this.audit.record("track.started", undefined, {
       sessionId: this.id,
@@ -5722,11 +5722,11 @@ export class Coordinator {
         });
         this.notifyTrack("track.finished", this.current);
         this.playbackSeconds = 0;
-        this.currentPlay++;
+        this.current.plays = (this.current.plays ?? 0) + 1;
+        this.store.setTrack(this.current.id, { plays: this.current.plays });
         this.store.setSession(this.id, {
           listenedSeconds: this.listenedSeconds,
           playbackSeconds: 0,
-          currentPlay: this.currentPlay,
         });
         this.sendMedia({
           type: "replay",
@@ -8717,7 +8717,7 @@ export class Coordinator {
       this.state === "playing",
       position,
       ask,
-      this.currentPlay,
+      entry.plays ?? 0,
     );
   }
 
