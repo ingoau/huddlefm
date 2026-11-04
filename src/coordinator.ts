@@ -809,7 +809,7 @@ export class Coordinator {
         !entry.automatic &&
         entry.requesterId !== this.botUserId
       )
-        void this.slack.userName(entry.requesterId);
+        void this.slack.displayName(entry.requesterId);
     const missingEntries = (
       await Promise.all(
         [this.current, ...this.queue].map(async (entry) =>
@@ -4465,7 +4465,7 @@ export class Coordinator {
     // The player names who added each song, so the name is looked up while
     // the songs are prepared rather than when the first starts.
     if (items.length && userId !== this.botUserId)
-      void this.slack.userName(userId);
+      void this.slack.displayName(userId);
     const entries = items.map((metadata): Entry => ({
       ...metadata,
       id: crypto.randomUUID(),
@@ -5342,7 +5342,7 @@ export class Coordinator {
       : entry.requesterId === this.botUserId
         ? undefined
         : entry.requesterId
-          ? `Added by ${await this.slack.userName(entry.requesterId)}`
+          ? `Added by ${await this.slack.displayName(entry.requesterId)}`
           : "Added by a listener";
     const coverPath = entry.stream
       ? entry.stream.cover
@@ -6183,7 +6183,7 @@ export class Coordinator {
     if (!entry) return false;
     entry.automatic = false;
     entry.requesterId = userId;
-    void this.slack.userName(userId);
+    void this.slack.displayName(userId);
     delete entry.autoplayMode;
     delete entry.discovery;
     delete entry.autoplaySources;

@@ -100,6 +100,7 @@ function setup(
       };
     },
     userName: (userId: string) => Promise.resolve(`Name ${userId}`),
+    displayName: (userId: string) => Promise.resolve(`Name ${userId}`),
     dm: async (...args: unknown[]) => {
       dms.push(args);
     },

@@ -79,6 +79,7 @@ async function setup(
       return { id: viewId, hash: "next" };
     },
     userName: async (userId: string) => `Name ${userId}`,
+    displayName: async (userId: string) => `Name ${userId}`,
     dm: async (...args: unknown[]) => {
       dms.push(args);
       return { channelId: "D1", ts: `dm-${dms.length}` };
