@@ -259,6 +259,7 @@ type SavedTrack = {
   fadeInSeconds?: number;
   fadeOutSeconds?: number;
   gainDb?: number;
+  plays?: number;
   queuePosition?: number;
 };
 
@@ -407,6 +408,7 @@ const trackColumns = {
   form: "media_form",
   isVideo: "is_video",
   gainDb: "gain_db",
+  plays: "plays",
 };
 
 const addedColumns = [
@@ -453,6 +455,10 @@ const addedColumns = [
   ["sessions", "video_autoplay", "INTEGER NOT NULL DEFAULT 0"],
   ["tracks", "related_video", "INTEGER NOT NULL DEFAULT 0"],
   ["sessions", "communism", "INTEGER NOT NULL DEFAULT 0"],
+  // How many times the track has started playing, counting its loops: each
+  // play is its own scrobble.
+  ["tracks", "plays", "INTEGER NOT NULL DEFAULT 0"],
+  ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -542,6 +548,7 @@ function savedTrack(track: Row) {
     fadeInSeconds: numeric(track.fade_in_seconds),
     fadeOutSeconds: numeric(track.fade_out_seconds),
     gainDb: numeric(track.gain_db),
+    plays: numeric(track.plays) || undefined,
     queuePosition: numeric(track.queue_position),
   } satisfies SavedTrack);
 }
@@ -767,7 +774,8 @@ export class Store {
         next_attempt_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
         confirmed INTEGER NOT NULL DEFAULT 0,
-        UNIQUE (session_id, track_id, user_id, service)
+        play INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (session_id, track_id, user_id, service, play)
       );
       CREATE TABLE IF NOT EXISTS usage_counters (
         event TEXT PRIMARY KEY,
@@ -922,6 +930,7 @@ export class Store {
     for (const [table, column, definition] of addedColumns)
       this.ensureColumn(table, column, definition);
     this.migrateAutoplayModes();
+    this.migrateScrobblesPerPlay();
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
@@ -2238,6 +2247,7 @@ export class Store {
       form?: MediaForm | null;
       isVideo?: boolean;
       gainDb?: number | null;
+      plays?: number;
     },
   ) {
     const { sql, values } = assignments(trackColumns, fields);
@@ -2504,13 +2514,14 @@ export class Store {
     listenedAt: number,
     track: unknown,
     confirmed = false,
+    play = 0,
   ) {
     const now = Date.now();
     this.db
       .query(
         `INSERT OR IGNORE INTO scrobbles
-      (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at, confirmed)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at, confirmed, play)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         crypto.randomUUID(),
@@ -2523,6 +2534,7 @@ export class Store {
         now,
         now,
         confirmed ? 1 : 0,
+        play,
       );
   }
 
@@ -2605,6 +2617,49 @@ export class Store {
       )
       .run();
     this.completeMigration("autoplay-modes-v1");
+  }
+
+  // Scrobbles were once unique per track in a session, so a looped track
+  // only ever scrobbled once. Each play of it is its own scrobble now.
+  private migrateScrobblesPerPlay() {
+    if (this.migrated("scrobbles-per-play-v1")) return;
+    const table = this.db
+      .query(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scrobbles'",
+      )
+      .get() as { sql: string } | null;
+    if (table && !table.sql.includes("service, play)"))
+      this.db.transaction(() => {
+        this.db.run(`
+          CREATE TABLE scrobbles_new (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            service TEXT NOT NULL,
+            listened_at INTEGER NOT NULL,
+            track TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            play INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (session_id, track_id, user_id, service, play)
+          );
+          INSERT INTO scrobbles_new
+            (id, session_id, track_id, user_id, service, listened_at, track,
+             status, attempts, next_attempt_at, created_at, confirmed, play)
+          SELECT id, session_id, track_id, user_id, service, listened_at, track,
+             status, attempts, next_attempt_at, created_at, confirmed, play
+          FROM scrobbles;
+          DROP TABLE scrobbles;
+          ALTER TABLE scrobbles_new RENAME TO scrobbles;
+          CREATE INDEX IF NOT EXISTS scrobbles_pending
+            ON scrobbles(status, next_attempt_at, listened_at, created_at);
+        `);
+      })();
+    this.completeMigration("scrobbles-per-play-v1");
   }
 
   private migrated(name: string) {

@@ -255,6 +255,8 @@ type Entry = TrackMetadata & {
   download?: boolean;
   /** Where to start playing, when not from the top: a resumed item. */
   startAt?: number;
+  /** How many times it has started playing, counting loops: each play scrobbles. */
+  plays?: number;
   /** The audio and captions picked for a Jellyfin item. */
   jellyfinTracks?: { audioStreamIndex?: number; subtitleStreamIndex?: number };
   /** What the prepared file holds. */
@@ -5223,7 +5225,11 @@ export class Coordinator {
     this.queue.splice(this.queue.indexOf(next), 1);
     this.queueChanged();
     this.current = next;
-    // A resumed item starts where it was left.
+    // A resumed item starts where it was left, and carries on the same play.
+    if (next.startAt === undefined || !next.plays) {
+      next.plays = (next.plays ?? 0) + 1;
+      this.store.setTrack(next.id, { plays: next.plays });
+    }
     this.playbackSeconds = next.live ? 0 : (next.startAt ?? 0);
     next.startAt = undefined;
     next.status = "playing";
@@ -5716,6 +5722,8 @@ export class Coordinator {
         });
         this.notifyTrack("track.finished", this.current);
         this.playbackSeconds = 0;
+        this.current.plays = (this.current.plays ?? 0) + 1;
+        this.store.setTrack(this.current.id, { plays: this.current.plays });
         this.store.setSession(this.id, {
           listenedSeconds: this.listenedSeconds,
           playbackSeconds: 0,
@@ -8709,6 +8717,7 @@ export class Coordinator {
       this.state === "playing",
       position,
       ask,
+      entry.plays ?? 0,
     );
   }
 

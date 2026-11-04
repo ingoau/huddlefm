@@ -829,6 +829,62 @@ test("persists global user scrobbling settings and deduplicates queued submissio
   store.close();
 });
 
+test("keeps one scrobble per play of a track, as when it loops", () => {
+  const dir = mkdtempSync(join(tmpdir(), "huddlefm-scrobbles-"));
+  const path = join(dir, "state.db");
+  try {
+    // Older databases allowed only one scrobble per track in a session.
+    const old = new Database(path);
+    old.run(`CREATE TABLE scrobbles (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      track_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      service TEXT NOT NULL,
+      listened_at INTEGER NOT NULL,
+      track TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE (session_id, track_id, user_id, service)
+    )`);
+    old.run(
+      `INSERT INTO scrobbles (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at)
+       VALUES ('old', 'session', 'track', 'user', 'lastfm', 100, '{}', 0, 0)`,
+    );
+    old.close();
+    const store = new Store(path);
+    store.queueScrobble("session", "track", "user", "lastfm", 150, {});
+    store.queueScrobble(
+      "session",
+      "track",
+      "user",
+      "lastfm",
+      200,
+      {},
+      false,
+      1,
+    );
+    store.queueScrobble(
+      "session",
+      "track",
+      "user",
+      "lastfm",
+      250,
+      {},
+      false,
+      1,
+    );
+    expect(
+      store.pendingScrobbles(Date.now()).map((item) => item.listenedAt),
+    ).toEqual([100, 200]);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("persists scrobbling mode and per-session overrides", () => {
   const store = new Store(":memory:");
   createSession(store);

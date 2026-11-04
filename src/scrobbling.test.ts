@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setSystemTime, test } from "bun:test";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { Store } from "./store.ts";
 
@@ -135,6 +135,62 @@ test("sends now playing immediately and queues scrobbles at the listening thresh
         (call) => JSON.parse(call.body).payload[0].track_metadata.artist_name,
       ),
   ).toEqual(["Artist, Featured Artist", "Artist, Featured Artist"]);
+  store.close();
+});
+
+test("a looped track scrobbles once for every play", async () => {
+  const store = new Store(":memory:");
+  store.setListenBrainzToken("user", "token", "user");
+  store.setListenBrainzEnabled("user", true);
+  const dispatcher = new ScrobbleDispatcher(store, {}, (async () =>
+    Response.json({ status: "ok" })) as unknown as typeof fetch);
+  const track = {
+    id: "track",
+    requesterId: "user",
+    title: "Title",
+    artist: "Artist",
+    duration: 600,
+  };
+  const listen = (
+    playback: ReturnType<typeof dispatcher.playback>,
+    from: number,
+  ) => {
+    for (let seconds = from + 5; seconds <= from + 300; seconds += 5)
+      playback.position(seconds);
+  };
+  try {
+    let playback = dispatcher.playback("session", "bot");
+    for (const [play, start] of [
+      [1, 1_000_000],
+      [2, 2_000_000],
+    ] as const) {
+      setSystemTime(start);
+      playback.start(track, ["user"], true, 0, true, play);
+      listen(playback, 0);
+      if (play === 2) break;
+      // A loop finishes the track before starting it again.
+      playback.finish();
+    }
+    // The same play, once scrobbled, does not scrobble again: not after
+    // scrobbling is switched off and on, nor after a restart.
+    playback.sessionEnabled("user");
+    listen(playback, 300);
+    setSystemTime(2_400_000);
+    playback = dispatcher.playback("session", "bot");
+    playback.start(track, ["user"], true, 300, false, 2);
+    listen(playback, 300);
+  } finally {
+    setSystemTime();
+  }
+  await Bun.sleep(0);
+  expect(
+    store.db
+      .query("SELECT play, listened_at FROM scrobbles ORDER BY play")
+      .all(),
+  ).toEqual([
+    { play: 1, listened_at: 1000 },
+    { play: 2, listened_at: 2000 },
+  ]);
   store.close();
 });
 
@@ -446,6 +502,23 @@ test("a finished track can only be confirmed if enough of it was heard", () => {
   playback.start(askTrack("next"), ["user"]);
   expect(playback.confirm("user", "skipped")).toBe("too_short");
   expect(pending()).toEqual([]);
+  store.close();
+});
+
+test("a late yes to a looped track scrobbles the play it was about too", () => {
+  const { store, playback } = askTrackSetup(
+    (async () =>
+      new Response("down", { status: 500 })) as unknown as typeof fetch,
+  );
+  playback.start(askTrack("loop"), ["user"], true, 0, true, 1);
+  for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+  playback.finish();
+  playback.start(askTrack("loop"), ["user"], true, 0, true, 2);
+  expect(playback.confirm("user", "loop")).toBe("scrobbling");
+  for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+  expect(
+    store.db.query("SELECT play FROM scrobbles ORDER BY play").all(),
+  ).toEqual([{ play: 1 }, { play: 2 }]);
   store.close();
 });
 

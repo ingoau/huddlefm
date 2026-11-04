@@ -341,28 +341,33 @@ export class ScrobbleDispatcher {
     {
       confirmed = false,
       remembered = false,
+      play = 0,
     }: {
       // The listener said yes to scrobbling this track.
       confirmed?: boolean;
       // This listen already reached the threshold once and was recorded.
       remembered?: boolean;
+      // Which play of the track this is, as it loops.
+      play?: number;
     } = {},
   ) {
     const threshold = track.duration ? Math.min(track.duration / 2, 240) : 240;
     if (listenedSeconds < threshold) return false;
     if (!remembered) this.rememberListen(sessionId, userId, track, listenedAt);
     if (confirmed || this.sessionEnabled(sessionId, userId))
-      this.queueListen(sessionId, userId, track, listenedAt, confirmed);
+      this.queueListen(sessionId, userId, track, listenedAt, confirmed, play);
     return true;
   }
 
-  // Queues an eligible listen for each service the listener scrobbles to.
+  // Queues an eligible listen for each service the listener scrobbles to,
+  // once for each play of the track however often it is queued.
   queueListen(
     sessionId: string,
     userId: string,
     track: ScrobbleTrack,
     listenedAt: number,
     confirmed = false,
+    play = 0,
   ) {
     const settings = this.store.getUserScrobbling(userId);
     const lastFm = enabled(settings, "lastfm");
@@ -376,6 +381,7 @@ export class ScrobbleDispatcher {
         listenedAt,
         track,
         confirmed,
+        play,
       );
     if (lastFm && (track.duration === undefined || track.duration > 30))
       queue("lastfm");
@@ -608,6 +614,8 @@ type Listener = {
 
 type Playing = {
   track: ScrobbleTrack;
+  // Each loop of the track is a new play, and so a new scrobble.
+  play: number;
   playing: boolean;
   lastPosition: number;
   listeners: Map<string, Listener>;
@@ -635,6 +643,7 @@ export class PlaybackScrobbler {
     playing = true,
     position = 0,
     ask = true,
+    play = 0,
   ) {
     // A replay of the same track, as when it loops, keeps the answers already
     // given for it, and its earlier prompt still answers for it.
@@ -648,7 +657,7 @@ export class PlaybackScrobbler {
           confirmed: replayed?.get(userId)?.confirmed,
         });
     if (this.current) this.previous = this.current;
-    this.current = { track, playing, lastPosition: position, listeners };
+    this.current = { track, play, playing, lastPosition: position, listeners };
     this.announce(listeners.keys());
     if (ask)
       for (const userId of listeners.keys())
@@ -667,26 +676,35 @@ export class PlaybackScrobbler {
 
   /** Scrobbles one track for a listener who has scrobbling off here. */
   confirm(userId: string, trackId: string): TrackConfirmation {
-    const playing = [this.current, this.previous].find(
-      (candidate) => candidate?.track.id === trackId,
+    // When a track loops, the play they answered about may have just ended
+    // while the next is under way: the yes is for both.
+    const candidates = [this.current, this.previous].filter(
+      (candidate): candidate is Playing =>
+        candidate?.track.id === trackId &&
+        Boolean(candidate.listeners.get(userId)),
     );
-    const listener = playing?.listeners.get(userId);
-    if (!playing || !listener) return "unknown";
-    // A finished track is only worth scrobbling if they heard enough of it.
-    if (playing !== this.current && !listener.reported) return "too_short";
-    if (listener.confirmed) return "scrobbling";
-    listener.confirmed = true;
-    // They already heard enough of it, so it goes out now.
-    if (listener.reported)
-      this.dispatcher.queueListen(
-        this.sessionId,
-        userId,
-        playing.track,
-        listener.listenedAt,
-        true,
-      );
-    if (playing === this.current) this.announce([userId]);
-    return "scrobbling";
+    if (!candidates.length) return "unknown";
+    let result: TrackConfirmation = "too_short";
+    for (const playing of candidates) {
+      const listener = playing.listeners.get(userId)!;
+      // A finished track is only worth scrobbling if they heard enough of it.
+      if (playing !== this.current && !listener.reported) continue;
+      result = "scrobbling";
+      if (listener.confirmed) continue;
+      listener.confirmed = true;
+      // They already heard enough of it, so it goes out now.
+      if (listener.reported)
+        this.dispatcher.queueListen(
+          this.sessionId,
+          userId,
+          playing.track,
+          listener.listenedAt,
+          true,
+          playing.play,
+        );
+      if (playing === this.current) this.announce([userId]);
+    }
+    return result;
   }
 
   memberLeft(userId: string) {
@@ -734,7 +752,11 @@ export class PlaybackScrobbler {
         this.current.track,
         listener.listenedAt,
         listener.seconds,
-        { confirmed: listener.confirmed, remembered: listener.remembered },
+        {
+          confirmed: listener.confirmed,
+          remembered: listener.remembered,
+          play: this.current.play,
+        },
       );
       if (listener.reported) listener.remembered = true;
     }
