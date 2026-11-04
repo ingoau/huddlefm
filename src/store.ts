@@ -310,6 +310,8 @@ export type SavedSession = {
   // Kept through a restart, but never in a saved session.
   communism?: boolean;
   playbackSeconds: number;
+  // Which play of the current track this is, counting its loops.
+  currentPlay?: number;
   listenedSeconds: number;
   watchedSeconds: number;
   resumeUntil: number;
@@ -388,6 +390,7 @@ const sessionColumns = {
   progressBar: "progress_bar",
   communism: "communism",
   watchedSeconds: "watched_seconds",
+  currentPlay: "current_play",
 };
 
 const trackColumns = {
@@ -453,6 +456,9 @@ const addedColumns = [
   ["sessions", "video_autoplay", "INTEGER NOT NULL DEFAULT 0"],
   ["tracks", "related_video", "INTEGER NOT NULL DEFAULT 0"],
   ["sessions", "communism", "INTEGER NOT NULL DEFAULT 0"],
+  // Which play of a looping track this is, and so which scrobble it makes.
+  ["sessions", "current_play", "INTEGER NOT NULL DEFAULT 0"],
+  ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -767,7 +773,8 @@ export class Store {
         next_attempt_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
         confirmed INTEGER NOT NULL DEFAULT 0,
-        UNIQUE (session_id, track_id, user_id, service, listened_at)
+        play INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (session_id, track_id, user_id, service, play)
       );
       CREATE TABLE IF NOT EXISTS usage_counters (
         event TEXT PRIMARY KEY,
@@ -922,7 +929,7 @@ export class Store {
     for (const [table, column, definition] of addedColumns)
       this.ensureColumn(table, column, definition);
     this.migrateAutoplayModes();
-    this.migrateScrobblesPerListen();
+    this.migrateScrobblesPerPlay();
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
@@ -1080,6 +1087,7 @@ export class Store {
       progressBar?: boolean;
       communism?: boolean;
       watchedSeconds?: number;
+      currentPlay?: number;
     },
   ) {
     const { sql, values } = assignments(sessionColumns, fields);
@@ -1475,6 +1483,7 @@ export class Store {
           progressBar: Boolean(row.progress_bar ?? 1),
           communism: Boolean(row.communism),
           playbackSeconds: Number(row.playback_seconds),
+          currentPlay: Number(row.current_play ?? 0),
           listenedSeconds: Number(row.listened_seconds),
           watchedSeconds: Number(row.watched_seconds ?? 0),
           resumeUntil: deadline,
@@ -2505,13 +2514,14 @@ export class Store {
     listenedAt: number,
     track: unknown,
     confirmed = false,
+    play = 0,
   ) {
     const now = Date.now();
     this.db
       .query(
         `INSERT OR IGNORE INTO scrobbles
-      (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at, confirmed)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, session_id, track_id, user_id, service, listened_at, track, next_attempt_at, created_at, confirmed, play)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         crypto.randomUUID(),
@@ -2524,6 +2534,7 @@ export class Store {
         now,
         now,
         confirmed ? 1 : 0,
+        play,
       );
   }
 
@@ -2609,15 +2620,15 @@ export class Store {
   }
 
   // Scrobbles were once unique per track in a session, so a looped track
-  // only ever scrobbled once. Each listen of it is its own scrobble now.
-  private migrateScrobblesPerListen() {
-    if (this.migrated("scrobbles-per-listen-v1")) return;
+  // only ever scrobbled once. Each play of it is its own scrobble now.
+  private migrateScrobblesPerPlay() {
+    if (this.migrated("scrobbles-per-play-v1")) return;
     const table = this.db
       .query(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scrobbles'",
       )
       .get() as { sql: string } | null;
-    if (table && !table.sql.includes("listened_at)"))
+    if (table && !table.sql.includes("service, play)"))
       this.db.transaction(() => {
         this.db.run(`
           CREATE TABLE scrobbles_new (
@@ -2633,13 +2644,14 @@ export class Store {
             next_attempt_at INTEGER NOT NULL,
             created_at INTEGER NOT NULL,
             confirmed INTEGER NOT NULL DEFAULT 0,
-            UNIQUE (session_id, track_id, user_id, service, listened_at)
+            play INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (session_id, track_id, user_id, service, play)
           );
           INSERT INTO scrobbles_new
             (id, session_id, track_id, user_id, service, listened_at, track,
-             status, attempts, next_attempt_at, created_at, confirmed)
+             status, attempts, next_attempt_at, created_at, confirmed, play)
           SELECT id, session_id, track_id, user_id, service, listened_at, track,
-             status, attempts, next_attempt_at, created_at, confirmed
+             status, attempts, next_attempt_at, created_at, confirmed, play
           FROM scrobbles;
           DROP TABLE scrobbles;
           ALTER TABLE scrobbles_new RENAME TO scrobbles;
@@ -2647,7 +2659,7 @@ export class Store {
             ON scrobbles(status, next_attempt_at, listened_at, created_at);
         `);
       })();
-    this.completeMigration("scrobbles-per-listen-v1");
+    this.completeMigration("scrobbles-per-play-v1");
   }
 
   private migrated(name: string) {

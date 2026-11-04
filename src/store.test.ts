@@ -829,7 +829,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
   store.close();
 });
 
-test("keeps one scrobble per listen of a track, as when it loops", () => {
+test("keeps one scrobble per play of a track, as when it loops", () => {
   const dir = mkdtempSync(join(tmpdir(), "huddlefm-scrobbles-"));
   const path = join(dir, "state.db");
   try {
@@ -855,8 +855,27 @@ test("keeps one scrobble per listen of a track, as when it loops", () => {
     );
     old.close();
     const store = new Store(path);
-    store.queueScrobble("session", "track", "user", "lastfm", 100, {});
-    store.queueScrobble("session", "track", "user", "lastfm", 200, {});
+    store.queueScrobble("session", "track", "user", "lastfm", 150, {});
+    store.queueScrobble(
+      "session",
+      "track",
+      "user",
+      "lastfm",
+      200,
+      {},
+      false,
+      1,
+    );
+    store.queueScrobble(
+      "session",
+      "track",
+      "user",
+      "lastfm",
+      250,
+      {},
+      false,
+      1,
+    );
     expect(
       store.pendingScrobbles(Date.now()).map((item) => item.listenedAt),
     ).toEqual([100, 200]);
