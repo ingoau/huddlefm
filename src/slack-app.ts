@@ -3,9 +3,10 @@ import { logger } from "./logger.ts";
 
 const log = logger.child({ component: "slack-app" });
 
-// The bot's messages link to what they show, such as a video's Open video
-// link, and an unfurled YouTube embed would bury the controls under a player
-// nobody needs.
+// Messages in the session's thread link to what they show, such as a video's
+// Open video link, and an unfurled YouTube embed would bury the controls under
+// a player nobody needs. Direct messages keep theirs: a saved song's preview
+// is the point of it.
 const noUnfurls = { unfurl_links: false, unfurl_media: false } as const;
 
 // Deletion outcomes after which the message can never be removed by retrying.
@@ -473,7 +474,6 @@ export class SlackAppAdapter {
       text,
       thread_ts: options?.threadTs,
       blocks: options?.blocks as never,
-      ...noUnfurls,
     });
     log.debug(
       {
