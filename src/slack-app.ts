@@ -444,6 +444,8 @@ export class SlackAppAdapter {
           { event: "user_lookup_failed", userId, err: error },
           "Slack user lookup failed",
         );
+        // Not kept, so the next song asks Slack again.
+        this.names.delete(userId);
         return { full: userId, display: userId };
       });
     this.names.set(userId, names);
