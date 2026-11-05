@@ -162,9 +162,9 @@ const userSettings = new UserSettings({
       for (const coordinator of activeCoordinators())
         coordinator.userSettingsChanged(userId, change);
     },
-    keepScrobbling: (userId, mode) => {
+    keepScrobbling: (userId) => {
       for (const coordinator of activeCoordinators())
-        coordinator.keepSessionScrobbling(userId, mode);
+        coordinator.keepSessionScrobbling(userId);
     },
   },
 });

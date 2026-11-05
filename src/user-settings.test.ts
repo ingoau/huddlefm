@@ -79,9 +79,21 @@ test("routes only interactions from Settings outside a session", () => {
   expect(settings.handles(interaction(openPersonalSettingsAction))).toBe(true);
   expect(
     settings.handles(
-      interaction("connect_lastfm", { value: personalSettingsId }),
+      interaction("connect_lastfm", {
+        value: personalSettingsId,
+        metadata: JSON.stringify({ sessionId: personalSettingsId }),
+      }),
     ),
   ).toBe(true);
+  // What someone types in a session's dialog is not a way in.
+  expect(
+    settings.handles(
+      interaction("jellyfin_address", {
+        value: personalSettingsId,
+        metadata: JSON.stringify({ sessionId: "session" }),
+      }),
+    ),
+  ).toBe(false);
   expect(
     settings.handles(
       interaction("save_settings", {
@@ -206,7 +218,7 @@ test("tells running sessions what changed", async () => {
     sessions: {
       changed: (userId, change) =>
         events.push(`changed ${userId} ${change.scrobblingEnabled}`),
-      keepScrobbling: (userId, mode) => events.push(`keep ${userId} ${mode}`),
+      keepScrobbling: (userId) => events.push(`keep ${userId}`),
     },
   });
   const mode =
@@ -223,6 +235,6 @@ test("tells running sessions what changed", async () => {
       },
     }),
   );
-  expect(events).toEqual([`keep user ${mode}`, "changed user true"]);
+  expect(events).toEqual(["keep user", "changed user true"]);
   expect(scrobbling.settings("user").mode).toBe(mode);
 });

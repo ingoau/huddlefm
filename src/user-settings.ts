@@ -35,12 +35,7 @@ import {
   type FormState,
 } from "./settings-view.ts";
 import type { Interaction, SlackAppAdapter } from "./slack-app.ts";
-import {
-  scrobblingModes,
-  type ScrobblingMode,
-  type SessionSave,
-  type Store,
-} from "./store.ts";
+import { scrobblingModes, type SessionSave, type Store } from "./store.ts";
 
 /**
  * Stands in for a session ID on Settings opened outside any session, from a
@@ -249,8 +244,8 @@ type SettingsMetadata = ReturnType<typeof parseSettingsMetadata>;
 export type SessionsHook = {
   /** The user changed their settings; whether scrobbling to a service began. */
   changed(userId: string, change: { scrobblingEnabled: boolean }): void;
-  /** The user's scrobbling default is about to become `mode`. */
-  keepScrobbling(userId: string, mode: ScrobblingMode): void;
+  /** The user's scrobbling default is about to change. */
+  keepScrobbling(userId: string): void;
 };
 
 export class UserSettings {
@@ -309,7 +304,8 @@ export class UserSettings {
   handles(interaction: Interaction) {
     return (
       interaction.actionId === openPersonalSettingsAction ||
-      interaction.value === personalSettingsId ||
+      // Every dialog from it carries this in its metadata. A button's value
+      // is no guide, as a value can be what someone typed in a session's.
       parseMetadata(interaction.metadata).sessionId === personalSettingsId
     );
   }
@@ -458,7 +454,7 @@ export class UserSettings {
       const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
       if (mode && mode !== settings.mode) {
         // It's the default for new Huddles, so one going on stays as it is.
-        this.services.sessions?.keepScrobbling(userId, mode);
+        this.services.sessions?.keepScrobbling(userId);
         scrobbling.setMode(userId, mode);
       }
       const services = submittedScrobbleServices(state.scrobble_to);

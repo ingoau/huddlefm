@@ -37,7 +37,6 @@ import {
   type SessionSaveOwner,
   type SessionSaveSettings,
   type SessionSaveTrack,
-  type ScrobblingMode,
   type TransitionMode,
 } from "./store.ts";
 import {
@@ -3009,8 +3008,10 @@ export class Coordinator {
    * what changed.
    */
   userSettingsChanged(userId: string, change: { scrobblingEnabled: boolean }) {
+    // Only someone in the huddle is hearing what plays here.
     if (
       change.scrobblingEnabled &&
+      this.participants.has(userId) &&
       this.scrobbling?.sessionEnabled(this.id, userId)
     )
       this.playbackScrobbling?.settingsEnabled(userId);
@@ -3022,13 +3023,18 @@ export class Coordinator {
    * session. It is the default for new Huddles, so one they are in keeps
    * scrobbling, or not, as it does now.
    */
-  keepSessionScrobbling(userId: string, mode: ScrobblingMode) {
+  keepSessionScrobbling(userId: string) {
     if (!this.scrobbling || !this.participants.has(userId)) return;
     // A session already set either way doesn't follow the default.
     if (this.store.getSessionScrobbling(this.id, userId) !== undefined) return;
-    const enabled = this.scrobbling.sessionEnabled(this.id, userId);
-    if (enabled !== (mode === "always"))
-      this.store.setSessionScrobbling(this.id, userId, enabled);
+    // Set even when the new default would agree, as Ask asks only in a
+    // session not yet set. Written directly, as turning it off through the
+    // dispatcher would drop scrobbles waiting on an answer.
+    this.store.setSessionScrobbling(
+      this.id,
+      userId,
+      this.scrobbling.sessionEnabled(this.id, userId),
+    );
   }
 
   memberJoined(userId: string) {
