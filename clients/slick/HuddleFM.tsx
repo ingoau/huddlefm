@@ -104,6 +104,12 @@ export default class HuddleFM extends SlickPlugin<typeof settings> {
 }
 
 /** Reads the channel of the huddle you're in, from Slack's own selector. */
+/**
+ * The channel of the huddle you're in. Slack's `allCalls` holds every call
+ * it has seen, and the one you're in is the one not yet ended with you among
+ * its active participants. Slack's `getActiveHuddleChannelId` selector, found
+ * by its name, is the fallback, as some releases don't name their selectors.
+ */
 function activeHuddle(api: SlickAPI) {
   type Selector = (state: unknown) => string | undefined;
   const isSelector = (exp: unknown): exp is Selector =>
@@ -116,8 +122,39 @@ function activeHuddle(api: SlickAPI) {
   });
   return () => {
     const state = api.redux.getStore()?.getState();
-    return state && selector ? selector(state) : undefined;
+    if (!state) return undefined;
+    const self = api.members.getCurrentMemberId();
+    const fromCalls = self ? joinedHuddleChannel(state, self) : undefined;
+    return fromCalls ?? (selector ? selector(state) : undefined);
   };
+}
+
+type SlackCall = {
+  isHuddle?: boolean;
+  hasEnded?: boolean;
+  dateStart?: number;
+  channels?: string[];
+  activeParticipants?: { slackId?: string }[];
+};
+
+/** The channel of the latest huddle you're active in, from `allCalls`. */
+function joinedHuddleChannel(state: unknown, self: string) {
+  const calls = (state as { allCalls?: { byId?: Record<string, SlackCall> } })
+    .allCalls?.byId;
+  let latest: SlackCall | undefined;
+  for (const call of Object.values(calls ?? {})) {
+    if (
+      !call ||
+      call.hasEnded ||
+      call.isHuddle === false ||
+      !call.channels?.[0] ||
+      !call.activeParticipants?.some((p) => p?.slackId === self)
+    )
+      continue;
+    if (!latest || (call.dateStart ?? 0) > (latest.dateStart ?? 0))
+      latest = call;
+  }
+  return latest?.channels?.[0];
 }
 
 /**
