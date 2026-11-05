@@ -43,6 +43,7 @@ import { Jellyfin } from "./jellyfin.ts";
 import { likeWindowMs, RecommendationCatalog } from "./recommendations.ts";
 import { ChannelManagers } from "./channel-managers.ts";
 import { WorkspaceAdmins } from "./workspace-admins.ts";
+import { openPersonalSettingsAction, UserSettings } from "./user-settings.ts";
 
 const resumeTtlMs = 3 * 60_000;
 const log = logger.child({ component: "app" });
@@ -146,6 +147,27 @@ const audit = new AuditLog(
 );
 if (store.needsUsageBackfill())
   store.importUsage(await audit.historicalUsage());
+// The user's own settings, opened from a DM with the bot outside any session.
+const userSettings = new UserSettings({
+  slack: slackApp,
+  store,
+  scrobbling,
+  ...(jellyfin ? { jellyfin } : {}),
+  recommendations,
+  audit,
+  log: logger.child({ component: "user-settings" }),
+  // A session the user is in hears of it at once, as its own Settings would.
+  sessions: {
+    changed: (userId, change) => {
+      for (const coordinator of activeCoordinators())
+        coordinator.userSettingsChanged(userId, change);
+    },
+    keepScrobbling: (userId, mode) => {
+      for (const coordinator of activeCoordinators())
+        coordinator.keepSessionScrobbling(userId, mode);
+    },
+  },
+});
 const slackHuddle = new SlackHuddleAdapter(config);
 const channelManagers = new ChannelManagers(
   (channelId) => slackHuddle.channelManagers(channelId),
@@ -280,6 +302,58 @@ function activeCoordinators() {
   );
 }
 
+// A person writing to the bot is answered, at most this often, with what the
+// bot is and how to use it, as nobody reads its DMs.
+const welcomeIntervalMs = 10 * 60_000;
+const welcomedAt = new Map<string, number>();
+
+async function welcomeDm(event: {
+  userId: string;
+  botId?: string;
+  channelId: string;
+}) {
+  // Other bots and integrations get no introduction.
+  if (event.botId) return;
+  const now = Date.now();
+  for (const [userId, at] of welcomedAt)
+    if (now - at >= welcomeIntervalMs) welcomedAt.delete(userId);
+  if (welcomedAt.has(event.userId)) return;
+  welcomedAt.set(event.userId, now);
+  const text =
+    "Hey, I’m HuddleFM, a music bot. I’m automated, so nobody’s going to read what you send here.";
+  await slackApp
+    .dm(event.userId, text, {
+      channelId: event.channelId,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text } },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "*Want to listen to music?* Invite me to a huddle, or mention me in a huddle’s thread while you’re in it. I’ll join and send a player in the thread where you can control stuff and add songs. If the player gets buried, mention me again and I’ll repost it.",
+          },
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "*Your settings* live here too: scrobbling, what goes into the Huddle mix, and the data I keep about you.",
+          },
+          accessory: {
+            type: "button",
+            action_id: openPersonalSettingsAction,
+            text: { type: "plain_text", text: "Open my settings" },
+          },
+        },
+      ],
+    })
+    .catch((error) => {
+      welcomedAt.delete(event.userId);
+      throw error;
+    });
+  captureAnalytics("dm.welcomed", { distinctId: event.userId });
+}
+
 async function handleIntegrationDm(event: {
   userId: string;
   botId?: string;
@@ -290,7 +364,7 @@ async function handleIntegrationDm(event: {
   if (event.userId === botUserId) return;
   if (config.excludedUserIds.has(event.userId)) return;
   if (!isAllowlisted(config.integrationUserIds, event.userId, event.botId))
-    return;
+    return welcomeDm(event);
   const reply = (body: Record<string, unknown>) =>
     slackApp.dm(event.userId, integrationReply(event.messageTs, body), {
       channelId: event.channelId,
@@ -305,6 +379,7 @@ async function handleIntegrationDm(event: {
           distinctId: event.userId,
           properties: { error: "invalid_json" },
         });
+      else await welcomeDm(event);
       return;
     }
     const { ok: _ok, error, ...rest } = parsed;
@@ -1584,8 +1659,10 @@ slackApp.onAction = async (interaction) => {
     ? restoreEndedSession(interaction)
     : interaction.actionId === "unlike_track"
       ? undoLike(interaction)
-      : (coordinatorFor(interaction)?.action(interaction) ??
-        endedBeforeConfirming(interaction));
+      : userSettings.handles(interaction)
+        ? userSettings.action(interaction)
+        : (coordinatorFor(interaction)?.action(interaction) ??
+          endedBeforeConfirming(interaction));
 };
 [botUserId] = await Promise.all([
   verifySlackIdentity(config),
@@ -1944,6 +2021,7 @@ async function shutdownSteps() {
     "Stopping Huddle connection",
   );
   slackHuddle.stop();
+  userSettings.close();
   log.debug({ event: "shutdown_catalog" }, "Closing media catalog");
   await catalog.close();
   log.debug({ event: "shutdown_scrobbling" }, "Stopping scrobbling");

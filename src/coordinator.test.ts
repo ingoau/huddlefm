@@ -9553,3 +9553,30 @@ test("client mods change settings as the modal would", async () => {
   });
   await result.coordinator.endFromSlack();
 });
+
+test("a scrobbling default changed from a DM leaves the session as it is", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setListenBrainzToken("listener", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("listener", true);
+  userStore.setScrobblingMode("listener", "always");
+  userStore.setListenBrainzToken("other", "lb-token", "lb-user");
+  userStore.setScrobblingMode("other", "always");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const result = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await result.coordinator.start();
+  result.coordinator.memberJoined("listener");
+  const id = result.coordinator.id;
+
+  result.coordinator.keepSessionScrobbling("listener", "disabled");
+  userStore.setScrobblingMode("listener", "disabled");
+  expect(scrobbling.sessionEnabled(id, "listener")).toBe(true);
+  // Someone not in the huddle is left to follow their default.
+  result.coordinator.keepSessionScrobbling("other", "disabled");
+  expect(userStore.getSessionScrobbling(id, "other")).toBeUndefined();
+  // Nor is anything kept when the default doesn't change the session.
+  userStore.setScrobblingMode("third", "ask");
+  result.coordinator.memberJoined("third");
+  result.coordinator.keepSessionScrobbling("third", "disabled");
+  expect(userStore.getSessionScrobbling(id, "third")).toBeUndefined();
+  await result.coordinator.endFromSlack();
+});

@@ -37,6 +37,7 @@ import {
   type SessionSaveOwner,
   type SessionSaveSettings,
   type SessionSaveTrack,
+  type ScrobblingMode,
   type TransitionMode,
 } from "./store.ts";
 import {
@@ -131,7 +132,6 @@ import {
 import {
   checked,
   defaultUserSettings,
-  dialogMetadata,
   mergeForm,
   parseSettingsMetadata,
   listenBrainzTokenView,
@@ -165,15 +165,14 @@ import {
   type PluginCommand,
   type PluginSettingChange,
 } from "./plugin-channel.ts";
-
-// What Your data calls each kind of record it deletes.
-const deletedNouns = {
-  added: ["song", "songs"],
-  plays: ["play", "plays"],
-  likes: ["like", "likes"],
-  skips: ["skip", "skips"],
-  scrobbles: ["scrobble", "scrobbles"],
-} as const;
+import {
+  deleteDataActions,
+  deleteUserData,
+  lastFmConnectedView,
+  lastFmLoginView,
+  yourData,
+  type UserDataKind,
+} from "./user-settings.ts";
 
 // What redrawing Settings may change about it.
 type SettingsChange = {
@@ -1252,16 +1251,12 @@ export class Coordinator {
         continue_lastfm: () => this.continueLastFm(interaction),
         disconnect_lastfm: () => this.disconnectLastFm(interaction),
         disconnect_listenbrainz: () => this.disconnectListenBrainz(interaction),
-        delete_own_save: () => this.deleteYourData(interaction, "own_save"),
-        delete_my_channel_save: () =>
-          this.deleteYourData(interaction, "channel_save"),
-        delete_data_added: () => this.deleteYourData(interaction, "added"),
-        delete_data_plays: () => this.deleteYourData(interaction, "plays"),
-        delete_data_likes: () => this.deleteYourData(interaction, "likes"),
-        delete_data_skips: () => this.deleteYourData(interaction, "skips"),
-        delete_data_scrobbles: () =>
-          this.deleteYourData(interaction, "scrobbles"),
-        delete_all_data: () => this.deleteYourData(interaction, "all"),
+        ...Object.fromEntries(
+          Object.entries(deleteDataActions).map(([actionId, kind]) => [
+            actionId,
+            () => this.deleteYourData(interaction, kind),
+          ]),
+        ),
         toggle_session_scrobbling: () =>
           this.toggleSessionScrobbling(interaction),
         enable_session_scrobbling: () =>
@@ -3006,6 +3001,34 @@ export class Coordinator {
       this.store.setUiLocation(this.id, channelId, "", channelId);
       await this.reanchor(previousChannelId);
     });
+  }
+
+  /**
+   * The user changed their own settings outside the session, from a DM:
+   * scrobbling picks up a service just turned on, and their client mod shows
+   * what changed.
+   */
+  userSettingsChanged(userId: string, change: { scrobblingEnabled: boolean }) {
+    if (
+      change.scrobblingEnabled &&
+      this.scrobbling?.sessionEnabled(this.id, userId)
+    )
+      this.playbackScrobbling?.settingsEnabled(userId);
+    this.plugins.refreshYouFor(userId);
+  }
+
+  /**
+   * The user is about to change their scrobbling default outside the
+   * session. It is the default for new Huddles, so one they are in keeps
+   * scrobbling, or not, as it does now.
+   */
+  keepSessionScrobbling(userId: string, mode: ScrobblingMode) {
+    if (!this.scrobbling || !this.participants.has(userId)) return;
+    // A session already set either way doesn't follow the default.
+    if (this.store.getSessionScrobbling(this.id, userId) !== undefined) return;
+    const enabled = this.scrobbling.sessionEnabled(this.id, userId);
+    if (enabled !== (mode === "always"))
+      this.store.setSessionScrobbling(this.id, userId, enabled);
   }
 
   memberJoined(userId: string) {
@@ -7083,30 +7106,10 @@ export class Coordinator {
     if (!this.scrobbling || !interaction.triggerId) return;
     try {
       const url = await this.scrobbling.beginLastFm(interaction.userId);
-      await this.slack.pushModal(interaction.triggerId, {
-        type: "modal",
-        callback_id: "lastfm_login",
-        private_metadata: dialogMetadata(
-          this.id,
-          this.settingsMetadata(interaction),
-        ),
-        title: plain("Connect Last.fm"),
-        close: plain("Cancel"),
-        blocks: [
-          section(
-            "Authorize HuddleFM in Last.fm, return here, then press Continue.",
-          ),
-          actions("lastfm_login_actions", [
-            button("open_lastfm_authorization", plain("Authorize Last.fm"), {
-              url,
-            }),
-            button("continue_lastfm", plain("Continue"), {
-              style: "primary",
-              value: this.id,
-            }),
-          ]),
-        ],
-      });
+      await this.slack.pushModal(
+        interaction.triggerId,
+        lastFmLoginView(this.id, this.settingsMetadata(interaction), url),
+      );
     } catch (error) {
       this.log.error(
         {
@@ -7128,12 +7131,11 @@ export class Coordinator {
     try {
       const username = await this.scrobbling.finishLastFm(interaction.userId);
       if (interaction.viewId && interaction.viewHash)
-        await this.slack.updateModal(interaction.viewId, interaction.viewHash, {
-          type: "modal",
-          title: plain("Connect Last.fm"),
-          close: plain("Done"),
-          blocks: [section(`Connected as *${escape(username)}*.`)],
-        });
+        await this.slack.updateModal(
+          interaction.viewId,
+          interaction.viewHash,
+          lastFmConnectedView(username),
+        );
       if (interaction.previousViewId)
         await this.slack.updateModal(
           interaction.previousViewId,
@@ -7164,33 +7166,11 @@ export class Coordinator {
     settings: ReturnType<Coordinator["settingsMetadata"]>,
     notice?: string,
   ) {
-    const data = this.store.userData(userId);
-    const save = (save: SessionSave) => ({
-      id: save.id,
-      name: save.name,
-      savedBy: save.savedBy,
-      savedAt: save.savedAt,
-      songs: save.tracks.length,
-    });
     return yourDataView({
       sessionId: this.id,
       settings,
       ...defined({ notice }),
-      added: data.added,
-      plays: data.plays,
-      likes: data.likes,
-      skips: data.skips,
-      scrobbles: data.scrobbles,
-      saves: data.saves.map(save),
-      channelSaves: data.channelSaves.map((item) => ({
-        ...save(item),
-        channelId: item.owner.id,
-      })),
-      jellyfinServers: this.store.jellyfinServers(userId).map((server) => ({
-        name: server.name,
-        host: URL.parse(server.baseUrl)?.host ?? server.baseUrl,
-        linkedAt: server.linkedAt,
-      })),
+      ...yourData(this.store, userId),
     });
   }
 
@@ -7205,53 +7185,14 @@ export class Coordinator {
   // Deletes one kind of what is kept about the user, or all of it, from Your
   // data. Only ever the user's own: each kind is looked up by their ID. The
   // audit log records that it happened, never what was deleted.
-  private async deleteYourData(
-    interaction: Interaction,
-    kind:
-      | "own_save"
-      | "channel_save"
-      | "added"
-      | "plays"
-      | "likes"
-      | "skips"
-      | "scrobbles"
-      | "all",
-  ) {
+  private async deleteYourData(interaction: Interaction, kind: UserDataKind) {
     const { userId } = interaction;
-    let count = 0;
-    let notice: string;
-    if (kind === "own_save" || kind === "channel_save") {
-      const data = this.store.userData(userId);
-      const save = (kind === "own_save" ? data.saves : data.channelSaves).find(
-        (save) => save.id === interaction.value,
-      );
-      if (save) {
-        this.store.deleteSessionSave(save.id);
-        count = 1;
-        notice = `Deleted “${escape(save.name)}”.`;
-      } else notice = "That saved session is no longer there.";
-    } else if (kind === "all") {
-      await this.jellyfinUi?.forget(userId);
-      this.store.forgetUser(userId);
-      notice =
-        "Deleted everything kept about you, apart from sessions you saved to channels.";
-    } else {
-      count =
-        kind === "added"
-          ? this.store.forgetAddedTracks(userId)
-          : kind === "plays"
-            ? this.store.deleteUserPlays(userId)
-            : kind === "likes"
-              ? this.store.deleteUserLikes(userId)
-              : kind === "skips"
-                ? this.store.deleteUserSkips(userId)
-                : this.store.deleteUserScrobbles(userId);
-      const [one, many] = deletedNouns[kind];
-      notice =
-        kind === "added"
-          ? `Your name is off ${songCount(count)} you added.`
-          : `Deleted ${count} ${count === 1 ? one : many}.`;
-    }
+    const { count, notice } = await deleteUserData(
+      { store: this.store, ...defined({ jellyfinUi: this.jellyfinUi }) },
+      userId,
+      kind,
+      interaction.value,
+    );
     this.audit.record("data.deleted", userId, {
       sessionId: this.id,
       kind,

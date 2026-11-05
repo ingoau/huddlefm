@@ -422,7 +422,9 @@ const entries: Entry[] = [
     section: "Scrobbling",
     kind: "toggle",
     text: "Scrobble what I listen to here",
-    visible: ({ user }) => Boolean(user?.configured),
+    // Settings opened outside a session has no session to scrobble.
+    visible: ({ user }) =>
+      Boolean(user?.configured) && user!.sessionEnabled !== undefined,
     value: ({ user }) => Boolean(user!.sessionEnabled),
   },
   {
