@@ -9553,3 +9553,54 @@ test("client mods change settings as the modal would", async () => {
   });
   await result.coordinator.endFromSlack();
 });
+
+test("a scrobbling default changed from a DM leaves the session as it is", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setListenBrainzToken("listener", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("listener", true);
+  userStore.setScrobblingMode("listener", "always");
+  userStore.setListenBrainzToken("other", "lb-token", "lb-user");
+  userStore.setScrobblingMode("other", "always");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const result = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await result.coordinator.start();
+  result.coordinator.memberJoined("listener");
+  const id = result.coordinator.id;
+
+  result.coordinator.keepSessionScrobbling("listener");
+  userStore.setScrobblingMode("listener", "disabled");
+  expect(scrobbling.sessionEnabled(id, "listener")).toBe(true);
+  // Someone not in the huddle is left to follow their default.
+  result.coordinator.keepSessionScrobbling("other");
+  expect(userStore.getSessionScrobbling(id, "other")).toBeUndefined();
+  // Switching to Ask doesn't have the session ask them now.
+  userStore.setScrobblingMode("third", "disabled");
+  result.coordinator.memberJoined("third");
+  result.coordinator.keepSessionScrobbling("third");
+  userStore.setScrobblingMode("third", "ask");
+  expect(userStore.getSessionScrobbling(id, "third")).toBe(false);
+  expect(scrobbling.shouldPrompt(id, "third")).toBe(false);
+  await result.coordinator.endFromSlack();
+});
+
+test("a service turned on from a DM only scrobbles for those in the huddle", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setScrobblingMode("listener", "always");
+  userStore.setScrobblingMode("away", "always");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const result = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await result.coordinator.start();
+  result.coordinator.memberJoined("listener");
+  const enabled: string[] = [];
+  Reflect.set(result.coordinator, "playbackScrobbling", {
+    settingsEnabled: (userId: string) => enabled.push(userId),
+  });
+
+  result.coordinator.userSettingsChanged("away", { scrobblingEnabled: true });
+  result.coordinator.userSettingsChanged("listener", {
+    scrobblingEnabled: true,
+  });
+  expect(enabled).toEqual(["listener"]);
+  Reflect.set(result.coordinator, "playbackScrobbling", undefined);
+  await result.coordinator.endFromSlack();
+});
