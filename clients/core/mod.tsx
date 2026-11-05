@@ -561,7 +561,11 @@ export class HuddleFMMod {
     const channel = this.host.activeHuddleChannel();
     const bot = this.host.botUser.get();
     if (!channel || !bot) {
-      this.host.log("Can't start HuddleFM: not in a huddle, or none is chosen");
+      this.host.log(
+        channel
+          ? "Can't start HuddleFM: none is chosen"
+          : "Can't start HuddleFM: couldn't find the huddle you're in",
+      );
       return false;
     }
     try {
