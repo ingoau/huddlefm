@@ -44,7 +44,7 @@ Every option HuddleFM reads from `.env`. Only the Slack credentials are required
 | `QUEUE_LIMIT`                   | `50`             | Maximum tracks in the queue                                                               |
 | `TRACK_DURATION_LIMIT_SECONDS`  | `1200`           | Maximum track duration                                                                    |
 | `TRACK_DOWNLOAD_LIMIT_BYTES`    | `100000000`      | Maximum download size                                                                     |
-| `INITIAL_VOLUME`                | `0.5`            | Starting volume as a fraction of max                                                      |
+| `INITIAL_VOLUME`                | `0.35`           | Starting volume as a fraction of max                                                      |
 | `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                              |
 | `LYRICS_OFFSET_MS`              | `0`              | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio |
 | `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to level songs and videos to -14 LUFS                                       |
