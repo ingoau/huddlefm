@@ -128,7 +128,7 @@ export function loadConfig() {
     downloadBytes: Number(
       process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000,
     ),
-    initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.5),
+    initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.35),
     duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
     lyricsOffsetMs: parseWholeNumber(
       process.env.LYRICS_OFFSET_MS,
