@@ -31,6 +31,7 @@ const user: UserSettingsView = {
   huddleMixSources: ["added"],
   huddleMixUsable: ["added", "lastfm"],
   mode: "always",
+  scrobbleOwnTracks: false,
   configured: true,
   sessionEnabled: true,
 };
@@ -90,6 +91,7 @@ test("the You tab needs the viewer's own settings", () => {
     "huddle_mix",
     "session_scrobbling",
     "scrobbling_mode",
+    "scrobble_own_tracks",
     "scrobble_to",
   ]);
   expect(you.find((field) => field.id === "scrobble_to")).toMatchObject({

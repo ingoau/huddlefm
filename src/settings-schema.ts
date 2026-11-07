@@ -59,6 +59,7 @@ export type UserSettingsView = {
   huddleMixSources: readonly HuddleMixSource[];
   huddleMixUsable: readonly HuddleMixSource[];
   mode: ScrobblingMode;
+  scrobbleOwnTracks: boolean;
   configured: boolean;
   sessionEnabled?: boolean;
 };
@@ -436,6 +437,18 @@ const entries: Entry[] = [
     visible: ({ user }) => Boolean(user?.configured),
     value: ({ user }) => user!.mode,
     options: () => choices(scrobblingModes, scrobblingModeLabel),
+  },
+  {
+    id: "scrobble_own_tracks",
+    tab: "you",
+    label: "Songs you add",
+    hint: "When scrobbling asks first, songs you add to the queue are scrobbled without asking.",
+    optional: true,
+    requires: "self",
+    kind: "toggle",
+    text: "Always scrobble songs I add",
+    visible: ({ user }) => Boolean(user?.configured),
+    value: ({ user }) => user!.scrobbleOwnTracks,
   },
   {
     id: "scrobble_to",

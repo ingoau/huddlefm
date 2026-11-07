@@ -61,6 +61,7 @@ test("disconnects saved scrobbling credentials", () => {
     huddleMixSources: ["added"],
     huddleMixUsable: ["added"],
     mode: "always",
+    scrobbleOwnTracks: false,
     configured: false,
     enabledIntegration: false,
   });
@@ -489,6 +490,40 @@ test("ask-for-every-track mode asks once per track, not per replay or restart", 
   restored.playback.start(askTrack("resumed"), ["user"], false, 12, false);
   expect(restored.asked).toEqual([]);
   restored.store.close();
+  store.close();
+});
+
+test("songs a listener adds scrobble without asking when they choose so", () => {
+  const { store, dispatcher, playback, asked, pending } = askTrackSetup(
+    (async () =>
+      new Response("down", { status: 500 })) as unknown as typeof fetch,
+  );
+  const listen = (track: ReturnType<typeof askTrack>) => {
+    playback.start(track, ["user"]);
+    for (const seconds of [5, 10, 15, 20, 25]) playback.position(seconds);
+  };
+  const theirs = (id: string) => ({ ...askTrack(id), requesterId: "guest" });
+  const autoplay = (id: string) => ({ ...askTrack(id), automatic: true });
+
+  // Off, their own songs are asked about like any other.
+  listen(askTrack("own-off"));
+  expect(asked).toEqual(["user:own-off"]);
+  expect(pending()).toEqual([]);
+
+  dispatcher.setScrobbleOwnTracks("user", true);
+  listen(askTrack("own"));
+  listen(theirs("theirs"));
+  listen(autoplay("autoplay"));
+  expect(asked).toEqual(["user:own-off", "user:theirs", "user:autoplay"]);
+  expect(pending()).toEqual(["own"]);
+
+  // Asking every Huddle, their songs scrobble until they turn this one off.
+  dispatcher.setMode("user", "ask");
+  listen(askTrack("own-ask"));
+  listen(theirs("theirs-ask"));
+  dispatcher.setSessionEnabled("session", "user", false);
+  listen(askTrack("own-declined"));
+  expect(pending()).toEqual(["own", "own-ask"]);
   store.close();
 });
 

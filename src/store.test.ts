@@ -783,6 +783,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     huddleMixOptIn: true,
     huddleMixSources: ["added"],
     mode: "always",
+    scrobbleOwnTracks: false,
   });
   store.setLastFmPending("user", "pending", 10);
   store.connectLastFm("user", "last-user", "session-key");
@@ -798,6 +799,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     huddleMixOptIn: true,
     huddleMixSources: ["added", "lastfm", "listenbrainz"],
     mode: "always",
+    scrobbleOwnTracks: false,
   });
   store.disconnectListenBrainz("user");
   expect(store.getUserScrobbling("user")).toEqual({
@@ -808,6 +810,7 @@ test("persists global user scrobbling settings and deduplicates queued submissio
     huddleMixOptIn: true,
     huddleMixSources: ["added", "lastfm"],
     mode: "always",
+    scrobbleOwnTracks: false,
   });
   const track = {
     id: "track",
