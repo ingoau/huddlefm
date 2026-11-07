@@ -21,6 +21,7 @@ import {
 } from "./settings-diff.ts";
 import type { SessionSettingsView } from "./settings-schema.ts";
 import {
+  checked,
   defaultUserSettings,
   dialogMetadata,
   listenBrainzTokenView,
@@ -425,6 +426,7 @@ export class UserSettings {
     const settings = scrobbling.settings(userId);
     return {
       scrobblingMode: settings.mode,
+      scrobbleOwnTracks: settings.scrobbleOwnTracks,
       huddleMixSources: settings.huddleMixSources,
       lastFmScrobbling: settings.lastFmEnabled,
       listenBrainzScrobbling: settings.listenBrainzEnabled,
@@ -457,6 +459,13 @@ export class UserSettings {
         this.services.sessions?.keepScrobbling(userId);
         scrobbling.setMode(userId, mode);
       }
+      const ownTracks = checked(state.scrobble_own_tracks?.enabled);
+      if (
+        ownTracks !== undefined &&
+        settings.configured &&
+        ownTracks !== settings.scrobbleOwnTracks
+      )
+        scrobbling.setScrobbleOwnTracks(userId, ownTracks);
       const services = submittedScrobbleServices(state.scrobble_to);
       if (services?.lastfm !== undefined && settings.lastFmConnected) {
         newlyEnabled ||= services.lastfm && !settings.lastFmEnabled;

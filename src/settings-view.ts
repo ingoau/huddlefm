@@ -227,6 +227,7 @@ const userFormBlocks = [
   "huddle_mix",
   "session_scrobbling",
   "scrobbling_mode",
+  "scrobble_own_tracks",
   "scrobble_to",
 ];
 
@@ -266,6 +267,7 @@ export const defaultUserSettings: UserSettingsView = {
   huddleMixSources: ["added"],
   huddleMixUsable: ["added"],
   mode: "always",
+  scrobbleOwnTracks: false,
   configured: false,
   sessionEnabled: false,
 };
