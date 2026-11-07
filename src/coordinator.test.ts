@@ -8966,7 +8966,11 @@ const dataBroadcasts = (media: unknown[]) =>
   });
 
 async function pluginSetup(
-  options: { store?: Store; lyrics?: LyricsCatalog } = {},
+  options: {
+    store?: Store;
+    lyrics?: LyricsCatalog;
+    recommendations?: RecommendationCatalog;
+  } = {},
 ) {
   const tracks = {
     resolve: async (value: string) => ({
@@ -8994,6 +8998,7 @@ async function pluginSetup(
     options.store,
     undefined,
     options.lyrics,
+    options.recommendations,
   );
   await result.coordinator.start();
   // a client syncs before anything else, as a real one does
@@ -9380,7 +9385,27 @@ test("client mods open Slack's Settings on the tab they ask for", async () => {
 
 test("client mods are offered what Add songs offers before anything's typed", async () => {
   const store = new Store(":memory:");
-  const result = await pluginSetup({ store });
+  // more of each than the 20 recent songs a client is given
+  const sample = (lane: string, count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      id: `${lane}-${index}`,
+      title: `${lane} ${index}`,
+      artist: "Artist",
+    }));
+  const recommendations = {
+    prefetchUsers() {},
+    prefetchUser: async () => {},
+    noteSessions() {},
+    refreshUser() {},
+    recommendation: () => undefined,
+    huddleMixOptedIn: () => true,
+    autoplayCandidates: async () => [],
+    userRecommendations: () => ({
+      favourites: sample("favourite", 30),
+      discover: sample("discover", 25),
+    }),
+  } as unknown as RecommendationCatalog;
+  const result = await pluginSetup({ store, recommendations });
   await result.coordinator.action(
     interaction(result.coordinator, "add_track_to_queue", "https://a"),
   );
@@ -9393,13 +9418,17 @@ test("client mods are offered what Add songs offers before anything's typed", as
   const answer = resultFor(result.media, "g1") as {
     ok: boolean;
     recent: { id: string; title: string }[];
-    recommended: unknown[];
+    recommended: { id: string; group: string }[];
   };
   expect(answer).toMatchObject({
     ok: true,
-    recommended: [],
     recent: [{ title: "A", artist: "Artist" }],
   });
+  // every recommendation Slack's dialog offers, in its groups
+  expect(answer.recommended.map((item) => [item.group, item.id])).toEqual([
+    ...sample("favourite", 30).map((item) => ["Your favourites", item.id]),
+    ...sample("discover", 25).map((item) => ["Discover", item.id]),
+  ]);
   await result.send("host", {
     type: "command",
     id: "g2",
