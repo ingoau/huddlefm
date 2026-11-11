@@ -58,13 +58,16 @@ itself moves to the app's bot user:
   another device. HuddleFM so stays in a Huddle with nobody else in it until
   it is ended from the player, or nothing plays for `IDLE_TIMEOUT_MS`.
 
-| Variable              | Bot user mode                                      |
-| --------------------- | -------------------------------------------------- |
-| `SLACK_WORKSPACE_URL` | Required                                           |
-| `SLACK_XAPP`          | Required, for Socket Mode events and button clicks |
-| `SLACK_XOXB`          | Required, the app's bot token                      |
-| `SLACK_XOXC`          | Required, to join Huddles                          |
-| `SLACK_XOXD`          | Required, with `SLACK_XOXC`                        |
+| Variable              | Bot user mode                                                             |
+| --------------------- | ------------------------------------------------------------------------- |
+| `SLACK_WORKSPACE_URL` | Required                                                                  |
+| `SLACK_XAPP`          | Required, for Socket Mode events and button clicks                        |
+| `SLACK_XOXB`          | Required, the app's bot token                                             |
+| `SLACK_XOXC`          | Required, to join Huddles                                                 |
+| `SLACK_XOXD`          | Required, with `SLACK_XOXC`                                               |
+| `SLACK_DISPLAY_USER`  | Optional, a Slack user whose name and picture the bot user posts under    |
+| `SLACK_DISPLAY_NAME`  | Optional, the name to post under without `SLACK_DISPLAY_USER`             |
+| `SLACK_DISPLAY_ICON`  | Optional, the icon to post under without it: an image URL or an `:emoji:` |
 
 `SLACK_XOXP` is ignored in this mode. The Slack app needs Socket Mode,
 Interactivity, the bot events `message.channels`, `message.groups` and
@@ -89,6 +92,7 @@ Interactivity, the bot events `message.channels`, `message.groups` and
         "channels:read",
         "chat:write",
         "chat:write.public",
+        "chat:write.customize",
         "emoji:read",
         "files:read",
         "groups:history",
@@ -116,7 +120,10 @@ Interactivity, the bot events `message.channels`, `message.groups` and
 After installing it, the bot token is `SLACK_XOXB`, and an app-level token
 with `connections:write` (Basic Information, App-Level Tokens) is `SLACK_XAPP`.
 `canvases:write` is only needed with `SLACK_CANVAS_ID`, and `chat:write.public`
-only to post in public channels the bot was not invited to. `files:read` lets admins upload YouTube cookies from Settings.
+only to post in public channels the bot was not invited to. `chat:write.customize` is only needed with `SLACK_DISPLAY_USER`,
+`SLACK_DISPLAY_NAME` or `SLACK_DISPLAY_ICON`: messages show that user's name
+and picture (read again hourly), else the name and icon set, while their
+buttons still come to HuddleFM. Edits keep the name a message was posted with. `files:read` lets admins upload YouTube cookies from Settings.
 
 Invite the bot user to every channel whose Huddles it should hear about; it only
 receives events from channels it is in.

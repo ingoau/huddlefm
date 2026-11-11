@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ackEnvelope,
   normalizeInteraction,
+  postedAs,
   SlackAppAdapter,
   slackErrorCode,
   slackRetryDelay,
@@ -307,5 +308,52 @@ describe("threadMessage", () => {
     ).toBeUndefined();
     expect(threadMessage(event({ type: "reaction_added" }))).toBeUndefined();
     expect(threadMessage(undefined)).toBeUndefined();
+  });
+});
+
+test("posts under a set name with an emoji or a picture icon", () => {
+  expect(postedAs()).toEqual({});
+  expect(postedAs("DJ", ":guitar:")).toEqual({
+    username: "DJ",
+    icon_emoji: ":guitar:",
+  });
+  expect(postedAs(undefined, "https://example.com/dj.png")).toEqual({
+    icon_url: "https://example.com/dj.png",
+  });
+});
+
+test("posts under another Slack user's name and picture first", async () => {
+  const adapter = new SlackAppAdapter({
+    xapp: "xapp-1",
+    xoxb: "xoxb-1",
+    displayUser: "U01TESTBOT",
+    displayName: "Fallback",
+    displayIcon: ":guitar:",
+  });
+  const posted: Record<string, unknown>[] = [];
+  Reflect.set(adapter, "web", {
+    users: {
+      info: async () => ({
+        user: {
+          real_name: "DJ",
+          profile: {
+            display_name: "",
+            image_512: "https://example.com/dj.png",
+          },
+        },
+      }),
+    },
+    chat: {
+      postMessage: async (body: Record<string, unknown>) => {
+        posted.push(body);
+        return { ts: "1.0" };
+      },
+    },
+  });
+  await Reflect.get(adapter, "mirror").call(adapter);
+  await adapter.post("C01TESTCHAN", undefined, "hi");
+  expect(posted[0]).toMatchObject({
+    username: "DJ",
+    icon_url: "https://example.com/dj.png",
   });
 });
