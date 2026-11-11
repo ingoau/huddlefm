@@ -750,6 +750,8 @@ export class TrackCatalog {
   // songs go straight to SoundCloud rather than wait out YouTube's retries.
   private youtubeRefusedUntil = 0;
   private youtubeProbeTimer?: ReturnType<typeof setInterval>;
+  // SoundCloud's match for each YouTube song looked up, or null for none.
+  private soundCloudMatches = new Map<string, TrackMetadata | null>();
   private activePreparations = 0;
   private extractions = new Map<
     string,
@@ -933,8 +935,30 @@ export class TrackCatalog {
 
   /** The same song on SoundCloud, for a YouTube one this server can't get. */
   private async soundCloudFor(track: TrackMetadata) {
+    if (this.soundCloudMatches.has(track.sourceId))
+      return this.soundCloudMatches.get(track.sourceId) ?? undefined;
     const query = `${firstArtist(track.artist)} ${coreTitle(track.title)}`;
-    return soundCloudMatch(await this.searchSoundCloud(query, 8), track);
+    const match = soundCloudMatch(await this.searchSoundCloud(query, 8), track);
+    this.soundCloudMatches.set(track.sourceId, match ?? null);
+    if (this.soundCloudMatches.size > 500)
+      this.soundCloudMatches.delete(
+        this.soundCloudMatches.keys().next().value!,
+      );
+    return match;
+  }
+
+  /**
+   * Whether a track can be played now: while YouTube refuses this server, a
+   * YouTube song only when SoundCloud has it. Autoplay checks before it
+   * offers a song, so the one shown as next is one that plays.
+   */
+  async playable(track: TrackMetadata) {
+    if (
+      Date.now() >= this.youtubeRefusedUntil ||
+      !isYoutubeVideoId(track.sourceId)
+    )
+      return true;
+    return Boolean(await this.soundCloudFor(track));
   }
 
   /** What video mode allows. */
