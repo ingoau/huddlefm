@@ -210,8 +210,61 @@ export function modeSelect<Mode extends string>(
   );
 }
 
+/**
+ * The player's custom emoji, from Microsoft's Fluent Emoji (emoji/README.md),
+ * and the standard Slack emoji each falls back to in a workspace without it.
+ */
+export const customEmoji: Record<string, { fluent: string; standard: string }> =
+  {
+    "ms-play": { fluent: "Play button", standard: "arrow_forward" },
+    "ms-pause": { fluent: "Pause button", standard: "double_vertical_bar" },
+    "ms-skip-forward": {
+      fluent: "Next track button",
+      standard: "black_right_pointing_double_triangle_with_vertical_bar",
+    },
+    "ms-skip-back": {
+      fluent: "Last track button",
+      standard: "black_left_pointing_double_triangle_with_vertical_bar",
+    },
+    "ms-fast-forward": {
+      fluent: "Fast-forward button",
+      standard: "fast_forward",
+    },
+    "ms-rewind": { fluent: "Fast reverse button", standard: "rewind" },
+    "ms-sparkling-heart": {
+      fluent: "Sparkling heart",
+      standard: "sparkling_heart",
+    },
+    "ms-floppy-disk": { fluent: "Floppy disk", standard: "floppy_disk" },
+    "ms-speaker-loud-volume": {
+      fluent: "Speaker high volume",
+      standard: "loud_sound",
+    },
+    "ms-speaker-low-volume": {
+      fluent: "Speaker low volume",
+      standard: "speaker",
+    },
+    "ms-3-00": { fluent: "Three oclock", standard: "clock3" },
+  };
+
+let missingEmoji = new Set<string>();
+
+/** Shows these custom emoji as their standard ones from now on. */
+export function useStandardEmoji(names: Iterable<string>) {
+  missingEmoji = new Set(names);
+}
+
+/** Text with each custom emoji the workspace lacks swapped for a standard one. */
+export function withEmoji(text: string) {
+  return text.replace(/:([a-z0-9-]+):/g, (whole, name: string) =>
+    missingEmoji.has(name) && customEmoji[name]
+      ? `:${customEmoji[name].standard}:`
+      : whole,
+  );
+}
+
 export function icon(text: string) {
-  return { ...plain(text), emoji: true };
+  return { ...plain(withEmoji(text)), emoji: true };
 }
 
 export function artworkIcon(track?: { artwork?: string; title: string }) {
