@@ -2501,7 +2501,7 @@ export class TrackCatalog {
             throw retryError;
           // YouTube refuses this server's address, which nothing on our side
           // gets past, so the same song is played from SoundCloud instead.
-          this.youtubeRefusedUntil = Date.now() + 15 * 60_000;
+          this.youtubeRefusedUntil = Date.now() + youtubeProbeInterval;
           result = await timed("soundcloud_fallback", () =>
             this.fromSoundCloud(track, download, entryId, signal),
           );
@@ -3839,7 +3839,7 @@ export type YouTubeCheck = { ok: boolean; reason?: string };
 // A short public video, downloaded to learn whether YouTube refuses this
 // server, and how often that is checked.
 const youtubeProbeUrl = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
-const youtubeProbeInterval = 15 * 60_000;
+const youtubeProbeInterval = 60 * 60_000;
 
 // Versions of a song other than the one asked for, which a SoundCloud search
 // turns up a lot of.
