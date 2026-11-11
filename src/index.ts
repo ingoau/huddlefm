@@ -41,7 +41,6 @@ import {
   integrationReply,
   isAllowlisted,
   parseIntegrationMessage,
-  sessionMatchesChannel,
 } from "./integration.ts";
 import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
@@ -1466,10 +1465,12 @@ const server = Bun.serve({
         token: config.mcpToken,
         actorId: config.mcpUserId ?? [...config.adminUserIds][0],
         version: "1",
-        session(channel) {
+        session(channel, threadTs) {
           const coordinator = [...runtimes.values()]
             .map((runtime) => runtime.coordinator)
-            .find((item) => item && sessionMatchesChannel(item.room, channel));
+            .find(
+              (item) => item && roomOwnsThread(item.room, channel, threadTs),
+            );
           return coordinator
             ? {
                 id: coordinator.id,

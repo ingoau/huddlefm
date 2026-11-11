@@ -7,8 +7,11 @@ export type McpHost = {
   // Who commands run as, with that user's permissions in the session.
   actorId?: string;
   version: string;
-  // The active session in a channel, when there is one.
-  session(channel: string):
+  // The active session of a Huddle's thread, when there is one.
+  session(
+    channel: string,
+    threadTs: string,
+  ):
     | {
         id: string;
         run(
@@ -29,6 +32,10 @@ const channel = {
   type: "string",
   description: "Slack channel ID of the Huddle (its channel or HuddleFM's)",
 };
+const threadTs = {
+  type: "string",
+  description: "Timestamp of the Huddle's message (its thread)",
+};
 const tool = (
   name: string,
   description: string,
@@ -41,8 +48,8 @@ const tool = (
   type,
   inputSchema: {
     type: "object",
-    properties: { channel, ...properties },
-    required: ["channel", ...required],
+    properties: { channel, thread_ts: threadTs, ...properties },
+    required: ["channel", "thread_ts", ...required],
     additionalProperties: false,
   },
 });
@@ -57,10 +64,7 @@ const joinTool = {
     type: "object",
     properties: {
       channel,
-      thread_ts: {
-        type: "string",
-        description: "Timestamp of the Huddle's message (its thread)",
-      },
+      thread_ts: threadTs,
       user: {
         type: "string",
         description: "Slack user ID of who asked; must be in the Huddle",
@@ -95,6 +99,7 @@ export const mcpTools = [
   tool("previous", "Go back to the previous song", "previous"),
   tool("pause", "Pause playback", "pause"),
   tool("resume", "Resume playback", "resume"),
+  tool("leave", "End the session and leave the Huddle", "end"),
   tool(
     "volume",
     "Set the volume",
@@ -181,8 +186,8 @@ async function call(
 ) {
   const args = params.arguments ?? {};
   const target = typeof args.channel === "string" ? args.channel : "";
+  const threadTs = typeof args.thread_ts === "string" ? args.thread_ts : "";
   if (params.name === joinTool.name) {
-    const threadTs = typeof args.thread_ts === "string" ? args.thread_ts : "";
     const user = typeof args.user === "string" ? args.user : "";
     if (!target || !threadTs || !user)
       return text({ error: "channel, thread_ts and user are required" }, true);
@@ -191,11 +196,12 @@ async function call(
   }
   const definition = mcpTools.find((item) => item.name === params.name);
   if (!definition) return text({ error: "Unknown tool" }, true);
-  // Only the session running in the channel the caller names.
-  if (!target) return text({ error: "channel is required" }, true);
-  const session = host.session(target);
+  // Only the session of the Huddle thread the caller names.
+  if (!target || !threadTs)
+    return text({ error: "channel and thread_ts are required" }, true);
+  const session = host.session(target, threadTs);
   if (!session)
-    return text({ error: "No HuddleFM session in that channel" }, true);
+    return text({ error: "No HuddleFM session in that thread" }, true);
   if (!host.actorId)
     return text({ error: "MCP_USER_ID or ADMIN_USER_IDS is not set" }, true);
   const command: IntegrationCommand = {

@@ -8,8 +8,8 @@ const host = (change: Partial<McpHost> = {}): McpHost => ({
   token: "secret",
   actorId: "U01TESTADMIN",
   version: "1",
-  session: (channel) =>
-    channel === "C01ALLOWED" || channel === "C02OTHER"
+  session: (channel, threadTs) =>
+    channel === "C01ALLOWED" && threadTs === "1.0"
       ? {
           id: "session",
           run: async (userId, command) => {
@@ -67,12 +67,21 @@ test("lists its tools", async () => {
   expect(result.tools.map((item) => item.name)).toContain("skip");
 });
 
-test("acts on the session in the named channel, as the configured user", async () => {
+test("acts on the session of the named thread, as the configured user", async () => {
   ran.length = 0;
   expect((await call("skip", {})).isError).toBe(true);
-  expect((await call("skip", { channel: "C09NOSESSION" })).isError).toBe(true);
+  expect((await call("skip", { channel: "C01ALLOWED" })).isError).toBe(true);
+  expect(
+    (await call("skip", { channel: "C01ALLOWED", thread_ts: "2.0" })).isError,
+  ).toBe(true);
   expect(ran).toHaveLength(0);
-  expect(await call("volume", { channel: "C01ALLOWED", percent: 40 })).toEqual({
+  expect(
+    await call("volume", {
+      channel: "C01ALLOWED",
+      thread_ts: "1.0",
+      percent: 40,
+    }),
+  ).toEqual({
     isError: false,
     value: { ok: true, type: "volume" },
   });
@@ -83,6 +92,14 @@ test("acts on the session in the named channel, as the configured user", async (
     },
   ]);
   expect((await call("sessions", {})).isError).toBe(true);
+});
+
+test("leaves by ending the thread's session", async () => {
+  ran.length = 0;
+  expect(
+    await call("leave", { channel: "C01ALLOWED", thread_ts: "1.0" }),
+  ).toEqual({ isError: false, value: { ok: true, type: "end" } });
+  expect(ran[0]!.command.type).toBe("end");
 });
 
 test("joins a Huddle only with its thread and who asked", async () => {
