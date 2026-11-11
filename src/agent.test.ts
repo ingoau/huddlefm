@@ -7,6 +7,9 @@ import {
   agentTools,
   isAgentBusy,
   isBareMention,
+  RateLimiter,
+  resetAgentRateLimits,
+  runAgentCommand,
   stripMentions,
 } from "./agent.ts";
 
@@ -83,4 +86,63 @@ test("the tools follow the mode, like the player does", () => {
   expect(fields(video.update_settings!)).toEqual(
     expect.arrayContaining(["mode", "autoplay", "loopMode", "hostUserId"]),
   );
+});
+
+test("RateLimiter allows each window's limit, then says how long to wait", () => {
+  let now = 0;
+  const limiter = new RateLimiter(
+    [
+      { limit: 2, windowMs: 1_000 },
+      { limit: 3, windowMs: 10_000 },
+    ],
+    () => now,
+  );
+  for (const at of [0, 100]) {
+    now = at;
+    expect(limiter.retryAfter("U1")).toBe(0);
+    limiter.record("U1");
+  }
+  now = 200;
+  expect(limiter.retryAfter("U1")).toBe(800);
+  expect(limiter.retryAfter("U2")).toBe(0);
+  now = 1_000;
+  expect(limiter.retryAfter("U1")).toBe(0);
+  limiter.record("U1");
+  // the longer window is full until the first use is 10 seconds old
+  now = 5_000;
+  expect(limiter.retryAfter("U1")).toBe(5_000);
+  now = 10_000;
+  expect(limiter.retryAfter("U1")).toBe(0);
+});
+
+test("runAgentCommand stops a user after a few requests a minute", async () => {
+  const previous = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  resetAgentRateLimits();
+  const coordinator = {
+    id: "S1",
+    videoMode: false,
+    communismMode: false,
+    primeManager: async () => {},
+  } as unknown as Coordinator;
+  const ask = (userId: string) =>
+    runAgentCommand({
+      coordinator,
+      userId,
+      text: "<@UBOT> add some jazz",
+      botUserId: "UBOT",
+    });
+  try {
+    // Without a key each request fails, but still counts.
+    for (let index = 0; index < 3; index++)
+      expect((await ask("U1")).text).not.toContain("asked me a lot");
+    const limited = await ask("U1");
+    expect(limited.ok).toBe(false);
+    expect(limited.text).toContain("You've asked me a lot just now.");
+    expect((await ask("U2")).text).not.toContain("asked me a lot");
+  } finally {
+    resetAgentRateLimits();
+    if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previous;
+  }
 });

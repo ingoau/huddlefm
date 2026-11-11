@@ -2980,6 +2980,12 @@ test("a channel manager can end the session through the agent", async () => {
     ended: true,
   });
   expect(ended(result)).toBeTrue();
+  // ended as the button ends it, not attributed to the agent
+  expect(result.audit).toContainEqual([
+    "session.ended",
+    "channel-manager",
+    expect.objectContaining({ reason: "ended by host" }),
+  ]);
 });
 
 test("a workspace admin outside the huddle can end the session by default", async () => {
@@ -4977,6 +4983,20 @@ test("agent controls enforce the same permissions as the Slack UI", async () => 
   const volume = await result.coordinator.agentSetVolume("host", 42);
   expect(volume).toEqual({ ok: true, volumePercent: 42 });
   expect(result.media).toContainEqual({ type: "volume", value: 0.42 });
+
+  // volume up and down, clamped to 0..100
+  expect(await result.coordinator.agentChangeVolume("host", 10)).toEqual({
+    ok: true,
+    volumePercent: 52,
+  });
+  expect(await result.coordinator.agentChangeVolume("host", 80)).toEqual({
+    ok: true,
+    volumePercent: 100,
+  });
+  expect(await result.coordinator.agentChangeVolume("listener", -10)).toEqual({
+    ok: false,
+    error: "You do not have permission for that.",
+  });
 
   const scrobblingDenied = result.coordinator.agentSetSessionScrobbling(
     "host",

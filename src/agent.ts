@@ -22,6 +22,74 @@ const log = logger.child({ component: "agent" });
 const agentTimeoutMs = 60_000;
 const activeAgentUsers = new Set<string>();
 
+const minuteMs = 60_000;
+const hourMs = 60 * minuteMs;
+
+function limitFromEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+/** Counts uses in sliding windows, so each key gets `limit` per `windowMs`. */
+export class RateLimiter {
+  private readonly uses = new Map<string, number[]>();
+
+  constructor(
+    private readonly windows: readonly { limit: number; windowMs: number }[],
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /** How long until `key` may go again, or 0 when it may now. */
+  retryAfter(key: string) {
+    const now = this.now();
+    const longest = Math.max(0, ...this.windows.map((w) => w.windowMs));
+    const uses = (this.uses.get(key) ?? []).filter((at) => now - at < longest);
+    if (uses.length) this.uses.set(key, uses);
+    else this.uses.delete(key);
+    let wait = 0;
+    for (const { limit, windowMs } of this.windows) {
+      const recent = uses.filter((at) => now - at < windowMs);
+      if (recent.length < limit) continue;
+      // The window frees up when the use that fills it to the limit ages out.
+      const freeing = recent[recent.length - limit] ?? now;
+      wait = Math.max(wait, freeing + windowMs - now);
+    }
+    return wait;
+  }
+
+  record(key: string) {
+    const uses = this.uses.get(key) ?? [];
+    uses.push(this.now());
+    this.uses.set(key, uses);
+  }
+
+  clear() {
+    this.uses.clear();
+  }
+}
+
+// Each AI request costs money, so each person gets a few a minute and an
+// hour, and the whole bot a budget an hour. Commands don't count.
+const userLimiter = new RateLimiter([
+  { limit: limitFromEnv("AGENT_USER_LIMIT_PER_MINUTE", 3), windowMs: minuteMs },
+  { limit: limitFromEnv("AGENT_USER_LIMIT_PER_HOUR", 20), windowMs: hourMs },
+]);
+const globalLimiter = new RateLimiter([
+  { limit: limitFromEnv("AGENT_LIMIT_PER_HOUR", 100), windowMs: hourMs },
+]);
+
+/** Forget every use, for tests. */
+export function resetAgentRateLimits() {
+  userLimiter.clear();
+  globalLimiter.clear();
+}
+
+function waitText(ms: number) {
+  const minutes = Math.ceil(ms / minuteMs);
+  if (ms < minuteMs) return `${Math.max(1, Math.ceil(ms / 1000))} seconds`;
+  return minutes === 1 ? "a minute" : `${minutes} minutes`;
+}
+
 export const agentModel = "openai/gpt-6-luna";
 
 const mentionPattern = (botUserId: string) =>
@@ -355,6 +423,35 @@ export async function runAgentCommand(options: {
       ok: false,
       text: "I'm already handling your last request. Try again in a moment.",
     };
+
+  const userWait = userLimiter.retryAfter(options.userId);
+  const globalWait = globalLimiter.retryAfter("all");
+  if (userWait || globalWait) {
+    log.info(
+      {
+        event: "agent_rate_limited",
+        userId: options.userId,
+        userWait,
+        globalWait,
+      },
+      "Agent request rate limited",
+    );
+    captureAnalytics("agent.rate_limited", {
+      distinctId: options.userId,
+      sessionId: options.coordinator.id,
+      properties: { scope: userWait ? "user" : "global" },
+    });
+    return {
+      ok: false,
+      text: `${
+        userWait
+          ? "You've asked me a lot just now."
+          : "I've had a lot of requests just now."
+      } Try again in ${waitText(Math.max(userWait, globalWait))}. Commands like \`skip\` or \`volume up\` still work: mention me with \`help\` to see them.`,
+    };
+  }
+  userLimiter.record(options.userId);
+  globalLimiter.record("all");
 
   activeAgentUsers.add(options.userId);
   const startedAt = Date.now();
