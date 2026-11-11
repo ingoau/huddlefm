@@ -24,6 +24,12 @@ test("fixed phrases are commands, whatever the case and punctuation", () => {
     type: "now-playing",
   });
   expect(parseMentionCommand("back")).toEqual({ type: "previous" });
+  expect(parseMentionCommand("skip:")).toEqual({ type: "skip" });
+  expect(parseMentionCommand("(skip)")).toEqual({ type: "skip" });
+  expect(parseMentionCommand("“volume 40%”")).toEqual({
+    type: "volume",
+    percent: 40,
+  });
   expect(parseMentionCommand("loop off")).toEqual({
     type: "loop",
     mode: "off",
@@ -217,4 +223,29 @@ test("commands run through the coordinator and say what happened", async () => {
     ["volume", "U1", 10],
     ["volume", "U1", 10],
   ]);
+});
+
+test("a link is added as the Add dialog reads it, and titles are escaped", async () => {
+  const added: string[] = [];
+  const coordinator = {
+    primeManager: async () => {},
+    agentSearch: async () => ({
+      ok: true,
+      results: [{ label: "Add playlist", reference: "bulkref_1" }],
+    }),
+    agentAdd: async (_userId: string, reference: string) => {
+      added.push(reference);
+      return { ok: true, added: [{ title: "<Tom & Jerry>", artist: "A&B" }] };
+    },
+  } as unknown as Coordinator;
+  expect(
+    await runMentionCommand(coordinator, "U1", {
+      type: "add",
+      url: "https://www.youtube.com/playlist?list=PL1",
+    }),
+  ).toEqual({
+    ok: true,
+    text: "Added *&lt;Tom &amp; Jerry&gt;* by A&amp;B.",
+  });
+  expect(added).toEqual(["bulkref_1"]);
 });

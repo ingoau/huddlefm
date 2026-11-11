@@ -1,4 +1,5 @@
 import type { Coordinator } from "./coordinator.ts";
+import { escape } from "./coordinator-ui.ts";
 import { logger } from "./logger.ts";
 import type { LoopMode, MediaMode } from "./store.ts";
 
@@ -175,7 +176,7 @@ export function normalizeCommand(text: string) {
   let normalized = text
     .toLowerCase()
     .replace(/[‘’']/g, "")
-    .replace(/[.!?,]+/g, " ")
+    .replace(/[.!?,:;()[\]{}"“”]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   normalized = normalized.replace(/^please /, "").replace(/ please$/, "");
@@ -335,8 +336,11 @@ const failure = (result: { ok: false; error?: unknown }): Outcome => ({
       : "I couldn't do that. Try again in a moment.",
 });
 
+// Titles are escaped, as the player does, so Slack shows them as written.
 const describe = (track: { title: string; artist?: string }) =>
-  track.artist ? `*${track.title}* by ${track.artist}` : `*${track.title}*`;
+  track.artist
+    ? `*${escape(track.title)}* by ${escape(track.artist)}`
+    : `*${escape(track.title)}*`;
 
 const clock = (seconds: number) => {
   const whole = Math.max(0, Math.floor(seconds));
@@ -553,14 +557,14 @@ async function runCommand(
         : failure(result);
     }
     case "add": {
-      const result = await coordinator.agentAdd(
-        userId,
-        command.url,
-        undefined,
-        {
-          awaitPreparation: false,
-        },
-      );
+      // As the Add dialog reads a pasted link, so a playlist link adds the
+      // playlist; the link itself is the fallback, for its error.
+      const search = await coordinator.agentSearch(userId, command.url);
+      const reference =
+        (search.ok && search.results[0]?.reference) || command.url;
+      const result = await coordinator.agentAdd(userId, reference, undefined, {
+        awaitPreparation: false,
+      });
       if (!result.ok) return failure(result);
       const [first] = result.added;
       return {
