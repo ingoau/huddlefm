@@ -580,6 +580,7 @@ export class Coordinator {
       queueLimit: number;
       initialVolume: number;
       autoplay?: AutoplayMode;
+      autoplayQueue?: number;
       duckingMode: DuckingMode;
       aloneMs: number;
       idleMs: number;
@@ -5116,10 +5117,14 @@ export class Coordinator {
   }
 
   // Autoplay only ever tops up an empty queue, one song at a time.
+  // Autoplay fills in behind nothing anyone asked for, up to AUTOPLAY_QUEUE
+  // picks at a time.
   private autoplayHasRoom() {
+    const picks = this.queue.filter((track) => track.automatic).length;
     return (
-      !this.queue.length &&
-      Number(Boolean(this.current)) < this.config.queueLimit
+      this.queue.length === picks &&
+      picks < (this.config.autoplayQueue ?? 1) &&
+      this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit
     );
   }
 
@@ -8644,7 +8649,7 @@ export class Coordinator {
           next && current?.live
             ? "Up next: waiting on the live stream"
             : next
-              ? `${next.live ? "🔴 LIVE · " : ""}${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}`
+              ? `${next.live ? "🔴 LIVE · " : ""}${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}${next.playedFrom ? " · via SoundCloud" : ""}`
               : findingAutoplay
                 ? "Autoplay is picking a recommendation"
                 : this.videoMode
