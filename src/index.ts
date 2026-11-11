@@ -8,7 +8,13 @@ import {
 import { AuditLog } from "./audit-log.ts";
 import { canvasMarkdown, type ActiveCanvasSession } from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
-import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
+import {
+  agentConfigured,
+  isBareMention,
+  runAgentCommand,
+  stripMentions,
+} from "./agent.ts";
+import { parseMentionCommand, runMentionCommand } from "./mention-commands.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
 import { parseLikeValue, settingsMessageView } from "./coordinator-ui.ts";
@@ -1742,6 +1748,9 @@ await slackHuddle.start((event) => {
     if (mentioned) {
       const settleMention = mentionReaction(event.channelId, event.messageTs);
       const bare = isBareMention(event.text, botUserId);
+      const command = bare
+        ? undefined
+        : parseMentionCommand(stripMentions(event.text, botUserId));
       const coordinator = runtime?.coordinator;
       const failed = (name: string, message: string) => (error: unknown) => {
         settleMention(false);
@@ -1792,12 +1801,30 @@ await slackHuddle.start((event) => {
           .repost()
           .then(() => settleMention(true))
           .catch(actionFailed);
+      } else if (command) {
+        // A command runs straight away, with no AI call.
+        void runMentionCommand(coordinator, event.userId, command, {
+          agentAvailable: agentConfigured(),
+        })
+          .then((reply) => {
+            settleMention(reply.ok);
+            return mentionEphemeral(
+              event.channelId,
+              event.userId,
+              reply.text,
+              event.threadTs,
+              coordinator.room.companionChannelId,
+            );
+          })
+          .catch(
+            failed("mention_command_failed", "Could not run mention command"),
+          );
       } else if (!agentConfigured()) {
         settleMention(false);
         void mentionEphemeral(
           event.channelId,
           event.userId,
-          "AI controls aren’t configured. Set OPENROUTER_API_KEY, or mention me with nothing else to bring the player to the bottom of the thread.",
+          "I didn’t recognise that command. Mention me with `help` to see what I can do, or with nothing else to bring the player to the bottom of the thread.",
           event.threadTs,
           coordinator.room.companionChannelId,
         ).catch(

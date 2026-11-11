@@ -30,7 +30,7 @@ Invite the bot to a huddle, or mention it in the huddle's thread. It joins and p
 - **DM the bot** to get a short note on how to start a session, with a button that opens your own settings (scrobbling, Huddle mix, Jellyfin and Your data) outside any session.
 - **Video mode** takes one of the huddle's two screen share slots while it's on.
 - **Jellyfin**: paste a link from Jellyfin's web app into Add to queue and approve the Quick Connect code. The server has to be reachable from the internet, and only you can use servers you link.
-- **Ask it**: with `OPENROUTER_API_KEY` set, mention the bot with a request like `@HuddleFM add something by Radiohead`. It has your own permissions, and replies only to you.
+- **Mention it**: mention the bot with a command like `@HuddleFM skip`, `volume up`, `end session` or a link on its own, and it happens straight away, small typos included; `@HuddleFM help` lists them. With `OPENROUTER_API_KEY` set, anything else, like `@HuddleFM add three songs by Radiohead`, goes to an AI agent, which is rate limited. Either way it has your own permissions, and replies only to you.
 
 ## Self hosting
 

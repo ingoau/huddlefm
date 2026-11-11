@@ -1996,6 +1996,29 @@ export class Coordinator {
     });
   }
 
+  /** Move the volume by `change` percent, for a mention's volume up or down. */
+  async agentChangeVolume(
+    userId: string,
+    change: number,
+    signal?: AbortSignal,
+  ) {
+    return this.enqueue(async () => {
+      throwIfAborted(signal);
+      if (!this.can(userId, "volume")) return this.denied(userId);
+      if (!Number.isFinite(change))
+        return { ok: false as const, error: "Change must be a number." };
+      const percent = Math.min(
+        100,
+        Math.max(0, Math.round(this.volume * 100) + change),
+      );
+      await this.setVolume(userId, percent / 100);
+      return {
+        ok: true as const,
+        volumePercent: Math.round(this.volume * 100),
+      };
+    });
+  }
+
   async agentUpdateSettings(
     userId: string,
     patch: {
@@ -2233,7 +2256,8 @@ export class Coordinator {
             ? "You do not have permission to end this session."
             : "Join the huddle before using the player.",
         };
-      await this.end(userId, "ended by agent");
+      // Said as the buttons say it: who asked, not how.
+      await this.end(userId, "ended by host");
       return { ok: true as const, ended: true };
     });
   }

@@ -29,13 +29,15 @@ Every option HuddleFM reads from `.env`. Only the Slack credentials are required
 
 ## Optional features
 
-| Variable                                  | Default                    | Purpose                                                                                                               |
-| ----------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling                                                                        |
-| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                                           |
-| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                                          |
-| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                                                |
-| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys |
+| Variable                                                    | Default                    | Purpose                                                                                                               |
+| ----------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET`                   | unset                      | Enables Last.fm account linking for scrobbling                                                                        |
+| `OPENROUTER_API_KEY`                                        | unset                      | Enables @mention AI controls via OpenRouter                                                                           |
+| `AGENT_USER_LIMIT_PER_MINUTE` / `AGENT_USER_LIMIT_PER_HOUR` | `3` / `20`                 | AI requests each person may make; mention commands like `skip` don't count                                            |
+| `AGENT_LIMIT_PER_HOUR`                                      | `100`                      | AI requests the whole bot may make an hour                                                                            |
+| `POSTHOG_API_KEY`                                           | unset                      | Enables PostHog analytics and error tracking                                                                          |
+| `POSTHOG_HOST`                                              | `https://us.i.posthog.com` | PostHog ingestion host                                                                                                |
+| `LOCAL_CONTROL_TOKEN`                                       | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys |
 
 ## Playback and limits
 
