@@ -745,6 +745,9 @@ export class TrackCatalog {
   private proxy?: PublicNetworkProxy;
   private tokens?: PoTokenServer;
   private cookies?: YouTubeCookies;
+  // Until when YouTube is taken to refuse this server, after it last did:
+  // songs go straight to SoundCloud rather than wait out YouTube's retries.
+  private youtubeRefusedUntil = 0;
   private activePreparations = 0;
   private extractions = new Map<
     string,
@@ -851,6 +854,40 @@ export class TrackCatalog {
       );
       return [];
     }
+  }
+
+  /**
+   * Downloads the same song from SoundCloud, noting where it came from, or
+   * nothing when SoundCloud has no match.
+   */
+  private async fromSoundCloud(
+    track: TrackMetadata,
+    download: string[],
+    entryId: string,
+    signal?: AbortSignal,
+  ) {
+    const match = await this.soundCloudFor(track);
+    if (!match) return;
+    log.warn(
+      {
+        event: "download_fallback",
+        entryId,
+        sourceId: track.sourceId,
+        fallbackUrl: match.canonicalUrl,
+      },
+      "Playing a YouTube track from SoundCloud",
+    );
+    const result = await this.extract(
+      [...download, "--", match.canonicalUrl],
+      180_000,
+      signal,
+    );
+    track.playedFrom = {
+      source: "SoundCloud",
+      url: match.canonicalUrl,
+      title: `${match.title} — ${match.artist}`,
+    };
+    return result;
   }
 
   /** The same song on SoundCloud, for a YouTube one this server can't get. */
@@ -2272,7 +2309,13 @@ export class TrackCatalog {
       path,
     ];
     const extraction = this.reusableExtraction(track.canonicalUrl);
-    let result = extraction
+    let result =
+      Date.now() < this.youtubeRefusedUntil && isYoutubeVideoId(track.sourceId)
+        ? await timed("soundcloud_fallback", () =>
+            this.fromSoundCloud(track, download, entryId, signal),
+          )
+        : undefined;
+    result ??= extraction
       ? await timed("download", () =>
           this.downloadExtracted(
             extraction,
@@ -2284,7 +2327,7 @@ export class TrackCatalog {
           ),
         )
       : undefined;
-    const extractionReused = Boolean(result);
+    const extractionReused = Boolean(result) && !track.playedFrom;
     if (!result) {
       try {
         result = await timed("download", () =>
@@ -2326,35 +2369,15 @@ export class TrackCatalog {
             throw retryError;
           // YouTube refuses this server's address, which nothing on our side
           // gets past, so the same song is played from SoundCloud instead.
-          const match = await timed("soundcloud_fallback", () =>
-            this.soundCloudFor(track),
+          this.youtubeRefusedUntil = Date.now() + 15 * 60_000;
+          result = await timed("soundcloud_fallback", () =>
+            this.fromSoundCloud(track, download, entryId, signal),
           );
-          if (!match)
+          if (!result)
             throw new TrackError(
               "YouTube is blocking this server, and SoundCloud doesn't have this song",
               { detail: trackFailureDetail(retryError) },
             );
-          log.warn(
-            {
-              event: "download_fallback",
-              entryId,
-              sourceId: track.sourceId,
-              fallbackUrl: match.canonicalUrl,
-            },
-            "Playing a YouTube track from SoundCloud",
-          );
-          result = await timed("download_fallback", () =>
-            this.extract(
-              [...download, "--", match.canonicalUrl],
-              180_000,
-              signal,
-            ),
-          );
-          track.playedFrom = {
-            source: "SoundCloud",
-            url: match.canonicalUrl,
-            title: `${match.title} — ${match.artist}`,
-          };
         }
       }
     }

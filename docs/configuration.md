@@ -52,6 +52,9 @@ itself moves to the app's bot user:
 - Thread messages are read from the app's own events, so the signed-in
   account's messages and DMs are not processed. Its realtime connection is
   still used for Huddle events (started, joined, left) and to join Huddles.
+- That account counts as a listener, as its owner may be in the Huddle on
+  another device. HuddleFM so stays in a Huddle with nobody else in it until
+  it is ended from the player, or nothing plays for `IDLE_TIMEOUT_MS`.
 
 | Variable              | Bot user mode                                      |
 | --------------------- | -------------------------------------------------- |
