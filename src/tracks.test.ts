@@ -2419,4 +2419,18 @@ test("matches the same song on SoundCloud and skips other versions", () => {
   expect(
     soundCloudMatch(found, { title: "Other Song", artist: "Artist A" }),
   ).toBeUndefined();
+  // A stranger's upload with the title somewhere in it is not the song.
+  expect(
+    soundCloudMatch(
+      result([entry("ScreenRecording Song Name 10", "stranger", 236)]),
+      { title: "Song Name", artist: "Artist A", duration: 237 },
+    ),
+  ).toBeUndefined();
+  expect(
+    soundCloudMatch(result([entry("Artist A - Song Name", "uploader", 236)]), {
+      title: "Song Name",
+      artist: "Artist A",
+      duration: 237,
+    })?.artist,
+  ).toBe("uploader");
 });
