@@ -1464,7 +1464,6 @@ const server = Bun.serve({
     "/mcp": (request: Request) =>
       mcpResponse(request, {
         token: config.mcpToken,
-        channels: config.mcpChannelIds,
         actorId: config.mcpUserId ?? [...config.adminUserIds][0],
         version: "1",
         session(channel) {

@@ -4,8 +4,6 @@ import type { IntegrationCommand } from "./integration.ts";
 /** What the MCP server needs of the running app. */
 export type McpHost = {
   token?: string;
-  // Channels the MCP server may act in; empty means any with a session.
-  channels: Set<string>;
   // Who commands run as, with that user's permissions in the session.
   actorId?: string;
   version: string;
@@ -183,30 +181,18 @@ async function call(
 ) {
   const args = params.arguments ?? {};
   const target = typeof args.channel === "string" ? args.channel : "";
-  const allowed = () => !host.channels.size || host.channels.has(target);
   if (params.name === joinTool.name) {
     const threadTs = typeof args.thread_ts === "string" ? args.thread_ts : "";
     const user = typeof args.user === "string" ? args.user : "";
     if (!target || !threadTs || !user)
       return text({ error: "channel, thread_ts and user are required" }, true);
-    if (!allowed())
-      return text(
-        { error: "This channel is not one HuddleFM's MCP may control" },
-        true,
-      );
     const outcome = await host.join(target, threadTs, user);
     return text(outcome, !outcome.ok);
   }
   const definition = mcpTools.find((item) => item.name === params.name);
   if (!definition) return text({ error: "Unknown tool" }, true);
-  // Only a session running in the channel the caller names, and only in
-  // MCP_CHANNEL_IDS when that is set.
+  // Only the session running in the channel the caller names.
   if (!target) return text({ error: "channel is required" }, true);
-  if (!allowed())
-    return text(
-      { error: "This channel is not one HuddleFM's MCP may control" },
-      true,
-    );
   const session = host.session(target);
   if (!session)
     return text({ error: "No HuddleFM session in that channel" }, true);
