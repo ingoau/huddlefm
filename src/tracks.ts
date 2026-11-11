@@ -748,10 +748,12 @@ export class TrackCatalog {
   private cookies?: YouTubeCookies;
   // Until when YouTube is taken to refuse this server, after it last did:
   // songs go straight to SoundCloud rather than wait out YouTube's retries.
-  private youtubeRefusedUntil = 0;
+  // Until the first check answers, it is taken to, as on a server it blocks
+  // waiting for that costs the first songs most of a minute each.
+  private youtubeRefusedUntil = Date.now() + 2 * 60_000;
   private youtubeProbeTimer?: ReturnType<typeof setInterval>;
-  // SoundCloud's match for each YouTube song looked up, or null for none.
-  private soundCloudMatches = new Map<string, TrackMetadata | null>();
+  // SoundCloud's matches for each YouTube song looked up, best first.
+  private soundCloudFound = new Map<string, TrackMetadata[]>();
   private activePreparations = 0;
   private extractions = new Map<
     string,
@@ -909,42 +911,66 @@ export class TrackCatalog {
     entryId: string,
     signal?: AbortSignal,
   ) {
-    const match = await this.soundCloudFor(track);
-    if (!match) return;
-    log.warn(
-      {
-        event: "download_fallback",
-        entryId,
-        sourceId: track.sourceId,
-        fallbackUrl: match.canonicalUrl,
-      },
-      "Playing a YouTube track from SoundCloud",
-    );
-    const result = await this.extract(
-      [...download, "--", match.canonicalUrl],
-      180_000,
-      signal,
-    );
-    track.playedFrom = {
-      source: "SoundCloud",
-      url: match.canonicalUrl,
-      title: `${match.title} — ${match.artist}`,
-    };
-    return result;
+    const found = await this.soundCloudFor(track);
+    // An upload can still refuse to download (DRM, taken down), so the next
+    // few are tried before giving up.
+    for (const [index, match] of found.slice(0, 3).entries()) {
+      log.warn(
+        {
+          event: "download_fallback",
+          entryId,
+          sourceId: track.sourceId,
+          fallbackUrl: match.canonicalUrl,
+        },
+        "Playing a YouTube track from SoundCloud",
+      );
+      try {
+        const result = await this.extract(
+          [...download, "--", match.canonicalUrl],
+          180_000,
+          signal,
+        );
+        track.playedFrom = {
+          source: "SoundCloud",
+          url: match.canonicalUrl,
+          title: `${match.title} — ${match.artist}`,
+        };
+        return result;
+      } catch (error) {
+        if (signal?.aborted || index === Math.min(found.length, 3) - 1)
+          throw error;
+        log.warn(
+          {
+            event: "download_fallback_failed",
+            entryId,
+            fallbackUrl: match.canonicalUrl,
+            reason: trackFailureDetail(error),
+          },
+          "SoundCloud upload failed; trying the next",
+        );
+        // Not offered again for this song.
+        this.soundCloudFound.set(
+          track.sourceId,
+          found.filter((item) => item !== match),
+        );
+      }
+    }
+    return;
   }
 
   /** The same song on SoundCloud, for a YouTube one this server can't get. */
   private async soundCloudFor(track: TrackMetadata) {
-    if (this.soundCloudMatches.has(track.sourceId))
-      return this.soundCloudMatches.get(track.sourceId) ?? undefined;
+    const known = this.soundCloudFound.get(track.sourceId);
+    if (known) return known;
     const query = `${firstArtist(track.artist)} ${coreTitle(track.title)}`;
-    const match = soundCloudMatch(await this.searchSoundCloud(query, 8), track);
-    this.soundCloudMatches.set(track.sourceId, match ?? null);
-    if (this.soundCloudMatches.size > 500)
-      this.soundCloudMatches.delete(
-        this.soundCloudMatches.keys().next().value!,
-      );
-    return match;
+    const found = soundCloudMatches(
+      await this.searchSoundCloud(query, 8),
+      track,
+    );
+    this.soundCloudFound.set(track.sourceId, found);
+    if (this.soundCloudFound.size > 500)
+      this.soundCloudFound.delete(this.soundCloudFound.keys().next().value!);
+    return found;
   }
 
   /**
@@ -958,7 +984,7 @@ export class TrackCatalog {
       !isYoutubeVideoId(track.sourceId)
     )
       return true;
-    return Boolean(await this.soundCloudFor(track));
+    return (await this.soundCloudFor(track)).length > 0;
   }
 
   /** What video mode allows. */
@@ -3824,12 +3850,12 @@ export function soundCloudTracks(result: unknown): TrackMetadata[] {
  * cover...), a full length rather than a 30-second preview, and close to the
  * song's length when that is known. One by the same artist goes first.
  */
-export function soundCloudMatch(
+export function soundCloudMatches(
   candidates: TrackMetadata[],
   wanted: Pick<TrackMetadata, "title" | "artist" | "duration">,
-) {
+): TrackMetadata[] {
   const title = normalizeToken(coreTitle(wanted.title));
-  if (!title) return;
+  if (!title) return [];
   const fits = candidates.filter((candidate) => {
     const name = normalizeToken(candidate.title);
     if (!` ${name} `.includes(` ${title} `)) return false;
@@ -3850,5 +3876,13 @@ export function soundCloudMatch(
     sameArtist(candidate.artist, wanted.artist) ||
     (artist !== "" &&
       ` ${normalizeToken(candidate.title)} `.includes(` ${artist} `));
-  return fits.find(byArtist);
+  return fits.filter(byArtist);
+}
+
+/** The best SoundCloud result for a song, as soundCloudMatches orders them. */
+export function soundCloudMatch(
+  candidates: TrackMetadata[],
+  wanted: Pick<TrackMetadata, "title" | "artist" | "duration">,
+) {
+  return soundCloudMatches(candidates, wanted)[0];
 }
