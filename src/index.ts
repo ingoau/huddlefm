@@ -1755,7 +1755,19 @@ async function youtubeCookies(interaction: Interaction) {
     await catalog.replaceYouTubeCookies(
       await slackApp.takeUploadedFile(fileId),
     );
-    reply = "YouTube cookies updated. The next song signs in with them.";
+    await slackApp.dm(
+      interaction.userId,
+      "YouTube cookies saved. Checking them with a YouTube download…",
+    );
+    const check = await catalog.checkYouTubeCookies();
+    reply =
+      check.verdict === "works"
+        ? ":white_check_mark: The cookies work: YouTube downloads from this server again."
+        : check.verdict === "refused"
+          ? ":x: YouTube refused these cookies (signed out or expired). Export them again from a private window and upload the new file."
+          : ":warning: The cookies are saved, but YouTube still blocks downloads from this server's address, so songs keep playing from SoundCloud.";
+    if (!check.ok && check.reason)
+      reply += `\n> ${check.reason.replace(/\s+/g, " ").slice(0, 200)}`;
   } catch (error) {
     log.warn(
       { event: "youtube_cookies_upload_failed", err: error },
