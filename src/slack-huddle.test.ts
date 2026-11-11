@@ -333,6 +333,40 @@ test("normalizes a Huddle starting in a channel", () => {
   ).toBeUndefined();
 });
 
+test("finds a Huddle started from inside a thread, the latest that is on", () => {
+  const thread = {
+    ok: true,
+    messages: [
+      { ts: "1.0", text: "play something" },
+      {
+        ts: "2.0",
+        subtype: "thread_broadcast",
+        room: { id: "ROLD", thread_root_ts: "1.0", date_end: 5 },
+      },
+      {
+        ts: "3.0",
+        subtype: "thread_broadcast",
+        room: {
+          id: "RNEW",
+          thread_root_ts: "1.0",
+          has_ended: false,
+          participants: ["U1"],
+        },
+      },
+      {
+        ts: "4.0",
+        subtype: "thread_broadcast",
+        room: { id: "ROTHER", thread_root_ts: "9.0" },
+      },
+    ],
+  };
+  expect(activeHuddleRoom(thread, "1.0")).toEqual({
+    callId: "RNEW",
+    participantIds: ["U1"],
+  });
+  expect(activeHuddleRoom(thread, "3.0")).toBeUndefined();
+});
+
 test("only accepts active Huddle thread roots", () => {
   const active = {
     ok: true,
