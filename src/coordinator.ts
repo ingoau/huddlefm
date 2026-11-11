@@ -586,6 +586,7 @@ export class Coordinator {
       warningMs: number;
       port: number;
       managerUserId?: string;
+      adminUserIds?: Set<string>;
       excludedUserIds: Set<string>;
       footer?: string;
       video?: { sessionLimit: number };
@@ -3219,7 +3220,7 @@ export class Coordinator {
   // accounts cannot let themselves in this way.
   private outsidePermissions(userId: string): RolePermissions {
     if (this.isExcluded(userId)) return "none";
-    if (userId === this.config.managerUserId) return "host";
+    if (this.configuredManager(userId)) return "host";
     const granted: RolePermissions[] = [];
     if (this.workspaceAdmins?.isAdmin(userId))
       granted.push(this.workspaceAdmins.permissions);
@@ -3284,7 +3285,7 @@ export class Coordinator {
       channelDefaults &&
       managers?.permissions !== "none" &&
       !this.roomId.startsWith("D") &&
-      userId !== this.config.managerUserId;
+      !this.configuredManager(userId);
     if (
       managers &&
       (matters(managers.permissions) || savesDefaults) &&
@@ -3372,8 +3373,22 @@ export class Coordinator {
   private managesChannel(userId: string) {
     if (this.isExcluded(userId) || this.roomId.startsWith("D")) return false;
     return (
-      userId === this.config.managerUserId ||
+      this.configuredManager(userId) ||
       this.channelManagers?.isManager(this.roomId, userId) === true
+    );
+  }
+
+  // MANAGER_USER_ID and ADMIN_USER_IDS, who manage every channel.
+  private configuredManager(userId: string) {
+    return (
+      userId === this.config.managerUserId ||
+      this.config.adminUserIds?.has(userId) === true
+    );
+  }
+
+  private botAdmin(userId: string) {
+    return (
+      !this.isExcluded(userId) && this.config.adminUserIds?.has(userId) === true
     );
   }
 
@@ -4562,6 +4577,12 @@ export class Coordinator {
       const media = await prepared;
       await this.enqueue(async () => {
         if (!(await this.acceptPrepared(entry, media))) return;
+        if (entry.playedFrom)
+          void this.notice(
+            entry.requesterId,
+            `YouTube is blocking this server, so *${escape(entry.title)}* plays from SoundCloud: <${entry.playedFrom.url}|${escape(entry.playedFrom.title)}>`,
+            "info",
+          );
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
@@ -6789,7 +6810,7 @@ export class Coordinator {
               ];
               return [
                 section(
-                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.live ? "🔴 LIVE · " : ""}${addedBy(track)}`,
+                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.live ? "🔴 LIVE · " : ""}${track.playedFrom ? "via SoundCloud · " : ""}${addedBy(track)}`,
                   `queue_item_${track.id}`,
                 ),
                 ...when(
@@ -7015,7 +7036,16 @@ export class Coordinator {
         endSession: this.can(userId, "end-session"),
         saveDefaults,
         autoJoin: this.managesChannel(userId),
+        botAdmin: this.botAdmin(userId),
       },
+      ...(this.botAdmin(userId)
+        ? {
+            bot: {
+              admins: [...this.config.adminUserIds!],
+              youtube: this.tracks.youtubeCookieStatus(),
+            },
+          }
+        : {}),
       session: this.sessionSettings(),
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
       ...(this.jellyfinUi ? { jellyfin: this.jellyfinUi.summary(userId) } : {}),
@@ -8026,7 +8056,7 @@ export class Coordinator {
   private isChannelManager(userId: string) {
     return (
       !this.isExcluded(userId) &&
-      (userId === this.config.managerUserId ||
+      (this.configuredManager(userId) ||
         this.channelManagers?.isManager(this.roomId, userId) === true)
     );
   }
@@ -8469,7 +8499,7 @@ export class Coordinator {
         title: plain(current ? displayTitle(current) : "Nothing playing"),
         subtitle: plain(
           current
-            ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}`
+            ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}${current.playedFrom ? " · via SoundCloud" : ""}`
             : this.videoMode
               ? "Ready to watch"
               : "Ready for music",

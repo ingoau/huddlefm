@@ -1,12 +1,10 @@
+import { existsSync } from "node:fs";
 import { parseCanvasSections } from "./canvas.ts";
 import { parseDuckingMode } from "./ducking.ts";
 
-const required = [
-  "SLACK_WORKSPACE_URL",
-  "SLACK_XOXP",
-  "SLACK_XAPP",
-  "SLACK_XOXD",
-] as const;
+const uploadedCookiesFile = "data/youtube-cookies.txt";
+
+const required = ["SLACK_WORKSPACE_URL", "SLACK_XAPP", "SLACK_XOXD"] as const;
 
 export function parseIds(value = "") {
   return new Set(value.split(/[\s,]+/).filter(Boolean));
@@ -112,10 +110,15 @@ export function loadConfig() {
     optionalText(process.env.SLACK_ENTERPRISE_XOXC) ??
     optionalText(process.env.SLACK_XOXC);
   if (!xoxc) throw new Error("Missing SLACK_XOXC or SLACK_ENTERPRISE_XOXC");
+  // With a bot token the app never uses a user token.
+  const xoxb = optionalText(process.env.SLACK_XOXB);
+  const xoxp = xoxb ? undefined : optionalText(process.env.SLACK_XOXP);
+  if (!xoxb && !xoxp) throw new Error("Missing SLACK_XOXP or SLACK_XOXB");
 
   return {
     workspaceUrl: process.env.SLACK_WORKSPACE_URL!,
-    xoxp: process.env.SLACK_XOXP!,
+    xoxp,
+    xoxb,
     xapp: process.env.SLACK_XAPP!,
     xoxc,
     xoxd: process.env.SLACK_XOXD!,
@@ -155,12 +158,19 @@ export function loadConfig() {
     video: parseVideoLimits(process.env),
     // The image sets this; empty turns proof-of-origin tokens off.
     potServerHome: optionalText(process.env.BGUTIL_SERVER_HOME),
-    youtubeCookiesFile: optionalText(process.env.YOUTUBE_COOKIES_FILE),
+    // Cookies an admin uploaded from Settings are kept here when
+    // YOUTUBE_COOKIES_FILE is unset, and signed in with after a restart.
+    youtubeCookiesFile:
+      optionalText(process.env.YOUTUBE_COOKIES_FILE) ??
+      (existsSync(uploadedCookiesFile) ? uploadedCookiesFile : undefined),
     aloneMs: Number(process.env.ALONE_TIMEOUT_MS ?? 120_000),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID,
+    // HuddleFM's own admins: hosts and channel managers everywhere, and the
+    // only ones who see the Admin tab.
+    adminUserIds: parseIds(process.env.ADMIN_USER_IDS),
     rolePermissions: parseRolePermissions(process.env),
     excludedUserIds: parseIds(process.env.EXCLUDED_USER_IDS),
     integrationUserIds: parseIds(process.env.INTEGRATION_USER_IDS),

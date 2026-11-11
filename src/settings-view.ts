@@ -99,13 +99,20 @@ export function submittedHuddleMixSources(
   ) as Partial<Record<HuddleMixSource, boolean>>;
 }
 
-export const settingsTabs = ["you", "session", "channel", "host"] as const;
+export const settingsTabs = [
+  "you",
+  "session",
+  "channel",
+  "host",
+  "admin",
+] as const;
 export type SettingsTab = (typeof settingsTabs)[number];
 const tabLabels: Record<SettingsTab, string> = {
   you: "You",
   session: "Session",
   channel: "Channel",
   host: "Host",
+  admin: "Admin",
 };
 // Communism mode's session is everyone's.
 function tabLabel(tab: SettingsTab, communism: boolean) {
@@ -299,6 +306,13 @@ export type SettingsViewOptions = {
     saveDefaults: boolean;
     // Whether the viewer may turn the channel's auto join on or off.
     autoJoin: boolean;
+    // Whether the viewer is one of ADMIN_USER_IDS.
+    botAdmin?: boolean;
+  };
+  // What the Admin tab shows, to ADMIN_USER_IDS only.
+  bot?: {
+    admins: string[];
+    youtube: { signedIn: boolean; invalid: boolean; loadedAt?: number };
   };
   session: SessionSettingsView;
   user: UserSettingsView;
@@ -327,7 +341,9 @@ export function visibleSettingsTabs(
         ? access.volume || access.configure || access.endSession
         : tab === "channel"
           ? access.saveDefaults || access.autoJoin || channel.saves.length > 0
-          : access.admin,
+          : tab === "host"
+            ? access.admin
+            : access.botAdmin === true,
   );
 }
 
@@ -377,7 +393,9 @@ export function settingsView(options: SettingsViewOptions) {
         ? sessionBlocks(options, form)
         : tab === "channel"
           ? channelBlocks(options)
-          : hostBlocks(options, form);
+          : tab === "host"
+            ? hostBlocks(options, form)
+            : adminBlocks(options);
   // Last on the Host tab, as there is no going back from it.
   const communismBlocks = when(
     tab === "host" && access.admin && !options.session.communism,
@@ -812,6 +830,39 @@ export function submittedScrobbleServices(
       .filter((service) => offered.has(service))
       .map((service) => [service, ticked.has(service)]),
   ) as Partial<Record<ScrobbleService, boolean>>;
+}
+
+export const uploadYouTubeCookiesAction = "upload_youtube_cookies";
+
+function adminBlocks(options: SettingsViewOptions) {
+  const bot = options.bot;
+  if (!bot) return [];
+  const youtube = bot.youtube;
+  const status = !youtube.signedIn
+    ? "*Not signed in.* YouTube plays signed out."
+    : youtube.invalid
+      ? "*Refused.* YouTube says the cookies are no longer valid; upload new ones."
+      : `*Signed in*${youtube.loadedAt ? ` since ${slackDate(youtube.loadedAt)}` : ""}.`;
+  return [
+    { type: "header", text: plain("Admins") },
+    section(
+      bot.admins.map((userId) => `• <@${userId}>`).join("\n") || "None",
+      "bot_admins",
+    ),
+    context(
+      "bot_admins_hint",
+      "Set by ADMIN_USER_IDS. Admins are hosts and channel managers everywhere.",
+    ),
+    { type: "header", text: plain("YouTube cookies") },
+    {
+      type: "section",
+      block_id: "youtube_cookies",
+      text: { type: "mrkdwn", text: status },
+      accessory: button(uploadYouTubeCookiesAction, plain("Upload"), {
+        value: options.sessionId,
+      }),
+    },
+  ];
 }
 
 function hostBlocks(options: SettingsViewOptions, form: FormState) {

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   ackEnvelope,
   normalizeInteraction,
@@ -6,6 +6,7 @@ import {
   slackErrorCode,
   slackRetryDelay,
   startHeartbeat,
+  threadMessage,
   type HeartbeatSocket,
 } from "./slack-app.ts";
 
@@ -261,4 +262,43 @@ test("names a listener by display name, and keeps full names for records", async
   expect(await adapter.displayName("U4")).toBe("U4");
   failing = false;
   expect(await adapter.displayName("U4")).toBe("dee");
+});
+
+describe("threadMessage", () => {
+  const event = (fields: Record<string, unknown>) => ({
+    event: {
+      type: "message",
+      channel: "C01TESTCHAN",
+      thread_ts: "1.0",
+      ts: "2.0",
+      user: "U01TESTUSER",
+      text: "hi <@U01TESTBOT>",
+      ...fields,
+    },
+  });
+
+  test("reads a thread reply", () => {
+    expect(threadMessage(event({}))).toEqual({
+      channelId: "C01TESTCHAN",
+      threadTs: "1.0",
+      messageTs: "2.0",
+      userId: "U01TESTUSER",
+      text: "hi <@U01TESTBOT>",
+    });
+  });
+
+  test("reads an app mention", () => {
+    expect(threadMessage(event({ type: "app_mention" }))?.messageTs).toBe(
+      "2.0",
+    );
+  });
+
+  test("skips top-level, edited and other events", () => {
+    expect(threadMessage(event({ thread_ts: undefined }))).toBeUndefined();
+    expect(
+      threadMessage(event({ subtype: "message_changed" })),
+    ).toBeUndefined();
+    expect(threadMessage(event({ type: "reaction_added" }))).toBeUndefined();
+    expect(threadMessage(undefined)).toBeUndefined();
+  });
 });
