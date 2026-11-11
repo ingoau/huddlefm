@@ -587,6 +587,9 @@ export class Coordinator {
       port: number;
       managerUserId?: string;
       adminUserIds?: Set<string>;
+      // The account HuddleFM joins through when its owner may be in the
+      // Huddle too, on another device; it alone does not keep a session.
+      huddleUserId?: string;
       excludedUserIds: Set<string>;
       footer?: string;
       video?: { sessionLimit: number };
@@ -9339,7 +9342,9 @@ export class Coordinator {
   private refreshIdle() {
     if (this.inactive()) return;
     const alone = () =>
-      ![...this.participants].some((id) => id !== this.botUserId);
+      ![...this.participants].some(
+        (id) => id !== this.botUserId && id !== this.config.huddleUserId,
+      );
     if (alone() && !this.aloneTimer) {
       this.warnLeaving(
         "alone",

@@ -287,6 +287,13 @@ describe("threadMessage", () => {
     });
   });
 
+  test("answers an app mention outside a thread in its own thread", () => {
+    expect(
+      threadMessage(event({ type: "app_mention", thread_ts: undefined }))
+        ?.threadTs,
+    ).toBe("2.0");
+  });
+
   test("reads an app mention", () => {
     expect(threadMessage(event({ type: "app_mention" }))?.messageTs).toBe(
       "2.0",
