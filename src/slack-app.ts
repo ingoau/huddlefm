@@ -73,7 +73,11 @@ export function threadMessage(payload: unknown): ThreadMessage | undefined {
     ?.event;
   if (!event || (event.type !== "message" && event.type !== "app_mention"))
     return;
-  const { channel, thread_ts, ts, user, text, subtype } = event;
+  const { channel, ts, user, text, subtype } = event;
+  // A mention outside a thread still gets an answer, that it is not a
+  // Huddle's thread.
+  const thread_ts =
+    event.thread_ts ?? (event.type === "app_mention" ? ts : undefined);
   if (
     subtype ||
     typeof channel !== "string" ||
@@ -731,6 +735,20 @@ export class SlackAppAdapter {
       ackEnvelope(socket, envelope.envelope_id!, payload);
     if (envelope.type === "events_api") {
       ack();
+      const event = (envelope.payload as { event?: Record<string, unknown> })
+        ?.event;
+      // Mentions are logged so a silent bot can be told from one Slack never
+      // reached; plain messages only at debug.
+      (event?.type === "app_mention" ? log.info : log.debug).call(
+        log,
+        {
+          event: "event_received",
+          type: event?.type,
+          channelId: event?.channel,
+          userId: event?.user,
+        },
+        "Slack event received",
+      );
       const message = threadMessage(envelope.payload);
       if (!message || !this.config.xoxb) return;
       // A mention arrives as both a message and an app_mention event.

@@ -190,6 +190,11 @@ let botUserId = "";
 // Mentions of this user trigger HuddleFM: the app's bot user when SLACK_XOXB
 // is set, otherwise the signed-in account.
 let mentionUserId = "";
+// Who a session takes for HuddleFM itself, whose actions are never a
+// listener's: the bot user when there is one, as then nothing is done in
+// Slack through the signed-in account but join the Huddle, and that
+// account's owner can listen in on another device and use the player.
+const sessionBotId = () => (config.xoxb ? mentionUserId : botUserId);
 let companions: CompanionChannels;
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
 let canvasTimer: ReturnType<typeof setInterval> | undefined;
@@ -781,13 +786,13 @@ async function joinHuddle(
     const coordinator = (runtime.coordinator = new Coordinator(
       joined,
       inviterUserId,
-      botUserId,
+      sessionBotId(),
       slackApp,
       store,
       catalog,
       lyrics,
       audit,
-      config,
+      { ...config, huddleUserId: config.xoxb ? botUserId : undefined },
       bootstrap.bridgeToken,
       (message) => void runtime?.media.send(message),
       async () => {
@@ -1390,7 +1395,7 @@ async function autoJoinHuddle(
   const inviterUserId = [event.creatorUserId, ...event.participantIds].find(
     (userId): userId is string =>
       Boolean(userId) &&
-      userId !== botUserId &&
+      userId !== sessionBotId() &&
       !config.excludedUserIds.has(userId!),
   );
   if (!inviterUserId) return;
@@ -1742,6 +1747,17 @@ slackApp.onAction = async (interaction) => {
   slackApp.start(),
 ]);
 mentionUserId = (await slackApp.botUserId()) ?? botUserId;
+log.info(
+  {
+    event: "mention_trigger",
+    mode: config.xoxb ? "bot user" : "signed-in account",
+    mentionUserId,
+    huddleUserId: botUserId,
+  },
+  config.xoxb
+    ? "Mentions of the app's bot user start HuddleFM"
+    : "Mentions of the signed-in account start HuddleFM",
+);
 companions = new CompanionChannels(store, slackHuddle, slackApp, botUserId);
 companions.start();
 for (const sessionId of saved.expiredIds) {
@@ -1810,10 +1826,15 @@ const handleHuddleEvent = (event: import("./slack-huddle.ts").HuddleEvent) => {
         ? roomOwnsThread(room, event.channelId, event.threadTs)
         : false;
     });
+    const mentions = new RegExp(`<@${mentionUserId}(?:\\|[^>]*)?>`).test(
+      event.text,
+    );
+    // With a bot user, the account HuddleFM plays through is never the one
+    // posting, so its messages are its owner's, who may ask like anyone.
     const mentioned =
-      event.userId !== botUserId &&
+      event.userId !== sessionBotId() &&
       event.userId !== mentionUserId &&
-      new RegExp(`<@${mentionUserId}(?:\\|[^>]*)?>`).test(event.text);
+      mentions;
     if (mentioned) {
       const settleMention = mentionReaction(event.channelId, event.messageTs);
       const bare = isBareMention(event.text, mentionUserId);
