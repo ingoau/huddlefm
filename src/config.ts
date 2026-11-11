@@ -177,6 +177,11 @@ export function loadConfig() {
     // HuddleFM's own admins: hosts and channel managers everywhere, and the
     // only ones who see the Admin tab.
     adminUserIds: parseIds(process.env.ADMIN_USER_IDS),
+    // HuddleFM's MCP server, at /mcp: on with a token, acting only in the
+    // listed channels, as MCP_USER_ID or else the first admin.
+    mcpToken: optionalText(process.env.MCP_TOKEN),
+    mcpChannelIds: parseIds(process.env.MCP_CHANNEL_IDS),
+    mcpUserId: optionalText(process.env.MCP_USER_ID),
     rolePermissions: parseRolePermissions(process.env),
     excludedUserIds: parseIds(process.env.EXCLUDED_USER_IDS),
     integrationUserIds: parseIds(process.env.INTEGRATION_USER_IDS),

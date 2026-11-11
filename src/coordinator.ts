@@ -3768,6 +3768,36 @@ export class Coordinator {
     );
   }
 
+  /**
+   * Runs a command from HuddleFM's MCP server as `userId`, with that user's
+   * permissions in the session, as a granted integration's would run.
+   */
+  async mcpCommand(userId: string, command: IntegrationCommand) {
+    if (this.inactive())
+      return { ok: false as const, error: "This session is not active." };
+    let result: Awaited<ReturnType<Coordinator["runIntegrationCommand"]>>;
+    try {
+      await this.primeManager(userId);
+      const run = { userId, done: false };
+      try {
+        result = await this.integrationRuns.run(run, () =>
+          this.runIntegrationCommand(userId, command),
+        );
+      } finally {
+        run.done = true;
+      }
+    } catch (error) {
+      result = { ok: false as const, error: message(error) };
+    }
+    if (command.type !== "status")
+      this.audit.record("mcp.command", userId, {
+        sessionId: this.id,
+        type: command.type,
+        ok: result.ok,
+      });
+    return result;
+  }
+
   private async runIntegrationCommand(
     userId: string,
     command: IntegrationCommand,
