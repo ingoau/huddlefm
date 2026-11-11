@@ -1,5 +1,6 @@
 import YTMusic from "ytmusic-api";
-import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { logger } from "./logger.ts";
 import { type CachedMedia, MediaCache } from "./media-cache.ts";
 import { PoTokenServer } from "./pot-server.ts";
@@ -748,6 +749,7 @@ export class TrackCatalog {
   // Until when YouTube is taken to refuse this server, after it last did:
   // songs go straight to SoundCloud rather than wait out YouTube's retries.
   private youtubeRefusedUntil = 0;
+  private youtubeProbeTimer?: ReturnType<typeof setInterval>;
   private activePreparations = 0;
   private extractions = new Map<
     string,
@@ -857,6 +859,45 @@ export class TrackCatalog {
   }
 
   /**
+   * Downloads a short public video, as songs would be, to learn whether
+   * YouTube refuses this server. While it does, songs go straight to
+   * SoundCloud.
+   */
+  private async probeYouTube() {
+    const directory = await mkdtemp(`${tmpdir()}/huddlefm-probe-`);
+    try {
+      await this.extract(
+        [
+          "--format",
+          "bestaudio/best",
+          "--no-playlist",
+          "--output",
+          `${directory}/probe.%(ext)s`,
+          "--",
+          youtubeProbeUrl,
+        ],
+        90_000,
+        this.closing.signal,
+      );
+      if (this.youtubeRefusedUntil)
+        log.info(
+          { event: "youtube_probe_ok" },
+          "YouTube downloads work again from this server",
+        );
+      this.youtubeRefusedUntil = 0;
+    } catch (error) {
+      if (this.closing.signal.aborted) return;
+      this.youtubeRefusedUntil = Date.now() + youtubeProbeInterval * 2;
+      log.warn(
+        { event: "youtube_probe_refused", reason: trackFailureDetail(error) },
+        "YouTube refuses this server; songs play from SoundCloud",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  /**
    * Downloads the same song from SoundCloud, noting where it came from, or
    * nothing when SoundCloud has no match.
    */
@@ -939,6 +980,14 @@ export class TrackCatalog {
         { event: "initialized", durationMs: Date.now() - startedAt },
         "Track catalog initialized",
       );
+      // Whether YouTube lets this server download is known before anyone
+      // waits on a song, and checked again while it does not.
+      void this.probeYouTube();
+      this.youtubeProbeTimer = setInterval(
+        () => void this.probeYouTube(),
+        youtubeProbeInterval,
+      );
+      this.youtubeProbeTimer.unref?.();
     } catch (error) {
       await this.close();
       throw error;
@@ -946,6 +995,7 @@ export class TrackCatalog {
   }
 
   async close() {
+    clearInterval(this.youtubeProbeTimer);
     this.closing.abort();
     await this.tokens?.close();
     await this.proxy?.close();
@@ -2309,12 +2359,17 @@ export class TrackCatalog {
       path,
     ];
     const extraction = this.reusableExtraction(track.canonicalUrl);
-    let result =
-      Date.now() < this.youtubeRefusedUntil && isYoutubeVideoId(track.sourceId)
-        ? await timed("soundcloud_fallback", () =>
-            this.fromSoundCloud(track, download, entryId, signal),
-          )
-        : undefined;
+    const refused =
+      Date.now() < this.youtubeRefusedUntil && isYoutubeVideoId(track.sourceId);
+    let result = refused
+      ? await timed("soundcloud_fallback", () =>
+          this.fromSoundCloud(track, download, entryId, signal),
+        )
+      : undefined;
+    if (refused && !result)
+      throw new TrackError(
+        "YouTube is blocking this server, and SoundCloud doesn't have this song",
+      );
     result ??= extraction
       ? await timed("download", () =>
           this.downloadExtracted(
@@ -2351,6 +2406,8 @@ export class TrackCatalog {
           "Retrying track download with embedded player",
         );
         try {
+          // The embedded player gets past some 403s, never the bot check.
+          if (/not a bot/i.test(detail)) throw error;
           result = await timed("download_retry", () =>
             this.extract(
               [
@@ -3701,6 +3758,11 @@ async function runOnce(
   return { stdout, stderr };
 }
 
+// A short public video, downloaded to learn whether YouTube refuses this
+// server, and how often that is checked.
+const youtubeProbeUrl = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+const youtubeProbeInterval = 15 * 60_000;
+
 // Versions of a song other than the one asked for, which a SoundCloud search
 // turns up a lot of.
 const otherVersion =
@@ -3757,8 +3819,12 @@ export function soundCloudMatch(
       Math.max(20, wanted.duration * 0.15)
     );
   });
+  // Anyone can upload under any title, so the artist has to be named too:
+  // as the uploader, or in the title.
+  const artist = normalizeToken(firstArtist(wanted.artist));
   const byArtist = (candidate: TrackMetadata) =>
     sameArtist(candidate.artist, wanted.artist) ||
-    normalizeToken(candidate.title).includes(normalizeToken(wanted.artist));
-  return fits.find(byArtist) ?? fits[0];
+    (artist !== "" &&
+      ` ${normalizeToken(candidate.title)} `.includes(` ${artist} `));
+  return fits.find(byArtist);
 }
