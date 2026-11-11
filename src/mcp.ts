@@ -38,7 +38,7 @@ export type McpHost = {
 
 const channel = {
   type: "string",
-  description: "Slack channel ID of the Huddle (its channel or HuddleFM's)",
+  description: "Slack channel ID of the Huddle's thread",
 };
 const threadTs = {
   type: "string",
@@ -62,12 +62,15 @@ const tool = (
   },
 });
 
+// Descriptions and errors are read by agents, which repeat their words to
+// people, so they speak of playing rather than of HuddleFM or sessions.
+
 // Joining is a Huddle's alone: it needs the thread of a Huddle that is on,
 // and someone in it to host, as a mention does.
 const joinTool = {
   name: "join",
   description:
-    "Bring HuddleFM into the active Huddle of a thread; user must be in the Huddle and becomes host",
+    "Join the active Huddle of a thread; user must be in the Huddle and becomes host",
   inputSchema: {
     type: "object",
     properties: {
@@ -121,10 +124,10 @@ export const mcpTools = [
   tool("previous", "Go back to the previous song", "previous"),
   tool("pause", "Pause playback", "pause"),
   tool("resume", "Resume playback", "resume"),
-  tool("leave", "End the session and leave the Huddle", "end"),
+  tool("leave", "Stop the music and leave the Huddle", "end"),
   tool(
     "settings",
-    "Change the session's settings; only the fields given change",
+    "Change how the music plays; only the fields given change",
     "settings",
     Object.fromEntries(
       Object.entries(sessionSettings).map(([key, kind]) => [
@@ -236,7 +239,10 @@ async function call(
     return text({ error: "channel and thread_ts are required" }, true);
   const session = host.session(target, threadTs);
   if (!session)
-    return text({ error: "No HuddleFM session in that thread" }, true);
+    return text(
+      { error: "Nothing is playing in this Huddle yet. Join it first." },
+      true,
+    );
   if (!host.actorId)
     return text({ error: "MCP_USER_ID or ADMIN_USER_IDS is not set" }, true);
   const command: IntegrationCommand = {

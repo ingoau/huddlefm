@@ -3790,7 +3790,10 @@ export class Coordinator {
    */
   async mcpCommand(userId: string, command: IntegrationCommand) {
     if (this.inactive())
-      return { ok: false as const, error: "This session is not active." };
+      return {
+        ok: false as const,
+        error: "The music has already stopped here.",
+      };
     let result: Awaited<ReturnType<Coordinator["runIntegrationCommand"]>>;
     try {
       await this.primeManager(userId);
