@@ -198,9 +198,9 @@ const endRestoreMs = 2 * 60_000;
 // from its click on the player.
 const settingsTabMs = 15_000;
 // How long a client mod's first look at Add songs' suggestions waits for the
-// user's recommendations to be built, and how many of each it gets.
+// user's recommendations to be built, and how many recent songs it gets.
 const suggestionWaitMs = 3_000;
-const suggestionLimit = 20;
+const recentSuggestionLimit = 20;
 // The longest a search waits for the same user's last one to finish.
 const searchDebounceMs = 300;
 // How long, and how many, search results are kept for the same words typed
@@ -2729,18 +2729,16 @@ export class Coordinator {
     });
     return {
       ok: true,
-      // each group to its own limit, as a client may show them apart
+      // all of each group, as Slack's dialog shows them
       recommended: [
-        ...(recommended?.favourites ?? [])
-          .slice(0, suggestionLimit)
-          .map((item) => track(item, "Your favourites")),
-        ...(recommended?.discover ?? [])
-          .slice(0, suggestionLimit)
-          .map((item) => track(item, "Discover")),
+        ...(recommended?.favourites ?? []).map((item) =>
+          track(item, "Your favourites"),
+        ),
+        ...(recommended?.discover ?? []).map((item) => track(item, "Discover")),
       ],
       recent: this.store
         .recentTracks(userId, recentTrackLimit)
-        .slice(0, suggestionLimit)
+        .slice(0, recentSuggestionLimit)
         .map((item) => track(item)),
     };
   }
