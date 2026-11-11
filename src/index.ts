@@ -11,7 +11,12 @@ import { CompanionChannels } from "./companion-channels.ts";
 import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
-import { parseLikeValue, settingsMessageView } from "./coordinator-ui.ts";
+import {
+  customEmoji,
+  parseLikeValue,
+  settingsMessageView,
+  useStandardEmoji,
+} from "./coordinator-ui.ts";
 import { safeError } from "./error-message.ts";
 import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
@@ -23,6 +28,8 @@ import {
 } from "./native-media/session.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
+import { uploadYouTubeCookiesAction } from "./settings-view.ts";
+import { mcpResponse } from "./mcp.ts";
 import {
   SlackHuddleAdapter,
   huddleHasParticipant,
@@ -183,7 +190,17 @@ const restoring = new Set<string>();
 const restoreWork = new Set<Promise<void>>();
 const endCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const migratingControls = new Set<string>();
+// Reactions to mentions come from the bot user when SLACK_XOXB is set.
+const reactor = config.xoxb ? slackApp : slackHuddle;
 let botUserId = "";
+// Mentions of this user trigger HuddleFM: the app's bot user when SLACK_XOXB
+// is set, otherwise the signed-in account.
+let mentionUserId = "";
+// Who a session takes for HuddleFM itself, whose actions are never a
+// listener's: the bot user when there is one, as then nothing is done in
+// Slack through the signed-in account but join the Huddle, and that
+// account's owner can listen in on another device and use the player.
+const sessionBotId = () => (config.xoxb ? mentionUserId : botUserId);
 let companions: CompanionChannels;
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
 let canvasTimer: ReturnType<typeof setInterval> | undefined;
@@ -775,7 +792,7 @@ async function joinHuddle(
     const coordinator = (runtime.coordinator = new Coordinator(
       joined,
       inviterUserId,
-      botUserId,
+      sessionBotId(),
       slackApp,
       store,
       catalog,
@@ -1276,7 +1293,7 @@ async function mentionEphemeral(
 // Acknowledge a mention with 👀 right away, then swap that for ✅ or ❌ once the
 // requested action settles. Only the first outcome reported is recorded.
 function mentionReaction(channelId: string, messageTs: string) {
-  const acknowledged = slackHuddle
+  const acknowledged = reactor
     .react(channelId, messageTs, "eyes")
     .catch((error) =>
       log.warn(
@@ -1291,7 +1308,7 @@ function mentionReaction(channelId: string, messageTs: string) {
     void acknowledged
       .then(async () => {
         try {
-          await slackHuddle.unreact(channelId, messageTs, "eyes");
+          await reactor.unreact(channelId, messageTs, "eyes");
         } catch (error) {
           log.warn(
             {
@@ -1302,7 +1319,7 @@ function mentionReaction(channelId: string, messageTs: string) {
             "Could not remove the Huddle mention acknowledgement",
           );
         }
-        await slackHuddle.react(
+        await reactor.react(
           channelId,
           messageTs,
           succeeded ? "white_check_mark" : "x",
@@ -1384,7 +1401,7 @@ async function autoJoinHuddle(
   const inviterUserId = [event.creatorUserId, ...event.participantIds].find(
     (userId): userId is string =>
       Boolean(userId) &&
-      userId !== botUserId &&
+      userId !== sessionBotId() &&
       !config.excludedUserIds.has(userId!),
   );
   if (!inviterUserId) return;
@@ -1443,6 +1460,37 @@ const server = Bun.serve({
       });
     },
     "/favicon.ico": () => new Response(null, { status: 204 }),
+    "/mcp": (request: Request) =>
+      mcpResponse(request, {
+        token: config.mcpToken,
+        actorId: config.mcpUserId ?? [...config.adminUserIds][0],
+        version: "1",
+        session(channel, threadTs) {
+          const coordinator = [...runtimes.values()]
+            .map((runtime) => runtime.coordinator)
+            .find(
+              (item) => item && roomOwnsThread(item.room, channel, threadTs),
+            );
+          return coordinator
+            ? {
+                id: coordinator.id,
+                run: (userId, command) =>
+                  coordinator.mcpCommand(userId, command),
+              }
+            : undefined;
+        },
+        async join(channel, threadTs, userId) {
+          const room = await slackHuddle.activeHuddleRoom(channel, threadTs);
+          if (!room)
+            return { ok: false, error: "No active Huddle in that thread" };
+          if (joiningCalls.has(room.callId) || runtimeForCall(room.callId))
+            return { ok: true, alreadyJoined: true };
+          if (!huddleHasParticipant(room, userId))
+            return { ok: false, error: "That user is not in the Huddle" };
+          await joinHuddle(channel, userId, room.callId);
+          return { ok: true, joined: true };
+        },
+      }),
     "/join": {
       POST: async (request: Request) => {
         const denied = controlDenied(request, config.localControlToken);
@@ -1653,8 +1701,86 @@ function selectedRuntime(request: Request) {
 const started = Promise.withResolvers<void>();
 slackApp.onSuggestion = (interaction) =>
   coordinatorFor(interaction)?.suggestions(interaction) ?? Promise.resolve([]);
+// An admin's upload of a YouTube cookies file, from the Admin tab.
+const youtubeCookiesCallback = "youtube_cookies";
+const youtubeCookiesView = {
+  type: "modal",
+  callback_id: youtubeCookiesCallback,
+  title: { type: "plain_text", text: "YouTube cookies" },
+  submit: { type: "plain_text", text: "Upload" },
+  close: { type: "plain_text", text: "Cancel" },
+  blocks: [
+    {
+      type: "input",
+      block_id: "cookies_file",
+      label: { type: "plain_text", text: "cookies.txt (Netscape format)" },
+      element: {
+        type: "file_input",
+        action_id: "file",
+        filetypes: ["txt"],
+        max_files: 1,
+      },
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "Export them from a private window signed in to an account made for the bot, then close it without signing out. Only YouTube and Google cookies are kept. HuddleFM tries to delete the upload from Slack; if it stays in your Files, delete it there.",
+        },
+      ],
+    },
+  ],
+};
+
+async function youtubeCookies(interaction: Interaction) {
+  if (!config.adminUserIds.has(interaction.userId)) return;
+  if (interaction.type !== "view_submission")
+    return void (await slackApp.pushModal(
+      interaction.triggerId,
+      youtubeCookiesView,
+    ));
+  const state = interaction.state as Record<
+    string,
+    Record<string, { files?: { id?: string }[] }>
+  >;
+  const fileId = state.cookies_file?.file?.files?.[0]?.id;
+  let reply: string;
+  try {
+    if (!fileId) throw new Error("No file was uploaded");
+    await catalog.replaceYouTubeCookies(
+      await slackApp.takeUploadedFile(fileId),
+    );
+    await slackApp.dm(
+      interaction.userId,
+      "YouTube cookies saved. Checking them with a YouTube download…",
+    );
+    const check = await catalog.checkYouTubeCookies();
+    reply =
+      check.verdict === "works"
+        ? ":white_check_mark: The cookies work: YouTube downloads from this server again."
+        : check.verdict === "refused"
+          ? ":x: YouTube refused these cookies (signed out or expired). Export them again from a private window and upload the new file."
+          : ":warning: The cookies are saved, but YouTube still blocks downloads from this server's address, so songs keep playing from SoundCloud.";
+    if (!check.ok && check.reason)
+      reply += `\n> ${check.reason.replace(/\s+/g, " ").slice(0, 200)}`;
+  } catch (error) {
+    log.warn(
+      { event: "youtube_cookies_upload_failed", err: error },
+      "Could not update YouTube cookies",
+    );
+    reply = `Couldn't update YouTube cookies: ${safeError(error)}`;
+  }
+  await slackApp.dm(interaction.userId, reply);
+}
+
 slackApp.onAction = async (interaction) => {
   await started.promise;
+  if (
+    interaction.actionId === uploadYouTubeCookiesAction ||
+    interaction.actionId === youtubeCookiesCallback
+  )
+    return youtubeCookies(interaction);
   return interaction.actionId === "restore_session"
     ? restoreEndedSession(interaction)
     : interaction.actionId === "unlike_track"
@@ -1669,6 +1795,37 @@ slackApp.onAction = async (interaction) => {
   catalog.initialize(),
   slackApp.start(),
 ]);
+mentionUserId = (await slackApp.botUserId()) ?? botUserId;
+// The player's custom emoji the workspace lacks show as standard ones.
+await slackApp
+  .customEmojiNames()
+  .then((names) => Object.keys(customEmoji).filter((name) => !names.has(name)))
+  .catch((error) => {
+    log.warn(
+      { event: "emoji_list_failed", err: error },
+      "Could not list custom emoji (needs emoji:read); using standard ones",
+    );
+    return Object.keys(customEmoji);
+  })
+  .then((missing) => {
+    useStandardEmoji(missing);
+    if (missing.length)
+      log.info(
+        { event: "standard_emoji", missing },
+        "Custom emoji missing from the workspace show as standard emoji; see emoji/README.md",
+      );
+  });
+log.info(
+  {
+    event: "mention_trigger",
+    mode: config.xoxb ? "bot user" : "signed-in account",
+    mentionUserId,
+    huddleUserId: botUserId,
+  },
+  config.xoxb
+    ? "Mentions of the app's bot user start HuddleFM"
+    : "Mentions of the signed-in account start HuddleFM",
+);
 companions = new CompanionChannels(store, slackHuddle, slackApp, botUserId);
 companions.start();
 for (const sessionId of saved.expiredIds) {
@@ -1680,7 +1837,7 @@ started.resolve();
 // tracked participants are reconciled with Slack's actual Huddle membership.
 slackHuddle.onConnected = reconcileAllParticipants;
 reconcileTimer = setInterval(reconcileAllParticipants, 60_000);
-await slackHuddle.start((event) => {
+const handleHuddleEvent = (event: import("./slack-huddle.ts").HuddleEvent) => {
   if (event.type === "DirectMessage") {
     void handleIntegrationDm(event).catch((error) =>
       log.warn(
@@ -1737,11 +1894,18 @@ await slackHuddle.start((event) => {
         ? roomOwnsThread(room, event.channelId, event.threadTs)
         : false;
     });
+    const mentions = new RegExp(`<@${mentionUserId}(?:\\|[^>]*)?>`).test(
+      event.text,
+    );
+    // With a bot user, the account HuddleFM plays through is never the one
+    // posting, so its messages are its owner's, who may ask like anyone.
     const mentioned =
-      event.userId !== botUserId && event.text.includes(`<@${botUserId}>`);
+      event.userId !== sessionBotId() &&
+      event.userId !== mentionUserId &&
+      mentions;
     if (mentioned) {
       const settleMention = mentionReaction(event.channelId, event.messageTs);
-      const bare = isBareMention(event.text, botUserId);
+      const bare = isBareMention(event.text, mentionUserId);
       const coordinator = runtime?.coordinator;
       const failed = (name: string, message: string) => (error: unknown) => {
         settleMention(false);
@@ -1811,7 +1975,7 @@ await slackHuddle.start((event) => {
           coordinator,
           userId: event.userId,
           text: event.text,
-          botUserId,
+          botUserId: mentionUserId,
         })
           .then((reply) => {
             settleMention(reply.ok);
@@ -1907,6 +2071,21 @@ await slackHuddle.start((event) => {
     store.removeSessionParticipant(runtime.coordinator.id, event.userId);
   }
   if (event.type === "HuddleEnded") void runtime.coordinator.endFromSlack();
+};
+slackApp.onThreadMessage = (message) => {
+  // The bot user's own posts (the player) are not activity to react to.
+  if (message.userId === mentionUserId) return;
+  handleHuddleEvent({ type: "ThreadActivity", ...message });
+};
+await slackHuddle.start((event) => {
+  // With a bot token, messages come from the bot user's own events, so the
+  // signed-in account's messages and DMs are left alone.
+  if (
+    config.xoxb &&
+    (event.type === "ThreadActivity" || event.type === "DirectMessage")
+  )
+    return;
+  handleHuddleEvent(event);
 });
 if (config.canvasId) {
   void updateCanvas();

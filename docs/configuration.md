@@ -4,57 +4,152 @@ Every option HuddleFM reads from `.env`. Only the Slack credentials are required
 
 ## Required
 
-| Variable                | Purpose                                                             |
-| ----------------------- | ------------------------------------------------------------------- |
-| `SLACK_WORKSPACE_URL`   | Workspace URL, e.g. `https://example.slack.com`                     |
-| `SLACK_XOXP`            | User OAuth token used for Slack Web API calls                       |
-| `SLACK_XAPP`            | App-level token used for Socket Mode                                |
-| `SLACK_XOXC`            | Client token from the bot user's browser session                    |
-| `SLACK_ENTERPRISE_XOXC` | Enterprise Grid client token; used instead of `SLACK_XOXC` when set |
-| `SLACK_XOXD`            | `d` cookie from the same browser session                            |
+| Variable                | Purpose                                                                  |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `SLACK_WORKSPACE_URL`   | Workspace URL, e.g. `https://example.slack.com`                          |
+| `SLACK_XOXP`            | User OAuth token used for Slack Web API calls; ignored with `SLACK_XOXB` |
+| `SLACK_XAPP`            | App-level token used for Socket Mode                                     |
+| `SLACK_XOXC`            | Client token from the bot user's browser session                         |
+| `SLACK_ENTERPRISE_XOXC` | Enterprise Grid client token; used instead of `SLACK_XOXC` when set      |
+| `SLACK_XOXD`            | `d` cookie from the same browser session                                 |
 
 ## Optional Slack behavior
 
-| Variable                      | Default | Purpose                                                                                                                                                                                      |
-| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                                                                                                                         |
-| `CHANNEL_MANAGER_PERMISSIONS` | `end`   | What managers of a huddle's channel may do without joining: `none`, `end` the session, or everything a `host` can                                                                            |
-| `WORKSPACE_ADMIN_PERMISSIONS` | `end`   | The same for Slack workspace admins and owners. Replaces `WORKSPACE_ADMINS_AS_MANAGERS=true`, which still means `host` until it is set                                                       |
-| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                                                                                  |
-| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                                                                                                                                |
-| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                                                                           |
-| `SLACK_CANVAS_ID`             | unset   | Canvas updated with live sessions and all-time listening stats                                                                                                                               |
-| `CANVAS_SECTIONS`             | all     | Comma-separated canvas sections to show, in order: `summary`, `active sessions`, `top artists`, `top tracks`, `top videos`, `top video channels`, `top channels`, `controls`, `integrations` |
-| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                                                                                                                              |
+| Variable                      | Default | Purpose                                                                                                                                                                                        |
+| ----------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MANAGER_USER_ID`             | unset   | User who is always treated as a host                                                                                                                                                           |
+| `ADMIN_USER_IDS`              | unset   | Comma-separated user IDs of HuddleFM admins: hosts and channel managers everywhere, and the only ones who see Settings' Admin tab, which lists the admins and takes a new YouTube cookies file |
+| `CHANNEL_MANAGER_PERMISSIONS` | `end`   | What managers of a huddle's channel may do without joining: `none`, `end` the session, or everything a `host` can                                                                              |
+| `WORKSPACE_ADMIN_PERMISSIONS` | `end`   | The same for Slack workspace admins and owners. Replaces `WORKSPACE_ADMINS_AS_MANAGERS=true`, which still means `host` until it is set                                                         |
+| `EXCLUDED_USER_IDS`           | unset   | Comma/space-separated users ignored for participation, hosting, permissions, and scrobbling                                                                                                    |
+| `FORCE_COMPANION_CHANNEL_IDS` | unset   | Channels that always get a separate HuddleFM controls channel                                                                                                                                  |
+| `SLACK_TEAM_ID`               | unset   | Workspace for companion channel creation; required for Enterprise Grid credentials                                                                                                             |
+| `SLACK_CANVAS_ID`             | unset   | Canvas updated with live sessions and all-time listening stats                                                                                                                                 |
+| `CANVAS_SECTIONS`             | all     | Comma-separated canvas sections to show, in order: `summary`, `active sessions`, `top artists`, `top tracks`, `top videos`, `top video channels`, `top channels`, `controls`, `integrations`   |
+| `FOOTER`                      | unset   | Optional mrkdwn footer under the queue controls                                                                                                                                                |
 
 ## Optional features
 
-| Variable                                  | Default                    | Purpose                                                                                                               |
-| ----------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling                                                                        |
-| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                                           |
-| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                                          |
-| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                                                |
-| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys |
+| Variable                                  | Default                    | Purpose                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET` | unset                      | Enables Last.fm account linking for scrobbling                                                                                                                                                                                                                                                                                  |
+| `OPENROUTER_API_KEY`                      | unset                      | Enables @mention AI controls via OpenRouter                                                                                                                                                                                                                                                                                     |
+| `POSTHOG_API_KEY`                         | unset                      | Enables PostHog analytics and error tracking                                                                                                                                                                                                                                                                                    |
+| `POSTHOG_HOST`                            | `https://us.i.posthog.com` | PostHog ingestion host                                                                                                                                                                                                                                                                                                          |
+| `LOCAL_CONTROL_TOKEN`                     | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys                                                                                                                                                                                                           |
+| `MCP_TOKEN`                               | unset                      | Turns on HuddleFM's MCP server at `/mcp` (streamable HTTP, `Authorization: Bearer <token>`), with tools that each name a Huddle's `channel` and `thread_ts`: join (hosted by the user who asked), status, search, add, skip, previous, pause, resume, volume, settings (autoplay, loop and the session's other settings), leave |
+| `MCP_USER_ID`                             | first of `ADMIN_USER_IDS`  | Who MCP commands run as, with that user's permissions in the session                                                                                                                                                                                                                                                            |
+| `SLACK_XOXB`                              | unset                      | Bot token. Messages and modals come from the app's bot user, mentions of that bot user trigger HuddleFM, and thread messages are read from the app's events (`message.channels`, `message.groups`, `app_mention`) instead of the signed-in account's feed                                                                       |
+
+## Bot user mode
+
+By default the Slack app acts as the signed-in account: its user token
+(`SLACK_XOXP`) posts the player, and mentions of that account in a Huddle
+thread trigger HuddleFM. With `SLACK_XOXB` set, everything but the Huddle
+itself moves to the app's bot user:
+
+- The player, replies, ephemerals and modals come from the bot user.
+- Mentioning the bot user is the trigger; mentions of the signed-in account are
+  ignored.
+- Thread messages are read from the app's own events, so the signed-in
+  account's messages and DMs are not processed. Its realtime connection is
+  still used for Huddle events (started, joined, left) and to join Huddles.
+- That account counts as a listener, as its owner may be in the Huddle on
+  another device. HuddleFM so stays in a Huddle with nobody else in it until
+  it is ended from the player, or nothing plays for `IDLE_TIMEOUT_MS`.
+
+| Variable              | Bot user mode                                                             |
+| --------------------- | ------------------------------------------------------------------------- |
+| `SLACK_WORKSPACE_URL` | Required                                                                  |
+| `SLACK_XAPP`          | Required, for Socket Mode events and button clicks                        |
+| `SLACK_XOXB`          | Required, the app's bot token                                             |
+| `SLACK_XOXC`          | Required, to join Huddles                                                 |
+| `SLACK_XOXD`          | Required, with `SLACK_XOXC`                                               |
+| `SLACK_DISPLAY_USER`  | Optional, a Slack user whose name and picture the bot user posts under    |
+| `SLACK_DISPLAY_NAME`  | Optional, the name to post under without `SLACK_DISPLAY_USER`             |
+| `SLACK_DISPLAY_ICON`  | Optional, the icon to post under without it: an image URL or an `:emoji:` |
+
+`SLACK_XOXP` is ignored in this mode. The Slack app needs Socket Mode,
+Interactivity, the bot events `message.channels`, `message.groups` and
+`app_mention`, and these bot scopes; this manifest sets them up:
+
+```json
+{
+  "display_information": {
+    "name": "HuddleFM",
+    "description": "Music for Slack Huddles. Mention me in a Huddle thread to start.",
+    "background_color": "#1d1d1d"
+  },
+  "features": {
+    "bot_user": { "display_name": "HuddleFM", "always_online": true }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "canvases:write",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "chat:write.public",
+        "chat:write.customize",
+        "emoji:read",
+        "files:read",
+        "groups:history",
+        "groups:read",
+        "im:read",
+        "im:write",
+        "mpim:read",
+        "reactions:write",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": ["app_mention", "message.channels", "message.groups"]
+    },
+    "interactivity": { "is_enabled": true },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
+```
+
+After installing it, the bot token is `SLACK_XOXB`, and an app-level token
+with `connections:write` (Basic Information, App-Level Tokens) is `SLACK_XAPP`.
+`canvases:write` is only needed with `SLACK_CANVAS_ID`, and `chat:write.public`
+only to post in public channels the bot was not invited to. `chat:write.customize` is only needed with `SLACK_DISPLAY_USER`,
+`SLACK_DISPLAY_NAME` or `SLACK_DISPLAY_ICON`: messages show that user's name
+and picture (read again hourly), else the name and icon set, while their
+buttons still come to HuddleFM. Edits keep the name a message was posted with. `files:read` lets admins upload YouTube cookies from Settings.
+
+Invite the bot user to every channel whose Huddles it should hear about; it only
+receives events from channels it is in.
 
 ## Playback and limits
 
-| Variable                        | Default          | Purpose                                                                                   |
-| ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
-| `QUEUE_LIMIT`                   | `50`             | Maximum tracks in the queue                                                               |
-| `TRACK_DURATION_LIMIT_SECONDS`  | `1200`           | Maximum track duration                                                                    |
-| `TRACK_DOWNLOAD_LIMIT_BYTES`    | `100000000`      | Maximum download size                                                                     |
-| `INITIAL_VOLUME`                | `0.35`           | Starting volume as a fraction of max                                                      |
-| `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                              |
-| `LYRICS_OFFSET_MS`              | `0`              | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio |
-| `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to level songs and videos to -14 LUFS                                       |
-| `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all Huddles                                |
-| `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`     | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache |
-| `MEDIA_CACHE_MAX_AGE_DAYS`      | `30`             | Re-download cached tracks older than this; `0` keeps them until evicted for space         |
-| `ALONE_TIMEOUT_MS`              | `120000`         | Leave when alone for this long                                                            |
-| `IDLE_TIMEOUT_MS`               | `600000`         | Leave when idle for this long                                                             |
-| `PAUSED_TIMEOUT_MS`             | `600000`         | Leave when paused for this long                                                           |
-| `CHIME_MEDIA_REGION`            | `ap-southeast-2` | AWS region for Chime media                                                                |
+| Variable                        | Default                | Purpose                                                                                                                                                                                                                   |
+| ------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QUEUE_LIMIT`                   | `50`                   | Maximum tracks in the queue                                                                                                                                                                                               |
+| `TRACK_DURATION_LIMIT_SECONDS`  | `1200`                 | Maximum track duration                                                                                                                                                                                                    |
+| `TRACK_DOWNLOAD_LIMIT_BYTES`    | `100000000`            | Maximum download size                                                                                                                                                                                                     |
+| `INITIAL_VOLUME`                | `0.35`                 | Starting volume as a fraction of max                                                                                                                                                                                      |
+| `DUCKING_MODE`                  | `gentle`               | Auto-duck default: `off`, `gentle`, `strong`                                                                                                                                                                              |
+| `LYRICS_OFFSET_MS`              | `0`                    | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio                                                                                                                                 |
+| `LOUDNESS_NORMALIZATION`        | `false`                | Set to `true` to level songs and videos to -14 LUFS                                                                                                                                                                       |
+| `TRACK_PREPARATION_CONCURRENCY` | `2`                    | Tracks downloaded and analysed at once, across all Huddles                                                                                                                                                                |
+| `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`           | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache                                                                                                                                 |
+| `MEDIA_CACHE_MAX_AGE_DAYS`      | `30`                   | Re-download cached tracks older than this; `0` keeps them until evicted for space                                                                                                                                         |
+| `AUTOPLAY`                      | `off`                  | Autoplay for a new session: `off`, `related` (songs like the last one) or `huddle` (a mix of what people in the Huddle listen to); with it on, a session starts playing by itself. A channel's saved defaults override it |
+| `AUTOPLAY_QUEUE`                | `10`                   | How many autoplay picks are kept queued while autoplay is on and nobody has queued a song; each can be removed from the queue                                                                                             |
+| `QUEUE_END_MENTION`             | unset                  | A Slack user, such as an agent's bot, mentioned in the Huddle's thread when the queue runs out with autoplay off and someone still listening, once until a song plays again                                               |
+| `QUEUE_END_MESSAGE`             | `The queue has ended.` | What follows that mention; `{recent}` is the last five songs played                                                                                                                                                       |
+| `ALONE_TIMEOUT_MS`              | `120000`               | Leave when alone for this long                                                                                                                                                                                            |
+| `IDLE_TIMEOUT_MS`               | `600000`               | Leave when idle for this long                                                                                                                                                                                             |
+| `PAUSED_TIMEOUT_MS`             | `600000`               | Leave when paused for this long                                                                                                                                                                                           |
+| `CHIME_MEDIA_REGION`            | `ap-southeast-2`       | AWS region for Chime media                                                                                                                                                                                                |
 
 ## Video mode
 
@@ -101,10 +196,10 @@ If the bot check keeps coming back, sign yt-dlp in to a YouTube account with its
 
 The bot keeps only the file's YouTube and Google cookies, and writes the ones YouTube rotates back to it, so it stays signed in. If YouTube rejects the cookies, the log says so; export them again.
 
-| Variable               | Default              | Purpose                                                      |
-| ---------------------- | -------------------- | ------------------------------------------------------------ |
-| `BGUTIL_SERVER_HOME`   | `/opt/bgutil/server` | BgUtils token server to run; empty turns tokens off          |
-| `YOUTUBE_COOKIES_FILE` | unset                | Netscape cookies file of the YouTube account to sign in with |
+| Variable               | Default              | Purpose                                                                                                                                                                  |
+| ---------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BGUTIL_SERVER_HOME`   | `/opt/bgutil/server` | BgUtils token server to run; empty turns tokens off                                                                                                                      |
+| `YOUTUBE_COOKIES_FILE` | unset                | Netscape cookies file of the YouTube account to sign in with; admins can also upload one from Settings' Admin tab, kept at `data/youtube-cookies.txt` when this is unset |
 
 ## Logs
 

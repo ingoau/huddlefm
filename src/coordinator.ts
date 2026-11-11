@@ -86,6 +86,8 @@ import {
   context,
   elapsed,
   escape,
+  queueEndText,
+  trackSource,
   footerContext,
   icon,
   input,
@@ -364,8 +366,10 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
-// How many random popular songs Play something tries before giving up.
-const autoplayPopularAttempts = 5;
+// The ⋯ menu on each queue row, whose options name a row button and track.
+const queueItemMenuAction = "queue_item_menu";
+// How many random popular songs autoplay tries before giving up.
+const autoplayPopularAttempts = 12;
 // Where video mode's autoplay picks come from, as recorded on each pick.
 const relatedVideosSource = "related_videos";
 
@@ -436,6 +440,8 @@ export class Coordinator {
   private participantsRevision = 0;
   private queue: Entry[] = [];
   private history: Entry[] = [];
+  // Whether the agent was told the queue ran out, since a song last started.
+  private queueEndAnnounced = false;
   private current?: Entry;
   private state = "ready";
   private playbackSeconds = 0;
@@ -579,6 +585,10 @@ export class Coordinator {
     private config: {
       queueLimit: number;
       initialVolume: number;
+      autoplay?: AutoplayMode;
+      autoplayQueue?: number;
+      queueEndMention?: string;
+      queueEndMessage?: string;
       duckingMode: DuckingMode;
       aloneMs: number;
       idleMs: number;
@@ -586,6 +596,7 @@ export class Coordinator {
       warningMs: number;
       port: number;
       managerUserId?: string;
+      adminUserIds?: Set<string>;
       excludedUserIds: Set<string>;
       footer?: string;
       video?: { sessionLimit: number };
@@ -696,6 +707,7 @@ export class Coordinator {
     this.participants.add(botUserId);
     for (const id of room.participantIds)
       if (!this.isExcluded(id)) this.participants.add(id);
+    this.autoplayMode = config.autoplay ?? this.autoplayMode;
     if (restored) {
       this.state = restored.state;
       this.playbackSeconds = restored.playbackSeconds;
@@ -785,6 +797,8 @@ export class Coordinator {
       [...this.participants].map((userId) => this.promptScrobbling(userId)),
     );
     this.prefetchRecommendations();
+    // With autoplay on, a new session starts playing by itself.
+    if (!this.current && !this.queue.length) this.scheduleAutoplay();
     this.audit.record("session.started", this.hostId, {
       sessionId: this.id,
       huddleId: this.room.huddleId,
@@ -850,8 +864,11 @@ export class Coordinator {
     this.sessionChanged();
     this.sendMediaSettings();
     this.prefetchRecommendations();
-    if (!this.current) await this.startNext();
-    else {
+    if (!this.current) {
+      await this.startNext();
+      // A session whose queue ran out goes on with autoplay, when it is on.
+      if (!this.current && !this.queue.length) this.scheduleAutoplay();
+    } else {
       // Listeners were already asked about this track before the restart,
       // and that prompt still answers for it.
       this.startScrobbling(this.current, this.playbackSeconds, false);
@@ -1118,7 +1135,15 @@ export class Coordinator {
     );
   }
 
-  async action(interaction: Interaction) {
+  async action(interaction: Interaction): Promise<void> {
+    // A queue row's ⋯ menu names the row's own button and its track.
+    if (interaction.actionId === queueItemMenuAction) {
+      const [actionId, trackId] = interaction.value.split("|");
+      if (!actionId || !trackId) return;
+      return this.action({ ...interaction, actionId, value: trackId });
+    }
+    if (interaction.actionId === "queue_keep_all_autoplay")
+      return this.keepAllAutoplay(interaction);
     this.scrobbling?.syncAnalyticsUser(interaction.userId);
     const ending = this.endingAction(interaction);
     // Settings opens with a trigger ID that expires after three seconds, which
@@ -3219,7 +3244,7 @@ export class Coordinator {
   // accounts cannot let themselves in this way.
   private outsidePermissions(userId: string): RolePermissions {
     if (this.isExcluded(userId)) return "none";
-    if (userId === this.config.managerUserId) return "host";
+    if (this.configuredManager(userId)) return "host";
     const granted: RolePermissions[] = [];
     if (this.workspaceAdmins?.isAdmin(userId))
       granted.push(this.workspaceAdmins.permissions);
@@ -3284,7 +3309,7 @@ export class Coordinator {
       channelDefaults &&
       managers?.permissions !== "none" &&
       !this.roomId.startsWith("D") &&
-      userId !== this.config.managerUserId;
+      !this.configuredManager(userId);
     if (
       managers &&
       (matters(managers.permissions) || savesDefaults) &&
@@ -3372,8 +3397,22 @@ export class Coordinator {
   private managesChannel(userId: string) {
     if (this.isExcluded(userId) || this.roomId.startsWith("D")) return false;
     return (
-      userId === this.config.managerUserId ||
+      this.configuredManager(userId) ||
       this.channelManagers?.isManager(this.roomId, userId) === true
+    );
+  }
+
+  // MANAGER_USER_ID and ADMIN_USER_IDS, who manage every channel.
+  private configuredManager(userId: string) {
+    return (
+      userId === this.config.managerUserId ||
+      this.config.adminUserIds?.has(userId) === true
+    );
+  }
+
+  private botAdmin(userId: string) {
+    return (
+      !this.isExcluded(userId) && this.config.adminUserIds?.has(userId) === true
     );
   }
 
@@ -3745,6 +3784,39 @@ export class Coordinator {
     );
   }
 
+  /**
+   * Runs a command from HuddleFM's MCP server as `userId`, with that user's
+   * permissions in the session, as a granted integration's would run.
+   */
+  async mcpCommand(userId: string, command: IntegrationCommand) {
+    if (this.inactive())
+      return {
+        ok: false as const,
+        error: "The music has already stopped here.",
+      };
+    let result: Awaited<ReturnType<Coordinator["runIntegrationCommand"]>>;
+    try {
+      await this.primeManager(userId);
+      const run = { userId, done: false };
+      try {
+        result = await this.integrationRuns.run(run, () =>
+          this.runIntegrationCommand(userId, command),
+        );
+      } finally {
+        run.done = true;
+      }
+    } catch (error) {
+      result = { ok: false as const, error: message(error) };
+    }
+    if (command.type !== "status")
+      this.audit.record("mcp.command", userId, {
+        sessionId: this.id,
+        type: command.type,
+        ok: result.ok,
+      });
+    return result;
+  }
+
   private async runIntegrationCommand(
     userId: string,
     command: IntegrationCommand,
@@ -4093,6 +4165,42 @@ export class Coordinator {
       (this.videoMode ? this.videoAutoplay : this.autoplayMode !== "off") &&
       !this.current?.live
     );
+  }
+
+  // Mentions QUEUE_END_MENTION in the thread when the queue runs out, so an
+  // agent can add more: once until a song starts again, with someone still
+  // listening, and not while autoplay keeps the queue filled.
+  private async announceQueueEnd() {
+    const agentId = this.config.queueEndMention;
+    if (
+      !agentId ||
+      this.queueEndAnnounced ||
+      this.autoplayOn() ||
+      !this.listenerIds().length ||
+      this.inactive()
+    )
+      return;
+    this.queueEndAnnounced = true;
+    try {
+      await this.post(
+        this.room.uiChannelId,
+        this.room.uiThreadTs,
+        queueEndText(
+          agentId,
+          this.history.slice(-5),
+          this.config.queueEndMessage,
+        ),
+      );
+      this.log.info(
+        { event: "queue_end_announced", agentId },
+        "Told an agent the queue ended",
+      );
+    } catch (error) {
+      this.log.warn(
+        { event: "queue_end_announce_failed", agentId, err: error },
+        "Could not tell the agent the queue ended",
+      );
+    }
   }
 
   private listenerIds() {
@@ -4913,7 +5021,10 @@ export class Coordinator {
         mode,
       );
       if (added !== undefined) return added;
-      if (playSomethingBy && this.canAddAutoplay(context, generation)) {
+      // Out of recommendations, autoplay goes on with a popular song rather
+      // than leave the queue empty; many are skipped while YouTube refuses
+      // the server and SoundCloud lacks them, so several are tried.
+      if (this.canAddAutoplay(context, generation)) {
         const popular = shuffle(await this.tracks.popularTracks()).filter(
           (track) => !excluded.has(track.sourceId),
         );
@@ -5002,6 +5113,9 @@ export class Coordinator {
           continue;
         }
       }
+      // A song that cannot be played now is passed over before it is shown.
+      if ((await this.tracks.playable?.(metadata).catch(() => true)) === false)
+        continue;
       const pending = await this.enqueue(async () => {
         if (!this.canAddAutoplay(context, generation)) return;
         const currentIds = new Set([
@@ -5082,10 +5196,14 @@ export class Coordinator {
   }
 
   // Autoplay only ever tops up an empty queue, one song at a time.
+  // Autoplay fills in behind nothing anyone asked for, up to AUTOPLAY_QUEUE
+  // picks at a time.
   private autoplayHasRoom() {
+    const picks = this.queue.filter((track) => track.automatic).length;
     return (
-      !this.queue.length &&
-      Number(Boolean(this.current)) < this.config.queueLimit
+      this.queue.length === picks &&
+      picks < (this.config.autoplayQueue ?? 1) &&
+      this.queue.length + Number(Boolean(this.current)) < this.config.queueLimit
     );
   }
 
@@ -5241,6 +5359,7 @@ export class Coordinator {
     this.interrupted = undefined;
     const next = this.queue.find((track) => track.status === "ready");
     if (!next) {
+      const ended = Boolean(this.current) && !this.queue.length;
       this.playbackScrobbling?.finish();
       this.current = undefined;
       this.state = "ready";
@@ -5249,8 +5368,10 @@ export class Coordinator {
       await this.render();
       this.sessionChanged();
       this.log.info({ event: "queue_idle" }, "No playable track in queue");
+      if (ended) void this.announceQueueEnd();
       return this.refreshIdle();
     }
+    this.queueEndAnnounced = false;
     this.queue.splice(this.queue.indexOf(next), 1);
     this.queueChanged();
     this.current = next;
@@ -6198,6 +6319,19 @@ export class Coordinator {
 
   // Turns the queued autoplay pick into a song the user asked for, so it
   // stays put when someone else queues a song and counts as theirs.
+  // Keeps every autoplay pick in the queue as the user's own requests.
+  private async keepAllAutoplay(interaction: Interaction) {
+    if (!this.validQueueView(interaction))
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
+    if (!(await this.require(interaction, "add"))) return;
+    for (const entry of this.queue.filter((track) => track.automatic))
+      await this.keepAutoplayEntry(interaction.userId, entry.id);
+    this.queueChanged(interaction);
+  }
+
   private async keepAutoplay(interaction: Interaction) {
     if (!this.validQueueView(interaction))
       return this.notice(
@@ -6731,8 +6865,17 @@ export class Coordinator {
         ? [
             ...when(
               (manages && this.shufflableCount() > 1) ||
-                this.can(userId, "clear"),
+                this.can(userId, "clear") ||
+                (this.queue.some((track) => track.automatic) &&
+                  this.can(userId, "add")),
               actions("queue_tools", [
+                ...when(
+                  this.queue.some((track) => track.automatic) &&
+                    this.can(userId, "add"),
+                  button("queue_keep_all_autoplay", plain("Add all to queue"), {
+                    value: this.id,
+                  }),
+                ),
                 ...when(
                   manages && this.shufflableCount() > 1,
                   button("shuffle_queue", plain("Shuffle"), {
@@ -6753,49 +6896,62 @@ export class Coordinator {
               ]),
             ),
             ...this.queue.flatMap((track, index) => {
-              const value = track.id;
-              const controls = [
+              const value = (actionId: string) => `${actionId}|${track.id}`;
+              const option = (actionId: string, label: string) => ({
+                text: plain(label),
+                value: value(actionId),
+              });
+              const options = [
                 ...when(
                   manages && index,
-                  button("queue_play_next", plain("Play next"), { value }),
+                  option("queue_play_next", "Play next"),
                 ),
-                ...when(
-                  manages && index,
-                  button("queue_move_up", plain("Up"), { value }),
-                ),
+                ...when(manages && index, option("queue_move_up", "Up")),
                 ...when(
                   manages && index < last,
-                  button("queue_move_down", plain("Down"), { value }),
+                  option("queue_move_down", "Down"),
                 ),
                 ...when(
                   track.automatic && this.can(userId, "add"),
-                  button("queue_keep_autoplay", plain("Add to queue"), {
-                    value,
-                  }),
+                  option("queue_keep_autoplay", "Add to queue"),
                 ),
                 ...when(
                   manages && !track.automatic,
-                  button("queue_move_to_position", plain("Move to…"), {
-                    value,
-                  }),
+                  option("queue_move_to_position", "Move to…"),
                 ),
                 ...when(
                   this.canRemove(userId, track),
-                  button("remove_queue_track", plain("Remove"), {
-                    style: "danger",
-                    value,
-                  }),
+                  option("remove_queue_track", "Remove"),
                 ),
               ];
+              // Songs are grouped under where they play from and who added
+              // them, a heading again wherever that changes, so the order
+              // stays the play order.
+              const group = (entry?: Entry) =>
+                entry
+                  ? `${trackSource(entry) ? `*${trackSource(entry)}* · ` : ""}${addedBy(entry)}`
+                  : "";
+              const heading = group(track);
               return [
-                section(
-                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.live ? "🔴 LIVE · " : ""}${addedBy(track)}`,
-                  `queue_item_${track.id}`,
-                ),
                 ...when(
-                  controls.length,
-                  actions(`queue_actions_${track.id}`, controls),
+                  heading !== group(this.queue[index - 1]),
+                  context(`queue_group_${track.id}`, heading),
                 ),
+                {
+                  ...section(
+                    `${index + 1}. *${escape(track.title)}* — ${escape(track.artist)}${track.live ? " · 🔴 LIVE" : ""}`,
+                    `queue_item_${track.id}`,
+                  ),
+                  ...(options.length
+                    ? {
+                        accessory: {
+                          type: "overflow",
+                          action_id: queueItemMenuAction,
+                          options: options.slice(0, 5),
+                        },
+                      }
+                    : {}),
+                },
               ];
             }),
           ]
@@ -7015,7 +7171,16 @@ export class Coordinator {
         endSession: this.can(userId, "end-session"),
         saveDefaults,
         autoJoin: this.managesChannel(userId),
+        botAdmin: this.botAdmin(userId),
       },
+      ...(this.botAdmin(userId)
+        ? {
+            bot: {
+              admins: [...this.config.adminUserIds!],
+              youtube: this.tracks.youtubeCookieStatus(),
+            },
+          }
+        : {}),
       session: this.sessionSettings(),
       user: this.scrobbling?.settings(userId, this.id) ?? defaultUserSettings,
       ...(this.jellyfinUi ? { jellyfin: this.jellyfinUi.summary(userId) } : {}),
@@ -8026,7 +8191,7 @@ export class Coordinator {
   private isChannelManager(userId: string) {
     return (
       !this.isExcluded(userId) &&
-      (userId === this.config.managerUserId ||
+      (this.configuredManager(userId) ||
         this.channelManagers?.isManager(this.roomId, userId) === true)
     );
   }
@@ -8469,7 +8634,7 @@ export class Coordinator {
         title: plain(current ? displayTitle(current) : "Nothing playing"),
         subtitle: plain(
           current
-            ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}`
+            ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}${trackSource(current) ? ` · ${trackSource(current)}` : ""}`
             : this.videoMode
               ? "Ready to watch"
               : "Ready for music",
@@ -8511,7 +8676,7 @@ export class Coordinator {
                   ...(this.videoMode
                     ? when(
                         !current.live,
-                        button("open_jump_to", plain(":ms-3-00:"), { value }),
+                        button("open_jump_to", icon(":ms-3-00:"), { value }),
                       )
                     : // Carries the entry rather than the session: a click
                       // can land after the song has rolled over, and it
@@ -8601,7 +8766,7 @@ export class Coordinator {
           next && current?.live
             ? "Up next: waiting on the live stream"
             : next
-              ? `${next.live ? "🔴 LIVE · " : ""}${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}`
+              ? `${next.live ? "🔴 LIVE · " : ""}${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}${trackSource(next) ? ` · ${trackSource(next)}` : ""}`
               : findingAutoplay
                 ? "Autoplay is picking a recommendation"
                 : this.videoMode

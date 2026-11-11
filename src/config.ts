@@ -1,12 +1,11 @@
+import { existsSync } from "node:fs";
 import { parseCanvasSections } from "./canvas.ts";
+import { autoplayModes } from "./store.ts";
 import { parseDuckingMode } from "./ducking.ts";
 
-const required = [
-  "SLACK_WORKSPACE_URL",
-  "SLACK_XOXP",
-  "SLACK_XAPP",
-  "SLACK_XOXD",
-] as const;
+const uploadedCookiesFile = "data/youtube-cookies.txt";
+
+const required = ["SLACK_WORKSPACE_URL", "SLACK_XAPP", "SLACK_XOXD"] as const;
 
 export function parseIds(value = "") {
   return new Set(value.split(/[\s,]+/).filter(Boolean));
@@ -112,10 +111,26 @@ export function loadConfig() {
     optionalText(process.env.SLACK_ENTERPRISE_XOXC) ??
     optionalText(process.env.SLACK_XOXC);
   if (!xoxc) throw new Error("Missing SLACK_XOXC or SLACK_ENTERPRISE_XOXC");
+  // With a bot token the app never uses a user token.
+  const xoxb = optionalText(process.env.SLACK_XOXB);
+  const xoxp = xoxb ? undefined : optionalText(process.env.SLACK_XOXP);
+  if (!xoxb && !xoxp) throw new Error("Missing SLACK_XOXP or SLACK_XOXB");
 
   return {
     workspaceUrl: process.env.SLACK_WORKSPACE_URL!,
-    xoxp: process.env.SLACK_XOXP!,
+    xoxp,
+    xoxb,
+    // The name and picture the bot user posts under (chat:write.customize):
+    // those of a Slack user, such as an agent's bot, else the ones set here.
+    displayUser: xoxb
+      ? optionalText(process.env.SLACK_DISPLAY_USER)
+      : undefined,
+    displayName: xoxb
+      ? optionalText(process.env.SLACK_DISPLAY_NAME)
+      : undefined,
+    displayIcon: xoxb
+      ? optionalText(process.env.SLACK_DISPLAY_ICON)
+      : undefined,
     xapp: process.env.SLACK_XAPP!,
     xoxc,
     xoxd: process.env.SLACK_XOXD!,
@@ -129,6 +144,16 @@ export function loadConfig() {
       process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000,
     ),
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.35),
+    // How many autoplay picks are kept queued while autoplay is on, so the
+    // queue shows what comes and any can be removed.
+    autoplayQueue: parseWholeNumber(process.env.AUTOPLAY_QUEUE, 10, 1, 50),
+    // An agent mentioned in the Huddle's thread when its queue runs out with
+    // autoplay off, so it can add more, and what it is told ({recent} is the
+    // last songs played).
+    queueEndMention: optionalText(process.env.QUEUE_END_MENTION),
+    queueEndMessage: optionalText(process.env.QUEUE_END_MESSAGE),
+    // Autoplay for a new session until a channel's defaults say otherwise.
+    autoplay: autoplayModes.find((mode) => mode === process.env.AUTOPLAY),
     duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
     lyricsOffsetMs: parseWholeNumber(
       process.env.LYRICS_OFFSET_MS,
@@ -155,12 +180,23 @@ export function loadConfig() {
     video: parseVideoLimits(process.env),
     // The image sets this; empty turns proof-of-origin tokens off.
     potServerHome: optionalText(process.env.BGUTIL_SERVER_HOME),
-    youtubeCookiesFile: optionalText(process.env.YOUTUBE_COOKIES_FILE),
+    // Cookies an admin uploaded from Settings are kept here when
+    // YOUTUBE_COOKIES_FILE is unset, and signed in with after a restart.
+    youtubeCookiesFile:
+      optionalText(process.env.YOUTUBE_COOKIES_FILE) ??
+      (existsSync(uploadedCookiesFile) ? uploadedCookiesFile : undefined),
     aloneMs: Number(process.env.ALONE_TIMEOUT_MS ?? 120_000),
     idleMs: Number(process.env.IDLE_TIMEOUT_MS ?? 600_000),
     pausedMs: Number(process.env.PAUSED_TIMEOUT_MS ?? 600_000),
     warningMs: 120_000,
     managerUserId: process.env.MANAGER_USER_ID,
+    // HuddleFM's own admins: hosts and channel managers everywhere, and the
+    // only ones who see the Admin tab.
+    adminUserIds: parseIds(process.env.ADMIN_USER_IDS),
+    // HuddleFM's MCP server, at /mcp: on with a token, acting on the session
+    // in the channel each call names, as MCP_USER_ID or else the first admin.
+    mcpToken: optionalText(process.env.MCP_TOKEN),
+    mcpUserId: optionalText(process.env.MCP_USER_ID),
     rolePermissions: parseRolePermissions(process.env),
     excludedUserIds: parseIds(process.env.EXCLUDED_USER_IDS),
     integrationUserIds: parseIds(process.env.INTEGRATION_USER_IDS),

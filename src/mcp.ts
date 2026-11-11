@@ -1,0 +1,266 @@
+import { timingSafeEqual } from "node:crypto";
+import type { IntegrationCommand } from "./integration.ts";
+import {
+  autoplayModes,
+  displayModes,
+  duckingModes,
+  loopModes,
+  modeOf,
+  transitionModes,
+} from "./store.ts";
+
+/** What the MCP server needs of the running app. */
+export type McpHost = {
+  token?: string;
+  // Who commands run as, with that user's permissions in the session.
+  actorId?: string;
+  version: string;
+  // The active session of a Huddle's thread, when there is one.
+  session(
+    channel: string,
+    threadTs: string,
+  ):
+    | {
+        id: string;
+        run(
+          userId: string,
+          command: IntegrationCommand,
+        ): Promise<{ ok: boolean; [key: string]: unknown }>;
+      }
+    | undefined;
+  // Brings HuddleFM into the active Huddle of a thread, hosted by userId.
+  join(
+    channel: string,
+    threadTs: string,
+    userId: string,
+  ): Promise<{ ok: boolean; [key: string]: unknown }>;
+};
+
+const channel = {
+  type: "string",
+  description: "Slack channel ID of the Huddle's thread",
+};
+const threadTs = {
+  type: "string",
+  description: "Timestamp of the Huddle's message (its thread)",
+};
+const tool = (
+  name: string,
+  description: string,
+  type: IntegrationCommand["type"],
+  properties: Record<string, unknown> = {},
+  required: string[] = [],
+) => ({
+  name,
+  description,
+  type,
+  inputSchema: {
+    type: "object",
+    properties: { channel, thread_ts: threadTs, ...properties },
+    required: ["channel", "thread_ts", ...required],
+    additionalProperties: false,
+  },
+});
+
+// Descriptions and errors are read by agents, which repeat their words to
+// people, so they speak of playing rather than of HuddleFM or sessions.
+
+// Joining is a Huddle's alone: it needs the thread of a Huddle that is on,
+// and someone in it to host, as a mention does.
+const joinTool = {
+  name: "join",
+  description:
+    "Join the active Huddle of a thread; user must be in the Huddle and becomes host",
+  inputSchema: {
+    type: "object",
+    properties: {
+      channel,
+      thread_ts: threadTs,
+      user: {
+        type: "string",
+        description: "Slack user ID of who asked; must be in the Huddle",
+      },
+    },
+    required: ["channel", "thread_ts", "user"],
+    additionalProperties: false,
+  },
+};
+
+// The session's settings MCP can change, each a boolean or one of its modes.
+// A new setting the coordinator takes is one more line here.
+const sessionSettings = {
+  autoplay: "boolean",
+  autoplayMode: autoplayModes,
+  loopMode: loopModes,
+  displayMode: displayModes,
+  transitionMode: transitionModes,
+  duckingMode: duckingModes,
+  anchorEnabled: "boolean",
+} satisfies Partial<
+  Record<keyof IntegrationCommand, "boolean" | readonly string[]>
+>;
+
+export const mcpTools = [
+  tool("status", "What is playing, the queue and settings", "status"),
+  tool(
+    "search",
+    "Search songs; returns references to add",
+    "search",
+    {
+      query: { type: "string" },
+    },
+    ["query"],
+  ),
+  tool(
+    "add",
+    "Add a song by a reference from search, or a link",
+    "add",
+    {
+      reference: { type: "string" },
+    },
+    ["reference"],
+  ),
+  tool("skip", "Skip to the next song", "skip"),
+  tool("previous", "Go back to the previous song", "previous"),
+  tool("pause", "Pause playback", "pause"),
+  tool("resume", "Resume playback", "resume"),
+  tool("leave", "Stop the music and leave the Huddle", "end"),
+  tool(
+    "settings",
+    "Change how the music plays; only the fields given change",
+    "settings",
+    Object.fromEntries(
+      Object.entries(sessionSettings).map(([key, kind]) => [
+        key,
+        kind === "boolean"
+          ? { type: "boolean" }
+          : { type: "string", enum: [...kind] },
+      ]),
+    ),
+  ),
+  tool(
+    "volume",
+    "Set the volume",
+    "volume",
+    {
+      percent: { type: "number", minimum: 0, maximum: 100 },
+    },
+    ["percent"],
+  ),
+];
+
+function same(a: string, b: string) {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+type Rpc = { jsonrpc?: string; id?: unknown; method?: string; params?: any };
+
+/**
+ * HuddleFM as an MCP server over streamable HTTP, without sessions: each
+ * POST is one JSON-RPC message, answered as JSON. Off without MCP_TOKEN.
+ */
+export async function mcpResponse(request: Request, host: McpHost) {
+  if (!host.token) return new Response("Not found", { status: 404 });
+  const auth = request.headers.get("authorization") ?? "";
+  if (!same(auth, `Bearer ${host.token}`))
+    return new Response("Unauthorized", { status: 401 });
+  if (request.method !== "POST")
+    return new Response("Method not allowed", {
+      status: 405,
+      headers: { allow: "POST" },
+    });
+  let rpc: Rpc;
+  try {
+    rpc = (await request.json()) as Rpc;
+  } catch {
+    return Response.json(error(null, -32700, "Parse error"));
+  }
+  // Notifications are only acknowledged.
+  if (rpc.id === undefined) return new Response(null, { status: 202 });
+  return Response.json(await answer(rpc, host));
+}
+
+function error(id: unknown, code: number, message: string) {
+  return { jsonrpc: "2.0", id, error: { code, message } };
+}
+
+function result(id: unknown, value: unknown) {
+  return { jsonrpc: "2.0", id, result: value };
+}
+
+function text(value: unknown, isError = false) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(value) }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+async function answer(rpc: Rpc, host: McpHost) {
+  switch (rpc.method) {
+    case "initialize":
+      return result(rpc.id, {
+        protocolVersion: rpc.params?.protocolVersion ?? "2025-06-18",
+        capabilities: { tools: {} },
+        serverInfo: { name: "huddlefm", version: host.version },
+      });
+    case "ping":
+      return result(rpc.id, {});
+    case "tools/list":
+      return result(rpc.id, {
+        tools: [joinTool, ...mcpTools.map(({ type: _type, ...rest }) => rest)],
+      });
+    case "tools/call":
+      return result(rpc.id, await call(rpc.params ?? {}, host));
+    default:
+      return error(rpc.id, -32601, "Method not found");
+  }
+}
+
+async function call(
+  params: { name?: string; arguments?: Record<string, unknown> },
+  host: McpHost,
+) {
+  const args = params.arguments ?? {};
+  const target = typeof args.channel === "string" ? args.channel : "";
+  const threadTs = typeof args.thread_ts === "string" ? args.thread_ts : "";
+  if (params.name === joinTool.name) {
+    const user = typeof args.user === "string" ? args.user : "";
+    if (!target || !threadTs || !user)
+      return text({ error: "channel, thread_ts and user are required" }, true);
+    const outcome = await host.join(target, threadTs, user);
+    return text(outcome, !outcome.ok);
+  }
+  const definition = mcpTools.find((item) => item.name === params.name);
+  if (!definition) return text({ error: "Unknown tool" }, true);
+  // Only the session of the Huddle thread the caller names.
+  if (!target || !threadTs)
+    return text({ error: "channel and thread_ts are required" }, true);
+  const session = host.session(target, threadTs);
+  if (!session)
+    return text(
+      { error: "Nothing is playing in this Huddle yet. Join it first." },
+      true,
+    );
+  if (!host.actorId)
+    return text({ error: "MCP_USER_ID or ADMIN_USER_IDS is not set" }, true);
+  const command: IntegrationCommand = {
+    type: definition.type,
+    channel: target,
+  };
+  if (typeof args.query === "string") command.query = args.query;
+  if (typeof args.reference === "string") command.reference = args.reference;
+  if (typeof args.percent === "number") command.percent = args.percent;
+  for (const [key, kind] of Object.entries(sessionSettings)) {
+    const value =
+      kind === "boolean"
+        ? typeof args[key] === "boolean"
+          ? args[key]
+          : undefined
+        : modeOf(kind, args[key]);
+    if (value !== undefined) Object.assign(command, { [key]: value });
+  }
+  const outcome = await session.run(host.actorId, command);
+  return text(outcome, !outcome.ok);
+}

@@ -249,7 +249,7 @@ const kickSettledErrors = [
 ];
 
 // Reaction removal outcomes that already leave the reaction off the message.
-const unreactSettledErrors = [
+export const unreactSettledErrors = [
   "no_reaction",
   "message_not_found",
   "channel_not_found",
@@ -545,10 +545,11 @@ export class SlackHuddleAdapter {
   }
 
   async activeHuddleRoom(channelId: string, threadTs: string) {
+    // The whole thread, as a Huddle may have been started from inside it.
     const replies = await this.api("conversations.replies", {
       channel: channelId,
       ts: threadTs,
-      limit: "1",
+      limit: "1000",
       inclusive: "true",
     });
     return activeHuddleRoom(replies, threadTs);
@@ -844,27 +845,33 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
   }
 }
 
+/**
+ * The Huddle that is on in a thread: the thread's own Huddle, when the thread
+ * is a Huddle's, or else the latest Huddle started from inside it, which
+ * Slack posts as a reply naming the thread as its root.
+ */
 export function activeHuddleRoom(
   raw: unknown,
   threadTs: string,
 ): ActiveHuddleRoom | undefined {
   const messages = object(raw, "replies").messages;
   if (!Array.isArray(messages)) return;
-  const root = messages.find(
-    (message) => (message as { ts?: unknown } | null)?.ts === threadTs,
-  ) as Record<string, unknown> | undefined;
-  if (
-    root?.subtype !== "huddle_thread" ||
-    !root.room ||
-    typeof root.room !== "object"
-  )
-    return;
-  const room = root.room as Record<string, unknown>;
-  const endedAt = Number(room.date_end ?? 0);
-  if (room.has_ended === true || (Number.isFinite(endedAt) && endedAt > 0))
-    return;
-  if (typeof room.id !== "string" || !room.id) return;
-  return { callId: room.id, participantIds: participantIds(room.participants) };
+  for (const message of [...messages].reverse()) {
+    const item = message as Record<string, unknown> | null;
+    if (!item?.room || typeof item.room !== "object") continue;
+    const room = item.room as Record<string, unknown>;
+    const own = item.ts === threadTs && item.subtype === "huddle_thread";
+    const inside = item.ts !== threadTs && room.thread_root_ts === threadTs;
+    if (!own && !inside) continue;
+    const endedAt = Number(room.date_end ?? 0);
+    if (room.has_ended === true || (Number.isFinite(endedAt) && endedAt > 0))
+      continue;
+    if (typeof room.id !== "string" || !room.id) continue;
+    return {
+      callId: room.id,
+      participantIds: participantIds(room.participants),
+    };
+  }
 }
 
 /**
@@ -878,7 +885,7 @@ export function huddleHasParticipant(room: ActiveHuddleRoom, userId: string) {
 
 export async function verifySlackIdentity(config: {
   workspaceUrl: string;
-  xoxp: string;
+  xoxp?: string;
   xoxc: string;
   xoxd: string;
 }) {
@@ -894,16 +901,16 @@ export async function verifySlackIdentity(config: {
   };
 
   const [appUserId, huddleUserId] = await Promise.all([
-    auth(config.xoxp),
+    config.xoxp ? auth(config.xoxp) : undefined,
     auth(config.xoxc, config.xoxd),
   ]);
-  if (appUserId !== huddleUserId)
+  if (appUserId && appUserId !== huddleUserId)
     throw new Error(
       "Slack app and Huddle credentials belong to different users",
     );
   log.info(
-    { event: "identity_verified", botUserId: appUserId },
+    { event: "identity_verified", botUserId: huddleUserId },
     "Slack credentials verified",
   );
-  return appUserId;
+  return huddleUserId;
 }

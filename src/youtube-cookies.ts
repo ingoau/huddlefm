@@ -59,13 +59,43 @@ export class YouTubeCookies {
   private saving: Promise<void> = Promise.resolve();
   private saveFailed = false;
   private warnedInvalid = false;
+  private loadedAt?: number;
 
   constructor(private path: string) {}
+
+  /** Whether yt-dlp is signed in, since when, and whether YouTube refused it. */
+  status() {
+    return {
+      signedIn: Boolean(this.text),
+      invalid: this.warnedInvalid,
+      ...(this.loadedAt ? { loadedAt: this.loadedAt } : {}),
+    };
+  }
+
+  /**
+   * Replaces the cookies with a newly exported file's YouTube and Google
+   * lines, and saves them for the next start. Throws when it has none.
+   */
+  async replace(text: string) {
+    const cookies = accountCookies(text);
+    if (!cookies) throw new Error("The file has no YouTube or Google cookies");
+    this.text = cookies;
+    this.loadedAt = Date.now();
+    this.warnedInvalid = false;
+    this.saveFailed = false;
+    this.saving = this.saving.then(() => this.save()).catch(() => {});
+    await this.saving;
+    log.info(
+      { event: "replaced", path: this.path },
+      "YouTube cookies replaced",
+    );
+  }
 
   /** Reads the cookies; without any, yt-dlp runs signed out. */
   async initialize() {
     try {
       this.text = accountCookies(await Bun.file(this.path).text());
+      if (this.text) this.loadedAt = Date.now();
       if (this.text)
         log.info(
           { event: "loaded", path: this.path },

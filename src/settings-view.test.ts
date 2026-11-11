@@ -512,3 +512,29 @@ test("Your data lists linked Jellyfin servers", () => {
   expect(text).toContain("*Home* · jellyfin.example.com");
   expect(text).toContain("unlinks Jellyfin");
 });
+
+test("shows the Admin tab to bot admins only", () => {
+  expect(visibleSettingsTabs({ access, channel: { saves: [] } })).not.toContain(
+    "admin",
+  );
+  expect(
+    visibleSettingsTabs({
+      access: { ...access, botAdmin: true },
+      channel: { saves: [] },
+    }),
+  ).toEqual(["you", "admin"]);
+  const view = settingsView(
+    options({
+      tab: "admin",
+      access: { ...access, botAdmin: true },
+      bot: {
+        admins: ["U01TESTADMIN", "U02TESTADMIN"],
+        youtube: { signedIn: false, invalid: false },
+      },
+    }),
+  );
+  const text = JSON.stringify(view.blocks);
+  expect(text).toContain("<@U01TESTADMIN>");
+  expect(text).toContain("<@U02TESTADMIN>");
+  expect(text).toContain("upload_youtube_cookies");
+});
