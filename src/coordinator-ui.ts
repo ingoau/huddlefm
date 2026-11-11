@@ -336,6 +336,24 @@ export function escape(text: string) {
 }
 
 /**
+ * What an agent is told when a queue runs out: the message, with `{recent}`
+ * as the last songs played, after a mention of the agent.
+ */
+export function queueEndText(
+  agentId: string,
+  recent: { title: string; artist?: string }[],
+  message = "The queue has ended.",
+) {
+  const songs =
+    recent
+      .map((track) =>
+        escape(track.artist ? `${track.artist} — ${track.title}` : track.title),
+      )
+      .join(", ") || "-";
+  return `<@${agentId}> ${message.replaceAll("{recent}", songs)}`;
+}
+
+/**
  * The platform a track plays from: where its sound came from when YouTube
  * was refused, otherwise where its link points.
  */

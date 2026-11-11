@@ -147,6 +147,11 @@ export function loadConfig() {
     // How many autoplay picks are kept queued while autoplay is on, so the
     // queue shows what comes and any can be removed.
     autoplayQueue: parseWholeNumber(process.env.AUTOPLAY_QUEUE, 10, 1, 50),
+    // An agent mentioned in the Huddle's thread when its queue runs out with
+    // autoplay off, so it can add more, and what it is told ({recent} is the
+    // last songs played).
+    queueEndMention: optionalText(process.env.QUEUE_END_MENTION),
+    queueEndMessage: optionalText(process.env.QUEUE_END_MESSAGE),
     // Autoplay for a new session until a channel's defaults say otherwise.
     autoplay: autoplayModes.find((mode) => mode === process.env.AUTOPLAY),
     duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
