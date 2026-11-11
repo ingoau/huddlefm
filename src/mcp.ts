@@ -1,5 +1,13 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IntegrationCommand } from "./integration.ts";
+import {
+  autoplayModes,
+  displayModes,
+  duckingModes,
+  loopModes,
+  modeOf,
+  transitionModes,
+} from "./store.ts";
 
 /** What the MCP server needs of the running app. */
 export type McpHost = {
@@ -75,6 +83,20 @@ const joinTool = {
   },
 };
 
+// The session's settings MCP can change, each a boolean or one of its modes.
+// A new setting the coordinator takes is one more line here.
+const sessionSettings = {
+  autoplay: "boolean",
+  autoplayMode: autoplayModes,
+  loopMode: loopModes,
+  displayMode: displayModes,
+  transitionMode: transitionModes,
+  duckingMode: duckingModes,
+  anchorEnabled: "boolean",
+} satisfies Partial<
+  Record<keyof IntegrationCommand, "boolean" | readonly string[]>
+>;
+
 export const mcpTools = [
   tool("status", "What is playing, the queue and settings", "status"),
   tool(
@@ -100,6 +122,19 @@ export const mcpTools = [
   tool("pause", "Pause playback", "pause"),
   tool("resume", "Resume playback", "resume"),
   tool("leave", "End the session and leave the Huddle", "end"),
+  tool(
+    "settings",
+    "Change the session's settings; only the fields given change",
+    "settings",
+    Object.fromEntries(
+      Object.entries(sessionSettings).map(([key, kind]) => [
+        key,
+        kind === "boolean"
+          ? { type: "boolean" }
+          : { type: "string", enum: [...kind] },
+      ]),
+    ),
+  ),
   tool(
     "volume",
     "Set the volume",
@@ -211,6 +246,15 @@ async function call(
   if (typeof args.query === "string") command.query = args.query;
   if (typeof args.reference === "string") command.reference = args.reference;
   if (typeof args.percent === "number") command.percent = args.percent;
+  for (const [key, kind] of Object.entries(sessionSettings)) {
+    const value =
+      kind === "boolean"
+        ? typeof args[key] === "boolean"
+          ? args[key]
+          : undefined
+        : modeOf(kind, args[key]);
+    if (value !== undefined) Object.assign(command, { [key]: value });
+  }
   const outcome = await session.run(host.actorId, command);
   return text(outcome, !outcome.ok);
 }

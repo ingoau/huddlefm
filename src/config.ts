@@ -120,6 +120,17 @@ export function loadConfig() {
     workspaceUrl: process.env.SLACK_WORKSPACE_URL!,
     xoxp,
     xoxb,
+    // The name and picture the bot user posts under (chat:write.customize):
+    // those of a Slack user, such as an agent's bot, else the ones set here.
+    displayUser: xoxb
+      ? optionalText(process.env.SLACK_DISPLAY_USER)
+      : undefined,
+    displayName: xoxb
+      ? optionalText(process.env.SLACK_DISPLAY_NAME)
+      : undefined,
+    displayIcon: xoxb
+      ? optionalText(process.env.SLACK_DISPLAY_ICON)
+      : undefined,
     xapp: process.env.SLACK_XAPP!,
     xoxc,
     xoxd: process.env.SLACK_XOXD!,

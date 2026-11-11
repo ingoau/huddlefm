@@ -227,6 +227,17 @@ export function normalizeInteraction(body: Body) {
   };
 }
 
+/**
+ * Slack's arguments for posting under another name and icon: an icon in
+ * colons is an emoji, else a picture's URL.
+ */
+export function postedAs(name?: string, icon?: string) {
+  const fields: Record<string, string> = {};
+  if (name) fields.username = name;
+  if (icon) fields[/^:[^:\s]+:$/.test(icon) ? "icon_emoji" : "icon_url"] = icon;
+  return fields;
+}
+
 export class SlackAppAdapter {
   private socket?: WebSocket;
   private web: WebClient;
@@ -243,12 +254,26 @@ export class SlackAppAdapter {
   onThreadMessage?: (message: ThreadMessage) => void;
   private seenMessages = new Set<string>();
 
-  constructor(private config: { xapp: string; xoxp?: string; xoxb?: string }) {
+  // The name and icon new messages are posted under, when one is set.
+  private as: Record<string, string>;
+  private mirrorTimer?: ReturnType<typeof setInterval>;
+
+  constructor(
+    private config: {
+      xapp: string;
+      xoxp?: string;
+      xoxb?: string;
+      displayUser?: string;
+      displayName?: string;
+      displayIcon?: string;
+    },
+  ) {
     // A bot token, when set, makes the app's own messages and views come
     // from the app's bot user rather than the signed-in account.
     const token = config.xoxb ?? config.xoxp!;
     this.web = new WebClient(token);
     this.interactive = new WebClient(token, interactiveOptions);
+    this.as = postedAs(config.displayName, config.displayIcon);
   }
 
   async react(channelId: string, messageTs: string, name: string) {
@@ -308,14 +333,51 @@ export class SlackAppAdapter {
     return result.user_id;
   }
 
+  /**
+   * Takes on the name and picture of SLACK_DISPLAY_USER, read again hourly so
+   * a changed picture follows; they come before SLACK_DISPLAY_NAME and _ICON,
+   * which fill in what the user lacks.
+   */
+  private async mirror() {
+    const userId = this.config.displayUser;
+    if (!userId) return;
+    try {
+      const { user } = await this.web.users.info({ user: userId });
+      const profile = user?.profile;
+      this.as = postedAs(
+        profile?.display_name ||
+          user?.real_name ||
+          user?.name ||
+          this.config.displayName,
+        profile?.image_512 || profile?.image_192 || this.config.displayIcon,
+      );
+      log.info(
+        { event: "display_user_mirrored", userId, username: this.as.username },
+        "Posting under another Slack user's name and picture",
+      );
+    } catch (error) {
+      log.warn(
+        { event: "display_user_failed", userId, err: error },
+        "Could not read the Slack user to post as",
+      );
+    }
+  }
+
   async start() {
     this.stopping = false;
+    if (this.config.displayUser && !this.mirrorTimer) {
+      await this.mirror();
+      this.mirrorTimer = setInterval(() => void this.mirror(), 60 * 60_000);
+      this.mirrorTimer.unref?.();
+    }
     await this.connect();
     log.info({ event: "started" }, "Slack app started");
   }
 
   async stop() {
     this.stopping = true;
+    clearInterval(this.mirrorTimer);
+    this.mirrorTimer = undefined;
     clearTimeout(this.reconnectTimer);
     this.stopHeartbeat?.();
     this.socket?.close();
@@ -334,6 +396,7 @@ export class SlackAppAdapter {
       text,
       blocks: blocks as never,
       ...noUnfurls,
+      ...this.as,
     });
     if (!result.ts) throw new Error("chat.postMessage returned no timestamp");
     log.debug(
@@ -433,6 +496,7 @@ export class SlackAppAdapter {
       text,
       thread_ts: threadTs || undefined,
       blocks: blocks as never,
+      ...this.as,
     });
     log.debug(
       { event: "ephemeral_posted", channelId: channel, userId: user, threadTs },
@@ -590,6 +654,7 @@ export class SlackAppAdapter {
       text,
       thread_ts: options?.threadTs,
       blocks: options?.blocks as never,
+      ...this.as,
     });
     log.debug(
       {

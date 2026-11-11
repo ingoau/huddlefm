@@ -112,3 +112,25 @@ test("joins a Huddle only with its thread and who asked", async () => {
     { channel: "C01ALLOWED", threadTs: "1.0", userId: "U1" },
   ]);
 });
+
+test("changes only the settings it is given, dropping unknown modes", async () => {
+  ran.length = 0;
+  expect(
+    (
+      await call("settings", {
+        channel: "C01ALLOWED",
+        thread_ts: "1.0",
+        autoplay: true,
+        loopMode: "queue",
+        duckingMode: "loud",
+      })
+    ).isError,
+  ).toBe(false);
+  expect(ran[0]!.command).toMatchObject({
+    type: "settings",
+    autoplay: true,
+    loopMode: "queue",
+  });
+  expect(ran[0]!.command.duckingMode).toBeUndefined();
+  expect(ran[0]!.command.autoplayMode).toBeUndefined();
+});
