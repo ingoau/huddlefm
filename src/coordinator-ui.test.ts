@@ -4,6 +4,7 @@ import {
   trackSource,
   useStandardEmoji,
   withEmoji,
+  queueEndText,
 } from "./coordinator-ui.ts";
 
 test("shows custom emoji the workspace lacks as standard ones", () => {
@@ -40,4 +41,17 @@ test("names the platform a track plays from", () => {
       playedFrom: { source: "SoundCloud" },
     }),
   ).toBe("SoundCloud");
+});
+
+test("tells an agent the queue ended, with the last songs when asked", () => {
+  expect(queueEndText("U01TESTAGENT", [])).toBe(
+    "<@U01TESTAGENT> The queue has ended.",
+  );
+  expect(
+    queueEndText(
+      "U01TESTAGENT",
+      [{ title: "Song <1>", artist: "Band" }, { title: "Song 2" }],
+      "Queue over. Recently: {recent}",
+    ),
+  ).toBe("<@U01TESTAGENT> Queue over. Recently: Band — Song &lt;1&gt;, Song 2");
 });

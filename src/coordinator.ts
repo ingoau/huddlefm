@@ -86,6 +86,7 @@ import {
   context,
   elapsed,
   escape,
+  queueEndText,
   trackSource,
   footerContext,
   icon,
@@ -439,6 +440,8 @@ export class Coordinator {
   private participantsRevision = 0;
   private queue: Entry[] = [];
   private history: Entry[] = [];
+  // Whether the agent was told the queue ran out, since a song last started.
+  private queueEndAnnounced = false;
   private current?: Entry;
   private state = "ready";
   private playbackSeconds = 0;
@@ -584,6 +587,8 @@ export class Coordinator {
       initialVolume: number;
       autoplay?: AutoplayMode;
       autoplayQueue?: number;
+      queueEndMention?: string;
+      queueEndMessage?: string;
       duckingMode: DuckingMode;
       aloneMs: number;
       idleMs: number;
@@ -4159,6 +4164,42 @@ export class Coordinator {
     );
   }
 
+  // Mentions QUEUE_END_MENTION in the thread when the queue runs out, so an
+  // agent can add more: once until a song starts again, with someone still
+  // listening, and not while autoplay keeps the queue filled.
+  private async announceQueueEnd() {
+    const agentId = this.config.queueEndMention;
+    if (
+      !agentId ||
+      this.queueEndAnnounced ||
+      this.autoplayOn() ||
+      !this.listenerIds().length ||
+      this.inactive()
+    )
+      return;
+    this.queueEndAnnounced = true;
+    try {
+      await this.post(
+        this.room.uiChannelId,
+        this.room.uiThreadTs,
+        queueEndText(
+          agentId,
+          this.history.slice(-5),
+          this.config.queueEndMessage,
+        ),
+      );
+      this.log.info(
+        { event: "queue_end_announced", agentId },
+        "Told an agent the queue ended",
+      );
+    } catch (error) {
+      this.log.warn(
+        { event: "queue_end_announce_failed", agentId, err: error },
+        "Could not tell the agent the queue ended",
+      );
+    }
+  }
+
   private listenerIds() {
     return [...this.participants].filter(
       (id) => id !== this.botUserId && !this.isExcluded(id),
@@ -5315,6 +5356,7 @@ export class Coordinator {
     this.interrupted = undefined;
     const next = this.queue.find((track) => track.status === "ready");
     if (!next) {
+      const ended = Boolean(this.current) && !this.queue.length;
       this.playbackScrobbling?.finish();
       this.current = undefined;
       this.state = "ready";
@@ -5323,8 +5365,10 @@ export class Coordinator {
       await this.render();
       this.sessionChanged();
       this.log.info({ event: "queue_idle" }, "No playable track in queue");
+      if (ended) void this.announceQueueEnd();
       return this.refreshIdle();
     }
+    this.queueEndAnnounced = false;
     this.queue.splice(this.queue.indexOf(next), 1);
     this.queueChanged();
     this.current = next;
