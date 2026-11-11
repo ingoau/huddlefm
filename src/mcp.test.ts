@@ -3,9 +3,9 @@ import { mcpResponse, type McpHost } from "./mcp.ts";
 import type { IntegrationCommand } from "./integration.ts";
 
 const ran: { userId: string; command: IntegrationCommand }[] = [];
+const joined: { channel: string; threadTs: string; userId: string }[] = [];
 const host = (change: Partial<McpHost> = {}): McpHost => ({
   token: "secret",
-  channels: new Set(["C01ALLOWED"]),
   actorId: "U01TESTADMIN",
   version: "1",
   session: (channel) =>
@@ -18,10 +18,10 @@ const host = (change: Partial<McpHost> = {}): McpHost => ({
           },
         }
       : undefined,
-  sessions: () => [
-    { id: "a", channels: ["C01ALLOWED"] },
-    { id: "b", channels: ["C02OTHER"] },
-  ],
+  join: async (channel, threadTs, userId) => {
+    joined.push({ channel, threadTs, userId });
+    return { ok: true, joined: true };
+  },
   ...change,
 });
 const post = (body: unknown, token = "secret") =>
@@ -67,9 +67,9 @@ test("lists its tools", async () => {
   expect(result.tools.map((item) => item.name)).toContain("skip");
 });
 
-test("acts only in its channels, as the configured user", async () => {
+test("acts on the session in the named channel, as the configured user", async () => {
   ran.length = 0;
-  expect((await call("skip", { channel: "C02OTHER" })).isError).toBe(true);
+  expect((await call("skip", {})).isError).toBe(true);
   expect((await call("skip", { channel: "C09NOSESSION" })).isError).toBe(true);
   expect(ran).toHaveLength(0);
   expect(await call("volume", { channel: "C01ALLOWED", percent: 40 })).toEqual({
@@ -82,7 +82,16 @@ test("acts only in its channels, as the configured user", async () => {
       command: { type: "volume", channel: "C01ALLOWED", percent: 40 },
     },
   ]);
-  expect((await call("sessions", {})).value).toEqual([
-    { id: "a", channels: ["C01ALLOWED"] },
+  expect((await call("sessions", {})).isError).toBe(true);
+});
+
+test("joins a Huddle only with its thread and who asked", async () => {
+  joined.length = 0;
+  expect((await call("join", { channel: "C01ALLOWED" })).isError).toBe(true);
+  expect(
+    await call("join", { channel: "C01ALLOWED", thread_ts: "1.0", user: "U1" }),
+  ).toEqual({ isError: false, value: { ok: true, joined: true } });
+  expect(joined).toEqual([
+    { channel: "C01ALLOWED", threadTs: "1.0", userId: "U1" },
   ]);
 });
