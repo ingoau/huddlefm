@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { parseCanvasSections } from "./canvas.ts";
+import { autoplayModes } from "./store.ts";
 import { parseDuckingMode } from "./ducking.ts";
 
 const uploadedCookiesFile = "data/youtube-cookies.txt";
@@ -132,6 +133,8 @@ export function loadConfig() {
       process.env.TRACK_DOWNLOAD_LIMIT_BYTES ?? 100_000_000,
     ),
     initialVolume: Number(process.env.INITIAL_VOLUME ?? 0.35),
+    // Autoplay for a new session until a channel's defaults say otherwise.
+    autoplay: autoplayModes.find((mode) => mode === process.env.AUTOPLAY),
     duckingMode: parseDuckingMode(process.env.DUCKING_MODE),
     lyricsOffsetMs: parseWholeNumber(
       process.env.LYRICS_OFFSET_MS,

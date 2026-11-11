@@ -579,6 +579,7 @@ export class Coordinator {
     private config: {
       queueLimit: number;
       initialVolume: number;
+      autoplay?: AutoplayMode;
       duckingMode: DuckingMode;
       aloneMs: number;
       idleMs: number;
@@ -697,6 +698,7 @@ export class Coordinator {
     this.participants.add(botUserId);
     for (const id of room.participantIds)
       if (!this.isExcluded(id)) this.participants.add(id);
+    this.autoplayMode = config.autoplay ?? this.autoplayMode;
     if (restored) {
       this.state = restored.state;
       this.playbackSeconds = restored.playbackSeconds;
@@ -786,6 +788,8 @@ export class Coordinator {
       [...this.participants].map((userId) => this.promptScrobbling(userId)),
     );
     this.prefetchRecommendations();
+    // With autoplay on, a new session starts playing by itself.
+    if (!this.current && !this.queue.length) this.scheduleAutoplay();
     this.audit.record("session.started", this.hostId, {
       sessionId: this.id,
       huddleId: this.room.huddleId,
@@ -851,8 +855,11 @@ export class Coordinator {
     this.sessionChanged();
     this.sendMediaSettings();
     this.prefetchRecommendations();
-    if (!this.current) await this.startNext();
-    else {
+    if (!this.current) {
+      await this.startNext();
+      // A session whose queue ran out goes on with autoplay, when it is on.
+      if (!this.current && !this.queue.length) this.scheduleAutoplay();
+    } else {
       // Listeners were already asked about this track before the restart,
       // and that prompt still answers for it.
       this.startScrobbling(this.current, this.playbackSeconds, false);
@@ -8541,7 +8548,7 @@ export class Coordinator {
                   ...(this.videoMode
                     ? when(
                         !current.live,
-                        button("open_jump_to", plain(":ms-3-00:"), { value }),
+                        button("open_jump_to", icon(":ms-3-00:"), { value }),
                       )
                     : // Carries the entry rather than the session: a click
                       // can land after the song has rolled over, and it

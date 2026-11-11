@@ -294,6 +294,12 @@ export class SlackAppAdapter {
     return text;
   }
 
+  /** The workspace's custom emoji names; needs `emoji:read`. */
+  async customEmojiNames() {
+    const result = await this.web.emoji.list();
+    return new Set(Object.keys(result.emoji ?? {}));
+  }
+
   /** The bot user behind SLACK_XOXB, or undefined without one. */
   async botUserId() {
     if (!this.config.xoxb) return undefined;

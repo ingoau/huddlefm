@@ -11,7 +11,12 @@ import { CompanionChannels } from "./companion-channels.ts";
 import { agentConfigured, isBareMention, runAgentCommand } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { Coordinator } from "./coordinator.ts";
-import { parseLikeValue, settingsMessageView } from "./coordinator-ui.ts";
+import {
+  customEmoji,
+  parseLikeValue,
+  settingsMessageView,
+  useStandardEmoji,
+} from "./coordinator-ui.ts";
 import { safeError } from "./error-message.ts";
 import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
@@ -1747,6 +1752,25 @@ slackApp.onAction = async (interaction) => {
   slackApp.start(),
 ]);
 mentionUserId = (await slackApp.botUserId()) ?? botUserId;
+// The player's custom emoji the workspace lacks show as standard ones.
+await slackApp
+  .customEmojiNames()
+  .then((names) => Object.keys(customEmoji).filter((name) => !names.has(name)))
+  .catch((error) => {
+    log.warn(
+      { event: "emoji_list_failed", err: error },
+      "Could not list custom emoji (needs emoji:read); using standard ones",
+    );
+    return Object.keys(customEmoji);
+  })
+  .then((missing) => {
+    useStandardEmoji(missing);
+    if (missing.length)
+      log.info(
+        { event: "standard_emoji", missing },
+        "Custom emoji missing from the workspace show as standard emoji; see emoji/README.md",
+      );
+  });
 log.info(
   {
     event: "mention_trigger",

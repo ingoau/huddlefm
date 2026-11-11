@@ -87,6 +87,7 @@ Interactivity, the bot events `message.channels`, `message.groups` and
         "channels:read",
         "chat:write",
         "chat:write.public",
+        "emoji:read",
         "files:read",
         "groups:history",
         "groups:read",
@@ -120,22 +121,23 @@ receives events from channels it is in.
 
 ## Playback and limits
 
-| Variable                        | Default          | Purpose                                                                                   |
-| ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
-| `QUEUE_LIMIT`                   | `50`             | Maximum tracks in the queue                                                               |
-| `TRACK_DURATION_LIMIT_SECONDS`  | `1200`           | Maximum track duration                                                                    |
-| `TRACK_DOWNLOAD_LIMIT_BYTES`    | `100000000`      | Maximum download size                                                                     |
-| `INITIAL_VOLUME`                | `0.35`           | Starting volume as a fraction of max                                                      |
-| `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                              |
-| `LYRICS_OFFSET_MS`              | `0`              | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio |
-| `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to level songs and videos to -14 LUFS                                       |
-| `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all Huddles                                |
-| `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`     | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache |
-| `MEDIA_CACHE_MAX_AGE_DAYS`      | `30`             | Re-download cached tracks older than this; `0` keeps them until evicted for space         |
-| `ALONE_TIMEOUT_MS`              | `120000`         | Leave when alone for this long                                                            |
-| `IDLE_TIMEOUT_MS`               | `600000`         | Leave when idle for this long                                                             |
-| `PAUSED_TIMEOUT_MS`             | `600000`         | Leave when paused for this long                                                           |
-| `CHIME_MEDIA_REGION`            | `ap-southeast-2` | AWS region for Chime media                                                                |
+| Variable                        | Default          | Purpose                                                                                                                                                                                                                   |
+| ------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QUEUE_LIMIT`                   | `50`             | Maximum tracks in the queue                                                                                                                                                                                               |
+| `TRACK_DURATION_LIMIT_SECONDS`  | `1200`           | Maximum track duration                                                                                                                                                                                                    |
+| `TRACK_DOWNLOAD_LIMIT_BYTES`    | `100000000`      | Maximum download size                                                                                                                                                                                                     |
+| `INITIAL_VOLUME`                | `0.35`           | Starting volume as a fraction of max                                                                                                                                                                                      |
+| `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                                                                                                                                                              |
+| `LYRICS_OFFSET_MS`              | `0`              | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio                                                                                                                                 |
+| `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to level songs and videos to -14 LUFS                                                                                                                                                                       |
+| `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all Huddles                                                                                                                                                                |
+| `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`     | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache                                                                                                                                 |
+| `MEDIA_CACHE_MAX_AGE_DAYS`      | `30`             | Re-download cached tracks older than this; `0` keeps them until evicted for space                                                                                                                                         |
+| `AUTOPLAY`                      | `off`            | Autoplay for a new session: `off`, `related` (songs like the last one) or `huddle` (a mix of what people in the Huddle listen to); with it on, a session starts playing by itself. A channel's saved defaults override it |
+| `ALONE_TIMEOUT_MS`              | `120000`         | Leave when alone for this long                                                                                                                                                                                            |
+| `IDLE_TIMEOUT_MS`               | `600000`         | Leave when idle for this long                                                                                                                                                                                             |
+| `PAUSED_TIMEOUT_MS`             | `600000`         | Leave when paused for this long                                                                                                                                                                                           |
+| `CHIME_MEDIA_REGION`            | `ap-southeast-2` | AWS region for Chime media                                                                                                                                                                                                |
 
 ## Video mode
 
