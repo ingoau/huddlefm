@@ -364,8 +364,8 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
-// How many random popular songs Play something tries before giving up.
-const autoplayPopularAttempts = 5;
+// How many random popular songs autoplay tries before giving up.
+const autoplayPopularAttempts = 12;
 // Where video mode's autoplay picks come from, as recorded on each pick.
 const relatedVideosSource = "related_videos";
 
@@ -4941,7 +4941,10 @@ export class Coordinator {
         mode,
       );
       if (added !== undefined) return added;
-      if (playSomethingBy && this.canAddAutoplay(context, generation)) {
+      // Out of recommendations, autoplay goes on with a popular song rather
+      // than leave the queue empty; many are skipped while YouTube refuses
+      // the server and SoundCloud lacks them, so several are tried.
+      if (this.canAddAutoplay(context, generation)) {
         const popular = shuffle(await this.tracks.popularTracks()).filter(
           (track) => !excluded.has(track.sourceId),
         );
@@ -5030,6 +5033,9 @@ export class Coordinator {
           continue;
         }
       }
+      // A song that cannot be played now is passed over before it is shown.
+      if ((await this.tracks.playable?.(metadata).catch(() => true)) === false)
+        continue;
       const pending = await this.enqueue(async () => {
         if (!this.canAddAutoplay(context, generation)) return;
         const currentIds = new Set([
