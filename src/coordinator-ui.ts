@@ -334,3 +334,30 @@ export function escape(text: string) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }
+
+/**
+ * The platform a track plays from: where its sound came from when YouTube
+ * was refused, otherwise where its link points.
+ */
+export function trackSource(track: {
+  sourceId: string;
+  canonicalUrl: string;
+  playedFrom?: { source: string };
+}) {
+  if (track.playedFrom) return track.playedFrom.source;
+  if (track.sourceId.startsWith("jellyfin:")) return "Jellyfin";
+  if (track.sourceId.startsWith("navidrome:")) return "Navidrome";
+  let host = "";
+  try {
+    host = new URL(track.canonicalUrl).hostname.replace(/^(www|m)\./, "");
+  } catch {
+    return undefined;
+  }
+  if (host === "music.youtube.com") return "YouTube Music";
+  if (/(^|\.)(youtube\.com|youtu\.be)$/.test(host)) return "YouTube";
+  if (/(^|\.)soundcloud\.com$/.test(host)) return "SoundCloud";
+  if (/(^|\.)bandcamp\.com$/.test(host)) return "Bandcamp";
+  if (/(^|\.)mixcloud\.com$/.test(host)) return "Mixcloud";
+  if (/(^|\.)twitch\.tv$/.test(host)) return "Twitch";
+  return host || undefined;
+}

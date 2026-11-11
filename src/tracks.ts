@@ -842,6 +842,28 @@ export class TrackCatalog {
     await this.cookies.replace(text);
   }
 
+  /**
+   * Tries a YouTube download with the cookies now held, for whoever just
+   * uploaded them: whether they work, YouTube refused them, or YouTube
+   * blocks this server whatever the cookies.
+   */
+  async checkYouTubeCookies(): Promise<
+    YouTubeCheck & { verdict: "works" | "refused" | "blocked" }
+  > {
+    const check = await this.probeYouTube();
+    if (check.ok) return { ...check, verdict: "works" };
+    return {
+      ...check,
+      verdict:
+        this.cookies?.status().invalid ||
+        /no longer valid|sign in to (?:view|watch|continue)|use --cookies/i.test(
+          check.reason ?? "",
+        )
+          ? "refused"
+          : "blocked",
+    };
+  }
+
   /** What SoundCloud has for a search, as tracks. */
   async searchSoundCloud(query: string, limit = 5) {
     try {
@@ -867,7 +889,7 @@ export class TrackCatalog {
    * YouTube refuses this server. While it does, songs go straight to
    * SoundCloud.
    */
-  private async probeYouTube() {
+  private async probeYouTube(): Promise<YouTubeCheck> {
     const directory = await mkdtemp(`${tmpdir()}/huddlefm-probe-`);
     try {
       await this.extract(
@@ -889,13 +911,16 @@ export class TrackCatalog {
           "YouTube downloads work again from this server",
         );
       this.youtubeRefusedUntil = 0;
+      return { ok: true };
     } catch (error) {
-      if (this.closing.signal.aborted) return;
+      const reason = trackFailureDetail(error) ?? String(error);
+      if (this.closing.signal.aborted) return { ok: false, reason };
       this.youtubeRefusedUntil = Date.now() + youtubeProbeInterval * 2;
       log.warn(
-        { event: "youtube_probe_refused", reason: trackFailureDetail(error) },
+        { event: "youtube_probe_refused", reason },
         "YouTube refuses this server; songs play from SoundCloud",
       );
+      return { ok: false, reason };
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -3807,6 +3832,9 @@ async function runOnce(
   if (code) throw extractorFailure(stderr);
   return { stdout, stderr };
 }
+
+/** What a YouTube download check found. */
+export type YouTubeCheck = { ok: boolean; reason?: string };
 
 // A short public video, downloaded to learn whether YouTube refuses this
 // server, and how often that is checked.

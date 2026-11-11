@@ -86,6 +86,7 @@ import {
   context,
   elapsed,
   escape,
+  trackSource,
   footerContext,
   icon,
   input,
@@ -6858,7 +6859,7 @@ export class Coordinator {
               ];
               return [
                 section(
-                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.live ? "🔴 LIVE · " : ""}${track.playedFrom ? "via SoundCloud · " : ""}${addedBy(track)}`,
+                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.live ? "🔴 LIVE · " : ""}${trackSource(track) ? `${trackSource(track)} · ` : ""}${addedBy(track)}`,
                   `queue_item_${track.id}`,
                 ),
                 ...when(
@@ -8547,7 +8548,7 @@ export class Coordinator {
         title: plain(current ? displayTitle(current) : "Nothing playing"),
         subtitle: plain(
           current
-            ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}${current.playedFrom ? " · via SoundCloud" : ""}`
+            ? `${current.automatic ? "Autoplay · " : ""}${current.album ? `${current.album} · ` : ""}${current.artist}${trackSource(current) ? ` · ${trackSource(current)}` : ""}`
             : this.videoMode
               ? "Ready to watch"
               : "Ready for music",
@@ -8679,7 +8680,7 @@ export class Coordinator {
           next && current?.live
             ? "Up next: waiting on the live stream"
             : next
-              ? `${next.live ? "🔴 LIVE · " : ""}${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}${next.playedFrom ? " · via SoundCloud" : ""}`
+              ? `${next.live ? "🔴 LIVE · " : ""}${next.status === "preparing" ? "Preparing · " : ""}${next.automatic ? "Autoplay · " : ""}${next.album ? `${next.album} · ` : ""}${next.artist}${trackSource(next) ? ` · ${trackSource(next)}` : ""}`
               : findingAutoplay
                 ? "Autoplay is picking a recommendation"
                 : this.videoMode
