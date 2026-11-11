@@ -29,6 +29,7 @@ import {
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { SlackAppAdapter, type Interaction } from "./slack-app.ts";
 import { uploadYouTubeCookiesAction } from "./settings-view.ts";
+import { mcpResponse } from "./mcp.ts";
 import {
   SlackHuddleAdapter,
   huddleHasParticipant,
@@ -40,6 +41,7 @@ import {
   integrationReply,
   isAllowlisted,
   parseIntegrationMessage,
+  sessionMatchesChannel,
 } from "./integration.ts";
 import { playWindowMs, skipWindowMs } from "./fatigue.ts";
 import { Store, type SavedSession } from "./store.ts";
@@ -1459,6 +1461,40 @@ const server = Bun.serve({
       });
     },
     "/favicon.ico": () => new Response(null, { status: 204 }),
+    "/mcp": (request: Request) =>
+      mcpResponse(request, {
+        token: config.mcpToken,
+        channels: config.mcpChannelIds,
+        actorId: config.mcpUserId ?? [...config.adminUserIds][0],
+        version: "1",
+        session(channel) {
+          const coordinator = [...runtimes.values()]
+            .map((runtime) => runtime.coordinator)
+            .find((item) => item && sessionMatchesChannel(item.room, channel));
+          return coordinator
+            ? {
+                id: coordinator.id,
+                run: (userId, command) =>
+                  coordinator.mcpCommand(userId, command),
+              }
+            : undefined;
+        },
+        sessions: () =>
+          [...runtimes.values()].flatMap(({ coordinator }) =>
+            coordinator
+              ? [
+                  {
+                    id: coordinator.id,
+                    channels: [
+                      coordinator.room.sourceChannelId,
+                      coordinator.room.uiChannelId,
+                      coordinator.room.companionChannelId,
+                    ].filter((id): id is string => Boolean(id)),
+                  },
+                ]
+              : [],
+          ),
+      }),
     "/join": {
       POST: async (request: Request) => {
         const denied = controlDenied(request, config.localControlToken);
