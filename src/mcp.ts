@@ -4,7 +4,7 @@ import type { IntegrationCommand } from "./integration.ts";
 /** What the MCP server needs of the running app. */
 export type McpHost = {
   token?: string;
-  // Channels the MCP server may act in; none means it acts nowhere.
+  // Channels the MCP server may act in; empty means any with a session.
   channels: Set<string>;
   // Who commands run as, with that user's permissions in the session.
   actorId?: string;
@@ -19,8 +19,12 @@ export type McpHost = {
         ): Promise<{ ok: boolean; [key: string]: unknown }>;
       }
     | undefined;
-  // Active sessions, by the channels they can be named by.
-  sessions(): { id: string; channels: string[] }[];
+  // Brings HuddleFM into the active Huddle of a thread, hosted by userId.
+  join(
+    channel: string,
+    threadTs: string,
+    userId: string,
+  ): Promise<{ ok: boolean; [key: string]: unknown }>;
 };
 
 const channel = {
@@ -44,6 +48,30 @@ const tool = (
     additionalProperties: false,
   },
 });
+
+// Joining is a Huddle's alone: it needs the thread of a Huddle that is on,
+// and someone in it to host, as a mention does.
+const joinTool = {
+  name: "join",
+  description:
+    "Bring HuddleFM into the active Huddle of a thread; user must be in the Huddle and becomes host",
+  inputSchema: {
+    type: "object",
+    properties: {
+      channel,
+      thread_ts: {
+        type: "string",
+        description: "Timestamp of the Huddle's message (its thread)",
+      },
+      user: {
+        type: "string",
+        description: "Slack user ID of who asked; must be in the Huddle",
+      },
+    },
+    required: ["channel", "thread_ts", "user"],
+    additionalProperties: false,
+  },
+};
 
 export const mcpTools = [
   tool("status", "What is playing, the queue and settings", "status"),
@@ -140,15 +168,7 @@ async function answer(rpc: Rpc, host: McpHost) {
       return result(rpc.id, {});
     case "tools/list":
       return result(rpc.id, {
-        tools: [
-          {
-            name: "sessions",
-            description:
-              "Active Huddle sessions in the channels this server may control",
-            inputSchema: { type: "object", properties: {} },
-          },
-          ...mcpTools.map(({ type: _type, ...rest }) => rest),
-        ],
+        tools: [joinTool, ...mcpTools.map(({ type: _type, ...rest }) => rest)],
       });
     case "tools/call":
       return result(rpc.id, await call(rpc.params ?? {}, host));
@@ -161,20 +181,28 @@ async function call(
   params: { name?: string; arguments?: Record<string, unknown> },
   host: McpHost,
 ) {
-  if (params.name === "sessions")
-    return text(
-      host
-        .sessions()
-        .filter((session) =>
-          session.channels.some((id) => host.channels.has(id)),
-        ),
-    );
-  const definition = mcpTools.find((item) => item.name === params.name);
-  if (!definition) return text({ error: "Unknown tool" }, true);
   const args = params.arguments ?? {};
   const target = typeof args.channel === "string" ? args.channel : "";
-  // Only the channels it was given, and only a session running in one.
-  if (!host.channels.has(target))
+  const allowed = () => !host.channels.size || host.channels.has(target);
+  if (params.name === joinTool.name) {
+    const threadTs = typeof args.thread_ts === "string" ? args.thread_ts : "";
+    const user = typeof args.user === "string" ? args.user : "";
+    if (!target || !threadTs || !user)
+      return text({ error: "channel, thread_ts and user are required" }, true);
+    if (!allowed())
+      return text(
+        { error: "This channel is not one HuddleFM's MCP may control" },
+        true,
+      );
+    const outcome = await host.join(target, threadTs, user);
+    return text(outcome, !outcome.ok);
+  }
+  const definition = mcpTools.find((item) => item.name === params.name);
+  if (!definition) return text({ error: "Unknown tool" }, true);
+  // Only a session running in the channel the caller names, and only in
+  // MCP_CHANNEL_IDS when that is set.
+  if (!target) return text({ error: "channel is required" }, true);
+  if (!allowed())
     return text(
       { error: "This channel is not one HuddleFM's MCP may control" },
       true,

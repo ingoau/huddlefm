@@ -1479,21 +1479,17 @@ const server = Bun.serve({
               }
             : undefined;
         },
-        sessions: () =>
-          [...runtimes.values()].flatMap(({ coordinator }) =>
-            coordinator
-              ? [
-                  {
-                    id: coordinator.id,
-                    channels: [
-                      coordinator.room.sourceChannelId,
-                      coordinator.room.uiChannelId,
-                      coordinator.room.companionChannelId,
-                    ].filter((id): id is string => Boolean(id)),
-                  },
-                ]
-              : [],
-          ),
+        async join(channel, threadTs, userId) {
+          const room = await slackHuddle.activeHuddleRoom(channel, threadTs);
+          if (!room)
+            return { ok: false, error: "No active Huddle in that thread" };
+          if (joiningCalls.has(room.callId) || runtimeForCall(room.callId))
+            return { ok: true, alreadyJoined: true };
+          if (!huddleHasParticipant(room, userId))
+            return { ok: false, error: "That user is not in the Huddle" };
+          await joinHuddle(channel, userId, room.callId);
+          return { ok: true, joined: true };
+        },
       }),
     "/join": {
       POST: async (request: Request) => {
