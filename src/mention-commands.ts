@@ -1,5 +1,8 @@
 import type { Coordinator } from "./coordinator.ts";
+import { logger } from "./logger.ts";
 import type { LoopMode, MediaMode } from "./store.ts";
+
+const log = logger.child({ component: "mention-commands" });
 
 // Mentions are read as commands first: a message that is exactly one of these
 // phrases runs straight away, with no AI call. Anything else goes to the agent,
@@ -187,11 +190,13 @@ const linkPattern = /^<?(https?:\/\/[^\s|>]+)(?:\|[^>]*)?>?$/i;
 // typed exactly; a near miss goes to the agent instead.
 const exactOnly = new Set<MentionCommand["type"]>(["end", "clear", "host"]);
 
-/** How many typos a phrase of this length may have and still match. */
+/**
+ * How many typos a word of this length may have. Short words have to be exact:
+ * a typo there turns on into no, up into dn, or skip into stop.
+ */
 function typosAllowed(length: number) {
   if (length >= 10) return 2;
   if (length >= 5) return 1;
-  // `np`, `ff`, `next` and `back` are too close to words and to each other.
   return 0;
 }
 
@@ -224,21 +229,40 @@ export function typoDistance(a: string, b: string, limit: number) {
 }
 
 /**
+ * Typos between `text` and `phrase`, counted word by word, or undefined when
+ * a word is further off than it may be. Words are never joined, split or
+ * swapped. Exact-only phrases allow a typo in any word, so that a near miss of
+ * one is seen as one.
+ */
+function phraseTypos(text: string[], phrase: string[], strict: boolean) {
+  if (text.length !== phrase.length) return undefined;
+  let total = 0;
+  for (const [index, word] of phrase.entries()) {
+    const limit = strict
+      ? Math.max(1, typosAllowed(word.length))
+      : typosAllowed(word.length);
+    const distance = typoDistance(text[index]!, word, limit);
+    if (distance > limit) return undefined;
+    total += distance;
+  }
+  return total;
+}
+
+/**
  * The phrase `text` is a typo of, when there's exactly one command it could
  * be. Anything as close to an exact-only phrase, or to two different
  * commands, is left to the agent.
  */
 function closestPhrase(text: string) {
+  const words = text.split(" ");
   let best: { distance: number; phrases: string[] } | undefined;
   for (const candidate of Object.keys(fixed)) {
-    // Exact-only phrases are measured too, even short ones, so that a near
-    // miss of one never runs something else.
-    const limit = exactOnly.has(fixed[candidate]!.type)
-      ? Math.max(1, typosAllowed(candidate.length))
-      : typosAllowed(candidate.length);
-    if (!limit) continue;
-    const distance = typoDistance(text, candidate, limit);
-    if (distance > limit) continue;
+    const distance = phraseTypos(
+      words,
+      candidate.split(" "),
+      exactOnly.has(fixed[candidate]!.type),
+    );
+    if (distance === undefined) continue;
     if (!best || distance < best.distance) best = { distance, phrases: [] };
     if (distance === best.distance) best.phrases.push(candidate);
   }
@@ -262,8 +286,16 @@ export function parseMentionCommand(
   text: string,
 ): ParsedMentionCommand | undefined {
   const trimmed = text.trim();
-  const url = linkPattern.exec(trimmed)?.[1];
-  if (url) return { type: "add", url };
+  const link = linkPattern.exec(trimmed)?.[1];
+  // Slack escapes &, < and > in the text it sends.
+  if (link)
+    return {
+      type: "add",
+      url: link
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&amp;", "&"),
+    };
 
   const normalized = normalizeCommand(trimmed);
   const known = fixed[normalized];
@@ -331,7 +363,24 @@ export async function runMentionCommand(
   command: ParsedMentionCommand,
   options: { agentAvailable?: boolean } = {},
 ): Promise<Outcome> {
-  const outcome = await runCommand(coordinator, userId, command, options);
+  let outcome: Outcome;
+  try {
+    // Permissions are checked from a cache, so make sure this user's roles,
+    // like a channel manager's, are in it first.
+    await coordinator.primeManager(userId);
+    outcome = await runCommand(coordinator, userId, command, options);
+  } catch (error) {
+    log.warn(
+      {
+        event: "mention_command_failed",
+        userId,
+        type: command.type,
+        err: error,
+      },
+      "Mention command failed",
+    );
+    return { ok: false, text: "I couldn't do that. Try again in a moment." };
+  }
   // Say what a typo was taken for, so a wrong guess is plain to see.
   return command.readAs
     ? { ...outcome, text: `${outcome.text} (Read as \`${command.readAs}\`.)` }

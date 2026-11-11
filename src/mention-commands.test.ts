@@ -72,6 +72,15 @@ test("only a link on its own is added; anything around it is the agent's", () =>
     url,
   });
   expect(parseMentionCommand(url)).toEqual({ type: "add", url });
+  // as Slack sends a link with more than one parameter
+  expect(
+    parseMentionCommand(
+      "<https://www.youtube.com/watch?feature=share&amp;v=abc&amp;list=PL1>",
+    ),
+  ).toEqual({
+    type: "add",
+    url: "https://www.youtube.com/watch?feature=share&v=abc&list=PL1",
+  });
   expect(parseMentionCommand(`add <${url}>`)).toBeUndefined();
   expect(parseMentionCommand(`play ${url}`)).toBeUndefined();
   expect(parseMentionCommand(`add <${url}> and Creep`)).toBeUndefined();
@@ -105,7 +114,7 @@ test("small typos in safe commands are read as the command", () => {
     readAs: "now playing",
   });
   // two typos only in longer phrases
-  expect(parseMentionCommand("turn teh volum up")).toMatchObject({
+  expect(parseMentionCommand("turn the volme up")).toMatchObject({
     type: "volume",
     change: volumeStep,
   });
@@ -123,12 +132,31 @@ test("typos the agent should handle instead", () => {
   expect(parseMentionCommand("leaev")).toBeUndefined();
   // as close to two different commands
   expect(parseMentionCommand("autoplay of")).toBeUndefined();
+  // a typo never flips a short word into its opposite
+  for (const text of [
+    "subtitles on",
+    "captions down",
+    "captions no",
+    "autoplay down",
+    "on autoplay",
+    "volume on",
+    "now loop",
+    "skip music",
+    "loop music",
+    "no back",
+    "turn teh volum up",
+  ])
+    expect(parseMentionCommand(text)).toBeUndefined();
   expect(parseMentionCommand("captions of")).toBeUndefined();
 });
 
 test("commands run through the coordinator and say what happened", async () => {
   const calls: unknown[][] = [];
   const coordinator = {
+    primeManager: async () => {},
+    agentShuffle: async () => {
+      throw new Error("render failed");
+    },
     agentEnd: async (...args: unknown[]) => {
       calls.push(["end", ...args]);
       return { ok: true, ended: true };
@@ -181,6 +209,9 @@ test("commands run through the coordinator and say what happened", async () => {
       readAs: "volume up",
     }),
   ).toEqual({ ok: true, text: "Volume 45%. (Read as `volume up`.)" });
+  expect(
+    await runMentionCommand(coordinator, "U1", { type: "shuffle" }),
+  ).toEqual({ ok: false, text: "I couldn't do that. Try again in a moment." });
   expect(calls).toEqual([
     ["end", "U1"],
     ["volume", "U1", 10],

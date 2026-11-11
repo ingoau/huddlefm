@@ -146,3 +146,20 @@ test("runAgentCommand stops a user after a few requests a minute", async () => {
     else process.env.OPENROUTER_API_KEY = previous;
   }
 });
+
+test("an empty rate limit setting is the default, not zero", async () => {
+  const name = "AGENT_LIMIT_PER_HOUR";
+  const previous = process.env[name];
+  process.env[name] = " ";
+  try {
+    const { limitFromEnv } = await import("./agent.ts");
+    expect(limitFromEnv(name, 100)).toBe(100);
+    process.env[name] = "0";
+    expect(limitFromEnv(name, 100)).toBe(0);
+    process.env[name] = "lots";
+    expect(limitFromEnv(name, 100)).toBe(100);
+  } finally {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  }
+});

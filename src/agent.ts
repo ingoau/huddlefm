@@ -25,8 +25,11 @@ const activeAgentUsers = new Set<string>();
 const minuteMs = 60_000;
 const hourMs = 60 * minuteMs;
 
-function limitFromEnv(name: string, fallback: number) {
-  const value = Number(process.env[name]);
+export function limitFromEnv(name: string, fallback: number) {
+  // Unset and empty are both the default; an empty 0 would turn the agent off.
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 

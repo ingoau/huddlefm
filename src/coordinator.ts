@@ -1996,7 +1996,7 @@ export class Coordinator {
     });
   }
 
-  /** Move the volume by `change` percent, as volume up and down do. */
+  /** Move the volume by `change` percent, for a mention's volume up or down. */
   async agentChangeVolume(
     userId: string,
     change: number,
