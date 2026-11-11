@@ -365,6 +365,8 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
+// The ⋯ menu on each queue row, whose options name a row button and track.
+const queueItemMenuAction = "queue_item_menu";
 // How many random popular songs autoplay tries before giving up.
 const autoplayPopularAttempts = 12;
 // Where video mode's autoplay picks come from, as recorded on each pick.
@@ -1128,7 +1130,15 @@ export class Coordinator {
     );
   }
 
-  async action(interaction: Interaction) {
+  async action(interaction: Interaction): Promise<void> {
+    // A queue row's ⋯ menu names the row's own button and its track.
+    if (interaction.actionId === queueItemMenuAction) {
+      const [actionId, trackId] = interaction.value.split("|");
+      if (!actionId || !trackId) return;
+      return this.action({ ...interaction, actionId, value: trackId });
+    }
+    if (interaction.actionId === "queue_keep_all_autoplay")
+      return this.keepAllAutoplay(interaction);
     this.scrobbling?.syncAnalyticsUser(interaction.userId);
     const ending = this.endingAction(interaction);
     // Settings opens with a trigger ID that expires after three seconds, which
@@ -6268,6 +6278,19 @@ export class Coordinator {
 
   // Turns the queued autoplay pick into a song the user asked for, so it
   // stays put when someone else queues a song and counts as theirs.
+  // Keeps every autoplay pick in the queue as the user's own requests.
+  private async keepAllAutoplay(interaction: Interaction) {
+    if (!this.validQueueView(interaction))
+      return this.notice(
+        interaction.userId,
+        "That queue view is stale; reopen it.",
+      );
+    if (!(await this.require(interaction, "add"))) return;
+    for (const entry of this.queue.filter((track) => track.automatic))
+      await this.keepAutoplayEntry(interaction.userId, entry.id);
+    this.queueChanged(interaction);
+  }
+
   private async keepAutoplay(interaction: Interaction) {
     if (!this.validQueueView(interaction))
       return this.notice(
@@ -6801,8 +6824,17 @@ export class Coordinator {
         ? [
             ...when(
               (manages && this.shufflableCount() > 1) ||
-                this.can(userId, "clear"),
+                this.can(userId, "clear") ||
+                (this.queue.some((track) => track.automatic) &&
+                  this.can(userId, "add")),
               actions("queue_tools", [
+                ...when(
+                  this.queue.some((track) => track.automatic) &&
+                    this.can(userId, "add"),
+                  button("queue_keep_all_autoplay", plain("Add all to queue"), {
+                    value: this.id,
+                  }),
+                ),
                 ...when(
                   manages && this.shufflableCount() > 1,
                   button("shuffle_queue", plain("Shuffle"), {
@@ -6823,49 +6855,62 @@ export class Coordinator {
               ]),
             ),
             ...this.queue.flatMap((track, index) => {
-              const value = track.id;
-              const controls = [
+              const value = (actionId: string) => `${actionId}|${track.id}`;
+              const option = (actionId: string, label: string) => ({
+                text: plain(label),
+                value: value(actionId),
+              });
+              const options = [
                 ...when(
                   manages && index,
-                  button("queue_play_next", plain("Play next"), { value }),
+                  option("queue_play_next", "Play next"),
                 ),
-                ...when(
-                  manages && index,
-                  button("queue_move_up", plain("Up"), { value }),
-                ),
+                ...when(manages && index, option("queue_move_up", "Up")),
                 ...when(
                   manages && index < last,
-                  button("queue_move_down", plain("Down"), { value }),
+                  option("queue_move_down", "Down"),
                 ),
                 ...when(
                   track.automatic && this.can(userId, "add"),
-                  button("queue_keep_autoplay", plain("Add to queue"), {
-                    value,
-                  }),
+                  option("queue_keep_autoplay", "Add to queue"),
                 ),
                 ...when(
                   manages && !track.automatic,
-                  button("queue_move_to_position", plain("Move to…"), {
-                    value,
-                  }),
+                  option("queue_move_to_position", "Move to…"),
                 ),
                 ...when(
                   this.canRemove(userId, track),
-                  button("remove_queue_track", plain("Remove"), {
-                    style: "danger",
-                    value,
-                  }),
+                  option("remove_queue_track", "Remove"),
                 ),
               ];
+              // Songs are grouped under where they play from and who added
+              // them, a heading again wherever that changes, so the order
+              // stays the play order.
+              const group = (entry?: Entry) =>
+                entry
+                  ? `${trackSource(entry) ? `*${trackSource(entry)}* · ` : ""}${addedBy(entry)}`
+                  : "";
+              const heading = group(track);
               return [
-                section(
-                  `*${index + 1}. ${escape(track.title)}* — ${escape(track.artist)}\n${track.live ? "🔴 LIVE · " : ""}${trackSource(track) ? `${trackSource(track)} · ` : ""}${addedBy(track)}`,
-                  `queue_item_${track.id}`,
-                ),
                 ...when(
-                  controls.length,
-                  actions(`queue_actions_${track.id}`, controls),
+                  heading !== group(this.queue[index - 1]),
+                  context(`queue_group_${track.id}`, heading),
                 ),
+                {
+                  ...section(
+                    `${index + 1}. *${escape(track.title)}* — ${escape(track.artist)}${track.live ? " · 🔴 LIVE" : ""}`,
+                    `queue_item_${track.id}`,
+                  ),
+                  ...(options.length
+                    ? {
+                        accessory: {
+                          type: "overflow",
+                          action_id: queueItemMenuAction,
+                          options: options.slice(0, 5),
+                        },
+                      }
+                    : {}),
+                },
               ];
             }),
           ]
