@@ -152,3 +152,26 @@ test("a run that only drops HttpOnly prefixes changes nothing", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("replaces the cookies with an uploaded file and saves them", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cookies-test-"));
+  try {
+    const path = join(directory, "cookies.txt");
+    const cookies = new YouTubeCookies(path);
+    expect(cookies.status()).toEqual({ signedIn: false, invalid: false });
+    await expect(
+      cookies.replace(line(".example.com", "a", "b")),
+    ).rejects.toThrow();
+    await cookies.replace(
+      [line(".youtube.com", "SID", "new"), line(".example.com", "a", "b")].join(
+        "\n",
+      ),
+    );
+    expect(cookies.status().signedIn).toBe(true);
+    expect(await Bun.file(path).text()).toBe(
+      `# Netscape HTTP Cookie File\n${line(".youtube.com", "SID", "new")}\n`,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

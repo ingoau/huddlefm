@@ -249,7 +249,7 @@ const kickSettledErrors = [
 ];
 
 // Reaction removal outcomes that already leave the reaction off the message.
-const unreactSettledErrors = [
+export const unreactSettledErrors = [
   "no_reaction",
   "message_not_found",
   "channel_not_found",
@@ -878,7 +878,7 @@ export function huddleHasParticipant(room: ActiveHuddleRoom, userId: string) {
 
 export async function verifySlackIdentity(config: {
   workspaceUrl: string;
-  xoxp: string;
+  xoxp?: string;
   xoxc: string;
   xoxd: string;
 }) {
@@ -894,16 +894,16 @@ export async function verifySlackIdentity(config: {
   };
 
   const [appUserId, huddleUserId] = await Promise.all([
-    auth(config.xoxp),
+    config.xoxp ? auth(config.xoxp) : undefined,
     auth(config.xoxc, config.xoxd),
   ]);
-  if (appUserId !== huddleUserId)
+  if (appUserId && appUserId !== huddleUserId)
     throw new Error(
       "Slack app and Huddle credentials belong to different users",
     );
   log.info(
-    { event: "identity_verified", botUserId: appUserId },
+    { event: "identity_verified", botUserId: huddleUserId },
     "Slack credentials verified",
   );
-  return appUserId;
+  return huddleUserId;
 }

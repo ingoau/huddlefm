@@ -1,5 +1,6 @@
 import { WebClient } from "@slack/web-api";
 import { logger } from "./logger.ts";
+import { unreactSettledErrors } from "./slack-huddle.ts";
 
 const log = logger.child({ component: "slack-app" });
 
@@ -57,6 +58,38 @@ const interactiveOptions = {
   rejectRateLimitedCalls: true,
   timeout: 15_000,
 };
+
+export type ThreadMessage = {
+  channelId: string;
+  threadTs: string;
+  messageTs: string;
+  userId: string;
+  text: string;
+};
+
+/** A plain reply in a thread from an Events API payload, if it is one. */
+export function threadMessage(payload: unknown): ThreadMessage | undefined {
+  const event = (payload as { event?: Record<string, unknown> } | undefined)
+    ?.event;
+  if (!event || (event.type !== "message" && event.type !== "app_mention"))
+    return;
+  const { channel, thread_ts, ts, user, text, subtype } = event;
+  if (
+    subtype ||
+    typeof channel !== "string" ||
+    typeof thread_ts !== "string" ||
+    typeof ts !== "string" ||
+    typeof user !== "string"
+  )
+    return;
+  return {
+    channelId: channel,
+    threadTs: thread_ts,
+    messageTs: ts,
+    userId: user,
+    text: typeof text === "string" ? text : "",
+  };
+}
 
 type Body = {
   type?: string;
@@ -202,10 +235,67 @@ export class SlackAppAdapter {
   private stopping = false;
   onAction?: (interaction: Interaction) => void | Promise<void>;
   onSuggestion?: (interaction: Interaction) => Promise<unknown[]>;
+  /** Thread messages the app's bot user sees, when SLACK_XOXB is set. */
+  onThreadMessage?: (message: ThreadMessage) => void;
+  private seenMessages = new Set<string>();
 
-  constructor(private config: { xapp: string; xoxp: string }) {
-    this.web = new WebClient(config.xoxp);
-    this.interactive = new WebClient(config.xoxp, interactiveOptions);
+  constructor(private config: { xapp: string; xoxp?: string; xoxb?: string }) {
+    // A bot token, when set, makes the app's own messages and views come
+    // from the app's bot user rather than the signed-in account.
+    const token = config.xoxb ?? config.xoxp!;
+    this.web = new WebClient(token);
+    this.interactive = new WebClient(token, interactiveOptions);
+  }
+
+  async react(channelId: string, messageTs: string, name: string) {
+    await this.web.reactions
+      .add({ channel: channelId, timestamp: messageTs, name })
+      .catch((error) => {
+        if (slackErrorCode(error) !== "already_reacted") throw error;
+      });
+  }
+
+  async unreact(channelId: string, messageTs: string, name: string) {
+    await this.web.reactions
+      .remove({ channel: channelId, timestamp: messageTs, name })
+      .catch((error) => {
+        if (!unreactSettledErrors.includes(slackErrorCode(error) ?? ""))
+          throw error;
+      });
+  }
+
+  /**
+   * The text of a file someone uploaded in a modal, which is then deleted
+   * where the token may, so what it holds does not stay in Slack.
+   */
+  async takeUploadedFile(fileId: string) {
+    const info = await this.web.files.info({ file: fileId });
+    const url = info.file?.url_private_download ?? info.file?.url_private;
+    if (!url) throw new Error("Slack gave no download URL for the file");
+    const response = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${this.config.xoxb ?? this.config.xoxp}`,
+      },
+    });
+    if (!response.ok) throw new Error(`File download HTTP ${response.status}`);
+    const text = await response.text();
+    await this.web.files
+      .delete({ file: fileId })
+      .catch((error) =>
+        log.warn(
+          { event: "uploaded_file_delete_failed", fileId, err: error },
+          "Could not delete an uploaded file",
+        ),
+      );
+    return text;
+  }
+
+  /** The bot user behind SLACK_XOXB, or undefined without one. */
+  async botUserId() {
+    if (!this.config.xoxb) return undefined;
+    const result = await this.web.auth.test();
+    if (!result.user_id) throw new Error("auth.test returned no bot user");
+    return result.user_id;
   }
 
   async start() {
@@ -639,6 +729,19 @@ export class SlackAppAdapter {
     if (!envelope.envelope_id) return;
     const ack = (payload?: unknown) =>
       ackEnvelope(socket, envelope.envelope_id!, payload);
+    if (envelope.type === "events_api") {
+      ack();
+      const message = threadMessage(envelope.payload);
+      if (!message || !this.config.xoxb) return;
+      // A mention arrives as both a message and an app_mention event.
+      const key = `${message.channelId}:${message.messageTs}`;
+      if (this.seenMessages.has(key)) return;
+      this.seenMessages.add(key);
+      if (this.seenMessages.size > 1000)
+        this.seenMessages.delete(this.seenMessages.values().next().value!);
+      this.onThreadMessage?.(message);
+      return;
+    }
     if (envelope.type !== "interactive" || !envelope.payload) return ack();
 
     const interaction = normalizeInteraction(envelope.payload);

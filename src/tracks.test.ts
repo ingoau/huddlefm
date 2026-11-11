@@ -46,6 +46,8 @@ import {
   trackKind,
   transitionData,
   type TrackMetadata,
+  soundCloudMatch,
+  soundCloudTracks,
 } from "./tracks.ts";
 
 const testCatalog = () =>
@@ -2381,3 +2383,40 @@ test.skipIf(!Bun.which("ffmpeg"))(
     }
   },
 );
+
+test("matches the same song on SoundCloud and skips other versions", () => {
+  const result = (entries: Record<string, unknown>[]) =>
+    soundCloudTracks({ entries });
+  const entry = (title: string, uploader: string, duration: number) => ({
+    id: title.length,
+    title,
+    uploader,
+    duration,
+    webpage_url: `https://soundcloud.com/a/${title.length}`,
+  });
+  const found = result([
+    entry("Song Name (slowed + reverb)", "fan", 240),
+    entry("Song Name", "preview", 30),
+    entry("Song Name", "someone", 236),
+    entry("Song Name", "Artist A", 238),
+    { title: "not soundcloud", webpage_url: "https://example.com/x" },
+  ]);
+  expect(found).toHaveLength(4);
+  expect(
+    soundCloudMatch(found, {
+      title: "Song Name",
+      artist: "Artist A",
+      duration: 237,
+    })?.artist,
+  ).toBe("Artist A");
+  expect(
+    soundCloudMatch(found, {
+      title: "Song Name",
+      artist: "Artist B",
+      duration: 400,
+    }),
+  ).toBeUndefined();
+  expect(
+    soundCloudMatch(found, { title: "Other Song", artist: "Artist A" }),
+  ).toBeUndefined();
+});
