@@ -100,6 +100,7 @@ export class ScrobbleDispatcher {
       huddleMixSources: value.huddleMixSources,
       huddleMixUsable: usableHuddleMixSources(value),
       mode: value.mode,
+      scrobbleOwnTracks: value.scrobbleOwnTracks,
       configured: lastFmConnected || listenBrainzConnected,
       enabledIntegration:
         (lastFmConnected && value.lastFmEnabled) ||
@@ -115,6 +116,16 @@ export class ScrobbleDispatcher {
     this.store.setScrobblingMode(userId, mode);
     if (mode !== "always") this.store.clearPendingUserScrobbles(userId);
     this.changed(userId, "mode_changed", "Scrobbling mode changed", { mode });
+  }
+
+  setScrobbleOwnTracks(userId: string, enabled: boolean) {
+    this.store.setScrobbleOwnTracks(userId, enabled);
+    this.changed(
+      userId,
+      "own_tracks_changed",
+      "Scrobbling of own tracks changed",
+      { enabled },
+    );
   }
 
   setHuddleMixSources(
@@ -143,12 +154,26 @@ export class ScrobbleDispatcher {
   }
 
   // Whether to ask this listener about each track they hear here.
-  shouldAskForTrack(sessionId: string, userId: string) {
+  shouldAskForTrack(sessionId: string, userId: string, track: ScrobbleTrack) {
     const settings = this.settings(userId);
     return (
       settings.mode === "ask_track" &&
       settings.enabledIntegration &&
-      !this.sessionEnabled(sessionId, userId)
+      !this.sessionEnabled(sessionId, userId) &&
+      !this.scrobblesOwnTrack(sessionId, userId, track)
+    );
+  }
+
+  // Whether a song this listener added scrobbles without asking them: when
+  // their mode asks first, they chose to scrobble their own songs, and they
+  // have not turned scrobbling off for this session.
+  scrobblesOwnTrack(sessionId: string, userId: string, track: ScrobbleTrack) {
+    if (track.requesterId !== userId || track.automatic) return false;
+    const settings = this.store.getUserScrobbling(userId);
+    return (
+      settings.scrobbleOwnTracks &&
+      (settings.mode === "ask" || settings.mode === "ask_track") &&
+      this.store.getSessionScrobbling(sessionId, userId) === undefined
     );
   }
 
@@ -354,6 +379,8 @@ export class ScrobbleDispatcher {
     const threshold = track.duration ? Math.min(track.duration / 2, 240) : 240;
     if (listenedSeconds < threshold) return false;
     if (!remembered) this.rememberListen(sessionId, userId, track, listenedAt);
+    // A song of their own counts as one they said yes to.
+    confirmed ||= this.scrobblesOwnTrack(sessionId, userId, track);
     if (confirmed || this.sessionEnabled(sessionId, userId))
       this.queueListen(sessionId, userId, track, listenedAt, confirmed, play);
     return true;
@@ -770,17 +797,21 @@ export class PlaybackScrobbler {
   // Tells the listeners who scrobble here what is playing, if anything is.
   private announce(userIds: Iterable<string>) {
     if (!this.current?.playing) return;
-    const listeners = this.current.listeners;
+    const { listeners, track } = this.current;
     const enabled = [...userIds].filter(
       (userId) =>
         listeners.get(userId)?.confirmed ||
-        this.dispatcher.sessionEnabled(this.sessionId, userId),
+        this.dispatcher.sessionEnabled(this.sessionId, userId) ||
+        this.dispatcher.scrobblesOwnTrack(this.sessionId, userId, track),
     );
-    this.dispatcher.nowPlaying(enabled, this.current.track);
+    this.dispatcher.nowPlaying(enabled, track);
   }
 
   private askAbout(userId: string, track: ScrobbleTrack) {
-    if (this.ask && this.dispatcher.shouldAskForTrack(this.sessionId, userId))
+    if (
+      this.ask &&
+      this.dispatcher.shouldAskForTrack(this.sessionId, userId, track)
+    )
       this.ask(userId, track);
   }
 }

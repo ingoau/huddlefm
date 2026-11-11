@@ -7423,6 +7423,7 @@ export class Coordinator {
       const settings = this.scrobbling.settings(userId, this.id);
       return {
         scrobblingMode: settings.mode,
+        scrobbleOwnTracks: settings.scrobbleOwnTracks,
         huddleMixSources: settings.huddleMixSources,
         lastFmScrobbling: settings.lastFmEnabled,
         listenBrainzScrobbling: settings.listenBrainzEnabled,
@@ -7544,6 +7545,13 @@ export class Coordinator {
         const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
         if (mode && mode !== userSettings.mode)
           this.scrobbling.setMode(interaction.userId, mode);
+        const ownTracks = checked(state.scrobble_own_tracks?.enabled);
+        if (
+          ownTracks !== undefined &&
+          userSettings.configured &&
+          ownTracks !== userSettings.scrobbleOwnTracks
+        )
+          this.scrobbling.setScrobbleOwnTracks(interaction.userId, ownTracks);
         const services = submittedScrobbleServices(state.scrobble_to);
         // A draft can hold a choice for a service disconnected since, which
         // there is nothing left to apply to.

@@ -336,6 +336,9 @@ export type UserScrobbling = {
   // connected is never listed, whatever its saved choice.
   huddleMixSources: HuddleMixSource[];
   mode: ScrobblingMode;
+  // Songs the listener adds themselves scrobble without asking, when their
+  // mode asks first.
+  scrobbleOwnTracks: boolean;
 };
 
 export type CanvasStats = ReturnType<Store["canvasStats"]>;
@@ -440,6 +443,7 @@ const addedColumns = [
   ["user_scrobbling", "huddle_mix_added", "INTEGER NOT NULL DEFAULT 1"],
   ["user_scrobbling", "huddle_mix_lastfm", "INTEGER NOT NULL DEFAULT 1"],
   ["user_scrobbling", "huddle_mix_listenbrainz", "INTEGER NOT NULL DEFAULT 1"],
+  ["user_scrobbling", "scrobble_own_tracks", "INTEGER NOT NULL DEFAULT 0"],
   ["scrobbles", "confirmed", "INTEGER NOT NULL DEFAULT 0"],
   ["sessions", "media_mode", "TEXT NOT NULL DEFAULT 'music'"],
   ["sessions", "captions", "INTEGER NOT NULL DEFAULT 0"],
@@ -753,6 +757,7 @@ export class Store {
         huddle_mix_lastfm INTEGER NOT NULL DEFAULT 1,
         huddle_mix_listenbrainz INTEGER NOT NULL DEFAULT 1,
         mode TEXT NOT NULL DEFAULT 'always',
+        scrobble_own_tracks INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS session_scrobbling (
@@ -2360,6 +2365,7 @@ export class Store {
         huddleMixOptIn: true,
         huddleMixSources: ["added"],
         mode: "always",
+        scrobbleOwnTracks: false,
       };
     const saved = savedHuddleMixSources(row);
     const sources = usableHuddleMixSources({
@@ -2380,11 +2386,20 @@ export class Store {
       huddleMixOptIn: sources.length > 0,
       huddleMixSources: sources,
       mode: modeOf(scrobblingModes, row.mode) ?? "always",
+      scrobbleOwnTracks: Boolean(row.scrobble_own_tracks),
     });
   }
 
   setScrobblingMode(userId: string, mode: ScrobblingMode) {
     this.updateUserScrobbling(userId, "mode = ?", mode);
+  }
+
+  setScrobbleOwnTracks(userId: string, enabled: boolean) {
+    this.updateUserScrobbling(
+      userId,
+      "scrobble_own_tracks = ?",
+      enabled ? 1 : 0,
+    );
   }
 
   getSessionScrobbling(sessionId: string, userId: string) {

@@ -4079,6 +4079,7 @@ test("user settings remove saved scrobbling credentials", async () => {
     huddleMixOptIn: true,
     huddleMixSources: ["added"],
     mode: "always",
+    scrobbleOwnTracks: false,
   });
   await test.coordinator.endFromSlack();
   userStore.close();
@@ -4115,6 +4116,9 @@ test("the You tab saves where and whether a user scrobbles", async () => {
       },
     },
     scrobbling_mode: { mode: { selected_option: { value: "disabled" } } },
+    scrobble_own_tracks: {
+      enabled: { selected_options: [{ value: "enabled" }] },
+    },
     session_scrobbling: {
       enabled: { selected_options: [{ value: "enabled" }] },
     },
@@ -4124,6 +4128,7 @@ test("the You tab saves where and whether a user scrobbles", async () => {
     lastFmEnabled: false,
     listenBrainzEnabled: true,
     mode: "disabled",
+    scrobbleOwnTracks: true,
   });
   // A new default leaves this session scrobbling, as the form showed.
   expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
