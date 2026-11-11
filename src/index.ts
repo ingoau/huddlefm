@@ -792,7 +792,7 @@ async function joinHuddle(
       catalog,
       lyrics,
       audit,
-      { ...config, huddleUserId: config.xoxb ? botUserId : undefined },
+      config,
       bootstrap.bridgeToken,
       (message) => void runtime?.media.send(message),
       async () => {
