@@ -4626,12 +4626,6 @@ export class Coordinator {
       const media = await prepared;
       await this.enqueue(async () => {
         if (!(await this.acceptPrepared(entry, media))) return;
-        if (entry.playedFrom)
-          void this.notice(
-            entry.requesterId,
-            `YouTube is blocking this server, so *${escape(entry.title)}* plays from SoundCloud: <${entry.playedFrom.url}|${escape(entry.playedFrom.title)}>`,
-            "info",
-          );
         if (!this.current) await this.startNext();
         else {
           this.queueRender();
