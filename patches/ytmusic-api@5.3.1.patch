@@ -1,0 +1,20 @@
+diff --git a/dist/index.d.mts b/dist/index.d.mts
+index e9b6848c9c192c8bac0987c0991227d7539405d3..9f9ca58d007f4de416fa8ac703c72c0865d7fa27 100644
+--- a/dist/index.d.mts
++++ b/dist/index.d.mts
+@@ -1,4 +1,4 @@
+-import { z } from 'zod';
++import { z } from 'zod/v3';
+ 
+ type ThumbnailFull = z.infer<typeof ThumbnailFull>;
+ declare const ThumbnailFull: z.ZodObject<{
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index e9b6848c9c192c8bac0987c0991227d7539405d3..9f9ca58d007f4de416fa8ac703c72c0865d7fa27 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -1,4 +1,4 @@
+-import { z } from 'zod';
++import { z } from 'zod/v3';
+ 
+ type ThumbnailFull = z.infer<typeof ThumbnailFull>;
+ declare const ThumbnailFull: z.ZodObject<{
