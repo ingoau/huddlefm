@@ -17,13 +17,22 @@ RUN mkdir /bgutil \
 FROM oven/bun:debian
 ARG BGUTIL_VERSION=2.0.2
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y \
+  && apt-get install -y --no-install-recommends \
     ca-certificates ffmpeg fonts-noto-cjk fonts-noto-color-emoji \
-    fonts-noto-core python3 python3-venv \
+    fonts-noto-core python3 \
   && rm -rf /var/lib/apt/lists/*
-RUN python3 -m venv /opt/yt-dlp \
+# python3-venv is only needed to create the venv; it's purged afterwards with
+# the bootstrap pip and setuptools wheels it ships, which go stale.
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
+  && python3 -m venv /opt/yt-dlp \
+  && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade "pip>=26.3" \
   && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade --pre "yt-dlp[default]" \
-    "bgutil-ytdlp-pot-provider==${BGUTIL_VERSION}"
+    "bgutil-ytdlp-pot-provider==${BGUTIL_VERSION}" \
+    "requests>=2.34.2" "urllib3>=2.8.0" "certifi>=2026.10.23" \
+  && apt-get purge -y --auto-remove python3-venv python3.13-venv \
+    python3-pip-whl python3-setuptools-whl \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=pot-server /bgutil/server /opt/bgutil/server
@@ -34,6 +43,7 @@ ENV PATH="/opt/yt-dlp/bin:${PATH}" \
 
 WORKDIR /app
 COPY --chown=bun:bun package.json bun.lock ./
+COPY --chown=bun:bun patches ./patches
 RUN bun install --frozen-lockfile --production
 COPY --chown=bun:bun index.ts tsconfig.json ./
 COPY --chown=bun:bun src ./src

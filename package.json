@@ -13,28 +13,36 @@
   "devDependencies": {
     "@fontsource-variable/lexend": "^5.3.0",
     "@types/bun": "latest",
-    "prettier": "^3.9.6"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "prettier": "^3.10.1",
+    "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@braccato/core": "1.1.0",
-    "@braccato/parsers": "0.2.0",
+    "@braccato/core": "1.21.5",
+    "@braccato/parsers": "0.4.3",
     "@fontsource/inter": "^5.3.0",
-    "@napi-rs/canvas": "1.0.9",
-    "@openrouter/ai-sdk-provider": "^3.0.0",
-    "@slack/web-api": "8",
-    "ai": "^7.0.93",
+    "@napi-rs/canvas": "1.1.1",
+    "@openrouter/ai-sdk-provider": "^3.1.0",
+    "@slack/web-api": "^8.4.0",
+    "ai": "^7.0.173",
     "libopus-wasm": "0.4.1",
-    "node-datachannel": "0.33.4",
-    "pino": "^10.1.0",
+    "node-datachannel": "0.33.6",
+    "pino": "^10.4.0",
     "pino-roll": "^4.0.0",
-    "posthog-node": "^5.51.4",
-    "protobufjs": "8.8.0",
-    "transliteration": "^2.6.1",
+    "posthog-node": "^5.73.1",
+    "protobufjs": "8.8.1",
+    "transliteration": "^2.7.0",
     "wanakana": "^5.3.1",
     "ytmusic-api": "5.3.1",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
+  },
+  "overrides": {
+    "axios": "^1.21.1",
+    "fast-xml-parser": "^5.12.1",
+    "follow-redirects": "^1.16.3",
+    "undici": "^7.30.2",
+    "zod": "^4.6.7"
+  },
+  "patchedDependencies": {
+    "ytmusic-api@5.3.1": "patches/ytmusic-api@5.3.1.patch"
   }
 }
