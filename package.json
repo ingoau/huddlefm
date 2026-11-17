@@ -28,11 +28,11 @@
     "node-datachannel": "0.33.6",
     "pino": "^10.4.0",
     "pino-roll": "^4.0.0",
-    "posthog-node": "^5.73.1",
+    "posthog-node": "^5.74.0",
     "protobufjs": "8.8.1",
     "transliteration": "^2.7.0",
     "wanakana": "^5.3.1",
-    "ytmusic-api": "5.3.1",
+    "ytmusic-api": "6.0.0",
     "zod": "^4.6.7"
   },
   "overrides": {
@@ -43,6 +43,6 @@
     "zod": "^4.6.7"
   },
   "patchedDependencies": {
-    "ytmusic-api@5.3.1": "patches/ytmusic-api@5.3.1.patch"
+    "ytmusic-api@6.0.0": "patches/ytmusic-api@6.0.0.patch"
   }
 }
