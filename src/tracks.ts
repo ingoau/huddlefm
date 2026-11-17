@@ -1133,15 +1133,17 @@ export class TrackCatalog {
     return (await this.upNextTracks(videoId)).map((track) => track.sourceId);
   }
 
-  // ytmusic-api's up-next rows do not match its own types: at runtime
-  // `artists` is a plain string, `duration` is "m:ss", and there is a single
-  // `thumbnail`. Accept every shape seen so far.
+  // ytmusic-api's up-next rows have changed shape between versions: before
+  // 6.0 `artists` was a plain string, `duration` "m:ss", and there was a
+  // single `thumbnail`; since 6.0 they are song results, with a `name` in
+  // place of `title`. Accept every shape seen so far.
   async upNextTracks(videoId: string): Promise<TrackMetadata[]> {
     const results: unknown = await this.music.getUpNexts(videoId);
     return asArray(results).flatMap((row) => {
       const {
         videoId: id,
         title,
+        name,
         artists,
         artist,
         duration,
@@ -1151,7 +1153,7 @@ export class TrackCatalog {
       if (typeof id !== "string" || !isYoutubeVideoId(id)) return [];
       return [
         youtubeMusicTrack(id, {
-          title: asString(title) ?? "Untitled",
+          title: asString(title) ?? asString(name) ?? "Untitled",
           artist: artistName(artists) ?? artistName(artist) ?? "Unknown artist",
           duration: parseDuration(duration),
           artwork: artworkUrl(thumbnailUrl(thumbnails) ?? asString(thumbnail)),

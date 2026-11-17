@@ -1,5 +1,5 @@
 diff --git a/dist/index.d.mts b/dist/index.d.mts
-index e9b6848c9c192c8bac0987c0991227d7539405d3..9f9ca58d007f4de416fa8ac703c72c0865d7fa27 100644
+index a7e5d80e25d64ad7e896709a771184077ea75db1..a03270ac54c0043d75bd225b6799a5b004e82b4b 100644
 --- a/dist/index.d.mts
 +++ b/dist/index.d.mts
 @@ -1,4 +1,4 @@
@@ -9,7 +9,7 @@ index e9b6848c9c192c8bac0987c0991227d7539405d3..9f9ca58d007f4de416fa8ac703c72c08
  type ThumbnailFull = z.infer<typeof ThumbnailFull>;
  declare const ThumbnailFull: z.ZodObject<{
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-index e9b6848c9c192c8bac0987c0991227d7539405d3..9f9ca58d007f4de416fa8ac703c72c0865d7fa27 100644
+index a7e5d80e25d64ad7e896709a771184077ea75db1..a03270ac54c0043d75bd225b6799a5b004e82b4b 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
 @@ -1,4 +1,4 @@

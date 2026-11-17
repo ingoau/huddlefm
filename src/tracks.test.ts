@@ -1187,7 +1187,19 @@ test("upNextTracks reads the shapes ytmusic-api actually returns", async () => {
         duration: "3:26",
         thumbnail: "https://i.ytimg.com/vi/euCqAq6BRa4/hq720.jpg",
       },
-      // What its types promise.
+      // What 6.0 returns: song results.
+      {
+        type: "SONG",
+        videoId: "dJqxQzxLbHM",
+        name: "Happy",
+        artist: { artistId: "UCJw8VyO6e3v6S0327AsgwcQ", name: "Pharrell" },
+        artists: [{ artistId: "UCJw8VyO6e3v6S0327AsgwcQ", name: "Pharrell" }],
+        album: { albumId: "MPREb_I3SbfnNDbxW", name: "G I R L" },
+        duration: 234,
+        explicit: false,
+        thumbnails: [{ url: "https://yt3.googleusercontent.com/happy=w60" }],
+      },
+      // What its types promised before 6.0.
       {
         videoId: "typedtypedt",
         title: "Typed",
@@ -1210,6 +1222,12 @@ test("upNextTracks reads the shapes ytmusic-api actually returns", async () => {
       artist: "DJ Snake",
       duration: 206,
       artwork: "https://i.ytimg.com/vi/euCqAq6BRa4/hq720.jpg",
+    }),
+    expect.objectContaining({
+      sourceId: "dJqxQzxLbHM",
+      title: "Happy",
+      artist: "Pharrell",
+      duration: 234,
     }),
     expect.objectContaining({
       sourceId: "typedtypedt",
