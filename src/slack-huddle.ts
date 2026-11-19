@@ -323,8 +323,13 @@ export class SlackHuddleAdapter {
     if (!auth.ok || !auth.team_id)
       throw new Error(`Selfbot auth failed: ${auth.error ?? auth.status}`);
 
-    const url = this.reconnectUrl
-      ? new URL(this.reconnectUrl)
+    // A reconnect_url dies with the connection that vended it, so spend it on
+    // a single attempt: once it has expired, the next retry must fall back to
+    // the gateway URL instead of looping on the dead one forever.
+    const reconnectUrl = this.reconnectUrl;
+    this.reconnectUrl = undefined;
+    const url = reconnectUrl
+      ? new URL(reconnectUrl)
       : this.gatewayUrl(auth.team_id);
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(url, {
@@ -376,7 +381,12 @@ export class SlackHuddleAdapter {
       socket.addEventListener("close", (event) => {
         if (!this.stopping)
           log.warn(
-            { event: "connection_closed", code: event.code },
+            {
+              event: "connection_closed",
+              code: event.code,
+              reason: event.reason || undefined,
+              ready,
+            },
             "Slack Huddle connection closed",
           );
         this.scheduleReconnect();

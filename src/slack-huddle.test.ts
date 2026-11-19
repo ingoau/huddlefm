@@ -444,3 +444,77 @@ test("reads channel managers from role assignments", () => {
   ).toEqual(["U1", "U2"]);
   expect(channelManagerIds({ ok: true })).toEqual([]);
 });
+
+test("spends a cached reconnect URL on one retry, then falls back to the gateway", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/api/auth.test")
+      return Response.json({ ok: true, team_id: "T123", user_id: "U1" });
+    throw new Error(`unexpected request ${path}`);
+  }) as typeof fetch;
+
+  const paths: string[] = [];
+  let gatewayConnections = 0;
+  const server = Bun.serve<{ path: string }>({
+    port: 0,
+    fetch(request, server) {
+      const { pathname } = new URL(request.url);
+      return server.upgrade(request, { data: { path: pathname } })
+        ? undefined
+        : new Response("no");
+    },
+    websocket: {
+      open(socket) {
+        paths.push(socket.data.path);
+        if (socket.data.path === "/reconnect") {
+          // An expired reconnect URL closes without ever saying hello.
+          socket.close(1011, "reconnect url expired");
+          return;
+        }
+        gatewayConnections++;
+        socket.send(JSON.stringify({ type: "hello" }));
+        if (gatewayConnections === 1) {
+          socket.send(
+            JSON.stringify({
+              type: "reconnect_url",
+              url: `ws://localhost:${server.port}/reconnect`,
+            }),
+          );
+          setTimeout(() => socket.close(1001, "going away"), 50);
+        }
+      },
+      message() {},
+    },
+  });
+
+  const adapter = new SlackHuddleAdapter({
+    workspaceUrl: "https://slack.test",
+    xoxc: "token",
+    xoxd: "cookie",
+    mediaRegion: "us-east-1",
+  });
+  // The real Slack gateway is unreachable from a test; serve it locally.
+  Reflect.set(
+    adapter,
+    "gatewayUrl",
+    () => new URL(`ws://localhost:${server.port}/gateway`),
+  );
+
+  try {
+    const reconnected = new Promise<void>((resolve) => {
+      let connections = 0;
+      adapter.onConnected = () => {
+        connections++;
+        if (connections === 2) resolve();
+      };
+    });
+    await adapter.start(() => {});
+    await reconnected;
+    expect(paths).toEqual(["/gateway", "/reconnect", "/gateway"]);
+  } finally {
+    adapter.stop();
+    server.stop(true);
+    globalThis.fetch = originalFetch;
+  }
+}, 20_000);
