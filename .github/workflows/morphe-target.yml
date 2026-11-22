@@ -1,0 +1,36 @@
+name: Morphe target
+
+# The Morphe patch targets the Slack release Slick Android does, so the two can
+# be applied together. Every day, and on demand, this compares the two and
+# opens an issue when Slick Android has moved to another Slack release.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ours="$(grep -oP 'AppTarget\(version = "\K[^"]+' clients/morphe/patches/HuddleFM.kt)"
+          slick="$(curl -fsSL https://raw.githubusercontent.com/3kh0/slick-morphe/main/patches-list.json |
+            jq -r '[.patches[].compatiblePackages[]? | select(.packageName == "com.Slack") | .targets[].version] | unique | .[]')"
+          echo "HuddleFM targets $ours; Slick Android targets: $slick"
+          [[ -n "$ours" && -n "$slick" ]] || { echo "::error::Couldn't read a Slack target"; exit 1; }
+          grep -qxF "$ours" <<<"$slick" && exit 0
+          latest="$(sort -V <<<"$slick" | tail -n1)"
+          title="Slick Android now targets Slack $latest"
+          if gh issue list --state open --search "\"$title\" in:title" --json title --jq '.[].title' | grep -qxF "$title"; then
+            echo "Already open: $title"
+            exit 0
+          fi
+          gh issue create --title "$title" --body "Slick Android's patches now target Slack $latest, and the Morphe patch in \`clients/morphe\` targets Slack $ours, so the two can't be applied together.
+
+          Check the patch's hooks against Slack $latest's APK, update \`AppTarget\` in \`clients/morphe/patches/HuddleFM.kt\`, and release it with a \`morphe-v*\` tag."

@@ -22,6 +22,8 @@ A self hosted music bot for Slack huddles, controlled from Slack.
 
 Plugins for [Taut](clients/taut/) and [Slick](clients/slick/) put the controls, queue and settings in the huddle's own toolbar. Download them from [the website](https://ingoau.github.io/huddlefm/#plugins).
 
+On Android, a [Morphe patch](clients/morphe/) for Slack adds a now playing card above the huddle's buttons and the same controls in its More Options, on its own or beside [Slick Android](https://github.com/3kh0/slick-morphe).
+
 ## Usage
 
 Invite the bot to a huddle, or mention it in the huddle's thread. It joins and posts a player in the thread, and you're the host. Mention it again with nothing else to bring the player back to the bottom.

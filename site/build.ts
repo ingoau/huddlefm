@@ -1,6 +1,7 @@
 // Builds the website from README.md into _site/: the README, rendered, with
 // the Taut and Slick plugins the Website workflow downloads into
-// _site/plugins/ before running this. Run with `bun site/build.ts`.
+// _site/plugins/ before running this, and the Morphe patch for Android, which
+// Morphe Manager adds from the repository's releases. Run with `bun site/build.ts`.
 import { $ } from "bun";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -35,7 +36,14 @@ const html = (markdown: string) =>
     .replace(/<table>/g, '<div class="table"><table>')
     .replace(/<\/table>/g, "</table></div>");
 
-const plugins = [
+type Plugin = {
+  name: string;
+  about: string;
+  files: { path: string; note: string }[];
+  links?: { href: string; title: string; label: string; note: string }[];
+};
+
+const plugins: Plugin[] = [
   {
     name: "Taut",
     about: `${repo}/tree/main/clients/taut#readme`,
@@ -60,6 +68,21 @@ const plugins = [
       },
     ],
   },
+  {
+    name: "Android",
+    about: `${repo}/tree/main/clients/morphe#readme`,
+    files: [],
+    links: [
+      {
+        // Morphe Manager asks before adding the source, for Slack only, and
+        // keeps it updated from patches-bundle.json on main
+        href: `https://morphe.software/add-source?github=${repo.replace("https://github.com/", "")}&name=HuddleFM&app=com.Slack`,
+        title: "Morphe patch for Slack",
+        label: "Add to Morphe",
+        note: "In Morphe Manager, on its own or beside Slick Android",
+      },
+    ],
+  },
 ];
 const missing = plugins
   .flatMap((p) => p.files)
@@ -74,7 +97,7 @@ const sha =
   (await $`git rev-parse HEAD`.cwd(root).text()).trim();
 const pluginSection = `<section id="plugins">
   <h2>Client plugins</h2>
-  <p>Put HuddleFM's controls, queue and settings in the huddle's own toolbar. Built from <a href="${repo}/commit/${sha}"><code>${sha.slice(0, 7)}</code></a>.</p>
+  <p>Put HuddleFM's controls, queue and settings in the huddle itself. The desktop plugins are built from <a href="${repo}/commit/${sha}"><code>${sha.slice(0, 7)}</code></a>; Morphe keeps the Android patch up to date from its latest release.</p>
   ${plugins
     .map(
       (p) => `<div class="plugin">
@@ -84,6 +107,14 @@ const pluginSection = `<section id="plugins">
         (f) => `<div class="file">
       <div><a href="${f.path}" download><code>${f.path.split("/").pop()}</code></a><span>${f.note}</span></div>
       <button type="button" data-copy="${f.path}">Copy link</button>
+    </div>`,
+      )
+      .join("\n    ")}
+    ${(p.links ?? [])
+      .map(
+        (l) => `<div class="file">
+      <div><strong>${l.title}</strong><span>${l.note}</span></div>
+      <a class="button" href="${l.href.replace(/&/g, "&amp;")}">${l.label}</a>
     </div>`,
       )
       .join("\n    ")}
