@@ -36,7 +36,13 @@ public final class Channel {
 
   private Channel() {}
 
-  /** A huddle's audio started, with its Chime session ready. */
+  /** The facade HuddleFM's observer was last added to, so a reconnect doesn't add it again. */
+  private static volatile Object listening;
+
+  /**
+   * A huddle's audio started, with its Chime session ready. Chime says so again after it
+   * reconnects, when HuddleFM is listening already.
+   */
   public static void attach(Object meetingSession) {
     try {
       Object av = field(meetingSession, "chimeAudioVideo");
@@ -44,6 +50,8 @@ public final class Channel {
         HuddleFM.log("The huddle has no Chime session");
         return;
       }
+      if (av == listening) return;
+      listening = av;
       Method add = method(av, "addRealtimeDataMessageObserver", 2);
       Method sendMethod = method(av, "realtimeSendDataMessage", 2);
       add.invoke(av, Client.TOPIC, observer);
@@ -76,8 +84,9 @@ public final class Channel {
     }
   }
 
-  /** The huddle's being left. */
+  /** The huddle's being left, or its audio stopped. */
   public static void detach(Object meetingSession) {
+    listening = null;
     HuddleFM.main.post(
         () -> {
           if (session.get() != meetingSession) return;
