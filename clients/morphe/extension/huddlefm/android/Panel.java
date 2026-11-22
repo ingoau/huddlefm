@@ -309,6 +309,8 @@ final class Panel {
 
   private void show(Page next) {
     page = next;
+    // a search still waiting to go out was typed into the page being replaced
+    HuddleFM.main.removeCallbacks(searchLater);
     body.removeAllViews();
     hideKeyboard();
     backButton.setVisibility(next == Page.MAIN ? View.GONE : View.VISIBLE);
