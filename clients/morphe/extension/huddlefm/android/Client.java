@@ -79,6 +79,9 @@ final class Client {
   JSONObject state;
   /** What this user may do, and their own settings. */
   JSONObject you;
+  /** The bot's own latest state, which a refused seek goes back to. */
+  private JSONObject confirmed;
+  private long confirmedAt;
   /** When the latest state arrived, by uptime. */
   long receivedAt;
   /** The bot's Slack user, once it has sent state. */
@@ -159,16 +162,29 @@ final class Client {
     chunks.clear();
     settleAll(result(false, "disconnected", "Not connected to the huddle."));
     state = null;
+    confirmed = null;
     you = null;
     seenHere = false;
   }
 
   private void settleAll(JSONObject result) {
+    for (Pending p : takePending()) settle(p, result);
+  }
+
+  /** Every request still waiting, with its timeout cancelled, and none left waiting. */
+  private List<Pending> takePending() {
     List<Pending> all = new ArrayList<>(pending.values());
     pending.clear();
-    for (Pending p : all) {
-      HuddleFM.main.removeCallbacks(p.timeout);
+    for (Pending p : all) HuddleFM.main.removeCallbacks(p.timeout);
+    return all;
+  }
+
+  /** Answers one request: one whose callback fails doesn't keep the rest from theirs. */
+  private static void settle(Pending p, JSONObject result) {
+    try {
       p.callback.done(result);
+    } catch (Throwable t) {
+      HuddleFM.log("A request's callback failed: " + t);
     }
   }
 
@@ -179,7 +195,7 @@ final class Client {
     long quiet = SystemClock.uptimeMillis() - heardAt;
     if (quiet > GONE_MS) {
       HuddleFM.log("HuddleFM stopped answering");
-      closeSession();
+      closeSession(false);
     } else if (quiet > QUIET_MS) post(object("type", "ping"));
   }
 
@@ -214,7 +230,6 @@ final class Client {
       callback.done(result(false, "idle", "HuddleFM isn't playing."));
       return;
     }
-    long beforeAt = receivedAt;
     try {
       JSONObject next = new JSONObject(before.toString());
       next.getJSONObject("session").put("position", seconds);
@@ -227,10 +242,11 @@ final class Client {
     command(
         object("type", "seek", "to", seconds),
         result -> {
-          // unless a newer state has come since, the one before is still the truth
-          if (!result.optBoolean("ok") && state != null && state.optInt("seq") == seq) {
-            receivedAt = beforeAt;
-            state = before;
+          // unless a newer state has come since, the bot's last one is still the truth, not
+          // another seek's guess
+          if (!result.optBoolean("ok") && state != null && state.optInt("seq") == seq && confirmed != null) {
+            receivedAt = confirmedAt;
+            state = confirmed;
             changed();
           }
           callback.done(result);
@@ -293,8 +309,11 @@ final class Client {
           changed();
           return;
         }
-        // a bot that restarted counts its states from the start again
+        // a bot that restarted counts its states from the start again, and won't answer what
+        // was asked of the run before
+        settleAll(result(false, "restarted", "HuddleFM restarted. Try again."));
         state = null;
+        confirmed = null;
         you = null;
         presence = Presence.WAITING;
         sync(0);
@@ -311,13 +330,15 @@ final class Client {
           String playback = session.optString("state");
           // the bot's last word before it stops answering
           if ("ended".equals(playback) || "suspended".equals(playback)) {
-            closeSession();
+            closeSession("ended".equals(playback));
             return;
           }
           receivedAt = SystemClock.uptimeMillis();
           if (presence != Presence.INCOMPATIBLE) presence = Presence.CONNECTED;
           Invite.remember(userId);
           state = payload;
+          confirmed = payload;
+          confirmedAt = receivedAt;
           // what the bot says this user may do, it says to those it sees in the huddle: one that
           // synced before the bot saw them join asks again once it does
           boolean here = strings(payload.optJSONArray("participants")).contains(selfUserId());
@@ -365,23 +386,26 @@ final class Client {
   }
 
   /** Forgets the session the bot has left, and settles what was waiting. */
-  private void closeSession() {
-    List<Pending> all = new ArrayList<>(pending.values());
-    pending.clear();
-    for (Pending p : all) {
-      HuddleFM.main.removeCallbacks(p.timeout);
-      // ending it was the last thing the bot did, before it could answer
-      p.callback.done(
-          "end".equals(p.type)
-              ? result(true, null, null)
-              : result(false, "ended", "The session ended."));
-    }
+  private void closeSession(boolean ended) {
+    // the client's left the session before anything waiting hears of it
+    List<Pending> all = takePending();
     botAttendee = null;
     botUserId = null;
     state = null;
+    confirmed = null;
     you = null;
     if (sender != null) presence = Presence.WAITING;
     changed();
+    for (Pending p : all)
+      settle(
+          p,
+          // ending it was the last thing the bot did, before it could answer; a bot that's
+          // restarting or gone quiet didn't say it had
+          !"end".equals(p.type)
+              ? result(false, "ended", "The session ended.")
+              : ended
+                  ? result(true, null, null)
+                  : result(false, "unconfirmed", "HuddleFM left before it said the session had ended."));
   }
 
   private void receiveChunk(String attendeeId, String userId, JSONObject payload) {
@@ -434,7 +458,8 @@ final class Client {
     if (sender == null) return;
     JSONObject message = object("type", "sync");
     if (key != null) put(message, "key", key);
-    if (!post(message)) return;
+    // a send that failed is tried again too, while the channel's still waiting
+    post(message);
     if (attempt + 1 >= SYNC_RETRIES) return;
     syncTimer =
         () -> {

@@ -31,6 +31,8 @@ final class Card extends FrameLayout {
   private final Runnable listener = this::refresh;
   private final Runnable tick = this::tick;
   private String artworkUrl;
+  /** How often this song's artwork was asked for, so a failed fetch is tried again, a few times. */
+  private int artworkTries;
 
   /** The song's progress, a line along the card's foot. */
   private static final class Progress extends View {
@@ -177,7 +179,12 @@ final class Card extends FrameLayout {
   }
 
   private void setArtwork(String url) {
-    if (url.equals(artworkUrl)) return;
+    if (url.equals(artworkUrl)) {
+      // shown, or given up on, or nothing to show
+      boolean shown = artwork.getDrawable() instanceof android.graphics.drawable.BitmapDrawable;
+      if (shown || url.isEmpty() || artworkTries >= 3) return;
+    } else artworkTries = 0;
+    artworkTries++;
     artworkUrl = url;
     Images.load(
         artwork,

@@ -43,6 +43,8 @@ public final class HuddleFM {
 
             @Override
             public void onActivityStopped(Activity activity) {
+              // out of sight: nothing opens over it, as a delayed open from More Options might
+              if (resumed.get() == activity) resumed = new WeakReference<>(null);
               Panel.hide(activity);
             }
 

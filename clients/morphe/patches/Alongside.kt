@@ -8,6 +8,14 @@ import org.w3c.dom.Element
 private const val ANDROID = "http://schemas.android.com/apk/res/android"
 private const val SLACK_PACKAGE = "com.Slack"
 
+/** [value] as a string resource takes it: quotes and backslashes escaped, and a leading @ or ?. */
+private fun androidString(value: String) =
+    value
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\"", "\\\"")
+        .replace(Regex("^([@?])"), "\\\\$1")
+
 /**
  * Gives the patched app its own package, so it installs beside Slack from Google Play. Slack builds
  * its providers' authorities from its package name at run time, so only the manifest, and the
@@ -90,7 +98,7 @@ val alongsideSlack =
                 d.documentElement.appendChild(
                     d.createElement("string").apply {
                         setAttribute("name", "huddlefm_app_name")
-                        textContent = appName!!
+                        textContent = androidString(appName!!)
                     },
                 )
             }
