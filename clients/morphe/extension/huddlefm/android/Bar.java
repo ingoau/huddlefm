@@ -19,6 +19,12 @@ public final class Bar {
   /** Puts the now playing card in the bar; called by the bar's composable with its composer. */
   public static void card(Object composer) {
     // AndroidView(factory, modifier, update): the modifier and update left as they default
-    AndroidView_androidKt.AndroidView(factory, null, null, (Composer) composer, 0, 6);
+    try {
+      AndroidView_androidKt.AndroidView(factory, null, null, (Composer) composer, 0, 6);
+    } catch (LinkageError e) {
+      // an AndroidView this build doesn't have fails before it starts drawing anything, so
+      // there's simply no card
+      HuddleFM.log("Couldn't draw the card: " + e);
+    }
   }
 }

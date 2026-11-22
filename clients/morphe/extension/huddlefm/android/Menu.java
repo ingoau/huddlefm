@@ -87,22 +87,41 @@ public final class Menu {
   /** A click on a More Options row, in Slack's handler: true when it was HuddleFM's. */
   public static boolean click(Object handler) {
     try {
-      Object event = get(handler, "$event");
-      if (!ID.equals(get(event, "itemId"))) return false;
+      // the handler is a generated coroutine, maybe merged with others, so what it holds is
+      // found by its type, not by the names R8 gave it
+      Object event = held(handler, "slack.features.huddles.settings.circuit.HuddleSettingsScreen$Event$OnItemClicked");
+      if (event == null || !ID.equals(get(event, "itemId"))) return false;
       // close More Options, as Slack does after its own rows
-      Object presenter = get(handler, "this$0");
-      Object navigator = get(presenter, "navigator");
-      for (Method m : navigator.getClass().getMethods())
-        if (m.getName().equals("pop") && m.getParameterTypes().length == 1) {
-          m.invoke(navigator, (Object) null);
-          break;
-        }
+      Object presenter = held(handler, "slack.features.huddles.settings.circuit.HuddleSettingsPresenter");
+      Object navigator = presenter == null ? null : get(presenter, "navigator");
+      if (navigator != null) {
+        for (Method m : navigator.getClass().getMethods())
+          if (m.getName().equals("pop") && m.getParameterTypes().length == 1) {
+            m.invoke(navigator, (Object) null);
+            break;
+          }
+      }
       HuddleFM.main.postDelayed(Panel::open, 250);
       return true;
     } catch (Throwable t) {
       HuddleFM.log("Couldn't handle a More Options click: " + t);
       return false;
     }
+  }
+
+  /** What [object] holds of the class named [type], in any of its fields, or null. */
+  private static Object held(Object object, String type) {
+    for (Class<?> c = object.getClass(); c != null && c != Object.class; c = c.getSuperclass())
+      for (Field f : c.getDeclaredFields()) {
+        if (java.lang.reflect.Modifier.isStatic(f.getModifiers()) || f.getType().isPrimitive()) continue;
+        try {
+          f.setAccessible(true);
+          Object value = f.get(object);
+          if (value != null && value.getClass().getName().equals(type)) return value;
+        } catch (Throwable ignored) {
+        }
+      }
+    return null;
   }
 
   private static Object get(Object object, String name) throws ReflectiveOperationException {
