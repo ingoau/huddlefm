@@ -1,0 +1,75 @@
+name: Morphe release
+
+# Pushing a morphe-v1.2.3 tag releases the Morphe patch for Slack on Android:
+# it builds that version, attaches the bundle to a GitHub release, and points
+# patches-bundle.json on main at it, which is where Morphe Manager looks for
+# updates to a source added from this repository. A pre-release tag, like
+# morphe-v1.3.0-beta.1, is released as a pre-release and leaves Morphe Manager
+# alone.
+on:
+  push:
+    tags: ["morphe-v*"]
+
+concurrency:
+  group: morphe-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      - id: version
+        run: |
+          v="${GITHUB_REF_NAME#morphe-v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::$GITHUB_REF_NAME isn't morphe-v followed by a version"
+            exit 1
+          }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          [[ "$v" == *-* ]] && echo "prerelease=true" >> "$GITHUB_OUTPUT" || echo "prerelease=false" >> "$GITHUB_OUTPUT"
+      - run: bash clients/morphe/build.sh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          # notes from the last Android release, as the bot's own history isn't this
+          previous="$(git tag --list 'morphe-v*' --sort=-v:refname | grep -vxF "$GITHUB_REF_NAME" | head -n1 || true)"
+          args=(--title "HuddleFM for Android $V" --generate-notes --latest=false)
+          [[ -n "$previous" ]] && args+=(--notes-start-tag "$previous")
+          [[ "$PRERELEASE" == true ]] && args+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "clients/morphe/dist/huddlefm-android-$V.mpp" "${args[@]}"
+      - name: Point Morphe Manager at it
+        if: steps.version.outputs.prerelease == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          cp clients/morphe/dist/patches-list.json "$RUNNER_TEMP/patches-list.json"
+          git fetch -q origin main
+          git checkout -q -B main origin/main
+          jq -n \
+            --arg t "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+            --arg d "$(gh release view "$GITHUB_REF_NAME" --json body --jq .body)" \
+            --arg u "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/huddlefm-android-$V.mpp" \
+            --arg v "$V" \
+            '{created_at: $t, description: $d, download_url: $u, signature_download_url: "", version: $v}' \
+            > patches-bundle.json
+          cp "$RUNNER_TEMP/patches-list.json" patches-list.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git add patches-bundle.json patches-list.json
+          git commit -qm "Release HuddleFM for Android $V"
+          git push -q origin main

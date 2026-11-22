@@ -1,7 +1,7 @@
 name: Client plugins
 
-# The Taut and Slick plugins, built in parallel. They share clients/core, so
-# a change to it builds both. On main, the Website workflow calls this to
+# The Taut and Slick plugins and the Morphe patch for Slack on Android, built
+# in parallel. The plugins share clients/core, so a change to it builds both. On main, the Website workflow calls this to
 # publish them, so a push there doesn't build them again.
 on:
   push:
@@ -106,4 +106,24 @@ jobs:
           path: |
             dist/HuddleFM.js
             dist/HuddleFM.user.js
+          if-no-files-found: error
+
+  morphe:
+    name: Morphe patch for Android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      # build.sh fetches Morphe, Kotlin, R8 and the Android platform at fixed,
+      # checksummed versions, the same as Slick Android's build
+      - run: bash clients/morphe/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: huddlefm-morphe-patch
+          path: clients/morphe/dist/*.mpp
           if-no-files-found: error

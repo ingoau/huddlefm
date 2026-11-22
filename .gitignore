@@ -4,6 +4,8 @@ node_modules
 # output
 out
 dist
+# the Morphe patch's build tools
+clients/morphe/work
 data
 *.tgz
 
