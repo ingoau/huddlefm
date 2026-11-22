@@ -1,6 +1,6 @@
 {
   "NOTE": "Written by the Morphe patch release workflow. Don't edit it: Morphe and other tools read it.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "patches": [
     {
       "name": "HuddleFM",
