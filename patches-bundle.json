@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-11-22T12:51:07",
-  "description": "## What's Changed\n* Find the Morphe patch's hooks in any build of Slack 26.11.30.0 by @ingoau in https://github.com/ingoau/huddlefm/pull/225\n\n\n**Full Changelog**: https://github.com/ingoau/huddlefm/compare/morphe-v1.0.0...morphe-v1.0.1",
-  "download_url": "https://github.com/ingoau/huddlefm/releases/download/morphe-v1.0.1/huddlefm-android-1.0.1.mpp",
+  "created_at": "2026-11-22T12:59:12",
+  "description": "## What's Changed\n* Remove the Install alongside Slack patch by @ingoau in https://github.com/ingoau/huddlefm/pull/226\n\n\n**Full Changelog**: https://github.com/ingoau/huddlefm/compare/morphe-v1.0.1...morphe-v1.0.2",
+  "download_url": "https://github.com/ingoau/huddlefm/releases/download/morphe-v1.0.2/huddlefm-android-1.0.2.mpp",
   "signature_download_url": "",
-  "version": "1.0.1"
+  "version": "1.0.2"
 }
