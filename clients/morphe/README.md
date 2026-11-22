@@ -42,8 +42,6 @@ java -jar morphe.jar patch \
   -o /path/to/slack-patched.apk /path/to/slack-26.11.30.0.apkm
 ```
 
-The bundle also has **Install alongside Slack**, off by default, which gives the patched app its own package name (`com.Slack.huddlefm`) and name under its icon (`Slack HuddleFM`), both options, so it installs next to Slack from Google Play rather than in its place. Slack builds its providers' authorities from its package name at run time, so the patch only renames what the manifest and its resources name: the authorities, Slack's own permission and shortcuts' target package. Push notifications, which Firebase ties to Slack's package, don't come to the renamed app. Enable it with `-e "Install alongside Slack"`, and set the options with `-O packageName=…` and `-O appName=…` after it.
-
 ## Release
 
 Pushing a `morphe-v1.2.3` tag runs the **Morphe release** workflow: it builds that version, attaches `huddlefm-android-1.2.3.mpp` to a GitHub release, and commits `patches-bundle.json` and `patches-list.json` to the root of `main`, which is where Morphe Manager looks for updates. A pre-release tag, like `morphe-v1.3.0-beta.1`, is released without them, so Morphe Manager doesn't offer it.
