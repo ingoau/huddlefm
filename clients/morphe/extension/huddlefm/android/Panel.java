@@ -151,6 +151,9 @@ final class Panel {
   private String shownQueue;
   private String artworkUrl;
   private String lyricsFor;
+  /** The settings and permissions the Settings page was drawn from. */
+  private String shownSettings;
+  private ImageView sparkles;
   private List<JSONObject> lyrics = new ArrayList<>();
   private boolean lyricsSynced;
   private final List<TextView> lyricLines = new ArrayList<>();
@@ -462,6 +465,10 @@ final class Panel {
 
     shownQueue = null;
     artworkUrl = null;
+    // a new page: nothing of the last one's lyrics or searches lands on it
+    lyricsFor = null;
+    lyricLines.clear();
+    searchCount++;
   }
 
   private TextView tab(String label, Runnable onClick) {
@@ -678,7 +685,7 @@ final class Panel {
           return false;
         });
     field.addView(search, Ui.weight(1));
-    ImageView sparkles = Ui.iconButton(c, "sparkles", Ui.TEXT, dp(40), dp(20), "Recommendations and recent songs");
+    sparkles = Ui.iconButton(c, "sparkles", Ui.TEXT, dp(40), dp(20), "Recommendations and recent songs");
     sparkles.setOnClickListener(v -> {
       if (allowed("add")) show(Page.SUGGESTIONS);
     });
@@ -832,6 +839,12 @@ final class Panel {
     settingsButton.setAlpha(connected ? 1f : 0.35f);
     if (page != Page.MAIN) {
       if (!connected) show(Page.MAIN);
+      // the bot answers a change before its new state comes: the page follows the state
+      else if (page == Page.SETTINGS && !settingsKey().equals(shownSettings)) {
+        int y = scroll.getScrollY();
+        show(Page.SETTINGS);
+        scroll.post(() -> scroll.scrollTo(0, y));
+      }
       return;
     }
 
@@ -864,6 +877,8 @@ final class Panel {
     }
 
     boolean video = "video".equals(session.optString("mode"));
+    // what Slack's Add songs offers before anything's typed is for music
+    sparkles.setVisibility(!video && client.can("add") ? View.VISIBLE : View.GONE);
     // now playing
     playing.setVisibility(song != null ? View.VISIBLE : View.GONE);
     idle.setVisibility(song == null ? View.VISIBLE : View.GONE);
@@ -946,8 +961,9 @@ final class Panel {
       list.addView(hint);
       return;
     }
-    for (int i = 0; i < tracks.size(); i++) list.addView(trackRow(tracks.get(i), i, tracks.size()));
+    // a long queue's state carries only its start, so moves count the whole of it
     int total = client.state.optInt("queueLength", tracks.size());
+    for (int i = 0; i < tracks.size(); i++) list.addView(trackRow(tracks.get(i), i, total));
     if (total > tracks.size()) list.addView(note("and " + (total - tracks.size()) + " more"));
   }
 
@@ -993,15 +1009,7 @@ final class Panel {
     int group = 0;
     if (manage && client.can("skip")) {
       m.add(group, actions.size(), actions.size(), "Play now");
-      actions.add(() -> {
-        // to the front, then skip to it, as the plugins' double-click does
-        client.command(
-            Client.object("type", "move", "trackId", id, "position", 1),
-            result -> {
-              if (result.optBoolean("ok")) run(Client.object("type", "skip"));
-              else say(result);
-            });
-      });
+      actions.add(() -> playNow(track, index));
     }
     if (track.optBoolean("automatic") && client.can("add")) {
       m.add(group, actions.size(), actions.size(), "Add to queue");
@@ -1044,6 +1052,34 @@ final class Panel {
     popup.show();
   }
 
+  /**
+   * To the front, then skipped to, as the plugins' Play now. A song still downloading can't play
+   * yet, so skipping would play another: it goes first instead, to play once it's ready.
+   */
+  private void playNow(JSONObject track, int index) {
+    String title = track.optString("title");
+    String status = track.optString("status", "");
+    if ("failed".equals(status)) {
+      toast(title + " couldn't be downloaded.");
+      return;
+    }
+    Runnable then =
+        () -> {
+          if (!status.isEmpty() && !"ready".equals(status)) toast(title + " is still downloading, so it plays next.");
+          else run(Client.object("type", "skip"));
+        };
+    if (index == 0) {
+      then.run();
+      return;
+    }
+    client.command(
+        Client.object("type", "move", "trackId", track.optString("id"), "position", 1),
+        result -> {
+          if (result.optBoolean("ok")) then.run();
+          else say(result);
+        });
+  }
+
   private void showLyrics(JSONObject song) {
     String id = song == null ? "" : song.optString("id");
     if (id.equals(lyricsFor)) return;
@@ -1059,7 +1095,7 @@ final class Panel {
     client.command(
         Client.object("type", "lyrics", "trackId", id),
         result -> {
-          if (!id.equals(lyricsFor) || !showLyrics) return;
+          if (!id.equals(lyricsFor)) return;
           lyricsList.removeAllViews();
           lyricLines.clear();
           litLine = -2;
@@ -1258,7 +1294,16 @@ final class Panel {
 
   // --- settings
 
+  private String settingsKey() {
+    JSONObject state = client.state;
+    JSONObject session = client.session();
+    return (state == null ? "" : String.valueOf(state.optJSONArray("settings")))
+        + (session == null ? "" : session.optString("hostId") + session.optBoolean("communism"))
+        + (client.you == null ? "" : client.you.toString());
+  }
+
   private void buildSettings() {
+    shownSettings = settingsKey();
     JSONObject state = client.state;
     if (state == null) return;
     List<JSONObject> all = Client.list(state.optJSONArray("settings"));
@@ -1444,9 +1489,10 @@ final class Panel {
   }
 
   private void change(JSONObject field, Object value) {
+    // on success the bot's new state redraws the page; a refusal puts it back as it was
     client.setting(field.optString("id"), value, result -> {
       say(result);
-      if (page == Page.SETTINGS) show(Page.SETTINGS);
+      if (!result.optBoolean("ok") && page == Page.SETTINGS) show(Page.SETTINGS);
     });
   }
 
@@ -1483,10 +1529,7 @@ final class Panel {
           .setTitle(field.optString("label"))
           .setItems(labels, (d, which) -> {
             if (which < list.size())
-              client.preset(list.get(which).optString("value"), result -> {
-                say(result);
-                if (page == Page.SETTINGS) show(Page.SETTINGS);
-              });
+              client.preset(list.get(which).optString("value"), this::say);
             else chooseEach(field);
           })
           .setNegativeButton("Cancel", null)

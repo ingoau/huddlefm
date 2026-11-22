@@ -79,14 +79,11 @@ val alongsideSlack =
                     e.rename("writePermission")
                     e.getAttributeNS(ANDROID, "resource").takeIf { it.startsWith("@xml/") }?.let { xml += it.removePrefix("@xml/") }
                 }
-                // the name under the icon: the app's and its launcher's, which share app_name
-                val application = d.getElementsByTagName("application").item(0) as Element
-                application.setAttributeNS(ANDROID, "android:label", "@string/huddlefm_app_name")
-                val aliases = d.getElementsByTagName("activity-alias")
-                for (i in 0 until aliases.length) {
-                    val alias = aliases.item(i) as Element
-                    if (alias.getAttributeNS(ANDROID, "label") == "@string/app_name")
-                        alias.setAttributeNS(ANDROID, "android:label", "@string/huddlefm_app_name")
+                // the name under the icon and in Recents: everything labelled with app_name
+                for (i in 0 until all.length) {
+                    val e = all.item(i) as Element
+                    if (e.getAttributeNS(ANDROID, "label") == "@string/app_name")
+                        e.setAttributeNS(ANDROID, "android:label", "@string/huddlefm_app_name")
                 }
             }
             document("res/values/strings.xml").use { d ->

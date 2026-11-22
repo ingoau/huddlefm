@@ -110,6 +110,7 @@ val huddleFM =
                     }
                 // add(list, Play music's row), which HuddleFM's is made like
                 val (list, row) = code[add].arguments
+                check(list < 16 && row < 16) { "More Options list moved to high registers" }
                 val next = if (code[add + 1].opcode == Opcode.MOVE_RESULT) add + 2 else add + 1
                 addInstructions(next, "invoke-static {v$list, v$row}, $EXTENSION/Menu;->add(Ljava/util/List;Ljava/lang/Object;)V")
             }

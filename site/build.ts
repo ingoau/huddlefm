@@ -76,7 +76,7 @@ const plugins: Plugin[] = [
       {
         // Morphe Manager asks before adding the source, for Slack only, and
         // keeps it updated from patches-bundle.json on main
-        href: "https://morphe.software/add-source?github=ingoau/huddlefm&name=HuddleFM&app=com.Slack",
+        href: `https://morphe.software/add-source?github=${repo.replace("https://github.com/", "")}&name=HuddleFM&app=com.Slack`,
         title: "Morphe patch for Slack",
         label: "Add to Morphe",
         note: "In Morphe Manager, on its own or beside Slick Android",

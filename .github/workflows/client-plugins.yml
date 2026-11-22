@@ -110,6 +110,8 @@ jobs:
 
   morphe:
     name: Morphe patch for Android
+    # the website doesn't serve the bundle, so its deploy doesn't wait on this
+    if: github.event_name != 'workflow_call'
     runs-on: ubuntu-latest
     permissions:
       contents: read

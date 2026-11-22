@@ -33,11 +33,14 @@ public final class Invite {
     return HuddleFM.context().getSharedPreferences("huddlefm", Context.MODE_PRIVATE);
   }
 
-  /** Remembers the bot heard in this workspace's huddle, for inviting it to the next one. */
+  /**
+   * Remembers the bot heard in this workspace's huddle, for inviting it to the next one and for
+   * believing only it. The first is kept, as the desktop plugins keep theirs.
+   */
   static void remember(String botUserId) {
     String team = teamId;
     if (team == null || botUserId == null || HuddleFM.context() == null) return;
-    if (botUserId.equals(bot())) return;
+    if (bot() != null) return;
     prefs().edit().putString("bot." + team, botUserId).apply();
   }
 
@@ -91,8 +94,18 @@ public final class Invite {
 
   private static void finish(Object result, Done done) {
     String name = result == null ? "null" : result.getClass().getName();
+    if (name.endsWith("Result$Failure")) {
+      // a coroutine that failed hands back its exception, wrapped
+      try {
+        java.lang.reflect.Field f = result.getClass().getDeclaredField("exception");
+        f.setAccessible(true);
+        name += ": " + f.get(result);
+      } catch (Throwable ignored) {
+      }
+    }
     boolean ok = name.endsWith("$Success");
-    HuddleFM.log("Inviting HuddleFM: " + name);
-    HuddleFM.main.post(() -> done.done(ok, ok ? null : name));
+    String outcome = name;
+    HuddleFM.log("Inviting HuddleFM: " + outcome);
+    HuddleFM.main.post(() -> done.done(ok, ok ? null : outcome));
   }
 }

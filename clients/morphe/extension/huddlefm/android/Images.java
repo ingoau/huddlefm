@@ -30,7 +30,7 @@ final class Images {
       placeholder.run();
       return;
     }
-    Bitmap cached = cache.get(url);
+    Bitmap cached = cache.get(url + "#" + size);
     if (cached != null) {
       view.setImageBitmap(cached);
       return;
@@ -40,7 +40,7 @@ final class Images {
         () -> {
           Bitmap bitmap = fetch(url, size);
           if (bitmap == null) return;
-          cache.put(url, bitmap);
+          cache.put(url + "#" + size, bitmap);
           HuddleFM.main.post(
               () -> {
                 if (url.equals(view.getTag())) view.setImageBitmap(bitmap);
@@ -55,7 +55,7 @@ final class Images {
   /** The artwork at [url], on the main thread, or nothing if it can't be had. */
   static void get(String url, int size, Loaded loaded) {
     if (url == null || !url.startsWith("https://")) return;
-    Bitmap cached = cache.get(url);
+    Bitmap cached = cache.get(url + "#" + size);
     if (cached != null) {
       loaded.loaded(cached);
       return;
@@ -64,7 +64,7 @@ final class Images {
         () -> {
           Bitmap bitmap = fetch(url, size);
           if (bitmap == null) return;
-          cache.put(url, bitmap);
+          cache.put(url + "#" + size, bitmap);
           HuddleFM.main.post(() -> loaded.loaded(bitmap));
         });
   }

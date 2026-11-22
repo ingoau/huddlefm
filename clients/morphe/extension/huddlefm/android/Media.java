@@ -47,6 +47,8 @@ final class Media {
       channel.setDescription("What HuddleFM is playing in your huddle");
       channel.setShowBadge(false);
       manager().createNotificationChannel(channel);
+      // only this app may send to it: RECEIVER_NOT_EXPORTED needs Android 13, so the app's own
+      // signature permission, which androidx declares in Slack's manifest, guards it before that
       app.registerReceiver(
           new BroadcastReceiver() {
             @Override
@@ -55,6 +57,8 @@ final class Media {
             }
           },
           new IntentFilter(ACTION),
+          app.getPackageName() + ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+          null,
           Context.RECEIVER_NOT_EXPORTED);
       HuddleFM.client.listen(Media::update);
     } catch (Throwable t) {
@@ -96,12 +100,12 @@ final class Media {
             new MediaSession.Callback() {
               @Override
               public void onPlay() {
-                run("toggle");
+                run("resume");
               }
 
               @Override
               public void onPause() {
-                run("toggle");
+                run("pause");
               }
 
               @Override
@@ -136,8 +140,12 @@ final class Media {
               bitmap -> {
                 if (!url.equals(artworkUrl)) return;
                 artwork = bitmap;
-                metadata(HuddleFM.client.nowPlaying());
-                notify(true);
+                try {
+                  metadata(HuddleFM.client.nowPlaying());
+                  notify(true);
+                } catch (Throwable t) {
+                  HuddleFM.log("Couldn't update media controls: " + t);
+                }
               });
         }
       }
@@ -181,10 +189,9 @@ final class Media {
 
   /** Posts the media notification the controls are drawn from, when what it shows changed. */
   private static void notify(boolean force) {
-    if (session == null) return;
     Client client = HuddleFM.client;
     JSONObject song = client.nowPlaying();
-    if (song == null) return;
+    if (session == null || song == null || client.session() == null) return;
     boolean playing = "playing".equals(client.session().optString("state"));
     String key = song.optString("id") + playing + client.can("pause") + client.can("skip") + (artwork != null);
     if (!force && key.equals(notified)) return;
@@ -251,8 +258,20 @@ final class Media {
   }
 
   private static void run(String command) {
-    if (command == null) return;
-    String capability = "toggle".equals(command) ? "pause" : "skip";
+    String capability;
+    switch (command == null ? "" : command) {
+      case "toggle":
+      case "pause":
+      case "resume":
+        capability = "pause";
+        break;
+      case "skip":
+      case "previous":
+        capability = "skip";
+        break;
+      default:
+        return;
+    }
     if (allowed(capability)) HuddleFM.client.command(Client.object("type", command), Media::say);
   }
 

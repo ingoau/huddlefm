@@ -20,12 +20,17 @@ public final class Channel {
       new DataMessageObserver() {
         @Override
         public void onDataMessageReceived(DataMessage message) {
-          if (!Client.TOPIC.equals(message.topic)) return;
-          final byte[] data = message.data;
-          final String attendee = message.senderAttendeeId;
-          final String external = message.senderExternalUserId;
-          final boolean throttled = message.throttled;
-          HuddleFM.main.post(() -> HuddleFM.client.receive(data, attendee, external, throttled));
+          // on Chime's thread, where nothing of HuddleFM's may throw into Slack's huddle
+          try {
+            if (!Client.TOPIC.equals(message.topic)) return;
+            final byte[] data = message.data;
+            final String attendee = message.senderAttendeeId;
+            final String external = message.senderExternalUserId;
+            final boolean throttled = message.throttled;
+            HuddleFM.main.post(() -> HuddleFM.client.receive(data, attendee, external, throttled));
+          } catch (Throwable t) {
+            HuddleFM.log("Couldn't take a data message: " + t);
+          }
         }
       };
 

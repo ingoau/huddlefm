@@ -188,7 +188,9 @@ final class Client {
    * bot's user is known only it is believed; before that, whoever sends state first is.
    */
   private boolean fromBot(String attendeeId, String userId) {
-    if (botUserId != null) return botUserId.equals(userId);
+    // the bot heard in this session, else the one last heard in this workspace's huddles
+    String bot = botUserId != null ? botUserId : Invite.bot();
+    if (bot != null) return bot.equals(userId);
     return botAttendee == null || botAttendee.equals(attendeeId);
   }
 
@@ -301,7 +303,7 @@ final class Client {
       case "state":
         {
           JSONObject session = payload.optJSONObject("session");
-          if (!(payload.opt("seq") instanceof Number) || session == null) return;
+          if (!(payload.opt("seq") instanceof Number) || session == null || !(session.opt("state") instanceof String)) return;
           botAttendee = attendeeId;
           botUserId = userId;
           if (state != null && payload.optInt("seq") < state.optInt("seq")) return;
