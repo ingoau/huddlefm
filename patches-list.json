@@ -1,0 +1,79 @@
+{
+  "NOTE": "Written by the Morphe patch release workflow. Don't edit it: Morphe and other tools read it.",
+  "version": "1.0.0",
+  "patches": [
+    {
+      "name": "HuddleFM",
+      "description": "Adds HuddleFM to huddles: a now playing card above the bottom bar, its controls in More Options, and its song in Android's media controls. Works with or without Slick Android.",
+      "default": true,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.Slack",
+          "name": "Slack",
+          "description": null,
+          "apkFileType": null,
+          "appIconColor": null,
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "26.11.30.0",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "Install alongside Slack",
+      "description": "Gives the patched app its own package name and name, so it installs next to Slack from Google Play.",
+      "default": false,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.Slack",
+          "name": "Slack",
+          "description": null,
+          "apkFileType": null,
+          "appIconColor": null,
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "26.11.30.0",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": [
+        {
+          "key": "packageName",
+          "title": "Package name",
+          "description": "The patched app's package name. It must differ from Slack's.",
+          "required": true,
+          "type": "kotlin.String",
+          "default": "com.Slack.huddlefm",
+          "values": null
+        },
+        {
+          "key": "appName",
+          "title": "App name",
+          "description": "The name under the patched app's icon, to tell it from Slack.",
+          "required": true,
+          "type": "kotlin.String",
+          "default": "Slack HuddleFM",
+          "values": null
+        }
+      ]
+    }
+  ]
+}
