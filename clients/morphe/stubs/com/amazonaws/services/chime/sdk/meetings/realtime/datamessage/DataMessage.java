@@ -1,10 +1,13 @@
 package com.amazonaws.services.chime.sdk.meetings.realtime.datamessage;
 
-/** Compile-only stub of the Chime SDK's data message, as Slack ships it. */
+/**
+ * Compile-only stub of the Chime SDK's data message, as Slack ships it. Its fields aren't final and
+ * have no initializers, so javac reads them at run time rather than inlining constants.
+ */
 public final class DataMessage {
-  public final byte[] data = null;
-  public final String senderAttendeeId = null;
-  public final String senderExternalUserId = null;
-  public final boolean throttled = false;
-  public final String topic = null;
+  public byte[] data;
+  public String senderAttendeeId;
+  public String senderExternalUserId;
+  public boolean throttled;
+  public String topic;
 }
