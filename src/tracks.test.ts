@@ -27,6 +27,8 @@ import {
   isBotCheck,
   integratedLoudness as summaryLoudness,
   isExpectedTrackFailure,
+  isLastingFailure,
+  TrackError,
   levelingGain,
   looksLikeFilenameTitle,
   metadataKind,
@@ -444,6 +446,34 @@ test("gives unplayable media a stable message without the source ID", () => {
     expect(isExpectedTrackFailure(failure)).toBe(true);
     expect(failure.detail).toBe(line);
   }
+});
+
+test("tells a failure that will happen again from one that may not", () => {
+  // Gone or locked away, it fails every time.
+  expect(
+    isLastingFailure(
+      extractorFailure("ERROR: [youtube] x: Video unavailable. Private video"),
+    ),
+  ).toBe(true);
+  expect(
+    isLastingFailure(new TrackError("Track exceeds the duration limit")),
+  ).toBe(true);
+  // A bot check or a blocked download may work in an hour.
+  expect(
+    isLastingFailure(
+      extractorFailure(
+        "ERROR: [youtube] x: Sign in to confirm you’re not a bot. Use --cookies-from-browser",
+      ),
+    ),
+  ).toBe(false);
+  expect(
+    isLastingFailure(
+      new TrackError(
+        "unable to download video data: HTTP Error 403: Forbidden",
+      ),
+    ),
+  ).toBe(false);
+  expect(isLastingFailure(new Error("Track is not available"))).toBe(false);
 });
 
 test("separates unreleased and unsupported media from missing media", () => {

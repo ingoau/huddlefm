@@ -52,6 +52,7 @@ import {
   parseBulkLinkList,
   normalizeToken,
   TrackCatalog,
+  isLastingFailure,
   TrackError,
   trackFailureDetail,
   trackKind,
@@ -827,26 +828,34 @@ export class Coordinator {
   }
 
   // Tells a host, once, that everyone can now skip, pause and change the
-  // volume, when this session lets them; a channel's defaults may not.
+  // volume by default, in a session that took the default: a channel's own
+  // defaults are its choice, not the change.
   private async announceOpenControls() {
     const hostId = this.hostId;
-    try {
-      if (
-        !hostId ||
-        this.communism ||
-        !openControlsCapabilities.every((capability) =>
-          this.allowed.has(capability),
-        ) ||
-        this.store.noticeShown(hostId, openControlsNotice)
+    if (
+      !hostId ||
+      this.communism ||
+      this.channelDefaultsApplied ||
+      !openControlsCapabilities.every((capability) =>
+        this.allowed.has(capability),
       )
-        return;
-      await this.slack.ephemeral(
-        this.room.uiChannelId,
-        hostId,
-        openControlsNoticeText,
-        this.room.uiThreadTs,
-      );
-      this.store.markNoticeShown(hostId, openControlsNotice);
+    )
+      return;
+    try {
+      // Claimed before it's sent, so two sessions starting at once don't
+      // both send it.
+      if (!this.store.markNoticeShown(hostId, openControlsNotice)) return;
+      try {
+        await this.slack.ephemeral(
+          this.room.uiChannelId,
+          hostId,
+          openControlsNoticeText,
+          this.room.uiThreadTs,
+        );
+      } catch (error) {
+        this.store.unmarkNoticeShown(hostId, openControlsNotice);
+        throw error;
+      }
     } catch (error) {
       this.log.warn(
         { event: "notice_failed", userId: hostId, err: error },
@@ -4836,7 +4845,10 @@ export class Coordinator {
     entry.status = "failed";
     this.queue = this.queue.filter((track) => track !== entry);
     this.queueChanged();
-    this.store.setTrack(entry.id, { status: "failed" });
+    this.store.setTrack(entry.id, {
+      status: "failed",
+      lastingFailure: isLastingFailure(error),
+    });
     this.audit.record("track.failed", undefined, {
       sessionId: this.id,
       ...auditTrack(entry),

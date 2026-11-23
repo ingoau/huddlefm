@@ -983,7 +983,13 @@ test("lists recently autoplayed songs once each, newest first", () => {
 test("lists songs that failed since a time and haven't prepared since", () => {
   const store = new Store(":memory:");
   createSession(store);
-  const add = (id: string, sourceId: string, status: string, at: number) => {
+  const add = (
+    id: string,
+    sourceId: string,
+    status: string,
+    at: number,
+    lastingFailure = status === "failed",
+  ) => {
     store.addTrack({
       id,
       sessionId: "session",
@@ -996,8 +1002,11 @@ test("lists songs that failed since a time and haven't prepared since", () => {
       status,
     });
     store.db.query("UPDATE tracks SET created_at = ? WHERE id = ?").run(at, id);
+    store.setTrack(id, { lastingFailure });
   };
   add("gone", "gone", "failed", 2_000);
+  // It failed in a way that may not happen again, as during an outage.
+  add("blocked", "blocked", "failed", 2_000, false);
   add("gone-again", "gone", "failed", 3_000);
   // It failed, then prepared for someone later.
   add("flaky", "flaky", "failed", 2_000);
@@ -1021,10 +1030,14 @@ test("lists songs that failed since a time and haven't prepared since", () => {
 test("remembers which one-off notices each user has seen", () => {
   const store = new Store(":memory:");
   expect(store.noticeShown("U1", "open-controls-v1")).toBeFalse();
-  store.markNoticeShown("U1", "open-controls-v1");
-  // Marking again is harmless.
-  store.markNoticeShown("U1", "open-controls-v1");
+  expect(store.markNoticeShown("U1", "open-controls-v1")).toBeTrue();
+  // Marking again is harmless, and says someone else got there first.
+  expect(store.markNoticeShown("U1", "open-controls-v1")).toBeFalse();
   expect(store.noticeShown("U1", "open-controls-v1")).toBeTrue();
+  // One that couldn't be shown is shown next time.
+  store.unmarkNoticeShown("U1", "open-controls-v1");
+  expect(store.noticeShown("U1", "open-controls-v1")).toBeFalse();
+  store.markNoticeShown("U1", "open-controls-v1");
   // Each notice and each user is their own.
   expect(store.noticeShown("U1", "other")).toBeFalse();
   expect(store.noticeShown("U2", "open-controls-v1")).toBeFalse();

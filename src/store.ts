@@ -431,6 +431,7 @@ const trackColumns = {
   isVideo: "is_video",
   gainDb: "gain_db",
   plays: "plays",
+  lastingFailure: "lasting_failure",
 };
 
 const addedColumns = [
@@ -481,6 +482,9 @@ const addedColumns = [
   // How many times the track has started playing, counting its loops: each
   // play is its own scrobble.
   ["tracks", "plays", "INTEGER NOT NULL DEFAULT 0"],
+  // A failed track that will fail every time, as a song that's gone does,
+  // rather than once, as during a YouTube outage.
+  ["tracks", "lasting_failure", "INTEGER NOT NULL DEFAULT 0"],
   ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
@@ -2062,15 +2066,16 @@ export class Store {
     }));
   }
 
-  // Songs that failed to prepare since `since`, in any session, and haven't
-  // prepared since, so autoplay doesn't pick a song that will probably fail
-  // again: one that's gone or too long fails every time.
+  // Songs that failed since `since` in a way that will happen again (gone,
+  // too long, locked away), in any session, and haven't prepared since, so
+  // autoplay doesn't pick a song that will probably fail again. A failure an
+  // outage caused doesn't count: the song may well work now.
   failedSources(since: number): Set<string> {
     const rows = this.db
       .query(
         `SELECT f.source_id AS sourceId FROM (
           SELECT source_id, MAX(created_at) AS failed_at FROM tracks
-          WHERE status = 'failed' AND created_at >= ?
+          WHERE status = 'failed' AND lasting_failure = 1 AND created_at >= ?
           GROUP BY source_id
         ) f
         WHERE NOT EXISTS (
@@ -2310,12 +2315,25 @@ export class Store {
     );
   }
 
+  /**
+   * Marks a notice shown, saying whether this call did: only one of two
+   * sessions starting at once gets to show it.
+   */
   markNoticeShown(userId: string, notice: string) {
+    return (
+      this.db
+        .query(
+          "INSERT OR IGNORE INTO user_notices (user_id, notice, shown_at) VALUES (?, ?, ?)",
+        )
+        .run(userId, notice, Date.now()).changes > 0
+    );
+  }
+
+  /** Lets a notice that couldn't be shown be shown next time. */
+  unmarkNoticeShown(userId: string, notice: string) {
     this.db
-      .query(
-        "INSERT OR IGNORE INTO user_notices (user_id, notice, shown_at) VALUES (?, ?, ?)",
-      )
-      .run(userId, notice, Date.now());
+      .query("DELETE FROM user_notices WHERE user_id = ? AND notice = ?")
+      .run(userId, notice);
   }
 
   /** The Jellyfin servers a user linked, oldest first. */
@@ -2422,6 +2440,7 @@ export class Store {
       isVideo?: boolean;
       gainDb?: number | null;
       plays?: number;
+      lastingFailure?: boolean;
     },
   ) {
     const { sql, values } = assignments(trackColumns, fields);

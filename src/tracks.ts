@@ -144,6 +144,26 @@ const expectedExtractorFailures = [
   },
 ];
 
+// Failures that will happen again however often a song is tried: it's gone,
+// too long, or locked away. A blocked or broken download isn't one of them;
+// it may work in an hour.
+const lastingFailures = new Set([
+  "Track is not available",
+  "Track exceeds the duration limit",
+  "Track exceeds the download limit",
+  "That video is too big to download",
+  "That video is age-restricted",
+  "That video is for channel members only",
+  "That link is not supported",
+  "Live streams are not supported",
+  "That live stream has ended",
+]);
+
+/** Whether a song that failed this way will fail every time it's tried. */
+export function isLastingFailure(error: unknown) {
+  return error instanceof TrackError && lastingFailures.has(error.message);
+}
+
 export function extractorFailure(stderr: string) {
   const line = stderr.trim().split("\n").at(-1)?.trim();
   if (!line) return new TrackError("Extractor failed", { expected: false });

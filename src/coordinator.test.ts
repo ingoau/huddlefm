@@ -1844,6 +1844,20 @@ test("a host isn't told everyone can skip, pause and change the volume when they
   expect(communism.ephemeral).not.toContain(openControlsText);
   expect(store.noticeShown("host", "open-controls-v1")).toBeFalse();
   await communism.coordinator.endFromSlack();
+
+  // A channel's defaults that open the controls are its choice, not the
+  // change the notice is about.
+  store.setChannelDefaults(
+    "channel",
+    { communism: false, permissions: ["add", "skip", "pause", "volume"] },
+    "manager",
+  );
+  const opened = setup(undefined, undefined, undefined, undefined, store);
+  await opened.coordinator.start();
+  await Bun.sleep(5);
+  expect(opened.ephemeral).not.toContain(openControlsText);
+  expect(store.noticeShown("host", "open-controls-v1")).toBeFalse();
+  await opened.coordinator.endFromSlack();
   store.close();
 });
 
