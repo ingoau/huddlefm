@@ -1421,11 +1421,19 @@ final class Panel {
           row.setOnClickListener(v -> pickMany(field));
           break;
         }
-      default:
+      case "user":
         {
           String user = field.isNull("value") ? "" : field.optString("value", "");
           String self = client.selfUserId();
           value = valueText(user.isEmpty() ? "Nobody" : user.equals(self) ? "You" : "Someone else");
+          String extra = "Change it in Slack.";
+          hint = hint.isEmpty() ? extra : hint + " " + extra;
+          break;
+        }
+      default:
+        {
+          // a kind this build doesn't know yet, shown as is
+          value = valueText(field.optString("value", ""));
           String extra = "Change it in Slack.";
           hint = hint.isEmpty() ? extra : hint + " " + extra;
         }

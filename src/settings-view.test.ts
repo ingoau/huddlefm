@@ -367,6 +367,13 @@ test("a typed volume round-trips through the draft", () => {
     options({ draft: { volume: { percent: { value: " " } } } }),
   );
   expect(block(cleared, "volume")!.element.initial_value).toBe("60");
+  // So does one outside 0 to 100, or not a number, which Slack wouldn't take.
+  for (const value of ["150", "-5", "abc"]) {
+    const view = settingsView(
+      options({ draft: { volume: { percent: { value } } } }),
+    );
+    expect(block(view, "volume")!.element.initial_value).toBe("60");
+  }
 });
 
 test("a preset's refill gives the permission inputs new block IDs", () => {

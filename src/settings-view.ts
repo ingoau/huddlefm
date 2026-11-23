@@ -523,8 +523,18 @@ function draftValue(
         ? value
         : undefined;
     }
-    case "number":
-      return block[actionId(field)]?.value?.trim() || undefined;
+    case "number": {
+      // Only a number Slack would take: tab switches don't check the range,
+      // so one outside it would become the input's initial value.
+      const value = block[actionId(field)]?.value?.trim();
+      const number = Number(value);
+      return value &&
+        Number.isFinite(number) &&
+        number >= field.min &&
+        number <= field.max
+        ? value
+        : undefined;
+    }
     case "toggle":
       return checked(block.enabled);
     case "user":

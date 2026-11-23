@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   settingFields,
+  volumePercent,
   type SessionSettingsView,
   type SettingsContext,
   type UserSettingsView,
@@ -125,6 +126,13 @@ test("the volume is a percent from 0 to 100, kept to the hundredth", () => {
     max: 100,
     value: "62.5",
   });
+});
+
+test("the volume shown stays within 0 to 100 whatever it was set to", () => {
+  expect(volumePercent(0.35)).toBe("35");
+  expect(volumePercent(50)).toBe("100");
+  expect(volumePercent(-1)).toBe("0");
+  expect(volumePercent(Number.NaN)).toBe("0");
 });
 
 test("a volume override stands in for the session's volume", () => {

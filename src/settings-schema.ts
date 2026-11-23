@@ -191,7 +191,10 @@ function choices<Mode extends string>(
 
 /** The volume as Settings shows it, in percent. */
 export function volumePercent(volume: number) {
-  return String(Math.round(volume * 10_000) / 100);
+  // Kept within 0 to 100, as the number input refuses anything else, even
+  // from a mistyped INITIAL_VOLUME.
+  const share = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 0;
+  return String(Math.round(share * 10_000) / 100);
 }
 
 function connectedServices(user: UserSettingsView) {
