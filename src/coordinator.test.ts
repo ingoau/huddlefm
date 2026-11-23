@@ -2600,7 +2600,7 @@ test("channel managers turn the channel's auto join on and off", async () => {
   );
   expect(store.channelAutoJoin("channel")).toBeUndefined();
   expect(result.ephemeral).toContain(
-    "Auto join is off. I’ll join Huddles in this channel when invited.",
+    "Auto join is off. I’ll join huddles in this channel when invited.",
   );
   await result.coordinator.endFromSlack();
 });
@@ -3182,7 +3182,7 @@ test("posts a collapsed recap after songs played", async () => {
   expect(JSON.stringify(blocks[1])).toContain("*Track*");
 });
 
-test("announces and leaves two minutes after becoming the only Huddle participant", async () => {
+test("announces and leaves two minutes after becoming the only huddle participant", async () => {
   const result = setup(undefined, {
     aloneMs: 10,
     idleMs: 100,
@@ -3196,7 +3196,7 @@ test("announces and leaves two minutes after becoming the only Huddle participan
   expect(result.posted[1]).toEqual([
     "channel",
     "1.0",
-    "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
+    "I’m alone in the huddle, so I’ll leave in 2 minutes.",
   ]);
   await until(() =>
     result.media.some((value) => (value as { type?: string }).type === "leave"),
@@ -3218,7 +3218,7 @@ test("reconciling participants removes a user whose leave event was missed", asy
   expect(result.posted[1]).toEqual([
     "channel",
     "1.0",
-    "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
+    "I’m alone in the huddle, so I’ll leave in 2 minutes.",
   ]);
   await until(() =>
     result.media.some((value) => (value as { type?: string }).type === "leave"),
@@ -3308,7 +3308,7 @@ test("a participant joining from a second device is not greeted again", async ()
   const prompts = test.ephemeralCalls.filter(
     ([, userId, text]) =>
       userId === "newbie" &&
-      text === "Do you want to scrobble your listening in this Huddle?",
+      text === "Do you want to scrobble your listening in this huddle?",
   );
   expect(prompts).toHaveLength(1);
   await test.coordinator.endFromSlack();
@@ -3547,7 +3547,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
   expect(modal).toContain('"block_id":"loop"');
   expect(modal).toContain('"value":"track"');
   expect(modal).toContain('"value":"queue"');
-  expect(modal).toContain("Include in Huddle mix");
+  expect(modal).toContain("Include in huddle mix");
   expect(modal).toContain('"action_id":"sources:added"');
   expect(modal).toContain(
     '"block_id":"transition","label":{"type":"plain_text","text":"Transitions"}',
@@ -4083,7 +4083,7 @@ test("ask mode prompts configured users and the shared session toggle overrides 
   expect(test.ephemeralCalls).toContainEqual([
     "channel",
     "host",
-    "Do you want to scrobble your listening in this Huddle?",
+    "Do you want to scrobble your listening in this huddle?",
     "1.0",
     expect.arrayContaining([
       expect.objectContaining({ block_id: "session_scrobbling_prompt" }),
@@ -5169,7 +5169,7 @@ test("asks listeners about each track in ask-for-every-track mode", async () => 
     userStore,
   );
   await test.coordinator.start();
-  // Unlike "ask", nothing is asked about the Huddle as a whole.
+  // Unlike "ask", nothing is asked about the huddle as a whole.
   expect(test.ephemeralCalls.some((call) => call[1] === "host")).toBeFalse();
 
   await test.coordinator.action(
@@ -5214,7 +5214,7 @@ test("asks listeners about each track in ask-for-every-track mode", async () => 
   await test.coordinator.action(everything);
   expect(test.ephemeral).toContain("Scrobbling enabled for this session.");
   await test.coordinator.action(everything);
-  expect(test.ephemeral).toContain("You're already scrobbling this Huddle.");
+  expect(test.ephemeral).toContain("You're already scrobbling this huddle.");
   expect(userStore.getSessionScrobbling(test.coordinator.id, "host")).toBe(
     true,
   );
@@ -7138,7 +7138,7 @@ test("autoplay leaves out a song this room skipped that only one person chose, u
     undefined,
     catalog,
   );
-  // Skipped in this room in earlier Huddles: one song nobody chose, one
+  // Skipped in this room in earlier huddles: one song nobody chose, one
   // that one person chose under another upload, and one that two people
   // chose, skipped long enough ago to have rested.
   const roomId = Reflect.get(test.coordinator, "roomId");
@@ -7200,7 +7200,7 @@ test("autoplay leaves out a song this room skipped that only one person chose, u
   await test.coordinator.endFromSlack();
 });
 
-test("a manager who is not in the Huddle carries no skip of their own", async () => {
+test("a manager who is not in the huddle carries no skip of their own", async () => {
   const calls: Record<string, unknown>[] = [];
   const catalog = huddleMixCatalog(
     [{ sourceId: "skipped0002", title: "Not This One" }],
@@ -7531,7 +7531,7 @@ test("user settings persist huddle mix opt-out", async () => {
   userStore.close();
 });
 
-test("user settings offer a Huddle mix source per connected service", async () => {
+test("user settings offer a huddle mix source per connected service", async () => {
   const userStore = new Store(":memory:");
   const scrobbling = new ScrobbleDispatcher(userStore, {});
   userStore.setListenBrainzToken("host", "token", "listener");
@@ -7685,7 +7685,7 @@ test("idle player offers Play something instead of playback controls", async () 
   await test.coordinator.endFromSlack();
 });
 
-test("Play something turns on Huddle mix and plays its pick", async () => {
+test("Play something turns on huddle mix and plays its pick", async () => {
   const test = playSomethingSetup(
     [{ sourceId: "mixpick0001", title: "Mix Pick" }],
     async () => {
@@ -8191,7 +8191,7 @@ test("the undo button is not the player's to handle", async () => {
   // A like outlives the session it was made in, so the undo is handled by the
   // app rather than here. What matters at this boundary is that the player
   // does not claim an interaction it would then serialize behind playback and
-  // drop once the Huddle ends.
+  // drop once the huddle ends.
   expect(
     test.coordinator.handles({
       ...interaction(test.coordinator, "unlike_track", value),
@@ -8444,7 +8444,7 @@ test("a session saved to an account is offered only to its owner", async () => {
 
   const second = sessionSaveSetup(store);
   await second.coordinator.start();
-  // The guest is in the Huddle, so the player offers to load a save.
+  // The guest is in the huddle, so the player offers to load a save.
   expect(JSON.stringify(second.posted[0])).toContain("open_load_session");
   await second.coordinator.action(
     interaction(second.coordinator, "open_load_session"),

@@ -1611,7 +1611,7 @@ test("a track that resolves to another song is weighed again under that song's n
   ).toEqual(["My Cousin Is My Wife", "Other"]);
   lucky.store.close();
 
-  // Skipped earlier in this Huddle under its real name.
+  // Skipped earlier in this huddle under its real name.
   const skippedHere = build(() => 0.5);
   expect(
     titles(
@@ -1625,7 +1625,7 @@ test("a track that resolves to another song is weighed again under that song's n
   ).toEqual(["Other"]);
   skippedHere.store.close();
 
-  // Just heard in this Huddle under its real name, it is out regardless.
+  // Just heard in this huddle under its real name, it is out regardless.
   const heard = build(() => 0);
   expect(
     titles(

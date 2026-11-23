@@ -201,7 +201,7 @@ export function lastFmConnectedView(username: string) {
 }
 
 // Settings outside a session has only the You tab, which reads nothing of a
-// session but whether it plays music, for the Huddle mix.
+// session but whether it plays music, for the huddle mix.
 const noSession: SessionSettingsView = {
   mediaMode: "music",
   volume: 1,
@@ -238,7 +238,7 @@ type SettingsMetadata = ReturnType<typeof parseSettingsMetadata>;
 
 /**
  * A user's own settings, opened from a DM with the bot rather than from a
- * session's player: scrobbling, the Huddle mix, linked accounts and Your
+ * session's player: scrobbling, the huddle mix, linked accounts and Your
  * data, with nothing that belongs to a session.
  */
 /** What sessions running meanwhile hear of the user's own settings. */
@@ -455,7 +455,7 @@ export class UserSettings {
       const settings = scrobbling.settings(userId);
       const mode = selected(state.scrobbling_mode?.mode, scrobblingModes);
       if (mode && mode !== settings.mode) {
-        // It's the default for new Huddles, so one going on stays as it is.
+        // It's the default for new huddles, so one going on stays as it is.
         this.services.sessions?.keepScrobbling(userId);
         scrobbling.setMode(userId, mode);
       }

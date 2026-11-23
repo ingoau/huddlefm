@@ -65,7 +65,7 @@ export function withLocalAudio(
 }
 
 /**
- * Runs one Huddle's native media in its own Bun process (src/native-media/
+ * Runs one huddle's native media in its own Bun process (src/native-media/
  * main.ts), so a crash in native WebRTC or media code ends that one session
  * instead of the whole bot. Coordinator messages go in on stdin, and media
  * events come back on stdout.

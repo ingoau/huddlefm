@@ -55,12 +55,12 @@ export const scrobblingModes = [
 ] as const;
 export type ScrobblingMode = (typeof scrobblingModes)[number];
 
-// What a listener lets the Huddle mix draw on: the songs they have added or
+// What a listener lets the huddle mix draw on: the songs they have added or
 // liked in HuddleFM, and their listening on each scrobbling service.
 export const huddleMixSources = ["added", "lastfm", "listenbrainz"] as const;
 export type HuddleMixSource = (typeof huddleMixSources)[number];
 
-// The sources a listener could give the Huddle mix right now: their HuddleFM
+// The sources a listener could give the huddle mix right now: their HuddleFM
 // history, and each scrobbling service they have connected.
 export function usableHuddleMixSources(
   settings: Pick<UserScrobbling, "lastFmSessionKey" | "listenBrainzToken">,
@@ -346,7 +346,7 @@ export type UserScrobbling = {
   listenBrainzUsername?: string;
   listenBrainzToken?: string;
   listenBrainzEnabled: boolean;
-  // Whether the listener takes part in the Huddle mix at all: true while any
+  // Whether the listener takes part in the huddle mix at all: true while any
   // of their sources is.
   huddleMixOptIn: boolean;
   // The usable sources the listener gives the mix. A service they have not
@@ -515,7 +515,7 @@ function compact<T extends object>(value: T): T {
   ) as T;
 }
 
-// The listener's saved choice for each Huddle mix source, connected or not.
+// The listener's saved choice for each huddle mix source, connected or not.
 // The opt-in column predates the per-source ones, so an older opt-out still
 // turns every source off.
 function savedHuddleMixSources(row: Row) {
@@ -586,7 +586,7 @@ function savedTrack(track: Row) {
 // A saved song. Who asked for it is left out: loading credits whoever loads.
 export type SessionSaveTrack = TrackMetadata;
 
-// Whoever a saved queue belongs to: a channel, for anyone in its Huddles, or
+// Whoever a saved queue belongs to: a channel, for anyone in its huddles, or
 // one user's account.
 export type SessionSaveOwner = { type: "channel" | "user"; id: string };
 
@@ -844,8 +844,8 @@ export class Store {
         user_id TEXT NOT NULL,
         PRIMARY KEY (session_id, user_id)
       );
-      -- One row per listener who actually heard a song, so the Huddle mix
-      -- remembers across Huddles rather than only within one. Deliberately
+      -- One row per listener who actually heard a song, so the huddle mix
+      -- remembers across huddles rather than only within one. Deliberately
       -- not tied to sessions(id) by a foreign key: the memory has to outlive
       -- any future session cleanup.
       CREATE TABLE IF NOT EXISTS track_plays (
@@ -901,7 +901,7 @@ export class Store {
         updated_by TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
-      -- Channels whose new Huddles the bot joins by itself, as a channel
+      -- Channels whose new huddles the bot joins by itself, as a channel
       -- manager chose in Settings.
       CREATE TABLE IF NOT EXISTS channel_auto_join (
         channel_id TEXT PRIMARY KEY,
@@ -910,7 +910,7 @@ export class Store {
       );
       -- Sessions kept when they ended, their queue and settings but never
       -- their permissions, for a later session to pick back up: saved to the
-      -- Huddle's channel, where anyone there can load them, or to the account
+      -- huddle's channel, where anyone there can load them, or to the account
       -- of whoever saved them. Saving under a name the owner already uses
       -- replaces that save.
       CREATE TABLE IF NOT EXISTS session_saves (
@@ -1993,7 +1993,7 @@ export class Store {
       .all(...userIds, since, limit) as LikeRecord[];
   }
 
-  // What these listeners have heard since `since`, across every Huddle. Titles
+  // What these listeners have heard since `since`, across every huddle. Titles
   // and artists come back raw: the mix normalizes them itself, so changing how
   // songs are matched never needs the stored rows rewritten.
   recentPlays(userIds: readonly string[], since: number): PlayRecord[] {
@@ -2069,7 +2069,7 @@ export class Store {
   }
 
   // What has been heard in this room since `since`, whoever was listening, so
-  // a Huddle full of listeners the mix knows nothing about still drifts.
+  // a huddle full of listeners the mix knows nothing about still drifts.
   recentRoomPlays(roomId: string, since: number): RoomPlayRecord[] {
     return this.db
       .query(
@@ -2238,10 +2238,10 @@ export class Store {
    * heard, liked and skipped, their scrobbles, the sessions saved to their
    * account, and their accounts and choices. Sessions they saved to a
    * channel belong to the channel, and stay, as does an opt-out of the
-   * Huddle mix.
+   * huddle mix.
    */
   forgetUser(userId: string) {
-    // Forgetting a user must not opt them back into the Huddle mix.
+    // Forgetting a user must not opt them back into the huddle mix.
     const before = this.getUserScrobbling(userId);
     const mixesAdded =
       before.huddleMixOptIn && before.huddleMixSources.includes("added");

@@ -1,4 +1,4 @@
-// The native media backend for one Huddle, run as a child process by
+// The native media backend for one huddle, run as a child process by
 // NativeMediaSession. It reads the bootstrap and then the coordinator's media
 // messages as JSON lines on stdin, and writes media events and log lines as
 // JSON lines on stdout.
@@ -538,7 +538,7 @@ async function main() {
       }
     }
   }
-  // The parent went away without saying leave: leave the Huddle anyway.
+  // The parent went away without saying leave: leave the huddle anyway.
   await leave();
 }
 

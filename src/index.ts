@@ -261,7 +261,7 @@ function updateCanvas(final = false) {
   return canvasUpdate;
 }
 
-// A Huddle outside a public channel is listed without its channel or track:
+// A huddle outside a public channel is listed without its channel or track:
 // the canvas is for the whole workspace.
 function canvasActiveSessions(): Promise<ActiveCanvasSession[]> {
   if (!config.canvasSections.includes("active-sessions"))
@@ -349,7 +349,7 @@ async function welcomeDm(event: {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: "*Your settings* live here too: scrobbling, what goes into the Huddle mix, and the data I keep about you.",
+            text: "*Your settings* live here too: scrobbling, what goes into the huddle mix, and the data I keep about you.",
           },
           accessory: {
             type: "button",
@@ -541,7 +541,7 @@ async function migrateControls(runtime: Runtime) {
     await coordinator.moveControls(channelId);
     log.info(
       { event: "controls_channel_migrated", oldChannelId, channelId },
-      "Migrated Huddle controls channel",
+      "Migrated huddle controls channel",
     );
     captureAnalytics("controls_channel.migrated", {
       sessionId: coordinator.id,
@@ -561,7 +561,7 @@ async function migrateControls(runtime: Runtime) {
         userId: coordinator.hostUserId(),
         err: error,
       },
-      "Could not migrate Huddle controls channel",
+      "Could not migrate huddle controls channel",
     );
     await coordinator.endFromSlack();
   } finally {
@@ -602,7 +602,7 @@ async function reconcileSessionParticipants(
   return false;
 }
 
-// Sessions reconcile independently: one Huddle whose Slack call is slow, or
+// Sessions reconcile independently: one huddle whose Slack call is slow, or
 // whose queue is busy, must never hold up or silence the others.
 async function reconcileParticipants(runtime: Runtime) {
   const coordinator = runtime.coordinator;
@@ -630,7 +630,7 @@ async function reconcileParticipants(runtime: Runtime) {
             callId: runtime.callId,
             err: error,
           },
-          "Could not reconcile Huddle participants",
+          "Could not reconcile huddle participants",
         );
       }
     } while (reconcilePendingSessions.has(coordinator.id) && !shuttingDown);
@@ -640,7 +640,7 @@ async function reconcileParticipants(runtime: Runtime) {
   }
 }
 
-// Slack sends a leave for each connection, so someone in the Huddle on two
+// Slack sends a leave for each connection, so someone in the huddle on two
 // devices "leaves" when they close one while still in it. A leave event only
 // prompts a check of Slack's participant list, which removes them once they
 // are really gone. A second check a little later catches a leave the list
@@ -692,7 +692,7 @@ async function joinHuddle(
         runtime.sourceChannelId === channelId || runtime.callId === callId,
     )
   )
-    throw new Error("HuddleFM is already joining or active in this Huddle");
+    throw new Error("HuddleFM is already joining or active in this huddle");
   if (!restored) scrobbling.syncAnalyticsUser(inviterUserId);
   else if (resumeActorId) scrobbling.syncAnalyticsUser(resumeActorId);
   const startedAt = Date.now();
@@ -704,7 +704,7 @@ async function joinHuddle(
       inviterUserId,
       restoredSessionId: restored?.id,
     },
-    restored ? "Restoring Huddle session" : "Joining Huddle",
+    restored ? "Restoring huddle session" : "Joining huddle",
   );
   captureAnalytics("huddle.join_started", {
     distinctId: inviterUserId,
@@ -734,7 +734,7 @@ async function joinHuddle(
       await slackApp
         .dm(
           inviterUserId,
-          `I couldn’t prepare a controls channel, so I didn’t join the Huddle: ${safeError(error)}`,
+          `I couldn’t prepare a controls channel, so I didn’t join the huddle: ${safeError(error)}`,
         )
         .catch(() => {});
       log.warn(
@@ -744,7 +744,7 @@ async function joinHuddle(
           callId,
           err: error,
         },
-        "Could not prepare Huddle controls channel",
+        "Could not prepare huddle controls channel",
       );
       captureAnalytics("controls_channel.prepare_failed", {
         distinctId: inviterUserId,
@@ -757,10 +757,10 @@ async function joinHuddle(
       callId && inviteFreeWilly
         ? await slackHuddle.joinInvited(channelId, callId, inviteFreeWilly)
         : await slackHuddle.join(channelId);
-    // Joining by channel takes whatever Huddle is there now, which may not
+    // Joining by channel takes whatever huddle is there now, which may not
     // be the one asked for if it ended in the meantime.
     if (callId && joined.huddleCallId !== callId)
-      throw new Error("The Huddle ended before HuddleFM could join it");
+      throw new Error("The huddle ended before HuddleFM could join it");
     const huddleThreadTs = joined.uiThreadTs;
     preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
       (userId) => !config.excludedUserIds.has(userId),
@@ -774,7 +774,7 @@ async function joinHuddle(
     joined.sourceChannelId = channelId;
     joined.huddleThreadTs = huddleThreadTs;
     if (runtimeForCall(joined.huddleCallId))
-      throw new Error("HuddleFM is already active in this Huddle");
+      throw new Error("HuddleFM is already active in this huddle");
     const bootstrap = {
       sessionId: crypto.randomUUID(),
       meeting: joined.chimeMeeting,
@@ -963,7 +963,7 @@ async function restoreSession(saved: SavedSession) {
     return abandon(
       "restore_huddle_ended",
       "session.restore_huddle_ended",
-      "Expired session because its Huddle ended",
+      "Expired session because its huddle ended",
     );
   await joinHuddle(
     saved.sourceChannelId ?? saved.channelId,
@@ -1105,7 +1105,7 @@ async function cleanupEndedSession(sessionId: string) {
 // Taking back a like, from the ephemeral the like posted. Handled here rather
 // than on the Coordinator because neither end of it belongs to a session: a
 // like is stored against the listener and the song, and the Undo sits in a
-// message Slack keeps showing long after the Huddle it was made in has ended.
+// message Slack keeps showing long after the huddle it was made in has ended.
 // Only the person who pressed the button is ever shown it, and it only ever
 // touches their own likes, so there is nobody else to check it against.
 // The end dialog can be submitted after its session has already ended and
@@ -1240,7 +1240,7 @@ async function restoreEndedSession(interaction: Interaction) {
   try {
     const room = await savedHuddleRoom(session);
     if (!room) {
-      await notify("That Huddle is no longer active.");
+      await notify("That huddle is no longer active.");
       return;
     }
     if (!huddleHasParticipant(room, interaction.userId)) {
@@ -1250,9 +1250,9 @@ async function restoreEndedSession(interaction: Interaction) {
           sessionId: session.id,
           userId: interaction.userId,
         },
-        "Manual restore refused because the user is not in the Huddle",
+        "Manual restore refused because the user is not in the huddle",
       );
-      await notify("Join the Huddle first, then I can restore that session.");
+      await notify("Join the huddle first, then I can restore that session.");
       return;
     }
     await joinHuddle(
@@ -1327,7 +1327,7 @@ function mentionReaction(channelId: string, messageTs: string) {
     .catch((error) =>
       log.warn(
         { event: "mention_reaction_failed", channelId, err: error },
-        "Could not react to Huddle mention",
+        "Could not react to huddle mention",
       ),
     );
   let settled = false;
@@ -1345,7 +1345,7 @@ function mentionReaction(channelId: string, messageTs: string) {
               channelId,
               err: error,
             },
-            "Could not remove the Huddle mention acknowledgement",
+            "Could not remove the huddle mention acknowledgement",
           );
         }
         await slackHuddle.react(
@@ -1362,7 +1362,7 @@ function mentionReaction(channelId: string, messageTs: string) {
             succeeded,
             err: error,
           },
-          "Could not mark the Huddle mention outcome",
+          "Could not mark the huddle mention outcome",
         ),
       );
   };
@@ -1381,7 +1381,7 @@ async function joinMentionedHuddle(
     event.threadTs,
   );
   if (!room) {
-    await notify("This isn’t an active Huddle thread.");
+    await notify("This isn’t an active huddle thread.");
     return false;
   }
   if (
@@ -1398,10 +1398,10 @@ async function joinMentionedHuddle(
         callId: room.callId,
         userId: event.userId,
       },
-      "Huddle join refused because the user is not in the Huddle",
+      "Huddle join refused because the user is not in the huddle",
     );
     await notify(
-      "Join the Huddle first, then mention me and I’ll bring the music.",
+      "Join the huddle first, then mention me and I’ll bring the music.",
     );
     return false;
   }
@@ -1409,7 +1409,7 @@ async function joinMentionedHuddle(
   return true;
 }
 
-// Joins a Huddle as it starts in a channel whose managers turned on auto
+// Joins a huddle as it starts in a channel whose managers turned on auto
 // join, with whoever started it as the inviter.
 async function autoJoinHuddle(
   event: Extract<
@@ -1434,7 +1434,7 @@ async function autoJoinHuddle(
       !config.excludedUserIds.has(userId!),
   );
   if (!inviterUserId) return;
-  // Joining a channel with no Huddle in it would start one, so a Huddle that
+  // Joining a channel with no huddle in it would start one, so a huddle that
   // ended as soon as it began is left alone.
   const room = await slackHuddle.activeHuddleRoom(
     event.channelId,
@@ -1448,7 +1448,7 @@ async function autoJoinHuddle(
       callId: event.callId,
       inviterUserId,
     },
-    "Joining a new Huddle in an auto join channel",
+    "Joining a new huddle in an auto join channel",
   );
   captureAnalytics("huddle.auto_joined", {
     distinctId: inviterUserId,
@@ -1508,7 +1508,7 @@ const server = Bun.serve({
         try {
           log.info(
             { event: "local_join_requested", channelId, inviterUserId },
-            "Local control requested Huddle join",
+            "Local control requested huddle join",
           );
           return Response.json({
             ok: true,
@@ -1517,7 +1517,7 @@ const server = Bun.serve({
         } catch (error) {
           log.error(
             { event: "local_join_failed", channelId, err: error },
-            "Local control Huddle join failed",
+            "Local control huddle join failed",
           );
           return Response.json({ error: safeError(error) }, { status: 502 });
         }
@@ -1723,7 +1723,7 @@ for (const sessionId of saved.expiredIds) {
 started.resolve();
 // Huddle member events ride the private realtime gateway, which drops them
 // whenever its socket cycles, so periodically and after every reconnect the
-// tracked participants are reconciled with Slack's actual Huddle membership.
+// tracked participants are reconciled with Slack's actual huddle membership.
 slackHuddle.onConnected = reconcileAllParticipants;
 reconcileTimer = setInterval(reconcileAllParticipants, 60_000);
 await slackHuddle.start((event) => {
@@ -1771,7 +1771,7 @@ await slackHuddle.start((event) => {
           callId: event.callId,
           err: error,
         },
-        "Could not auto join a new Huddle",
+        "Could not auto join a new huddle",
       ),
     );
     return;
@@ -1811,7 +1811,7 @@ await slackHuddle.start((event) => {
         );
       const actionFailed = failed(
         "mention_action_failed",
-        "Could not handle Huddle mention",
+        "Could not handle huddle mention",
       );
       if (!coordinator) {
         void joinMentionedHuddle(event)
@@ -2079,7 +2079,7 @@ async function shutdownSteps() {
   await slackApp.stop();
   log.debug(
     { event: "shutdown_huddle_connection" },
-    "Stopping Huddle connection",
+    "Stopping huddle connection",
   );
   slackHuddle.stop();
   userSettings.close();

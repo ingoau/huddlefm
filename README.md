@@ -10,7 +10,7 @@ A self hosted music bot for Slack huddles, controlled from Slack.
 - A shared queue to reorder, shuffle and loop
 - Playback, volume and permissions, all from buttons in Slack
 - Album art, progress and synced lyrics on the bot's video tile
-- Autoplay from YouTube or a Huddle mix of what people listen to, and 💖 to hear more like a song
+- Autoplay from YouTube or a huddle mix of what people listen to, and 💖 to hear more like a song
 - Video mode: watch YouTube or Jellyfin together on a screen share, with captions and chapters
 - Live streams from YouTube and Twitch
 - Scrobbling to Last.fm and ListenBrainz
@@ -28,8 +28,8 @@ On Android, a [Morphe patch](clients/morphe/) for Slack adds a now playing card 
 
 Invite the bot to a huddle, or mention it in the huddle's thread. It joins and posts a player in the thread, and you're the host. Mention it again with nothing else to bring the player back to the bottom.
 
-- **Settings** has permissions, video mode, autoplay and the rest. Channel managers can save a channel's defaults and turn on auto join, which has the bot join every new Huddle in the channel. **Your data** shows and deletes what HuddleFM keeps about you.
-- **DM the bot** to get a short note on how to start a session, with a button that opens your own settings (scrobbling, Huddle mix, Jellyfin and Your data) outside any session.
+- **Settings** has permissions, video mode, autoplay and the rest. Channel managers can save a channel's defaults and turn on auto join, which has the bot join every new huddle in the channel. **Your data** shows and deletes what HuddleFM keeps about you.
+- **DM the bot** to get a short note on how to start a session, with a button that opens your own settings (scrobbling, huddle mix, Jellyfin and Your data) outside any session.
 - **Video mode** takes one of the huddle's two screen share slots while it's on.
 - **Jellyfin**: paste a link from Jellyfin's web app into Add to queue and approve the Quick Connect code. The server has to be reachable from the internet, and only you can use servers you link.
 - **Mention it**: mention the bot with a command like `@HuddleFM skip`, `volume up`, `end session` or a link on its own, and it happens straight away, small typos included; `@HuddleFM help` lists them. With `OPENROUTER_API_KEY` set, anything else, like `@HuddleFM add three songs by Radiohead`, goes to an AI agent, which is rate limited. Either way it has your own permissions, and replies only to you.
@@ -50,7 +50,7 @@ curl -fsSL -o compose.yaml https://raw.githubusercontent.com/ingoau/huddlefm/mai
 SLACK_WORKSPACE_URL=https://example.slack.com
 SLACK_XOXP=xoxp-...   # Slack app user token (Web API)
 SLACK_XAPP=xapp-...   # Slack app-level token (Socket Mode)
-SLACK_XOXC=xoxc-...   # Browser session token for joining Huddles
+SLACK_XOXC=xoxc-...   # Browser session token for joining huddles
 SLACK_XOXD=xoxd-...   # Browser `d` cookie for that session
 ```
 

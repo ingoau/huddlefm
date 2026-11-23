@@ -3059,7 +3059,7 @@ export class Coordinator {
 
   /**
    * The user is about to change their scrobbling default outside the
-   * session. It is the default for new Huddles, so one they are in keeps
+   * session. It is the default for new huddles, so one they are in keeps
    * scrobbling, or not, as it does now.
    */
   keepSessionScrobbling(userId: string) {
@@ -3078,7 +3078,7 @@ export class Coordinator {
 
   memberJoined(userId: string) {
     if (this.isExcluded(userId)) return;
-    // Slack sends a join for each connection, so someone opening the Huddle
+    // Slack sends a join for each connection, so someone opening the huddle
     // on a second device is already here and isn't greeted again.
     const isNew = !this.participants.has(userId);
     // Still a member event: a Slack snapshot taken before it may have missed
@@ -3126,7 +3126,7 @@ export class Coordinator {
 
   // Huddle member events arrive over the private realtime gateway, whose
   // socket cycles can drop them, so the tracked set can drift from the actual
-  // Huddle. Applying the diff against the authoritative participant list also
+  // huddle. Applying the diff against the authoritative participant list also
   // lets refreshIdle() re-evaluate the alone, idle, and paused timers.
   get participantsVersion() {
     return this.participantsRevision;
@@ -3146,7 +3146,7 @@ export class Coordinator {
         if (version !== this.participantsRevision) {
           this.log.debug(
             { event: "participants_reconcile_stale", version },
-            "Discarded a stale Huddle participant snapshot",
+            "Discarded a stale huddle participant snapshot",
           );
           return;
         }
@@ -3159,7 +3159,7 @@ export class Coordinator {
         if (!added.length && !removed.length) return;
         this.log.info(
           { event: "participants_reconciled", added, removed },
-          "Reconciled Huddle participants with Slack",
+          "Reconciled huddle participants with Slack",
         );
         // Additions go first so a diff that both restores a missed join and
         // removes a stale participant never announces an alone timeout the
@@ -3258,7 +3258,7 @@ export class Coordinator {
 
   // What a user may do in this session without joining the huddle. The
   // configured manager holds host powers; workspace admins and managers of the
-  // Huddle's channel hold what WORKSPACE_ADMIN_PERMISSIONS and
+  // huddle's channel hold what WORKSPACE_ADMIN_PERMISSIONS and
   // CHANNEL_MANAGER_PERMISSIONS grant, and someone who is both gets the
   // higher. Exclusion wins over all of them, so the bot and integration
   // accounts cannot let themselves in this way.
@@ -3374,7 +3374,7 @@ export class Coordinator {
   }
 
   // What a user granted only the end permission may do from outside the
-  // Huddle: reach Settings and its End session button. A Settings submission
+  // huddle: reach Settings and its End session button. A Settings submission
   // changes only what the user is otherwise allowed to change.
   private endingAction(interaction: Interaction) {
     if (interaction.type === "view_submission")
@@ -3412,7 +3412,7 @@ export class Coordinator {
   }
 
   // Channel managers, and the configured manager, also choose whether the bot
-  // joins every new Huddle in the channel, whatever they may do in the
+  // joins every new huddle in the channel, whatever they may do in the
   // session itself.
   private managesChannel(userId: string) {
     if (this.isExcluded(userId) || this.roomId.startsWith("D")) return false;
@@ -4179,9 +4179,9 @@ export class Coordinator {
     ].slice(-20);
   }
 
-  // A room in a channel, which is what a recurring Huddle actually is. The
+  // A room in a channel, which is what a recurring huddle actually is. The
   // companion channel is stable per source channel, so either identifies the
-  // same room across Huddles.
+  // same room across huddles.
   private get roomId() {
     return this.room.sourceChannelId ?? this.room.uiChannelId;
   }
@@ -4225,7 +4225,7 @@ export class Coordinator {
   // against it. The song and its artist also stay out of this session's
   // autoplay and are pushed down in the rejecter's own recommendations, and a
   // skipped discovery makes the next discovery turn wait longer. An autoplay
-  // pick is also remembered as listening memory across Huddles.
+  // pick is also remembered as listening memory across huddles.
   private rejectSkipped(
     skipped: Entry,
     userId: string,
@@ -4391,7 +4391,7 @@ export class Coordinator {
   private rememberSkip(skipped: Entry, userId: string) {
     const optedIn = (listener: string) =>
       this.recommendations?.huddleMixOptedIn(listener) ?? false;
-    // Managers and integrations can skip without being in the Huddle, and they
+    // Managers and integrations can skip without being in the huddle, and they
     // never heard the song, so nothing is recorded against them. Only people
     // who were actually listening carry a skip.
     const listeners = this.listenerIds();
@@ -7441,7 +7441,7 @@ export class Coordinator {
     if (enabled) this.playbackScrobbling?.sessionEnabled(userId);
   }
 
-  // Answers "Scrobble everything in this Huddle" on a prompt. Unlike the
+  // Answers "Scrobble everything in this huddle" on a prompt. Unlike the
   // toggle, an old prompt pressed again never turns scrobbling back off.
   private async enableSessionScrobbling(interaction: Interaction) {
     if (!this.scrobbling) return;
@@ -7458,7 +7458,7 @@ export class Coordinator {
     await this.notice(
       interaction.userId,
       settings.sessionEnabled
-        ? "You're already scrobbling this Huddle."
+        ? "You're already scrobbling this huddle."
         : "Scrobbling enabled for this session.",
     );
   }
@@ -7662,7 +7662,7 @@ export class Coordinator {
             services.listenbrainz,
           );
         }
-        // The mode is the default for new Huddles, so a change to it leaves
+        // The mode is the default for new huddles, so a change to it leaves
         // this session as the form showed it.
         const session = checked(state.session_scrobbling?.enabled);
         if (
@@ -7880,7 +7880,7 @@ export class Coordinator {
     );
   }
 
-  // Turns joining every new Huddle in the channel on or off. Unlike the
+  // Turns joining every new huddle in the channel on or off. Unlike the
   // defaults it takes nothing from the session, so only the user's role is
   // checked again.
   private async setChannelAutoJoin(interaction: Interaction, on: boolean) {
@@ -7907,8 +7907,8 @@ export class Coordinator {
     await this.notice(
       interaction.userId,
       on
-        ? "Auto join is on. I’ll join every new Huddle in this channel."
-        : "Auto join is off. I’ll join Huddles in this channel when invited.",
+        ? "Auto join is on. I’ll join every new huddle in this channel."
+        : "Auto join is off. I’ll join huddles in this channel when invited.",
     );
   }
 
@@ -7991,7 +7991,7 @@ export class Coordinator {
     await this.render();
   }
 
-  // The idle player's one button: turn on Huddle mix and let it pick, with
+  // The idle player's one button: turn on huddle mix and let it pick, with
   // a popular song as the backstop when the mix has nothing to draw on.
   private async playSomething(interaction: Interaction) {
     // Video mode's autoplay needs a video to follow; this suggests from the
@@ -8016,7 +8016,7 @@ export class Coordinator {
   }
 
   /**
-   * Turns on the Huddle mix and has autoplay pick a song, for an idle
+   * Turns on the huddle mix and has autoplay pick a song, for an idle
    * session. Returns whether it started.
    */
   private startPlaySomething(userId: string) {
@@ -9370,10 +9370,10 @@ export class Coordinator {
       .ephemeral(
         this.room.uiChannelId,
         userId,
-        "Do you want to scrobble your listening in this Huddle?",
+        "Do you want to scrobble your listening in this huddle?",
         this.room.uiThreadTs,
         [
-          section("Do you want to scrobble your listening in this Huddle?"),
+          section("Do you want to scrobble your listening in this huddle?"),
           actions("session_scrobbling_prompt", [
             button(
               "enable_session_scrobbling",
@@ -9409,7 +9409,7 @@ export class Coordinator {
           }),
           button(
             "enable_session_scrobbling",
-            plain("Scrobble everything in this Huddle"),
+            plain("Scrobble everything in this huddle"),
             { value: `${this.id}:${track.id}` },
           ),
         ]),
@@ -9434,7 +9434,7 @@ export class Coordinator {
     if (alone() && !this.aloneTimer) {
       this.warnLeaving(
         "alone",
-        "I’m alone in the Huddle, so I’ll leave in 2 minutes.",
+        "I’m alone in the huddle, so I’ll leave in 2 minutes.",
       );
       this.log.debug(
         { event: "alone_timeout_scheduled", timeoutMs: this.config.aloneMs },

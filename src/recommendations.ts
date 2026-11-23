@@ -67,7 +67,7 @@ const addedWeight = 2;
 const knownHistoryLimit = 1000;
 const upNextPerSeed = 10;
 
-// Huddle mix autoplay.
+// huddle mix autoplay.
 const mixCandidateLimit = 12;
 const mixResolveAttempts = 24;
 const mixDiscoveryLimit = 6;
@@ -154,17 +154,17 @@ type TasteArtist = { name: string; score: number };
 type TasteProfile = {
   contributions: TasteContribution[];
   known: Set<string>;
-  // The known set split by where it came from, so the Huddle mix can leave
+  // The known set split by where it came from, so the huddle mix can leave
   // out the sources a listener has not given it.
   knownFrom: Record<HuddleMixSource, Set<string>>;
   artists: TasteArtist[];
   listenBrainz: ListenBrainzRecommendation[];
 };
 
-// The part of a listener's taste the Huddle mix may use.
+// The part of a listener's taste the huddle mix may use.
 type MixTaste = Pick<TasteProfile, "contributions" | "known">;
 
-// Which Huddle mix source each kind of taste contribution belongs to.
+// Which huddle mix source each kind of taste contribution belongs to.
 const mixSourceOf: Record<string, HuddleMixSource> = {
   huddlefm: "added",
   liked: "added",
@@ -588,7 +588,7 @@ export class RecommendationCatalog {
     // How many tracks in a row the now-playing artist has had, including
     // the current one.
     artistRun?: number;
-    // Cross-Huddle listening memory. Structural so the catalog does not have
+    // Cross-huddle listening memory. Structural so the catalog does not have
     // to know how fatigue is built or stored.
     fatigue?: {
       multiplier(
@@ -677,7 +677,7 @@ export class RecommendationCatalog {
           track.score *= sameArtist;
     }
     // Push down whatever these listeners have already heard, or skipped, in
-    // earlier Huddles. Applied last so it weighs the finished score.
+    // earlier huddles. Applied last so it weighs the finished score.
     if (options.fatigue)
       for (const track of ranked)
         track.score *= options.fatigue.multiplier(track, listeners);
@@ -872,7 +872,7 @@ export class RecommendationCatalog {
     // mix chose rather than something you queued, so it is the one positive
     // signal nothing else here can stand in for. A like fades with age instead
     // of being taken back, and carries no metadata: the track has been played
-    // in a Huddle by definition, so resolving it finds the same video again.
+    // in a huddle by definition, so resolving it finds the same video again.
     const now = Date.now();
     // Rows are deduplicated the way the mix matches songs, not the way SQLite
     // stores them: liking "Alpha (Official Video)" and later plain "Alpha" is

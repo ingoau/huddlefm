@@ -131,7 +131,7 @@ test("lists active sessions with what each is playing", () => {
       "- ![](#C123) · 2 listeners · Playing **Song \\(Live\\)** — Artist",
       "- ![](#C456) · 1 listener · Paused **Tune** — Band",
       "- ![](#C789) · 1 listener · Nothing playing",
-      "- A private Huddle · 3 listeners",
+      "- A private huddle · 3 listeners",
       "",
       "_Updated 1970-01-01T00:00:00.000Z_",
     ].join("\n"),
@@ -143,7 +143,7 @@ test("says when no sessions are active", () => {
     sections: ["active-sessions"],
     updatedAt: 0,
   });
-  expect(markdown).toContain("## Active sessions\nNo Huddles right now.");
+  expect(markdown).toContain("## Active sessions\nNo huddles right now.");
 });
 
 test("accepts active and now playing as section aliases", () => {

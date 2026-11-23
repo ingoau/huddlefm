@@ -2,10 +2,10 @@ import { primaryArtist, trackKey } from "./recommendations.ts";
 import type { PlayRecord, RoomPlayRecord, SkipRecord, Store } from "./store.ts";
 import { normalizeToken } from "./tracks.ts";
 
-// Listening memory that survives a Huddle ending. Within one Huddle the
+// Listening memory that survives a huddle ending. Within one huddle the
 // coordinator already keeps the last hundred songs out of the mix; this is
 // what stops the same songs coming back the next time the same people are in
-// a Huddle together.
+// a huddle together.
 //
 // Everything here is a soft multiplier rather than an exclusion. Hard
 // exclusions do not survive contact with a room: the union of five listeners'
@@ -34,7 +34,7 @@ const skipWeight = 1.2;
 const skipArtistWeight = 0.1;
 // A skip is one person's click, made in front of everyone else. They chose it,
 // so they carry it in full; the rest of the room only tolerated the song, so it
-// follows them at a fraction and never into Huddles they are not in.
+// follows them at a fraction and never into huddles they are not in.
 export const skipBystanderShare = 0.25;
 // What the room itself remembers, whoever is listening.
 const roomWeight = 0.35;

@@ -164,7 +164,7 @@ const presetLabels: Record<keyof typeof permissionPresets, string> = {
 };
 
 export function scrobblingModeLabel(mode: ScrobblingMode) {
-  if (mode === "ask") return "Ask every Huddle";
+  if (mode === "ask") return "Ask every huddle";
   if (mode === "ask_track") return "Ask for every track";
   return capitalize(mode);
 }
@@ -397,7 +397,7 @@ const entries: Entry[] = [
   {
     id: "huddle_mix",
     tab: "you",
-    label: "Include in Huddle mix",
+    label: "Include in huddle mix",
     hint: "Only used while you're in the huddle, and never shown as yours. Untick everything to opt out of the mix.",
     optional: true,
     requires: "self",
@@ -431,7 +431,7 @@ const entries: Entry[] = [
   {
     id: "scrobbling_mode",
     tab: "you",
-    label: "Default for new Huddles",
+    label: "Default for new huddles",
     requires: "self",
     kind: "select",
     visible: ({ user }) => Boolean(user?.configured),

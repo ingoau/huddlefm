@@ -35,7 +35,7 @@ export type ActiveHuddleRoom = {
   participantIds: string[];
 };
 
-/** Slack reports Huddle participants as user IDs or as membership objects. */
+/** Slack reports huddle participants as user IDs or as membership objects. */
 function participantIds(value: unknown) {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
@@ -298,7 +298,7 @@ export class SlackHuddleAdapter {
     this.stopping = false;
     this.onEvent = onEvent;
     await this.connect();
-    log.info({ event: "started" }, "Slack Huddle connection started");
+    log.info({ event: "started" }, "Slack huddle connection started");
   }
 
   stop() {
@@ -306,14 +306,14 @@ export class SlackHuddleAdapter {
     clearInterval(this.pingTimer);
     clearTimeout(this.reconnectTimer);
     this.socket?.close();
-    log.info({ event: "stopped" }, "Slack Huddle connection stopped");
+    log.info({ event: "stopped" }, "Slack huddle connection stopped");
   }
 
   private async connect() {
     const startedAt = Date.now();
     log.info(
       { event: "connection_started", attempt: this.reconnectAttempts + 1 },
-      "Connecting Slack Huddle realtime API",
+      "Connecting Slack huddle realtime API",
     );
     const auth = await authTest(
       this.config.workspaceUrl,
@@ -349,7 +349,7 @@ export class SlackHuddleAdapter {
           );
           log.info(
             { event: "connected", durationMs: Date.now() - startedAt },
-            "Slack Huddle realtime API connected",
+            "Slack huddle realtime API connected",
           );
           resolve();
           return;
@@ -366,14 +366,14 @@ export class SlackHuddleAdapter {
               realtimeType: String(message.type),
               err,
             },
-            "Ignored invalid Slack Huddle event",
+            "Ignored invalid Slack huddle event",
           );
         }
       });
       socket.addEventListener("error", () => {
         log.warn(
           { event: "connection_error", ready },
-          "Slack Huddle connection error",
+          "Slack huddle connection error",
         );
         if (!ready)
           reject(new Error("Private Slack realtime connection failed"));
@@ -387,7 +387,7 @@ export class SlackHuddleAdapter {
               reason: event.reason || undefined,
               ready,
             },
-            "Slack Huddle connection closed",
+            "Slack huddle connection closed",
           );
         this.scheduleReconnect();
       });
@@ -421,14 +421,14 @@ export class SlackHuddleAdapter {
     const delay = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempts++);
     log.warn(
       { event: "reconnect_scheduled", delayMs: delay },
-      "Slack Huddle reconnect scheduled",
+      "Slack huddle reconnect scheduled",
     );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       void this.connect().catch((error) => {
         log.error(
           { event: "reconnect_failed", err: error },
-          "Slack Huddle reconnect failed",
+          "Slack huddle reconnect failed",
         );
         this.scheduleReconnect();
       });
@@ -617,7 +617,7 @@ export class SlackHuddleAdapter {
 
   async join(channelId: string) {
     const startedAt = Date.now();
-    log.info({ event: "join_started", channelId }, "Joining Slack Huddle");
+    log.info({ event: "join_started", channelId }, "Joining Slack huddle");
     const response = await this.post(
       "/api/rooms.join",
       formData({
@@ -638,7 +638,7 @@ export class SlackHuddleAdapter {
         participants: joined.participantIds.length,
         durationMs: Date.now() - startedAt,
       },
-      "Joined Slack Huddle",
+      "Joined Slack huddle",
     );
     return joined;
   }
@@ -651,7 +651,7 @@ export class SlackHuddleAdapter {
     const startedAt = Date.now();
     log.info(
       { event: "invite_join_started", channelId, callId },
-      "Joining invited Slack Huddle",
+      "Joining invited Slack huddle",
     );
     const joined = normalizeInvitedJoinResponse(
       await this.roomInfo(callId),
@@ -659,7 +659,7 @@ export class SlackHuddleAdapter {
       freeWilly,
     );
     if (joined.huddleCallId !== callId)
-      throw new Error("screenhero.rooms.info returned the wrong Huddle");
+      throw new Error("screenhero.rooms.info returned the wrong huddle");
     log.info(
       {
         event: "invite_join_completed",
@@ -668,12 +668,12 @@ export class SlackHuddleAdapter {
         participants: joined.participantIds.length,
         durationMs: Date.now() - startedAt,
       },
-      "Joined invited Slack Huddle",
+      "Joined invited Slack huddle",
     );
     return joined;
   }
 
-  // The actual participants of a Huddle, straight from Slack. Realtime member
+  // The actual participants of a huddle, straight from Slack. Realtime member
   // events can miss joins and leaves, so this is the source of truth for
   // reconciling tracked participants.
   async participants(callId: string) {
@@ -683,8 +683,8 @@ export class SlackHuddleAdapter {
     );
     const room = object(response.room, "room");
     // Reconciliation acts on this list, so a shape it cannot read has to
-    // fail rather than pass for an empty Huddle and evict everyone. A real
-    // Huddle is never empty while the bot is in it.
+    // fail rather than pass for an empty huddle and evict everyone. A real
+    // huddle is never empty while the bot is in it.
     if (!Array.isArray(room.participants))
       throw new Error("Slack response is missing room.participants");
     return participantIds(room.participants);
@@ -725,7 +725,7 @@ export class SlackHuddleAdapter {
       );
     log.info(
       { event: "invite_declined", channelId, callId },
-      "Declined inaccessible Huddle invitation",
+      "Declined inaccessible huddle invitation",
     );
   }
 }
@@ -791,7 +791,7 @@ export function normalizeRealtimeEvent(raw: unknown): HuddleEvent | undefined {
         };
       return;
     }
-    // Slack posts a Huddle's thread root in its channel as the Huddle starts.
+    // Slack posts a huddle's thread root in its channel as the huddle starts.
     if (
       subtype === "huddle_thread" &&
       channelId &&
@@ -878,7 +878,7 @@ export function activeHuddleRoom(
 }
 
 /**
- * True when the user is one of the Huddle's current participants. Slack only
+ * True when the user is one of the huddle's current participants. Slack only
  * lists participants it knows about, so an empty list means we cannot tell and
  * the user gets the benefit of the doubt rather than a false rejection.
  */
@@ -909,7 +909,7 @@ export async function verifySlackIdentity(config: {
   ]);
   if (appUserId !== huddleUserId)
     throw new Error(
-      "Slack app and Huddle credentials belong to different users",
+      "Slack app and huddle credentials belong to different users",
     );
   log.info(
     { event: "identity_verified", botUserId: appUserId },

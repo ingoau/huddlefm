@@ -337,8 +337,8 @@ export class ScrobbleDispatcher {
       );
   }
 
-  // The Huddle mix remembers what each listener actually heard, so it does not
-  // serve them the same songs the next time they are in a Huddle. This is the
+  // The huddle mix remembers what each listener actually heard, so it does not
+  // serve them the same songs the next time they are in a huddle. This is the
   // same threshold a scrobble uses, and it is recorded whether or not the
   // listener scrobbles \u2014 but never for someone who opted out of the mix.
   private rememberListen(
@@ -633,7 +633,7 @@ type Listener = {
   seconds: number;
   active: boolean;
   reported?: boolean;
-  // Their listen is recorded for the Huddle mix, which it only ever is once.
+  // Their listen is recorded for the huddle mix, which it only ever is once.
   remembered?: boolean;
   // The listener said yes when asked whether to scrobble this track.
   confirmed?: boolean;

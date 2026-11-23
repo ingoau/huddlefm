@@ -50,7 +50,7 @@ Every option HuddleFM reads from `.env`. Only the Slack credentials are required
 | `DUCKING_MODE`                  | `gentle`         | Auto-duck default: `off`, `gentle`, `strong`                                              |
 | `LYRICS_OFFSET_MS`              | `0`              | Shift the lyrics' timing; positive shows them later, for when they run ahead of the audio |
 | `LOUDNESS_NORMALIZATION`        | `false`          | Set to `true` to level songs and videos to -14 LUFS                                       |
-| `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all Huddles                                |
+| `TRACK_PREPARATION_CONCURRENCY` | `2`              | Tracks downloaded and analysed at once, across all huddles                                |
 | `MEDIA_CACHE_LIMIT_BYTES`       | `1000000000`     | Disk kept for prepared tracks under `data/cache/media`; `0` disables and clears the cache |
 | `MEDIA_CACHE_MAX_AGE_DAYS`      | `30`             | Re-download cached tracks older than this; `0` keeps them until evicted for space         |
 | `ALONE_TIMEOUT_MS`              | `120000`         | Leave when alone for this long                                                            |
@@ -85,7 +85,7 @@ Every option HuddleFM reads from `.env`. Only the Slack credentials are required
 
 Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`.
 
-Each Huddle's media runs in its own process, so a crash ends only that session. Live streams, YouTube videos in video mode and Jellyfin items stream as they play rather than downloading first; a YouTube video also downloads into the video cache behind it.
+Each huddle's media runs in its own process, so a crash ends only that session. Live streams, YouTube videos in video mode and Jellyfin items stream as they play rather than downloading first; a YouTube video also downloads into the video cache behind it.
 
 With `LOUDNESS_NORMALIZATION` on, songs are re-encoded at -14 LUFS as they download. Videos are measured instead and turned to the same level as they play (lifting a quiet one by at most 6 dB); each measurement is kept, so a video is levelled from its first second every time after.
 

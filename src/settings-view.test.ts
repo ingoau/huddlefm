@@ -455,7 +455,7 @@ test("the host picks the mode, and video mode leaves out the music's settings", 
   // The progress bar is drawn over videos, so only video mode offers it.
   expect(block(music, "progress_bar")).toBeUndefined();
   expect(block(video, "progress_bar")?.element.initial_options).toHaveLength(1);
-  // The Huddle mix is autoplay's.
+  // The huddle mix is autoplay's.
   expect(
     block(settingsView(options({ tab: "you" })), "huddle_mix"),
   ).toBeDefined();

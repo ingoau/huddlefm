@@ -984,7 +984,7 @@ test("persists huddle mix opt-in per Slack user", () => {
   store.close();
 });
 
-test("persists which sources each listener gives the Huddle mix", () => {
+test("persists which sources each listener gives the huddle mix", () => {
   const store = new Store(":memory:");
   // Only connected services are usable.
   expect(store.getUserScrobbling("user").huddleMixSources).toEqual(["added"]);
@@ -1020,7 +1020,7 @@ test("turning off every usable source opts out, even of services connected later
   store.close();
 });
 
-test("a Huddle mix save that changes nothing keeps hidden choices", () => {
+test("a huddle mix save that changes nothing keeps hidden choices", () => {
   const store = new Store(":memory:");
   store.connectLastFm("user", "last-user", "session-key");
   store.setHuddleMixSources("user", { added: false });
@@ -1043,7 +1043,7 @@ test("an opt-out saved before per-source settings turns every source off", () =>
   store.close();
 });
 
-test("remembers what each listener heard, across Huddles", () => {
+test("remembers what each listener heard, across huddles", () => {
   const store = new Store(":memory:");
   const session = (id: string, sourceChannelId?: string) =>
     store.createSession({
@@ -1094,7 +1094,7 @@ test("remembers what each listener heard, across Huddles", () => {
   expect(store.recentPlays([], 0)).toEqual([]);
   expect(store.recentPlays(["host", "guest"], 0)).toHaveLength(3);
 
-  // A room is the channel, so separate Huddles in it share a memory.
+  // A room is the channel, so separate huddles in it share a memory.
   expect(store.recentRoomPlays("general", 0)).toEqual([
     { title: "Other", artist: "Band", playedAt: 2_000 },
     { title: "Song", artist: "Band", playedAt: 1_000 },
@@ -1105,7 +1105,7 @@ test("remembers what each listener heard, across Huddles", () => {
   expect(store.recentRoomPlays("quiet", 0)).toEqual([]);
 });
 
-test("falls back to the Huddle's own channel when there is no source channel", () => {
+test("falls back to the huddle's own channel when there is no source channel", () => {
   const store = new Store(":memory:");
   createSession(store);
   store.recordTrackPlay({
@@ -1503,7 +1503,7 @@ test("channel defaults keep only settings that are still valid", () => {
   expect(store.channelDefaults("C1")).toBeUndefined();
 });
 
-test("remembers which channels auto join their Huddles", () => {
+test("remembers which channels auto join their huddles", () => {
   const store = new Store(":memory:");
   expect(store.channelAutoJoin("C1")).toBeUndefined();
   const before = Date.now();
@@ -1683,7 +1683,7 @@ test("songs left queued in a session that ended let go of who added them", () =>
   store.close();
 });
 
-test("forgetting a user keeps them out of the Huddle mix if they opted out", () => {
+test("forgetting a user keeps them out of the huddle mix if they opted out", () => {
   const store = new Store(":memory:");
   store.setHuddleMixSources("U1", { added: false });
   store.likeTrack({ userId: "U1", title: "Liked", artist: "Artist" });

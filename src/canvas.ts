@@ -16,7 +16,7 @@ export const canvasSections = [
 export type CanvasSection = (typeof canvasSections)[number];
 
 /**
- * A Huddle HuddleFM is in right now, as the canvas lists it. A private one
+ * A huddle HuddleFM is in right now, as the canvas lists it. A private one
  * (a DM or private channel) carries no channel or track, so the canvas never
  * says where it is or what it plays.
  */
@@ -114,14 +114,14 @@ export function canvasMarkdown(
       active
         .map((session) => {
           const listeners = plural(session.listeners, "listener");
-          if ("private" in session) return `- A private Huddle · ${listeners}`;
+          if ("private" in session) return `- A private huddle · ${listeners}`;
           const { channelId, state, track } = session;
           const playing = track
             ? `${state === "paused" ? "Paused" : "Playing"} **${escapeMarkdown(track.title)}** — ${escapeMarkdown(track.artist)}`
             : "Nothing playing";
           return `- ![](#${channelId}) · ${listeners} · ${playing}`;
         })
-        .join("\n") || "No Huddles right now.",
+        .join("\n") || "No huddles right now.",
     ],
     "top-artists": () => [
       "## Top artists",
