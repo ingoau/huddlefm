@@ -8077,6 +8077,23 @@ test("the save button sits with the seek controls and DMs a Squigly link", async
   await test.coordinator.endFromSlack();
 });
 
+test("a saved http SoundCloud song goes to Squigly as https", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  Reflect.set(test.coordinator, "current", {
+    ...playingTrack(),
+    canonicalUrl: "http://soundcloud.com/artist/song",
+  });
+  await test.coordinator.action(
+    interaction(test.coordinator, "save_track", "playing"),
+  );
+  await Bun.sleep(0);
+  expect(test.dms.at(-1)?.[1]).toBe(
+    "<https://squigly.link/?link=https%3A%2F%2Fsoundcloud.com%2Fartist%2Fsong|Worth Hearing Again — Band>",
+  );
+  await test.coordinator.endFromSlack();
+});
+
 test("saving a song from another source links the source itself", async () => {
   const test = setup();
   await test.coordinator.start();

@@ -349,16 +349,18 @@ const squiglyHosts = new Set([
 /**
  * Where a saved song points: a Squigly page when Squigly can match the source,
  * otherwise the source itself. Squigly's home page takes the source in its
- * `link` parameter and makes the shareable link as it opens. A Navidrome share's URL is a bearer
- * token for its audio, so it gets no link at all.
+ * `link` parameter and makes the shareable link as it opens for YouTube; a
+ * SoundCloud source is filled in for one more click. Squigly refuses http
+ * links, so those go as https. A Navidrome share's URL is a bearer token for
+ * its audio, so it gets no link at all.
  */
 function savedLink(entry: { sourceId: string; canonicalUrl: string }) {
   if (entry.sourceId.startsWith("navidrome:")) return undefined;
   const url = URL.parse(entry.canonicalUrl);
   if (url?.protocol !== "https:" && url?.protocol !== "http:") return undefined;
-  return squiglyHosts.has(url.hostname)
-    ? `https://squigly.link/?link=${encodeURIComponent(url.href)}`
-    : url.href;
+  if (!squiglyHosts.has(url.hostname)) return url.href;
+  url.protocol = "https:";
+  return `https://squigly.link/?link=${encodeURIComponent(url.href)}`;
 }
 
 const autoplayDiscoveryEvery = 4;
