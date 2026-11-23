@@ -120,7 +120,7 @@ test("classifies channel access", () => {
 
 test("tells public channels from private ones", () => {
   expect(isPublicChannel({ is_private: false })).toBe(true);
-  expect(isPublicChannel({})).toBe(true);
+  expect(isPublicChannel({})).toBe(false);
   expect(isPublicChannel({ is_private: true })).toBe(false);
   expect(isPublicChannel({ is_im: true })).toBe(false);
   expect(isPublicChannel({ is_mpim: true })).toBe(false);
@@ -131,7 +131,10 @@ test("asks the bot's session whether a channel is public", async () => {
   const originalFetch = globalThis.fetch;
   const asked: string[] = [];
   const channels: Record<string, unknown> = {
-    CPUBLIC: { ok: true, channel: { id: "CPUBLIC", is_channel: true } },
+    CPUBLIC: {
+      ok: true,
+      channel: { id: "CPUBLIC", is_channel: true, is_private: false },
+    },
     GPRIVATE: { ok: true, channel: { id: "GPRIVATE", is_private: true } },
     CGONE: { ok: false, error: "channel_not_found" },
   };

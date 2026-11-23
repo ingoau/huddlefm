@@ -225,16 +225,15 @@ export function channelAccess(channel?: {
 
 /**
  * Whether anyone in the workspace could see the channel: not a DM, group DM
- * or private channel.
+ * or private channel. Only Slack saying so outright counts, so a channel
+ * described without its privacy counts as private.
  */
 export function isPublicChannel(channel?: {
   is_private?: boolean;
   is_im?: boolean;
   is_mpim?: boolean;
 }) {
-  return Boolean(
-    channel && !channel.is_private && !channel.is_im && !channel.is_mpim,
-  );
+  return channel?.is_private === false && !channel.is_im && !channel.is_mpim;
 }
 
 // Slack's role ID for a channel manager.
@@ -453,8 +452,8 @@ export class SlackHuddleAdapter {
   /**
    * Whether anyone in the workspace could see the channel. Asked as the bot's
    * session, which can read any channel the bot can, unlike the app token.
-   * Channels Slack will not describe count as private. A public answer is
-   * rechecked after an hour, in case the channel has since been made private.
+   * Channels Slack will not describe count as private. Answers are rechecked
+   * after an hour, in case the channel has since changed.
    */
   isPublicChannel(channelId: string) {
     const cached = this.publicChannels.get(channelId);
@@ -463,14 +462,13 @@ export class SlackHuddleAdapter {
       "channel_not_found",
     ])
       .then((info) => {
-        const isPublic =
-          info.ok === true && isPublicChannel(object(info.channel, "channel"));
-        if (isPublic)
-          setTimeout(
-            () => this.publicChannels.delete(channelId),
-            60 * 60_000,
-          ).unref();
-        return isPublic;
+        setTimeout(() => {
+          if (this.publicChannels.get(channelId) === known)
+            this.publicChannels.delete(channelId);
+        }, 60 * 60_000).unref();
+        return (
+          info.ok === true && isPublicChannel(object(info.channel, "channel"))
+        );
       })
       .catch((error) => {
         log.warn(
