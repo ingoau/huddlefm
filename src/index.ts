@@ -270,7 +270,7 @@ function canvasActiveSessions(): Promise<ActiveCanvasSession[]> {
     activeCoordinators()
       .flatMap((coordinator) => coordinator.canvasSession() ?? [])
       .map(async (session) =>
-        (await slackApp.isPublicChannel(session.channelId))
+        (await slackHuddle.isPublicChannel(session.channelId))
           ? session
           : { private: true as const, listeners: session.listeners },
       ),

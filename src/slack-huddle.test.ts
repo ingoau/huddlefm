@@ -5,6 +5,7 @@ import {
   channelAccess,
   channelManagerIds,
   huddleHasParticipant,
+  isPublicChannel,
   normalizeInvitedJoinResponse,
   normalizeJoinResponse,
   normalizeRealtimeEvent,
@@ -115,6 +116,50 @@ test("classifies channel access", () => {
   expect(channelAccess({ is_member: false, is_private: true })).toBe("decline");
   expect(channelAccess()).toBe("decline");
   expect(channelAccess({ is_member: true, is_archived: true })).toBe("decline");
+});
+
+test("tells public channels from private ones", () => {
+  expect(isPublicChannel({ is_private: false })).toBe(true);
+  expect(isPublicChannel({})).toBe(false);
+  expect(isPublicChannel({ is_private: true })).toBe(false);
+  expect(isPublicChannel({ is_im: true })).toBe(false);
+  expect(isPublicChannel({ is_mpim: true })).toBe(false);
+  expect(isPublicChannel()).toBe(false);
+});
+
+test("asks the bot's session whether a channel is public", async () => {
+  const originalFetch = globalThis.fetch;
+  const asked: string[] = [];
+  const channels: Record<string, unknown> = {
+    CPUBLIC: {
+      ok: true,
+      channel: { id: "CPUBLIC", is_channel: true, is_private: false },
+    },
+    GPRIVATE: { ok: true, channel: { id: "GPRIVATE", is_private: true } },
+    CGONE: { ok: false, error: "channel_not_found" },
+  };
+  globalThis.fetch = ((_url: URL, init: RequestInit) => {
+    const body = init.body as URLSearchParams;
+    expect(body.get("token")).toBe("token");
+    const channel = body.get("channel")!;
+    asked.push(channel);
+    return Promise.resolve(Response.json(channels[channel]));
+  }) as unknown as typeof fetch;
+  const adapter = new SlackHuddleAdapter({
+    workspaceUrl: "https://slack.test",
+    xoxc: "token",
+    xoxd: "cookie",
+    mediaRegion: "us-east-1",
+  });
+  try {
+    await expect(adapter.isPublicChannel("CPUBLIC")).resolves.toBe(true);
+    await expect(adapter.isPublicChannel("CPUBLIC")).resolves.toBe(true);
+    await expect(adapter.isPublicChannel("GPRIVATE")).resolves.toBe(false);
+    await expect(adapter.isPublicChannel("CGONE")).resolves.toBe(false);
+    expect(asked).toEqual(["CPUBLIC", "GPRIVATE", "CGONE"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("normalizes the private join response without nullable MeetingFeatures", () => {

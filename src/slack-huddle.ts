@@ -223,6 +223,19 @@ export function channelAccess(channel?: {
   return !channel || channel.is_private ? "decline" : "join";
 }
 
+/**
+ * Whether anyone in the workspace could see the channel: not a DM, group DM
+ * or private channel. Only Slack saying so outright counts, so a channel
+ * described without its privacy counts as private.
+ */
+export function isPublicChannel(channel?: {
+  is_private?: boolean;
+  is_im?: boolean;
+  is_mpim?: boolean;
+}) {
+  return channel?.is_private === false && !channel.is_im && !channel.is_mpim;
+}
+
 // Slack's role ID for a channel manager.
 const channelManagerRoleId = "Rl0A";
 
@@ -280,6 +293,7 @@ export class SlackHuddleAdapter {
   private stopping = false;
   private reconnectUrl?: string;
   private onEvent?: (event: HuddleEvent) => void;
+  private publicChannels = new Map<string, Promise<boolean>>();
   // Fired after every successful (re)connect, so consumers can resync state
   // for events the previous socket may have dropped.
   onConnected?: () => void;
@@ -433,6 +447,39 @@ export class SlackHuddleAdapter {
         this.scheduleReconnect();
       });
     }, delay);
+  }
+
+  /**
+   * Whether anyone in the workspace could see the channel. Asked as the bot's
+   * session, which can read any channel the bot can, unlike the app token.
+   * Channels Slack will not describe count as private. Answers are rechecked
+   * after an hour, in case the channel has since changed.
+   */
+  isPublicChannel(channelId: string) {
+    const cached = this.publicChannels.get(channelId);
+    if (cached) return cached;
+    const known = this.api("conversations.info", { channel: channelId }, [
+      "channel_not_found",
+    ])
+      .then((info) => {
+        setTimeout(() => {
+          if (this.publicChannels.get(channelId) === known)
+            this.publicChannels.delete(channelId);
+        }, 60 * 60_000).unref();
+        return (
+          info.ok === true && isPublicChannel(object(info.channel, "channel"))
+        );
+      })
+      .catch((error) => {
+        log.warn(
+          { event: "channel_lookup_failed", channelId, err: error },
+          "Slack channel lookup failed",
+        );
+        this.publicChannels.delete(channelId);
+        return false;
+      });
+    this.publicChannels.set(channelId, known);
+    return known;
   }
 
   async ensureChannelAccess(channelId: string) {
