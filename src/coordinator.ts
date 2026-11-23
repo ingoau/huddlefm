@@ -3077,10 +3077,10 @@ export class Coordinator {
     // Slack sends a join for each connection, so someone opening the Huddle
     // on a second device is already here and isn't greeted again.
     const isNew = !this.participants.has(userId);
-    if (isNew) {
-      this.participantsRevision++;
-      this.sessionChanged();
-    }
+    // Still a member event: a Slack snapshot taken before it may have missed
+    // them rejoining, so it must not be applied.
+    this.participantsRevision++;
+    if (isNew) this.sessionChanged();
     this.participants.add(userId);
     this.plugins.changed();
     // A new device's client mod still needs their state.

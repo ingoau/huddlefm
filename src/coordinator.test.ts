@@ -3302,11 +3302,8 @@ test("a participant joining from a second device is not greeted again", async ()
   const scrobbling = new ScrobbleDispatcher(userStore, {});
   const test = setup(undefined, undefined, undefined, scrobbling, userStore);
   await test.coordinator.start();
-  const version = test.coordinator.participantsVersion;
   test.coordinator.memberJoined("newbie");
   test.coordinator.memberJoined("newbie");
-  // Only the first connection changes who is in the Huddle.
-  expect(test.coordinator.participantsVersion).toBe(version + 1);
   await Bun.sleep(10);
   const prompts = test.ephemeralCalls.filter(
     ([, userId, text]) =>
@@ -3334,6 +3331,29 @@ test("the host stays host when Slack still lists them after one device leaves", 
     "guest",
   ]);
   expect(diff).toBeUndefined();
+  expect(result.coordinator.hasParticipant("host")).toBe(true);
+  expect(result.coordinator.hostUserId()).toBe("host");
+  await result.coordinator.endFromSlack();
+});
+
+test("reconciling participants ignores a snapshot a rejoin has overtaken", async () => {
+  const result = setup(undefined, {
+    aloneMs: 10,
+    idleMs: 100,
+    pausedMs: 100,
+    warningMs: 20,
+  });
+  await result.coordinator.start();
+  // The host left every device, so Slack's list misses them, but they rejoin
+  // while it is in flight. Their leave was never applied, so they are still
+  // tracked and the join adds no one.
+  const version = result.coordinator.participantsVersion;
+  const pending = result.coordinator.reconcileParticipants(
+    ["bot", "guest"],
+    version,
+  );
+  result.coordinator.memberJoined("host");
+  expect(await pending).toBeUndefined();
   expect(result.coordinator.hasParticipant("host")).toBe(true);
   expect(result.coordinator.hostUserId()).toBe("host");
   await result.coordinator.endFromSlack();
