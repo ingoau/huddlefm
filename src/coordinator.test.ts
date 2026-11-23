@@ -7021,6 +7021,103 @@ test("a skipped autoplay pick is remembered for the room, not only the skipper",
   await test.coordinator.endFromSlack();
 });
 
+test("a skipped autoplay pick stays out of autoplay through a restart", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const catalog = huddleMixCatalog(
+    [{ sourceId: "skipped0003", title: "Not This One" }],
+    calls,
+  );
+  const test = setup(
+    {
+      prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+      upNextIds: async () => [],
+      resolveVideoId: async () => {
+        throw new Error("huddle mix should use cached metadata");
+      },
+    } as unknown as TrackCatalog,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new Set(),
+    undefined,
+    catalog,
+  );
+  await test.coordinator.start();
+  await enableHuddleMix(test.coordinator);
+  await until(
+    () =>
+      (Reflect.get(test.coordinator, "current") as { sourceId?: string })
+        ?.sourceId === "skipped0003",
+  );
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  // Saved the moment it is skipped, since a restart can come at any time.
+  expect(test.sessions).toContainEqual({
+    autoplayRejected: { sourceIds: ["skipped0003"], artists: ["Band"] },
+  });
+  await test.coordinator.endFromSlack();
+
+  const store = new Store(":memory:");
+  store.createSession({
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    creatorId: "creator",
+    hostId: "host",
+    volume: 0.4,
+  });
+  store.setSession("saved", {
+    autoplayRejected: { sourceIds: ["skipped0003"], artists: ["Band"] },
+  });
+  store.suspendSession(
+    "saved",
+    {
+      state: "paused",
+      playbackSeconds: 0,
+      displayMode: "default",
+      anchorEnabled: false,
+      queue: [],
+    },
+    180_000,
+  );
+  const saved = store.resumableSessions(1, 180_000).sessions[0];
+  const result = setup(undefined, undefined, saved, undefined, store);
+  expect(Reflect.get(result.coordinator, "autoplayRejected")).toEqual([
+    "skipped0003",
+  ]);
+  expect(Reflect.get(result.coordinator, "autoplayRejectedArtists")).toEqual([
+    "Band",
+  ]);
+});
+
+test("a long session keeps every skipped autoplay pick out of autoplay", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const reject = Reflect.get(test.coordinator, "rejectSkipped") as (
+    entry: unknown,
+    userId: string,
+  ) => void;
+  // Hours of a busy room: far more skips than the recent window holds.
+  for (let index = 0; index < 60; index++)
+    reject.call(
+      test.coordinator,
+      {
+        id: `entry${index}`,
+        sourceId: `source${index}`,
+        title: `Song ${index}`,
+        artist: `Artist ${index}`,
+        relatedVideo: true,
+      },
+      "host",
+    );
+  const rejected = Reflect.get(test.coordinator, "autoplayRejected");
+  expect(rejected).toHaveLength(60);
+  expect(rejected).toContain("source0");
+  await test.coordinator.endFromSlack();
+});
+
 test("a manager who is not in the Huddle carries no skip of their own", async () => {
   const calls: Record<string, unknown>[] = [];
   const catalog = huddleMixCatalog(

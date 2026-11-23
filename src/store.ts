@@ -278,6 +278,8 @@ type RecentTrack = Pick<
   | "live"
 >;
 
+export type AutoplayRejections = { sourceIds: string[]; artists: string[] };
+
 export type SavedSession = {
   id: string;
   huddleId: string;
@@ -310,6 +312,9 @@ export type SavedSession = {
   // Everyone in the huddle may do everything, and nobody takes over as host.
   // Kept through a restart, but never in a saved session.
   communism?: boolean;
+  // What the room skipped or removed from autoplay, kept out of autoplay for
+  // the rest of the session, restarts included.
+  autoplayRejected?: AutoplayRejections;
   playbackSeconds: number;
   listenedSeconds: number;
   watchedSeconds: number;
@@ -392,6 +397,7 @@ const sessionColumns = {
   progressBar: "progress_bar",
   communism: "communism",
   watchedSeconds: "watched_seconds",
+  autoplayRejected: "autoplay_rejected",
 };
 
 const trackColumns = {
@@ -463,7 +469,28 @@ const addedColumns = [
   // play is its own scrobble.
   ["tracks", "plays", "INTEGER NOT NULL DEFAULT 0"],
   ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
+  // JSON AutoplayRejections.
+  ["sessions", "autoplay_rejected", "TEXT"],
 ] as const;
+
+// A session's saved autoplay rejections, or nothing if the column is empty or
+// unreadable: losing them only lets a skipped song come back.
+function autoplayRejections(value: unknown): AutoplayRejections | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(value) as Partial<AutoplayRejections>;
+    const strings = (list: unknown) =>
+      Array.isArray(list)
+        ? list.filter((item): item is string => typeof item === "string")
+        : [];
+    return {
+      sourceIds: strings(parsed.sourceIds),
+      artists: strings(parsed.artists),
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 // The SET clause and bindings for whichever of `fields` are present.
 function assignments(
@@ -1093,9 +1120,14 @@ export class Store {
       progressBar?: boolean;
       communism?: boolean;
       watchedSeconds?: number;
+      autoplayRejected?: AutoplayRejections;
     },
   ) {
-    const { sql, values } = assignments(sessionColumns, fields);
+    const { sql, values } = assignments(sessionColumns, {
+      ...fields,
+      autoplayRejected:
+        fields.autoplayRejected && JSON.stringify(fields.autoplayRejected),
+    });
     if (!sql) return;
     this.db
       .query(`UPDATE sessions SET ${sql}, updated_at = ? WHERE id = ?`)
@@ -1490,6 +1522,7 @@ export class Store {
           playbackSeconds: Number(row.playback_seconds),
           listenedSeconds: Number(row.listened_seconds),
           watchedSeconds: Number(row.watched_seconds ?? 0),
+          autoplayRejected: autoplayRejections(row.autoplay_rejected),
           resumeUntil: deadline,
           endText: text(row.end_text),
           endBlocks: row.end_blocks

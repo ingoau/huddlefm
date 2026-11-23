@@ -364,6 +364,13 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
+// A skipped or removed autoplay pick stays out of autoplay for the rest of the
+// session, long after it has left the recent window. The cap only bounds what
+// a session saves; a room skips far fewer songs than this in a day.
+const autoplayRejectedLimit = 500;
+// Rejected artists are only pushed down, and only the latest matter: an artist
+// skipped hours ago deserves another chance.
+const autoplayRejectedArtistLimit = 20;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 // Where video mode's autoplay picks come from, as recorded on each pick.
@@ -711,6 +718,8 @@ export class Coordinator {
       this.progressBar = restored.progressBar ?? true;
       this.communism = restored.communism ?? false;
       this.watchedSeconds = restored.watchedSeconds ?? 0;
+      this.autoplayRejected = restored.autoplayRejected?.sourceIds ?? [];
+      this.autoplayRejectedArtists = restored.autoplayRejected?.artists ?? [];
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
       this.allowed = new Set(restored.permissions);
@@ -4153,7 +4162,18 @@ export class Coordinator {
     this.autoplayRejectedArtists = [
       ...this.autoplayRejectedArtists.filter((value) => value !== name),
       name,
-    ].slice(-20);
+    ].slice(-autoplayRejectedArtistLimit);
+  }
+
+  // Saved as they change, so a restart does not hand a skipped song back to
+  // autoplay.
+  private saveAutoplayRejections() {
+    this.store.setSession(this.id, {
+      autoplayRejected: {
+        sourceIds: this.autoplayRejected,
+        artists: this.autoplayRejectedArtists,
+      },
+    });
   }
 
   // A room in a channel, which is what a recurring Huddle actually is. The
@@ -4172,10 +4192,11 @@ export class Coordinator {
     this.autoplayRejected = [
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
-    ].slice(-20);
+    ].slice(-autoplayRejectedLimit);
     // A related video says nothing about anyone's taste in music.
+    if (!skipped.relatedVideo) this.rejectAutoplayArtist(skipped.artist);
+    this.saveAutoplayRejections();
     if (skipped.relatedVideo) return;
-    this.rejectAutoplayArtist(skipped.artist);
     this.recommendations?.penalize(userId, skipped);
     if (skipped.automatic) this.rememberSkip(skipped, userId);
     if (skipped.discovery)
