@@ -1485,12 +1485,7 @@ function Settings(props: {
     { title: "You", fields: you?.settings ?? [] },
   ];
   const change = (field: SettingField, value: unknown) =>
-    client
-      // the bot takes the volume as a number, though it's picked like a select
-      .setting(field.id, {
-        value: field.id === "volume" ? Number(value) : value,
-      })
-      .then(say);
+    client.setting(field.id, { value }).then(say);
 
   // Jellyfin's linked in Slack, so it has a place on You whatever else does
   const jellyfin = you?.jellyfin !== undefined && platform.openSlackSettings;
@@ -2076,6 +2071,16 @@ function Field(props: {
         </div>
       );
     }
+    case "number":
+      return (
+        <NumberField
+          field={field}
+          kit={kit}
+          label={label}
+          hint={hint}
+          onChange={props.onChange}
+        />
+      );
     case "toggle":
       return (
         <div className="huddlefm-field">
@@ -2114,6 +2119,46 @@ function Field(props: {
         </div>
       );
   }
+}
+
+// A number typed in, set with Enter, as Slack's number input is on save.
+function NumberField(props: {
+  field: Extract<SettingField, { kind: "number" }>;
+  kit: Platform["kit"];
+  label: React.ReactNode;
+  hint: (text?: string) => React.ReactNode;
+  onChange: (value: unknown) => Promise<boolean>;
+}) {
+  const { field, kit } = props;
+  const [draft, setDraft] = React.useState(field.value);
+  // someone else's change shows, as the bot's value is the truth
+  React.useEffect(() => setDraft(field.value), [field.value]);
+  const number = Number(draft.trim());
+  const valid =
+    draft.trim() !== "" &&
+    Number.isFinite(number) &&
+    number >= field.min &&
+    number <= field.max;
+  return (
+    <div className="huddlefm-field">
+      {props.label}
+      <kit.TextInput
+        value={draft}
+        onChange={setDraft}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          if (valid && draft.trim() !== field.value)
+            props.onChange(number).then((ok) => {
+              if (!ok) setDraft(field.value);
+            });
+        }}
+      />
+      {props.hint(
+        valid ? undefined : `Enter a number from ${field.min} to ${field.max}.`,
+      )}
+    </div>
+  );
 }
 
 // One component per participant, so each name is read with a hook of its own.

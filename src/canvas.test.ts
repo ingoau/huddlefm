@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import {
+  canvasBody,
   canvasMarkdown,
   canvasSections,
+  canvasStamped,
   parseCanvasSections,
 } from "./canvas.ts";
 
@@ -88,6 +90,34 @@ test("renders only the chosen sections in the chosen order", () => {
       "",
       "_Updated 1970-01-01T00:00:00.000Z_",
     ].join("\n"),
+  );
+});
+
+test("the canvas body leaves out when it was updated, so it compares by content", () => {
+  const options = {
+    integrations: [{ id: "U123", name: "Deploy Bot" }],
+    sections: ["integrations", "top-tracks"] as const,
+  };
+  const body = canvasBody(stats, [], options);
+  expect(body).not.toContain("_Updated");
+  expect(body).toBe(
+    [
+      "## Integrations",
+      "- **Deploy Bot** · `U123`",
+      "",
+      "## Top tracks",
+      "1. **Song** — Artist · 1 play",
+      "",
+    ].join("\n"),
+  );
+  // The same stats a moment later give the same body.
+  expect(canvasBody(stats, [], options)).toBe(body);
+  const updatedAt = Date.UTC(2026, 0, 2, 3, 4, 5);
+  expect(canvasMarkdown(stats, [], { ...options, updatedAt })).toBe(
+    canvasStamped(body, updatedAt),
+  );
+  expect(canvasStamped(body, updatedAt)).toBe(
+    `${body}\n_Updated 2026-01-02T03:04:05.000Z_`,
   );
 });
 

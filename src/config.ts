@@ -175,6 +175,8 @@ export function loadConfig() {
     lastFmSharedSecret: process.env.LASTFM_SHARED_SECRET,
     posthogApiKey: process.env.POSTHOG_API_KEY,
     posthogHost: process.env.POSTHOG_HOST ?? "https://us.i.posthog.com",
+    // Off unless asked for: what people ask the agent stays out of PostHog.
+    posthogLlmContent: process.env.POSTHOG_LLM_CONTENT === "true",
     openRouterApiKey: optionalText(process.env.OPENROUTER_API_KEY),
   };
 }

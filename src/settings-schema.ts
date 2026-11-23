@@ -91,6 +91,7 @@ type FieldBase = {
 export type SettingField = FieldBase &
   (
     | { kind: "select"; options: SettingOption[]; value: string }
+    | { kind: "number"; min: number; max: number; value: string }
     | { kind: "toggle"; text: string; value: boolean }
     | {
         kind: "multi";
@@ -159,6 +160,7 @@ export const scrobbleServiceLabels: Record<ScrobbleService, string> = {
 };
 const presetLabels: Record<keyof typeof permissionPresets, string> = {
   default: "Default",
+  "add-only": "Add songs only",
   "host-only": "Host only",
   collaborative: "Collaborative",
 };
@@ -189,17 +191,10 @@ function choices<Mode extends string>(
 
 /** The volume as Settings shows it, in percent. */
 export function volumePercent(volume: number) {
-  return String(Math.round(volume * 10_000) / 100);
-}
-
-// Volume in the player's steps of 5%, and the current volume when it falls
-// between them, as from an older default or a channel's.
-function volumeChoices(current: string) {
-  const steps = Array.from({ length: 21 }, (_, index) => String(index * 5));
-  const values = steps.includes(current)
-    ? steps
-    : [...steps, current].sort((a, b) => Number(a) - Number(b));
-  return values.map((value) => ({ value, label: `${value}%` }));
+  // Kept within 0 to 100, as the number input refuses anything else, even
+  // from a mistyped INITIAL_VOLUME.
+  const share = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 0;
+  return String(Math.round(share * 10_000) / 100);
 }
 
 function connectedServices(user: UserSettingsView) {
@@ -215,6 +210,12 @@ type Entry = FieldBase & {
         kind: "select";
         value(context: SettingsContext): string;
         options(context: SettingsContext, value: string): SettingOption[];
+      }
+    | {
+        kind: "number";
+        min: number;
+        max: number;
+        value(context: SettingsContext): string;
       }
     | { kind: "toggle"; text: string; value(context: SettingsContext): boolean }
     | {
@@ -251,12 +252,13 @@ const entries: Entry[] = [
   {
     id: "volume",
     tab: "session",
-    label: "Volume",
+    label: "Volume (%)",
     requires: "volume",
-    kind: "select",
+    kind: "number",
+    min: 0,
+    max: 100,
     visible: always,
     value: ({ session }) => volumePercent(session.volume),
-    options: (_, value) => volumeChoices(value),
   },
   {
     id: "display",
@@ -494,6 +496,14 @@ export function settingFields(
           typeof override === "string" ? override : base.value(context);
         return [{ ...base, value, options: base.options(context, value) }];
       }
+      case "number":
+        return [
+          {
+            ...base,
+            value:
+              typeof override === "string" ? override : base.value(context),
+          },
+        ];
       case "toggle":
         return [
           {

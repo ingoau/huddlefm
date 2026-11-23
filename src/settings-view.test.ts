@@ -3,6 +3,7 @@ import {
   compactForm,
   defaultUserSettings,
   dialogMetadata,
+  fieldFormState,
   mergeForm,
   parseSettingsMetadata,
   settingsView,
@@ -10,6 +11,7 @@ import {
   yourDataView,
   type SettingsViewOptions,
 } from "./settings-view.ts";
+import { settingFields } from "./settings-schema.ts";
 
 const access = {
   volume: false,
@@ -166,7 +168,7 @@ test("a tab shows the edits a draft kept for it", () => {
       draft: {
         autoplay: { mode: { selected_option: { value: "huddle" } } },
         anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
-        volume: { percent: { selected_option: { value: "35" } } },
+        volume: { percent: { value: "35" } },
       },
     }),
   );
@@ -174,7 +176,7 @@ test("a tab shows the edits a draft kept for it", () => {
     "huddle",
   );
   expect(block(session, "anchor")!.element.initial_options).toHaveLength(1);
-  expect(block(session, "volume")!.element.initial_option.value).toBe("35");
+  expect(block(session, "volume")!.element.initial_value).toBe("35");
   // The draft goes with the modal, for the next interaction to hand back.
   expect(parseSettingsMetadata(session.private_metadata)).toEqual({
     sessionId: "session",
@@ -185,7 +187,7 @@ test("a tab shows the edits a draft kept for it", () => {
     draft: {
       autoplay: { mode: { selected_option: { value: "huddle" } } },
       anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
-      volume: { percent: { selected_option: { value: "35" } } },
+      volume: { percent: { value: "35" } },
     },
   });
 });
@@ -326,22 +328,52 @@ test("channel managers turn auto join on and off from the Channel tab", () => {
   expect(block(viewer, "channel_auto_join")).toBeUndefined();
 });
 
-test("volume is picked in the player's steps, keeping a volume between them", () => {
-  const values = (view: View) =>
-    block(view, "volume")!.element.options.map(
-      (option: { value: string }) => option.value,
-    );
-  const stepped = settingsView(options());
-  expect(values(stepped)).toHaveLength(21);
-  expect(block(stepped, "volume")!.element.initial_option).toEqual({
-    text: { type: "plain_text", text: "60%" },
-    value: "60",
+test("volume is typed as a percent, keeping a volume between steps", () => {
+  expect(block(settingsView(options()), "volume")).toMatchObject({
+    type: "input",
+    label: { type: "plain_text", text: "Volume (%)" },
+    element: {
+      type: "number_input",
+      action_id: "percent",
+      is_decimal_allowed: true,
+      min_value: "0",
+      max_value: "100",
+      initial_value: "60",
+    },
   });
   const between = settingsView(
     options({ session: { ...options().session, volume: 0.625 } }),
   );
-  expect(values(between).slice(12, 15)).toEqual(["60", "62.5", "65"]);
-  expect(block(between, "volume")!.element.initial_option.value).toBe("62.5");
+  expect(block(between, "volume")!.element.initial_value).toBe("62.5");
+});
+
+test("a typed volume round-trips through the draft", () => {
+  const field = settingFields({
+    access: { volume: true, configure: true, admin: false },
+    session: options().session,
+  }).find((field) => field.id === "volume")!;
+  const state = fieldFormState(field, "42.5");
+  expect(state).toEqual({ volume: { percent: { value: "42.5" } } });
+  // What Slack hands back is kept as the draft, and shown again.
+  const draft = compactForm({
+    volume: { percent: { type: "number_input", value: "42.5" } },
+  });
+  expect(draft).toEqual(state);
+  const view = settingsView(options({ draft }));
+  expect(block(view, "volume")!.element.initial_value).toBe("42.5");
+  expect(parseSettingsMetadata(view.private_metadata).draft).toEqual(state);
+  // A cleared input keeps the session's volume.
+  const cleared = settingsView(
+    options({ draft: { volume: { percent: { value: " " } } } }),
+  );
+  expect(block(cleared, "volume")!.element.initial_value).toBe("60");
+  // So does one outside 0 to 100, or not a number, which Slack wouldn't take.
+  for (const value of ["150", "-5", "abc"]) {
+    const view = settingsView(
+      options({ draft: { volume: { percent: { value } } } }),
+    );
+    expect(block(view, "volume")!.element.initial_value).toBe("60");
+  }
 });
 
 test("a preset's refill gives the permission inputs new block IDs", () => {

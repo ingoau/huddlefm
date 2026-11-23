@@ -6,7 +6,11 @@ import {
   type ToolExecutionOptions,
 } from "ai";
 import { z } from "zod";
-import { capture as captureAnalytics } from "./analytics.ts";
+import {
+  aiTelemetry,
+  capture as captureAnalytics,
+  withAnalyticsContext,
+} from "./analytics.ts";
 import type { Coordinator } from "./coordinator.ts";
 import {
   autoplayModes,
@@ -167,7 +171,10 @@ const settingsSchema = z.object({
         ...(keyof typeof permissionPresets)[],
       ],
     )
-    .optional(),
+    .optional()
+    .describe(
+      "What everyone but the host may do. default: add songs, remove their own, skip, pause, change volume; add-only: add songs and remove their own; host-only: nothing; collaborative: everything but clear the queue and end the session",
+    ),
   hostUserId: z
     .string()
     .optional()
@@ -464,9 +471,11 @@ export async function runAgentCommand(options: {
     // The tools below check permissions synchronously, so resolve whether this
     // user counts as a manager before any of them runs.
     await options.coordinator.primeManager(options.userId);
+    const telemetry = aiTelemetry();
     const agent = new ToolLoopAgent({
       id: "huddlefm-session",
       model: openRouterModel(),
+      ...(telemetry ? { telemetry } : {}),
       instructions: `You are HuddleFM, a Slack huddle music bot assistant.
 The user @mentioned you in the huddle thread (player controls may live in a companion channel). Help them control this listening session. Reply briefly; your reply is shown privately to them.
 Use tools for any playback, queue, search, settings, or session scrobbling change. Respect tool errors about permissions — the user only has the same access as the Slack UI buttons.
@@ -486,10 +495,15 @@ Loop modes: ${loopModes.join(", ")}.`,
       stopWhen: stepCountIs(10),
       temperature: 0.2,
     });
-    const result = await agent.generate({
-      prompt,
-      abortSignal: AbortSignal.timeout(timeoutMs),
-    });
+    // Traced to PostHog's LLM analytics as this user's, in this session.
+    const result = await withAnalyticsContext(
+      { distinctId: options.userId, sessionId: options.coordinator.id },
+      () =>
+        agent.generate({
+          prompt,
+          abortSignal: AbortSignal.timeout(timeoutMs),
+        }),
+    );
     reply = agentCommandResult(result);
   } catch (error) {
     log.error(

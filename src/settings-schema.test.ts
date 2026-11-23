@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   settingFields,
+  volumePercent,
   type SessionSettingsView,
   type SettingsContext,
   type UserSettingsView,
@@ -113,14 +114,51 @@ test("overrides stand in for current values", () => {
   expect(value("display")).toBe("default");
 });
 
-test("the volume's steps include a current volume between them", () => {
+test("the volume is a percent from 0 to 100, kept to the hundredth", () => {
   const volume = settingFields({
     access: everything,
     session: { ...session, volume: 0.625 },
   }).find((field) => field.id === "volume");
-  expect(volume?.value).toBe("62.5");
-  expect(
-    volume?.kind === "select" &&
-      volume.options.map((option) => option.value).slice(12, 15),
-  ).toEqual(["60", "62.5", "65"]);
+  expect(volume).toMatchObject({
+    kind: "number",
+    label: "Volume (%)",
+    min: 0,
+    max: 100,
+    value: "62.5",
+  });
+});
+
+test("the volume shown stays within 0 to 100 whatever it was set to", () => {
+  expect(volumePercent(0.35)).toBe("35");
+  expect(volumePercent(50)).toBe("100");
+  expect(volumePercent(-1)).toBe("0");
+  expect(volumePercent(Number.NaN)).toBe("0");
+});
+
+test("a volume override stands in for the session's volume", () => {
+  const volume = settingFields(
+    { access: everything, session },
+    { volume: "37.25" },
+  ).find((field) => field.id === "volume");
+  expect(volume?.value).toBe("37.25");
+});
+
+test("permissions offer each preset, the default first", () => {
+  const permissions = settingFields({ access: everything, session }).find(
+    (field) => field.id === "permissions",
+  );
+  expect(permissions?.kind === "multi" && permissions.presets).toEqual([
+    {
+      value: "default",
+      label: "Default",
+      permissions: ["add", "remove-own", "skip", "pause", "volume"],
+    },
+    {
+      value: "add-only",
+      label: "Add songs only",
+      permissions: ["add", "remove-own"],
+    },
+    { value: "host-only", label: "Host only", permissions: [] },
+    expect.objectContaining({ value: "collaborative" }),
+  ]);
 });

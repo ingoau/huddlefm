@@ -19,7 +19,9 @@ export const capabilities = [
 export type Capability = (typeof capabilities)[number];
 
 export const permissionPresets = {
-  default: ["add", "remove-own"],
+  default: ["add", "remove-own", "skip", "pause", "volume"],
+  // What the default was before everyone could skip, pause and set the volume.
+  "add-only": ["add", "remove-own"],
   "host-only": [],
   collaborative: capabilities.filter(
     (capability) => capability !== "clear" && capability !== "end-session",
@@ -429,6 +431,7 @@ const trackColumns = {
   isVideo: "is_video",
   gainDb: "gain_db",
   plays: "plays",
+  lastingFailure: "lasting_failure",
 };
 
 const addedColumns = [
@@ -479,6 +482,9 @@ const addedColumns = [
   // How many times the track has started playing, counting its loops: each
   // play is its own scrobble.
   ["tracks", "plays", "INTEGER NOT NULL DEFAULT 0"],
+  // A failed track that will fail every time, as a song that's gone does,
+  // rather than once, as during a YouTube outage.
+  ["tracks", "lasting_failure", "INTEGER NOT NULL DEFAULT 0"],
   ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
@@ -947,6 +953,14 @@ export class Store {
         source TEXT PRIMARY KEY,
         lufs REAL NOT NULL,
         measured_at INTEGER NOT NULL
+      );
+      -- The one-off notices each user has been shown, such as what changed
+      -- since they last hosted.
+      CREATE TABLE IF NOT EXISTS user_notices (
+        user_id TEXT NOT NULL,
+        notice TEXT NOT NULL,
+        shown_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, notice)
       );
       CREATE INDEX IF NOT EXISTS sessions_status_resume
         ON sessions(status, resume_until);
@@ -2052,6 +2066,28 @@ export class Store {
     }));
   }
 
+  // Songs that failed since `since` in a way that will happen again (gone,
+  // too long, locked away), in any session, and haven't prepared since, so
+  // autoplay doesn't pick a song that will probably fail again. A failure an
+  // outage caused doesn't count: the song may well work now.
+  failedSources(since: number): Set<string> {
+    const rows = this.db
+      .query(
+        `SELECT f.source_id AS sourceId FROM (
+          SELECT source_id, MAX(created_at) AS failed_at FROM tracks
+          WHERE status = 'failed' AND lasting_failure = 1 AND created_at >= ?
+          GROUP BY source_id
+        ) f
+        WHERE NOT EXISTS (
+          SELECT 1 FROM tracks t
+          WHERE t.status IN ('ready', 'playing', 'played')
+          AND t.source_id = f.source_id AND t.created_at > f.failed_at
+        )`,
+      )
+      .all(since) as { sourceId: string }[];
+    return new Set(rows.map((row) => row.sourceId));
+  }
+
   // Every song someone chose in this room, by hand or by keeping an autoplay
   // pick, one row per add. Tracks outlive their sessions, so this is the
   // room's whole history.
@@ -2265,8 +2301,39 @@ export class Store {
       this.db
         .query("DELETE FROM jellyfin_servers WHERE user_id = ?")
         .run(userId);
+      this.db.query("DELETE FROM user_notices WHERE user_id = ?").run(userId);
       if (!mixesAdded) this.setHuddleMixSources(userId, { added: false });
     })();
+  }
+
+  /** Whether a user has been shown a one-off notice. */
+  noticeShown(userId: string, notice: string) {
+    return Boolean(
+      this.db
+        .query("SELECT 1 FROM user_notices WHERE user_id = ? AND notice = ?")
+        .get(userId, notice),
+    );
+  }
+
+  /**
+   * Marks a notice shown, saying whether this call did: only one of two
+   * sessions starting at once gets to show it.
+   */
+  markNoticeShown(userId: string, notice: string) {
+    return (
+      this.db
+        .query(
+          "INSERT OR IGNORE INTO user_notices (user_id, notice, shown_at) VALUES (?, ?, ?)",
+        )
+        .run(userId, notice, Date.now()).changes > 0
+    );
+  }
+
+  /** Lets a notice that couldn't be shown be shown next time. */
+  unmarkNoticeShown(userId: string, notice: string) {
+    this.db
+      .query("DELETE FROM user_notices WHERE user_id = ? AND notice = ?")
+      .run(userId, notice);
   }
 
   /** The Jellyfin servers a user linked, oldest first. */
@@ -2373,6 +2440,7 @@ export class Store {
       isVideo?: boolean;
       gainDb?: number | null;
       plays?: number;
+      lastingFailure?: boolean;
     },
   ) {
     const { sql, values } = assignments(trackColumns, fields);

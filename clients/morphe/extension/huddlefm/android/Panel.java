@@ -1391,6 +1391,10 @@ final class Panel {
         value = valueText(label(field.optJSONArray("options"), field.optString("value")));
         row.setOnClickListener(v -> pickOne(field));
         break;
+      case "number":
+        value = valueText(field.optString("value"));
+        row.setOnClickListener(v -> typeNumber(field));
+        break;
       case "toggle":
         {
           Switch toggle = new Switch(c);
@@ -1417,11 +1421,19 @@ final class Panel {
           row.setOnClickListener(v -> pickMany(field));
           break;
         }
-      default:
+      case "user":
         {
           String user = field.isNull("value") ? "" : field.optString("value", "");
           String self = client.selfUserId();
           value = valueText(user.isEmpty() ? "Nobody" : user.equals(self) ? "You" : "Someone else");
+          String extra = "Change it in Slack.";
+          hint = hint.isEmpty() ? extra : hint + " " + extra;
+          break;
+        }
+      default:
+        {
+          // a kind this build doesn't know yet, shown as is
+          value = valueText(field.optString("value", ""));
           String extra = "Change it in Slack.";
           hint = hint.isEmpty() ? extra : hint + " " + extra;
         }
@@ -1512,12 +1524,46 @@ final class Panel {
         .setTitle(field.optString("label"))
         .setSingleChoiceItems(labels, checked, (d, which) -> {
           d.dismiss();
-          String v = options.get(which).optString("value");
-          // the bot takes the volume as a number, though it's picked like a select
-          change(field, "volume".equals(field.optString("id")) ? (Object) Double.valueOf(v) : v);
+          change(field, options.get(which).optString("value"));
         })
         .setNegativeButton("Cancel", null)
         .show();
+  }
+
+  /** A number typed in, between the field's min and max. */
+  private void typeNumber(JSONObject field) {
+    double min = field.optDouble("min", 0);
+    double max = field.optDouble("max", 100);
+    EditText input = new EditText(c);
+    input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+    input.setText(field.optString("value"));
+    input.setSelectAllOnFocus(true);
+    FrameLayout frame = new FrameLayout(c);
+    frame.setPadding(dp(20), dp(8), dp(20), 0);
+    frame.addView(input);
+    new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        .setTitle(field.optString("label"))
+        .setView(frame)
+        .setPositiveButton("Set", (d, which) -> {
+          double number;
+          try {
+            number = Double.parseDouble(input.getText().toString().trim());
+          } catch (NumberFormatException e) {
+            number = Double.NaN;
+          }
+          if (!(number >= min && number <= max)) {
+            Toast.makeText(c, "Enter a number from " + plain(min) + " to " + plain(max) + ".", Toast.LENGTH_SHORT).show();
+            return;
+          }
+          change(field, number);
+        })
+        .setNegativeButton("Cancel", null)
+        .show();
+  }
+
+  /** A number without a trailing ".0" when it's whole. */
+  private static String plain(double number) {
+    return number == Math.rint(number) ? String.valueOf((long) number) : String.valueOf(number);
   }
 
   private void pickMany(JSONObject field) {

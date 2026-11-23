@@ -166,6 +166,11 @@ function setup(
       roomSkips: (roomId: string) =>
         roomSkips.filter((skip) => skip.roomId === roomId),
       roomAdds: () => roomAdds,
+      failedSources: () => new Set<string>(),
+      // Hosts here have seen the one-off notices, so they don't crowd out
+      // the ephemerals a test looks for.
+      noticeShown: () => true,
+      markNoticeShown: () => {},
       recordAutoplaySkip: (value: unknown) => {
         rememberedSkips.push(value);
       },
@@ -1741,7 +1746,7 @@ test("communism mode lets everyone do everything but take over as host", async (
   expect(test.sessions).not.toContainEqual({ communism: true });
   expect(test.ephemeral.at(-1)).toBe("Only the host can start communism mode.");
   expect(await test.coordinator.agentStatus("guest")).toMatchObject({
-    yourCapabilities: ["add", "remove-own"],
+    yourCapabilities: ["add", "remove-own", "skip", "pause", "volume"],
   });
 
   await start("host");
@@ -1789,6 +1794,71 @@ test("communism mode lets everyone do everything but take over as host", async (
   ).toMatchObject({ ok: true, communism: true });
   expect(JSON.stringify(test.updates.at(-1))).toContain("☭ Communism mode");
   await test.coordinator.endFromSlack();
+});
+
+const openControlsText =
+  "Heads up: everyone in the huddle can now skip, pause and change the volume by default, not just the host. You can change this under Settings › Host › Permissions.";
+
+test("tells a host once that everyone can skip, pause and change the volume", async () => {
+  const store = new Store(":memory:");
+  const first = setup(undefined, undefined, undefined, undefined, store);
+  await first.coordinator.start();
+  await until(() => store.noticeShown("host", "open-controls-v1"));
+  const notices = first.ephemeralCalls.filter(
+    (call) => call[2] === openControlsText,
+  );
+  // Only to the host, in the player's thread.
+  expect(notices).toEqual([["channel", "host", openControlsText, "1.0"]]);
+  await first.coordinator.endFromSlack();
+
+  // The next session they host says nothing about it.
+  const second = setup(undefined, undefined, undefined, undefined, store);
+  await second.coordinator.start();
+  await Bun.sleep(5);
+  expect(second.ephemeral).not.toContain(openControlsText);
+  await second.coordinator.endFromSlack();
+  store.close();
+});
+
+test("a host isn't told everyone can skip, pause and change the volume when they can't", async () => {
+  const store = new Store(":memory:");
+  // The channel's defaults keep the volume to the host.
+  store.setChannelDefaults(
+    "channel",
+    { permissions: ["add", "remove-own", "skip", "pause"] },
+    "manager",
+  );
+  const restricted = setup(undefined, undefined, undefined, undefined, store);
+  await restricted.coordinator.start();
+  await Bun.sleep(5);
+  expect(restricted.ephemeral).not.toContain(openControlsText);
+  // Not shown, so a later session that does allow it still says so.
+  expect(store.noticeShown("host", "open-controls-v1")).toBeFalse();
+  await restricted.coordinator.endFromSlack();
+
+  // Communism mode has no host to tell.
+  store.setChannelDefaults("channel", { communism: true }, "manager");
+  const communism = setup(undefined, undefined, undefined, undefined, store);
+  await communism.coordinator.start();
+  await Bun.sleep(5);
+  expect(communism.ephemeral).not.toContain(openControlsText);
+  expect(store.noticeShown("host", "open-controls-v1")).toBeFalse();
+  await communism.coordinator.endFromSlack();
+
+  // A channel's defaults that open the controls are its choice, not the
+  // change the notice is about.
+  store.setChannelDefaults(
+    "channel",
+    { communism: false, permissions: ["add", "skip", "pause", "volume"] },
+    "manager",
+  );
+  const opened = setup(undefined, undefined, undefined, undefined, store);
+  await opened.coordinator.start();
+  await Bun.sleep(5);
+  expect(opened.ephemeral).not.toContain(openControlsText);
+  expect(store.noticeShown("host", "open-controls-v1")).toBeFalse();
+  await opened.coordinator.endFromSlack();
+  store.close();
 });
 
 test("a guest passing communism off to the agent is not refused", async () => {
@@ -2111,7 +2181,7 @@ test("manager overrides permissions and HuddleFM cannot become host", async () =
     }),
     state: { host: { user: { selected_user: "bot" } } },
   });
-  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
   expect(result.ephemeral).toContain("HuddleFM cannot be the host.");
   await result.coordinator.endFromSlack();
 });
@@ -2156,13 +2226,13 @@ test("treats a workspace admin as a manager when granted host", async () => {
   );
   await result.coordinator.start();
   await result.coordinator.action(volumeUp("admin"));
-  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
   expect(lookups).toEqual(["admin"]);
 
   // The cached answer keeps later actions off the Slack API.
   await result.coordinator.action(volumeUp("admin"));
   expect(lookups).toEqual(["admin"]);
-  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.8 });
   await result.coordinator.endFromSlack();
 });
 
@@ -2184,7 +2254,7 @@ test("leaves workspace admins alone when granted nothing", async () => {
   expect(result.ephemeral).toContain(
     "Join the huddle before using the player.",
   );
-  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.7 });
   expect(lookups).toEqual([]);
   await result.coordinator.endFromSlack();
 });
@@ -2206,7 +2276,7 @@ test("an excluded workspace admin gains nothing", async () => {
   expect(result.ephemeral).toContain(
     "Join the huddle before using the player.",
   );
-  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.7 });
   await result.coordinator.endFromSlack();
 });
 
@@ -2447,7 +2517,7 @@ test("the configured manager can save and clear the channel's defaults", async (
     anchorEnabled: true,
     progressBar: true,
     communism: false,
-    permissions: ["add", "remove-own"],
+    permissions: ["add", "remove-own", "skip", "pause", "volume"],
   });
   expect(result.sessions).not.toContainEqual({ autoplay: "huddle" });
   const saved = result.updatedModals.at(-1)![2];
@@ -2525,6 +2595,12 @@ test("a channel manager who sees no settings cannot save them as defaults", asyn
     store,
   );
   await result.coordinator.start();
+  // Everyone else may only add songs, so the guest sees no session settings.
+  expect(
+    await result.coordinator.agentUpdateSettings("host", {
+      permissions: ["add", "remove-own"],
+    }),
+  ).toMatchObject({ ok: true });
   await result.act("guest", "open_settings");
   // The Channel tab shows for auto join, without the defaults.
   expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([
@@ -2631,7 +2707,7 @@ test("a channel manager saves only the settings they can see", async () => {
   );
   // The permissions are not in the guest's form, so a forged value is ignored.
   await pressInSettings(result, "guest", "save_channel_defaults", {
-    volume: { percent: { selected_option: { value: "25" } } },
+    volume: { percent: { value: "25" } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
     permissions: { selected: { selected_options: [{ value: "clear" }] } },
   });
@@ -2757,7 +2833,10 @@ test("others delete only the channel saves they made", async () => {
   );
   expect(store.sessionSaves([channel]).map((save) => save.id)).toEqual([hosts]);
   // With nothing left on it, the Channel tab goes and Settings falls back.
-  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([]);
+  expect(settingsTabsOf(result.updatedModals.at(-1)![2])).toEqual([
+    "you",
+    "session",
+  ]);
   await result.coordinator.endFromSlack();
   store.close();
 });
@@ -2951,7 +3030,7 @@ test("a channel manager gains nothing beyond ending the session", async () => {
   expect(result.ephemeral).toContain(
     "Join the huddle before using the player.",
   );
-  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.7 });
   await result.act("channel-manager", "open_settings");
   const modal = JSON.stringify(result.updatedModals.at(-1)![2]);
   expect(modal).toContain("end_session");
@@ -3016,7 +3095,7 @@ test("a workspace admin outside the huddle can end the session by default", asyn
   expect(result.ephemeral).toContain(
     "Join the huddle before using the player.",
   );
-  expect(result.media).not.toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).not.toContainEqual({ type: "volume", value: 0.7 });
   await result.act("admin", "open_settings");
   const modal = JSON.stringify(result.updatedModals.at(-1)![2]);
   expect(modal).toContain("end_session");
@@ -3029,7 +3108,7 @@ test("a channel manager granted host powers acts as a manager", async () => {
   const result = channelManagerSetup(["channel-manager"], new Set(), "host");
   await result.coordinator.start();
   await result.coordinator.action(volumeUp("channel-manager"));
-  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
   expect(result.lookups).toEqual(["channel"]);
   await result.coordinator.endFromSlack();
 });
@@ -3056,7 +3135,7 @@ test("someone with two roles gets the higher grant", async () => {
   );
   await result.coordinator.start();
   await result.coordinator.action(volumeUp("channel-manager"));
-  expect(result.media).toContainEqual({ type: "volume", value: 0.65 });
+  expect(result.media).toContainEqual({ type: "volume", value: 0.7 });
   expect(adminLookups).toEqual(["channel-manager"]);
   await result.coordinator.endFromSlack();
 });
@@ -3487,7 +3566,7 @@ test("host transfers ownership and global permissions atomically", async () => {
       hostId: "host",
     }),
     state: {
-      volume: { percent: { selected_option: { value: "37.25" } } },
+      volume: { percent: { value: "37.25" } },
       host: { user: { selected_user: "guest" } },
       display: { mode: { selected_option: { value: "off" } } },
       permissions: {
@@ -3590,7 +3669,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -3604,7 +3683,7 @@ test("autoplay defaults off and host settings persist both toggle states", async
     "view_submission",
   );
   disable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "off" } } },
   };
   await result.coordinator.action(disable);
@@ -3949,7 +4028,7 @@ test("delegated users only see and save settings they can configure", async () =
   );
   save.userId = "guest";
   save.state = {
-    volume: { percent: { selected_option: { value: "25" } } },
+    volume: { percent: { value: "25" } },
     display: { mode: { selected_option: { value: "lyrics" } } },
     autoplay: { mode: { selected_option: { value: "related" } } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
@@ -3969,6 +4048,12 @@ test("delegated users only see and save settings they can configure", async () =
 test("all participants can open user settings and end-session permission adds the session action", async () => {
   const test = setup();
   await test.coordinator.start();
+  // Everyone else may only add and remove their own songs.
+  expect(
+    await test.coordinator.agentUpdateSettings("host", {
+      permissions: ["add", "remove-own"],
+    }),
+  ).toMatchObject({ ok: true });
   const open = interaction(test.coordinator, "open_settings");
   open.userId = "guest";
   await test.coordinator.action(open);
@@ -4335,7 +4420,7 @@ test("display mode defaults to album art and persists dropdown changes", async (
     "view_submission",
   );
   save.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     display: { mode: { selected_option: { value: "lyrics" } } },
   };
   await test.coordinator.action(save);
@@ -4387,7 +4472,7 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4406,6 +4491,81 @@ test("autoplay deduplicates current and recent tracks before resolving metadata"
   expect(resolved).toEqual([ids.c]);
   expect(JSON.stringify(result.updates)).toContain("Autoplay recommendation");
   expect(JSON.stringify(result.audit)).toContain('"origin":"autoplay"');
+  await result.coordinator.endFromSlack();
+});
+
+test("autoplay leaves out songs that recently failed to prepare", async () => {
+  const ids = {
+    a: "aaaaaaaaaaa",
+    b: "bbbbbbbbbbb",
+    c: "ccccccccccc",
+    d: "ddddddddddd",
+  };
+  const resolved: string[] = [];
+  const tracks = {
+    resolve: async (value: keyof typeof ids) => ({
+      sourceInput: `https://example.com/${value}`,
+      canonicalUrl: `https://example.com/${value}`,
+      sourceId: ids[value],
+      title: value.toUpperCase(),
+      artist: "Artist",
+    }),
+    upNextIds: async () => [ids.c, ids.d],
+    resolveVideoId: async (id: string) => (
+      resolved.push(id),
+      {
+        sourceInput: `https://music.youtube.com/watch?v=${id}`,
+        canonicalUrl: `https://music.youtube.com/watch?v=${id}`,
+        sourceId: id,
+        title: id === ids.c ? "C" : "D",
+        artist: "Radio",
+      }
+    ),
+    prepare: async (track: { sourceId: string }) => `${track.sourceId}.opus`,
+  } as unknown as TrackCatalog;
+  const result = setup(tracks);
+  const since: number[] = [];
+  Object.assign(Reflect.get(result.coordinator, "store"), {
+    failedSources: (value: number) => (since.push(value), new Set([ids.c])),
+  });
+  await result.coordinator.start();
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "a"),
+  );
+  await result.coordinator.action(
+    interaction(result.coordinator, "add_track_to_queue", "b"),
+  );
+  const enable = interaction(
+    result.coordinator,
+    "save_settings",
+    "",
+    "view_submission",
+  );
+  enable.state = {
+    autoplay: { mode: { selected_option: { value: "related" } } },
+  };
+  await result.coordinator.action(enable);
+  const first = (
+    result.media.find(
+      (value) => (value as { type?: string }).type === "play",
+    ) as { entryId: string }
+  ).entryId;
+  await result.coordinator.mediaEvent("track_ended", { entryId: first });
+  await until(() =>
+    result.audit.some(
+      (value) => (value as unknown[])[0] === "track.autoplay_added",
+    ),
+  );
+  // The top recommendation failed lately, so the next one is picked.
+  expect(resolved).toEqual([ids.d]);
+  expect(JSON.stringify(result.audit)).toContain(`"sourceId":"${ids.d}"`);
+  // Failures from the last week count.
+  const week = 7 * 24 * 60 * 60_000;
+  expect(since.length).toBeGreaterThan(0);
+  for (const value of since) {
+    expect(value).toBeGreaterThan(Date.now() - week - 60_000);
+    expect(value).toBeLessThanOrEqual(Date.now() - week);
+  }
   await result.coordinator.endFromSlack();
 });
 
@@ -4459,7 +4619,7 @@ test("autoplay favors recommendations shared by recent manual tracks", async () 
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4515,7 +4675,7 @@ test("skipping a manual track plays the queued autoplay recommendation", async (
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4593,7 +4753,7 @@ test("skipping an autoplay track plays the queued next autoplay", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4717,7 +4877,7 @@ test("a late-prepared autoplay track still queues the following recommendation",
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4785,7 +4945,7 @@ test("player shows autoplay search while the next song is being chosen", async (
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4827,7 +4987,7 @@ test("failed recommendation lookup leaves the session running", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4873,7 +5033,7 @@ test("a manual track replaces a prepared autoplay recommendation", async () => {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
   };
   await result.coordinator.action(enable);
@@ -4960,6 +5120,44 @@ test("collaborative preset grants everything except destructive permissions", as
   await test.coordinator.endFromSlack();
 });
 
+test("the add-only preset lets everyone else add songs and remove their own", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  await pressInSettings(
+    test,
+    "host",
+    "apply_permission_preset",
+    {},
+    "host",
+    { tab: "host" },
+    "add-only",
+  );
+  const view = test.updatedModals.at(-1)![2] as {
+    blocks: { block_id?: string; element?: Record<string, any> }[];
+  };
+  expect(
+    view.blocks
+      .find((block) => block.block_id === "permissions.1")!
+      .element!.initial_options.map(
+        (option: { value: string }) => option.value,
+      ),
+  ).toEqual(["add", "remove-own"]);
+
+  // As the agent picks it, too.
+  expect(
+    await test.coordinator.agentUpdateSettings("host", {
+      permissionPreset: "add-only",
+    }),
+  ).toMatchObject({ ok: true });
+  expect([
+    ...(Reflect.get(test.coordinator, "allowed") as Set<string>),
+  ]).toEqual(["add", "remove-own"]);
+  expect(await test.coordinator.agentStatus("guest")).toMatchObject({
+    yourCapabilities: ["add", "remove-own"],
+  });
+  await test.coordinator.endFromSlack();
+});
+
 test("only the host can fill in a permission preset", async () => {
   const test = setup();
   await test.coordinator.start();
@@ -5010,7 +5208,7 @@ test("thread anchoring is disabled by default and can be enabled", async () => {
   )[1].blocks.find((block) => block.block_id === "anchor");
   expect(initialAnchor?.element.initial_options).toEqual([]);
   await action("view_submission", {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     anchor: { enabled: { selected_options: [{ value: "enabled" }] } },
   });
   expect(test.posted).toHaveLength(2);
@@ -5046,6 +5244,10 @@ test("agent controls enforce the same permissions as the Slack UI", async () => 
   const result = setup();
   await result.coordinator.start();
   result.coordinator.memberJoined("listener");
+  // Listeners may not skip or change the volume.
+  await result.coordinator.agentUpdateSettings("host", {
+    permissions: ["add", "remove-own"],
+  });
 
   const denied = await result.coordinator.agentSkip("listener");
   expect(denied).toEqual({
@@ -5150,6 +5352,7 @@ test("asks listeners about each track in ask-for-every-track mode", async () => 
   userStore.setListenBrainzToken("host", "lb-token", "lb-user");
   userStore.setListenBrainzEnabled("host", true);
   userStore.setScrobblingMode("host", "ask_track");
+  userStore.markNoticeShown("host", "open-controls-v1");
   const tracks = {
     resolve: async () => ({
       sourceInput: "https://example.com/track",
@@ -6482,7 +6685,7 @@ test("huddle mix autoplay uses compiled past additions when YouTube up next is e
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
   };
   await result.coordinator.action(enable);
@@ -6971,7 +7174,7 @@ async function enableHuddleMix(coordinator: Coordinator) {
     "view_submission",
   );
   enable.state = {
-    volume: { percent: { selected_option: { value: "60" } } },
+    volume: { percent: { value: "60" } },
     autoplay: { mode: { selected_option: { value: "huddle" } } },
   };
   await coordinator.action(enable);
@@ -7590,7 +7793,6 @@ test("settings selects offer an initial option Slack can match", async () => {
     .filter((block) => block.element?.type === "static_select");
   expect(selects.map((block) => block.block_id)).toEqual([
     "media_mode",
-    "volume",
     "display",
     "autoplay",
     "loop",
@@ -8268,7 +8470,7 @@ test("saving settings audits the list of settings that changed", async () => {
     "view_submission",
   );
   save.state = {
-    volume: { percent: { selected_option: { value: "80" } } },
+    volume: { percent: { value: "80" } },
     autoplay: { mode: { selected_option: { value: "related" } } },
     loop: { mode: { selected_option: { value: "off" } } },
   };
@@ -8420,7 +8622,7 @@ test("ending can save the session for the next one in the channel to load", asyn
   // Permissions are the new session's own.
   expect([
     ...(Reflect.get(second.coordinator, "allowed") as Set<string>),
-  ]).toEqual(["add", "remove-own"]);
+  ]).toEqual(["add", "remove-own", "skip", "pause", "volume"]);
   expect(store.sessionSaves([{ type: "channel", id: "channel" }])).toEqual([]);
   await second.coordinator.endFromSlack();
   store.close();
@@ -8880,6 +9082,7 @@ test("a song whose adder took their name off it is shown without one", () => {
 test("a Scrobble to choice for a service disconnected since does not stop a save", async () => {
   const userStore = new Store(":memory:");
   userStore.connectLastFm("host", "last-user", "session-key");
+  userStore.markNoticeShown("host", "open-controls-v1");
   const scrobbling = new ScrobbleDispatcher(userStore, {});
   const test = setup(undefined, undefined, undefined, scrobbling, userStore);
   await test.coordinator.start();
@@ -9305,7 +9508,7 @@ test("client mods sync the session over the data channel", async () => {
       state: "playing",
       volume: 60,
       hostId: "host",
-      allowed: ["add", "remove-own"],
+      allowed: ["add", "remove-own", "skip", "pause", "volume"],
       queueLimit: 50,
       player: { channel: "channel", ts: "1" },
     },
@@ -9330,7 +9533,7 @@ test("client mods sync the session over the data channel", async () => {
   expect(you).toEqual({
     type: "you",
     to: "guest",
-    capabilities: ["add", "remove-own"],
+    capabilities: ["add", "remove-own", "skip", "pause", "volume"],
     admin: false,
     settings: [],
   });
@@ -9343,6 +9546,10 @@ test("client mods sync the session over the data channel", async () => {
 
 test("client mods use the player as their user, noted as over the data channel", async () => {
   const result = await pluginSetup();
+  // Guests may not skip.
+  await result.coordinator.agentUpdateSettings("host", {
+    permissions: ["add", "remove-own"],
+  });
   await result.coordinator.action(
     interaction(result.coordinator, "add_track_to_queue", "https://a"),
   );
@@ -9781,6 +9988,39 @@ test("client mods can't send settings the modal wouldn't", async () => {
   ]);
   expect(result.coordinator.agentStatus("host")).toMatchObject({
     volumePercent: 60,
+  });
+  await result.coordinator.endFromSlack();
+});
+
+test("client mods set the volume to a percent from 0 to 100", async () => {
+  const result = await pluginSetup();
+  await result.send("host", { type: "sync" });
+  const tries: [unknown, boolean][] = [
+    ["101", false],
+    [150, false],
+    ["-5", false],
+    [-1, false],
+    ["abc", false],
+    ["42.5", true],
+    [100, true],
+    ["0", true],
+  ];
+  for (const [index, [value]] of tries.entries())
+    await result.send("host", {
+      type: "setting",
+      id: `r${index}`,
+      setting: "volume",
+      value,
+    });
+  const results = dataBroadcasts(result.media).filter(
+    (message) => message.type === "result",
+  );
+  expect(results.map((message) => [message.id, message.ok])).toEqual(
+    tries.map(([, ok], index) => [`r${index}`, ok]),
+  );
+  expect(results[0]).toMatchObject({ message: "That value is invalid." });
+  expect(result.coordinator.agentStatus("host")).toMatchObject({
+    volumePercent: 0,
   });
   await result.coordinator.endFromSlack();
 });

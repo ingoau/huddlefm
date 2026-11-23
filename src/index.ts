@@ -6,7 +6,11 @@ import {
   startAnalytics,
 } from "./analytics.ts";
 import { AuditLog } from "./audit-log.ts";
-import { canvasMarkdown, type ActiveCanvasSession } from "./canvas.ts";
+import {
+  canvasBody,
+  canvasStamped,
+  type ActiveCanvasSession,
+} from "./canvas.ts";
 import { CompanionChannels } from "./companion-channels.ts";
 import {
   agentConfigured,
@@ -65,11 +69,15 @@ log.info(
 const config = loadConfig();
 for (const warning of config.rolePermissions.warnings)
   log.warn({ event: "config_warning" }, warning);
-await startAnalytics(config.posthogApiKey, config.posthogHost, (error) =>
-  log.warn(
-    { event: "posthog_delivery_failed", error: safeError(error) },
-    "PostHog delivery failed",
-  ),
+await startAnalytics(
+  config.posthogApiKey,
+  config.posthogHost,
+  (error) =>
+    log.warn(
+      { event: "posthog_delivery_failed", error: safeError(error) },
+      "PostHog delivery failed",
+    ),
+  { llmContent: config.posthogLlmContent },
 );
 captureAnalytics("app.started", {
   properties: {
@@ -203,12 +211,16 @@ const participantRecheckMs = 5_000;
 let canvasUpdate: Promise<void> | undefined;
 let canvasPending = false;
 let canvasDelay: ReturnType<typeof setTimeout> | undefined;
-const canvasDelayMs = 10_000;
+// Slack refuses edits to a canvas that has been rewritten too much
+// (canvas_too_large), whatever their size, so edits are kept to at most one a
+// minute, and one that changes nothing isn't sent.
+const canvasDelayMs = 60_000;
+let canvasSent: string | undefined;
 const reconcilingSessions = new Set<string>();
 const reconcilePendingSessions = new Set<string>();
 let shuttingDown = false;
 
-// Sessions report every track, pause, and membership change. Waiting a moment
+// Sessions report every track, pause, and membership change. Waiting a minute
 // turns a burst of them into one Canvas edit.
 function scheduleCanvasUpdate() {
   if (!config.canvasId || shuttingDown || canvasDelay) return;
@@ -229,22 +241,23 @@ function updateCanvas(final = false) {
   const startedAt = Date.now();
   log.debug({ event: "canvas_update_started" }, "Updating Slack Canvas");
   canvasUpdate = Promise.all([canvasIntegrations(), canvasActiveSessions()])
-    .then(([integrations, active]) =>
-      slackApp.updateCanvas(
-        canvasId,
-        canvasMarkdown(store.canvasStats(), store.usageStats(), {
-          active,
-          integrations,
-          sections: config.canvasSections,
-        }),
-      ),
-    )
-    .then(() =>
+    .then(async ([integrations, active]) => {
+      const body = canvasBody(store.canvasStats(), store.usageStats(), {
+        active,
+        integrations,
+        sections: config.canvasSections,
+      });
+      if (body === canvasSent) {
+        log.debug({ event: "canvas_unchanged" }, "Slack Canvas unchanged");
+        return;
+      }
+      await slackApp.updateCanvas(canvasId, canvasStamped(body, Date.now()));
+      canvasSent = body;
       log.info(
         { event: "canvas_updated", durationMs: Date.now() - startedAt },
         "Slack Canvas updated",
-      ),
-    )
+      );
+    })
     .catch((error) =>
       log.error(
         { event: "canvas_update_failed", err: error },

@@ -20,6 +20,9 @@ function fakeClient() {
       people.push(message);
     },
     async shutdown() {},
+    withContext(_context, fn) {
+      return fn();
+    },
   };
   return {
     events,

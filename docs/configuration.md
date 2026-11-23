@@ -29,15 +29,16 @@ Every option HuddleFM reads from `.env`. Only the Slack credentials are required
 
 ## Optional features
 
-| Variable                                                    | Default                    | Purpose                                                                                                               |
-| ----------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET`                   | unset                      | Enables Last.fm account linking for scrobbling                                                                        |
-| `OPENROUTER_API_KEY`                                        | unset                      | Enables @mention AI controls via OpenRouter                                                                           |
-| `AGENT_USER_LIMIT_PER_MINUTE` / `AGENT_USER_LIMIT_PER_HOUR` | `3` / `20`                 | AI requests each person may make; mention commands like `skip` don't count                                            |
-| `AGENT_LIMIT_PER_HOUR`                                      | `100`                      | AI requests the whole bot may make an hour                                                                            |
-| `POSTHOG_API_KEY`                                           | unset                      | Enables PostHog analytics and error tracking                                                                          |
-| `POSTHOG_HOST`                                              | `https://us.i.posthog.com` | PostHog ingestion host                                                                                                |
-| `LOCAL_CONTROL_TOKEN`                                       | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys |
+| Variable                                                    | Default                    | Purpose                                                                                                                               |
+| ----------------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `LASTFM_API_KEY` / `LASTFM_SHARED_SECRET`                   | unset                      | Enables Last.fm account linking for scrobbling                                                                                        |
+| `OPENROUTER_API_KEY`                                        | unset                      | Enables @mention AI controls via OpenRouter                                                                                           |
+| `AGENT_USER_LIMIT_PER_MINUTE` / `AGENT_USER_LIMIT_PER_HOUR` | `3` / `20`                 | AI requests each person may make; mention commands like `skip` don't count                                                            |
+| `AGENT_LIMIT_PER_HOUR`                                      | `100`                      | AI requests the whole bot may make an hour                                                                                            |
+| `POSTHOG_API_KEY`                                           | unset                      | Enables PostHog analytics and error tracking                                                                                          |
+| `POSTHOG_HOST`                                              | `https://us.i.posthog.com` | PostHog ingestion host. Agent traces go to its origin, so a proxy path is ignored for them                                            |
+| `POSTHOG_LLM_CONTENT`                                       | `false`                    | `true` also sends what people ask the AI agent, its replies, and its tool calls' arguments and results with its traces, for debugging |
+| `LOCAL_CONTROL_TOKEN`                                       | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys                 |
 
 ## Playback and limits
 
@@ -116,4 +117,4 @@ Logs can include Slack user, channel, session, and track identifiers. Credential
 
 ## Analytics
 
-Set `POSTHOG_API_KEY` to send product events and sanitized errors to PostHog. Events use Slack user IDs as distinct IDs and never include Slack names, messages, search text, lyrics, audio, credentials, or raw API payloads. Active users get current-state person properties for their Last.fm and ListenBrainz connections, enabled settings, and scrobbling mode. HuddleFM keeps a random system identity in `data/posthog-installation-id`. Analytics is best-effort and disabled when the key is absent.
+Set `POSTHOG_API_KEY` to send product events and sanitized errors to PostHog. Events use Slack user IDs as distinct IDs and never include Slack names, messages, search text, lyrics, audio, credentials, or raw API payloads. Active users get current-state person properties for their Last.fm and ListenBrainz connections, enabled settings, and scrobbling mode. With `OPENROUTER_API_KEY` set, each AI agent run is also sent to PostHog's LLM analytics as a trace of its model and tool calls, with their timing, token counts, cost and errors, credited to the user who mentioned the bot. The prompt, replies and tool arguments and results are left out unless `POSTHOG_LLM_CONTENT=true`; with it, PostHog keeps what people asked the agent and what it answered, as written, without the redaction product events get. HuddleFM keeps a random system identity in `data/posthog-installation-id`. Analytics is best-effort and disabled when the key is absent.

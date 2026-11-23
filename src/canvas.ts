@@ -65,20 +65,41 @@ export function parseCanvasSections(value = ""): CanvasSection[] {
   return [...new Set(sections)];
 }
 
+type CanvasOptions = {
+  active?: ActiveCanvasSession[];
+  integrations?: { id: string; name: string }[];
+  sections?: readonly CanvasSection[];
+};
+
 export function canvasMarkdown(
+  stats: CanvasStats,
+  controls: { label: string; count: number }[],
+  {
+    updatedAt = Date.now(),
+    ...options
+  }: CanvasOptions & { updatedAt?: number } = {},
+) {
+  return canvasStamped(canvasBody(stats, controls, options), updatedAt);
+}
+
+/** The canvas with when it last changed, below what changed. */
+export function canvasStamped(body: string, updatedAt: number) {
+  return `${body}\n_Updated ${new Date(updatedAt).toISOString()}_`;
+}
+
+/**
+ * The canvas without its timestamp, which says whether anything changed:
+ * Slack caps how much one canvas can be rewritten, so an edit that changes
+ * nothing is never sent.
+ */
+export function canvasBody(
   stats: CanvasStats,
   controls: { label: string; count: number }[],
   {
     active = [],
     integrations = [],
     sections = canvasSections,
-    updatedAt = Date.now(),
-  }: {
-    active?: ActiveCanvasSession[];
-    integrations?: { id: string; name: string }[];
-    sections?: readonly CanvasSection[];
-    updatedAt?: number;
-  } = {},
+  }: CanvasOptions = {},
 ) {
   const requested = stats.tracks.count - stats.tracks.autoplay;
   const average = stats.sessions.count
@@ -182,13 +203,11 @@ export function canvasMarkdown(
           ]
         : [],
   };
-  return [
-    ...sections
-      .map((section) => render[section]())
-      .filter((lines) => lines.length)
-      .flatMap((lines) => [...lines, ""]),
-    `_Updated ${new Date(updatedAt).toISOString()}_`,
-  ].join("\n");
+  return sections
+    .map((section) => render[section]())
+    .filter((lines) => lines.length)
+    .flatMap((lines) => [...lines, ""])
+    .join("\n");
 }
 
 function escapeMarkdown(value: string) {

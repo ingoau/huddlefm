@@ -63,7 +63,13 @@ test("persists session and permission defaults", () => {
         "SELECT capability FROM permissions WHERE allowed = 1 ORDER BY capability",
       )
       .all(),
-  ).toEqual([{ capability: "add" }, { capability: "remove-own" }]);
+  ).toEqual([
+    { capability: "add" },
+    { capability: "pause" },
+    { capability: "remove-own" },
+    { capability: "skip" },
+    { capability: "volume" },
+  ]);
   expect(
     store.db
       .query("SELECT allowed FROM permissions WHERE capability = 'add-bulk'")
@@ -971,6 +977,75 @@ test("lists recently autoplayed songs once each, newest first", () => {
   expect(store.recentAutomaticTracks(1).map((track) => track.title)).toEqual([
     "older pick",
   ]);
+  store.close();
+});
+
+test("lists songs that failed since a time and haven't prepared since", () => {
+  const store = new Store(":memory:");
+  createSession(store);
+  const add = (
+    id: string,
+    sourceId: string,
+    status: string,
+    at: number,
+    lastingFailure = status === "failed",
+  ) => {
+    store.addTrack({
+      id,
+      sessionId: "session",
+      requesterId: "host",
+      sourceInput: sourceId,
+      canonicalUrl: sourceId,
+      sourceId,
+      title: id,
+      artist: "Band",
+      status,
+    });
+    store.db.query("UPDATE tracks SET created_at = ? WHERE id = ?").run(at, id);
+    store.setTrack(id, { lastingFailure });
+  };
+  add("gone", "gone", "failed", 2_000);
+  // It failed in a way that may not happen again, as during an outage.
+  add("blocked", "blocked", "failed", 2_000, false);
+  add("gone-again", "gone", "failed", 3_000);
+  // It failed, then prepared for someone later.
+  add("flaky", "flaky", "failed", 2_000);
+  add("flaky-ok", "flaky", "ready", 2_500);
+  add("played-after", "back", "failed", 2_000);
+  add("played-later", "back", "played", 4_000);
+  // It played before it failed, which doesn't clear the failure.
+  add("broke-played", "broke", "played", 1_500);
+  add("broke-failed", "broke", "failed", 2_000);
+  // It failed before `since`.
+  add("old", "old", "failed", 500);
+  // Queued, not failed.
+  add("waiting", "waiting", "queued", 2_000);
+  expect([...store.failedSources(1_000)].sort()).toEqual(["broke", "gone"]);
+  // A later `since` still counts a failure after it.
+  expect([...store.failedSources(2_500)]).toEqual(["gone"]);
+  expect([...store.failedSources(5_000)]).toEqual([]);
+  store.close();
+});
+
+test("remembers which one-off notices each user has seen", () => {
+  const store = new Store(":memory:");
+  expect(store.noticeShown("U1", "open-controls-v1")).toBeFalse();
+  expect(store.markNoticeShown("U1", "open-controls-v1")).toBeTrue();
+  // Marking again is harmless, and says someone else got there first.
+  expect(store.markNoticeShown("U1", "open-controls-v1")).toBeFalse();
+  expect(store.noticeShown("U1", "open-controls-v1")).toBeTrue();
+  // One that couldn't be shown is shown next time.
+  store.unmarkNoticeShown("U1", "open-controls-v1");
+  expect(store.noticeShown("U1", "open-controls-v1")).toBeFalse();
+  store.markNoticeShown("U1", "open-controls-v1");
+  // Each notice and each user is their own.
+  expect(store.noticeShown("U1", "other")).toBeFalse();
+  expect(store.noticeShown("U2", "open-controls-v1")).toBeFalse();
+  store.markNoticeShown("U2", "open-controls-v1");
+  // Forgetting a user lets them see it again, and leaves others alone.
+  store.forgetUser("U1");
+  expect(store.noticeShown("U1", "open-controls-v1")).toBeFalse();
+  expect(store.noticeShown("U2", "open-controls-v1")).toBeTrue();
   store.close();
 });
 
