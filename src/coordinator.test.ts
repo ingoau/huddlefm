@@ -3294,6 +3294,51 @@ test("reconciling participants ignores a snapshot a leave has overtaken", async 
   );
 });
 
+test("a participant joining from a second device is not greeted again", async () => {
+  const userStore = new Store(":memory:");
+  userStore.setListenBrainzToken("newbie", "lb-token", "lb-user");
+  userStore.setListenBrainzEnabled("newbie", true);
+  userStore.setScrobblingMode("newbie", "ask");
+  const scrobbling = new ScrobbleDispatcher(userStore, {});
+  const test = setup(undefined, undefined, undefined, scrobbling, userStore);
+  await test.coordinator.start();
+  const version = test.coordinator.participantsVersion;
+  test.coordinator.memberJoined("newbie");
+  test.coordinator.memberJoined("newbie");
+  // Only the first connection changes who is in the Huddle.
+  expect(test.coordinator.participantsVersion).toBe(version + 1);
+  await Bun.sleep(10);
+  const prompts = test.ephemeralCalls.filter(
+    ([, userId, text]) =>
+      userId === "newbie" &&
+      text === "Do you want to scrobble your listening in this Huddle?",
+  );
+  expect(prompts).toHaveLength(1);
+  await test.coordinator.endFromSlack();
+  userStore.close();
+});
+
+test("the host stays host when Slack still lists them after one device leaves", async () => {
+  const result = setup(undefined, {
+    aloneMs: 10,
+    idleMs: 100,
+    pausedMs: 100,
+    warningMs: 20,
+  });
+  await result.coordinator.start();
+  // A second device joins, then leaves: Slack still lists the host.
+  result.coordinator.memberJoined("host");
+  const diff = await result.coordinator.reconcileParticipants([
+    "bot",
+    "host",
+    "guest",
+  ]);
+  expect(diff).toBeUndefined();
+  expect(result.coordinator.hasParticipant("host")).toBe(true);
+  expect(result.coordinator.hostUserId()).toBe("host");
+  await result.coordinator.endFromSlack();
+});
+
 test("excluded users cannot participate, host, or scrobble", async () => {
   const store = new Store(":memory:");
   store.setListenBrainzToken("host", "token", "host");

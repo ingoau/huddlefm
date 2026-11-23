@@ -3074,16 +3074,22 @@ export class Coordinator {
 
   memberJoined(userId: string) {
     if (this.isExcluded(userId)) return;
-    if (!this.participants.has(userId)) {
+    // Slack sends a join for each connection, so someone opening the Huddle
+    // on a second device is already here and isn't greeted again.
+    const isNew = !this.participants.has(userId);
+    if (isNew) {
       this.participantsRevision++;
       this.sessionChanged();
     }
     this.participants.add(userId);
     this.plugins.changed();
+    // A new device's client mod still needs their state.
     this.plugins.refreshYouFor(userId);
     this.playbackScrobbling?.memberJoined(userId);
-    void this.promptScrobbling(userId);
-    this.prefetchRecommendations(userId);
+    if (isNew) {
+      void this.promptScrobbling(userId);
+      this.prefetchRecommendations(userId);
+    }
     this.refreshIdle();
     this.log.info(
       { event: "member_joined", userId, participants: this.participants.size },
