@@ -8,18 +8,33 @@ import type { PostHog } from "posthog-node";
 /**
  * Sends the AI agent's traces to PostHog's LLM analytics: each run, its model
  * calls with their latency, tokens and cost, and its tool calls. Like the
- * rest of HuddleFM's analytics it leaves out what people wrote: the prompt,
- * the replies and tool arguments are never sent (privacy mode). A run is
+ * rest of HuddleFM's analytics it leaves out what people wrote (privacy
+ * mode), unless `recordContent` is set (POSTHOG_LLM_CONTENT): then the
+ * prompt, replies, and tool arguments and results go too, for debugging. A
+ * run is
  * credited to whoever is in the PostHog client's context when it starts, so
  * the agent runs inside `client.withContext`.
  */
 export class LlmTracing {
-  readonly telemetry: OpenTelemetry;
+  private telemetry: OpenTelemetry;
 
-  private constructor(private provider: TracerProvider) {
+  private constructor(
+    private provider: TracerProvider,
+    private recordContent: boolean,
+  ) {
     this.telemetry = new OpenTelemetry({
       tracer: provider.getTracer("huddlefm"),
     });
+  }
+
+  /** The AI SDK `telemetry` setting that traces a run. */
+  telemetryOptions() {
+    return {
+      isEnabled: true,
+      recordInputs: this.recordContent,
+      recordOutputs: this.recordContent,
+      integrations: this.telemetry,
+    };
   }
 
   static create(
@@ -27,6 +42,7 @@ export class LlmTracing {
     host: string | undefined,
     client: Pick<PostHog, "getContext">,
     onError: (error: unknown) => void = () => {},
+    recordContent = false,
   ) {
     // A trace PostHog refused, or a host it couldn't reach, is only told to
     // OpenTelemetry's logger; it's reported like the other analytics.
@@ -54,10 +70,11 @@ export class LlmTracing {
             projectToken: apiKey,
             host,
             client,
-            privacyMode: true,
+            privacyMode: !recordContent,
           }),
         ],
       }),
+      recordContent,
     );
   }
 

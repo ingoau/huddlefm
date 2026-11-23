@@ -55,7 +55,7 @@ export class Analytics {
     private client?: Client,
     readonly systemId = "",
     private onError: (error: unknown) => void = () => {},
-    private tracing?: Pick<LlmTracing, "telemetry" | "shutdown">,
+    private tracing?: Pick<LlmTracing, "telemetryOptions" | "shutdown">,
   ) {}
 
   static async create(
@@ -63,6 +63,7 @@ export class Analytics {
     host?: string,
     onError?: (error: unknown) => void,
     idPath = "data/posthog-installation-id",
+    { llmContent = false }: { llmContent?: boolean } = {},
   ) {
     if (!apiKey) return new Analytics(undefined, "", onError);
     const client = new PostHog(apiKey, {
@@ -82,7 +83,7 @@ export class Analytics {
       client,
       await installationId(idPath),
       onError,
-      LlmTracing.create(apiKey, host, client, onError),
+      LlmTracing.create(apiKey, host, client, onError, llmContent),
     );
   }
 
@@ -167,7 +168,7 @@ export class Analytics {
 
   /** The AI SDK telemetry that traces the agent, when PostHog is set up. */
   aiTelemetry() {
-    return this.tracing?.telemetry;
+    return this.tracing?.telemetryOptions();
   }
 
   /**
@@ -200,9 +201,10 @@ export async function startAnalytics(
   apiKey?: string,
   host?: string,
   onError?: (error: unknown) => void,
+  options?: { llmContent?: boolean },
 ) {
   try {
-    current = await Analytics.create(apiKey, host, onError);
+    current = await Analytics.create(apiKey, host, onError, undefined, options);
   } catch (error) {
     current = new Analytics();
     onError?.(error);

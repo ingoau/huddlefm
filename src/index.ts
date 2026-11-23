@@ -69,11 +69,15 @@ log.info(
 const config = loadConfig();
 for (const warning of config.rolePermissions.warnings)
   log.warn({ event: "config_warning" }, warning);
-await startAnalytics(config.posthogApiKey, config.posthogHost, (error) =>
-  log.warn(
-    { event: "posthog_delivery_failed", error: safeError(error) },
-    "PostHog delivery failed",
-  ),
+await startAnalytics(
+  config.posthogApiKey,
+  config.posthogHost,
+  (error) =>
+    log.warn(
+      { event: "posthog_delivery_failed", error: safeError(error) },
+      "PostHog delivery failed",
+    ),
+  { llmContent: config.posthogLlmContent },
 );
 captureAnalytics("app.started", {
   properties: {
