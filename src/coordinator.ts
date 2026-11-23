@@ -332,9 +332,9 @@ const likedNotice = "This will be recommended to you more";
 const communismHostNotice =
   "Communism mode is on, so nobody can take over as host.";
 
-// Hosts song.link can match to other streaming services. Of the sources the
+// Hosts Squigly can match to other streaming services. Of the sources the
 // bot plays, that is YouTube and SoundCloud.
-const songLinkHosts = new Set([
+const squiglyHosts = new Set([
   "youtube.com",
   "www.youtube.com",
   "m.youtube.com",
@@ -343,20 +343,24 @@ const songLinkHosts = new Set([
   "soundcloud.com",
   "www.soundcloud.com",
   "m.soundcloud.com",
+  "on.soundcloud.com",
 ]);
 
 /**
- * Where a saved song points: a song.link page when song.link can match the
- * source, otherwise the source itself. A Navidrome share's URL is a bearer
- * token for its audio, so it gets no link at all.
+ * Where a saved song points: a Squigly page when Squigly can match the source,
+ * otherwise the source itself. Squigly's home page takes the source in its
+ * `link` parameter and makes the shareable link as it opens for YouTube; a
+ * SoundCloud source is filled in for one more click. Squigly refuses http
+ * links, so those go as https. A Navidrome share's URL is a bearer token for
+ * its audio, so it gets no link at all.
  */
 function savedLink(entry: { sourceId: string; canonicalUrl: string }) {
   if (entry.sourceId.startsWith("navidrome:")) return undefined;
   const url = URL.parse(entry.canonicalUrl);
   if (url?.protocol !== "https:" && url?.protocol !== "http:") return undefined;
-  return songLinkHosts.has(url.hostname)
-    ? `https://song.link/${url.href}`
-    : url.href;
+  if (!squiglyHosts.has(url.hostname)) return url.href;
+  url.protocol = "https:";
+  return `https://squigly.link/?link=${encodeURIComponent(url.href)}`;
 }
 
 const autoplayDiscoveryEvery = 4;
