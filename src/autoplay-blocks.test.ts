@@ -129,3 +129,17 @@ test("an unknown artist does not tie different songs together", () => {
   expect([...blocks.sourceIds]).toEqual(["one"]);
   expect(blocks.keys.size).toBe(0);
 });
+
+test("an add that only shares a name with another add still counts", () => {
+  const blocks = roomBlocks(
+    [skip("U3", 300 * day)],
+    [
+      // Alice added another upload under the song's name; Carol added that
+      // upload when its artist was unknown.
+      add("alice", { sourceId: "reupload" }),
+      add("carol", { sourceId: "reupload", artist: "Unknown artist" }),
+    ],
+    { now },
+  );
+  expect(blocks.sourceIds.size).toBe(0);
+});

@@ -7229,10 +7229,15 @@ test("skipping your own song, or a song near its end, is not remembered by the r
   play({ id: "mostly", sourceId: "mostly", duration: 600 }, 500);
   await test.coordinator.action(interaction(test.coordinator, "next_track"));
   expect(test.roomSkips).toEqual([]);
-  // Early on, it counts.
+  // Early on, it counts, however short the song.
   play({ id: "early", sourceId: "early", duration: 200 }, 30);
   await test.coordinator.action(interaction(test.coordinator, "next_track"));
-  expect(test.roomSkips.map((skip) => skip.sourceId)).toEqual(["early"]);
+  play({ id: "skit", sourceId: "skit", duration: 15 }, 3);
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  expect(test.roomSkips.map((skip) => skip.sourceId)).toEqual([
+    "early",
+    "skit",
+  ]);
   await test.coordinator.endFromSlack();
 });
 
@@ -7285,6 +7290,7 @@ test("removing a queued autoplay pick keeps it out of the mix", async () => {
   expect(Reflect.get(test.coordinator, "autoplayRejected")).toContain(
     "secondpick1",
   );
+  expect(test.roomSkips.map((skip) => skip.sourceId)).toEqual(["secondpick1"]);
   await until(() => calls.length > before);
   expect((calls.at(-1)!.exclude as Set<string>).has("secondpick1")).toBe(true);
   await test.coordinator.endFromSlack();

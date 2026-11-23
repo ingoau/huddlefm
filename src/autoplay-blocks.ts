@@ -72,11 +72,21 @@ export function roomBlocks(
     }
   };
   for (const skip of skips) join(namesOf(skip));
-  // Only adds of a skipped song matter.
-  const relevant = adds.filter((add) =>
-    namesOf(add).some((name) => parent.has(name)),
-  );
-  for (const add of relevant) join(namesOf(add));
+  // Only adds of a skipped song matter, including adds that only share a name
+  // with another add of it.
+  const relevant: RoomAdd[] = [];
+  let rest = [...adds];
+  for (let grew = true; grew;) {
+    grew = false;
+    rest = rest.filter((add) => {
+      const names = namesOf(add);
+      if (!names.some((name) => parent.has(name))) return true;
+      join(names);
+      relevant.push(add);
+      grew = true;
+      return false;
+    });
+  }
 
   type Song = {
     names: Set<string>;

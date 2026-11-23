@@ -365,10 +365,10 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
-// A skip this close to the end, by share or by seconds left, is someone
-// moving on rather than saying "not this", so the room does not remember it.
+// A skip this close to the end is someone moving on rather than saying "not
+// this", so the room does not remember it.
 const lateSkipShare = 0.8;
-const lateSkipSeconds = 20;
+const autoplayBansCacheMs = 60_000;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 // Where video mode's autoplay picks come from, as recorded on each pick.
@@ -501,6 +501,14 @@ export class Coordinator {
   private autoplayCredits: string[][] = [];
   private autoplayPending = false;
   private autoplayRejected: string[] = [];
+  // Room skips this session has recorded, so cached blocks know when they
+  // are out of date.
+  private roomSkipCount = 0;
+  private autoplayBansCache?: {
+    at: number;
+    skips: number;
+    blocks: ReturnType<typeof roomBlocks>;
+  };
   private autoplayRejectedArtists: string[] = [];
   private anchorEnabled = false;
   // Whether this new session took its settings from its channel's defaults.
@@ -4169,13 +4177,25 @@ export class Coordinator {
   }
 
   // Songs this room's skips keep out of autoplay right now, weighed against
-  // how many people here chose them (see autoplay-blocks.ts).
+  // how many people here chose them (see autoplay-blocks.ts). Built from the
+  // room's whole history, so kept until this session skips something or a
+  // minute passes, rather than rebuilt for every candidate.
   private autoplayBans() {
-    return roomBlocks(
+    const now = Date.now();
+    const cached = this.autoplayBansCache;
+    if (
+      cached &&
+      cached.skips === this.roomSkipCount &&
+      now - cached.at < autoplayBansCacheMs
+    )
+      return cached.blocks;
+    const blocks = roomBlocks(
       this.store.roomSkips(this.roomId),
       this.store.roomAdds(this.roomId),
-      { botUserId: this.botUserId },
+      { botUserId: this.botUserId, now },
     );
+    this.autoplayBansCache = { at: now, skips: this.roomSkipCount, blocks };
+    return blocks;
   }
 
   private isBanned(
@@ -4205,10 +4225,9 @@ export class Coordinator {
       playedSeconds !== undefined &&
       !skipped.live &&
       Boolean(skipped.duration) &&
-      (playedSeconds >= skipped.duration! * lateSkipShare ||
-        skipped.duration! - playedSeconds <= lateSkipSeconds);
+      playedSeconds >= skipped.duration! * lateSkipShare;
     const ownChoice = !skipped.automatic && skipped.requesterId === userId;
-    if (!late && !ownChoice)
+    if (!late && !ownChoice) {
       this.store.recordRoomSkip({
         roomId: this.roomId,
         sessionId: this.id,
@@ -4217,6 +4236,8 @@ export class Coordinator {
         title: skipped.title,
         artist: skipped.artist,
       });
+      this.roomSkipCount++;
+    }
     this.autoplayRejected = [
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
@@ -6030,7 +6051,7 @@ export class Coordinator {
     });
     this.notifyTrack("track.skipped", skipped);
     this.store.incrementUsage("next");
-    this.rejectSkipped(skipped, userId, this.playbackSeconds);
+    this.rejectSkipped(skipped, userId, this.playbackPosition());
     await this.advance("skipped");
     this.scheduleAutoplay();
     return skipped;

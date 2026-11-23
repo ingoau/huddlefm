@@ -981,6 +981,11 @@ export class Store {
     this.migrateAutoplayModes();
     this.migrateScrobblesPerPlay();
     this.migrateRoomSkips();
+    // Bans from an unreleased build of room skips, which followed the user.
+    this.db.run("DROP TABLE IF EXISTS autoplay_bans");
+    // A room's sessions, for what the room added and heard.
+    this.db.run(`CREATE INDEX IF NOT EXISTS sessions_room
+      ON sessions(COALESCE(source_channel_id, channel_id))`);
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
@@ -2155,8 +2160,8 @@ export class Store {
           ORDER BY liked_at DESC, rowid DESC LIMIT ?`,
         ),
       },
-      // Each song once, whether the mix remembers the skip, autoplay keeps
-      // the song out wherever the user listens, or both.
+      // Each song once, whether the mix remembers the skip, a room does, or
+      // both.
       skips: {
         count: count(`SELECT COUNT(*) AS count FROM (${skippedSongs})`),
         recent: songs(
