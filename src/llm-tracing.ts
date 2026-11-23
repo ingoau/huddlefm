@@ -11,9 +11,8 @@ import type { PostHog } from "posthog-node";
  * rest of HuddleFM's analytics it leaves out what people wrote (privacy
  * mode), unless `recordContent` is set (POSTHOG_LLM_CONTENT): then the
  * prompt, replies, and tool arguments and results go too, for debugging. A
- * run is
- * credited to whoever is in the PostHog client's context when it starts, so
- * the agent runs inside `client.withContext`.
+ * run is credited to whoever is in the PostHog client's context when it
+ * starts, so the agent runs inside `client.withContext`.
  */
 export class LlmTracing {
   private telemetry: OpenTelemetry;

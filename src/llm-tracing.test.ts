@@ -46,6 +46,12 @@ async function traced(recordContent: boolean) {
                 toolName: "search",
                 input: JSON.stringify({ query: "secret song request" }),
               },
+              {
+                type: "tool-call",
+                toolCallId: "call-2",
+                toolName: "broken",
+                input: "{}",
+              },
             ],
             finishReason: { unified: "tool-calls", raw: "tool_calls" },
             usage,
@@ -61,16 +67,24 @@ async function traced(recordContent: boolean) {
   const agent = new ToolLoopAgent({
     model,
     telemetry: tracing.telemetryOptions(),
+    instructions: "private instructions",
     stopWhen: stepCountIs(3),
     tools: {
       search: tool({
         inputSchema: z.object({ query: z.string() }),
         execute: async () => ({ found: "tool result text" }),
       }),
+      broken: tool({
+        inputSchema: z.object({}),
+        execute: async (): Promise<{ ok: boolean }> => {
+          throw new Error("tool failure text");
+        },
+      }),
     },
   });
-  await client.withContext({ distinctId: "U123", sessionId: "session" }, () =>
-    agent.generate({ prompt: "play the private prompt" }),
+  await client.withContext(
+    { distinctId: "U123", sessionId: "S-trace-42" },
+    () => agent.generate({ prompt: "play the private prompt" }),
   );
   await tracing.shutdown();
   return exports.join("\n");
@@ -81,13 +95,15 @@ const written = [
   "secret song request",
   "tool result text",
   "Queued the hidden reply",
+  "private instructions",
+  "tool failure text",
 ];
 
 test("traces leave out what people wrote by default", async () => {
   const sent = await traced(false);
   // The run is there, credited to its user and session.
   expect(sent).toContain("U123");
-  expect(sent).toContain("session");
+  expect(sent).toContain("S-trace-42");
   for (const text of written) expect(sent).not.toContain(text);
 });
 
