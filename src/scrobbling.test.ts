@@ -222,7 +222,7 @@ test("does not count seeks as listening time", async () => {
   store.close();
 });
 
-test("one user connection applies to every Huddle playback", async () => {
+test("one user connection applies to every huddle playback", async () => {
   let playingNow = 0;
   const store = new Store(":memory:");
   store.setListenBrainzToken("user", "token", "user");
@@ -429,7 +429,7 @@ test("ask-for-every-track mode asks about each track and scrobbles only confirme
   // Only the current and previous tracks can still be confirmed.
   expect(playback.confirm("user", "first")).toBe("unknown");
 
-  // With the whole Huddle enabled there is nothing to ask.
+  // With the whole huddle enabled there is nothing to ask.
   dispatcher.setSessionEnabled("session", "user", true);
   playback.start(track("fourth"), ["user"]);
   expect(asked).toEqual(["user:first", "user:second", "user:third"]);
@@ -517,7 +517,7 @@ test("songs a listener adds scrobble without asking when they choose so", () => 
   expect(asked).toEqual(["user:own-off", "user:theirs", "user:autoplay"]);
   expect(pending()).toEqual(["own"]);
 
-  // Asking every Huddle, their songs scrobble until they turn this one off.
+  // Asking every huddle, their songs scrobble until they turn this one off.
   dispatcher.setMode("user", "ask");
   listen(askTrack("own-ask"));
   listen(theirs("theirs-ask"));
@@ -610,7 +610,7 @@ test("a listen is remembered once however often scrobbling is switched on", () =
   store.close();
 });
 
-test("remembers a real listen for the Huddle mix, scrobbler or not", () => {
+test("remembers a real listen for the huddle mix, scrobbler or not", () => {
   const store = new Store(":memory:");
   const dispatcher = new ScrobbleDispatcher(store, {});
   const track = {

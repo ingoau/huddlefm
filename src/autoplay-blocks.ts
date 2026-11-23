@@ -2,7 +2,7 @@ import { trackKey } from "./recommendations.ts";
 import type { RoomAdd, RoomSkip } from "./store.ts";
 
 // Which songs a room's skips keep out of its autoplay. Everything in
-// fatigue.ts is a soft weight across Huddles; this is the hard part, and it
+// fatigue.ts is a soft weight across huddles; this is the hard part, and it
 // is decided per room from what the room actually did, every time autoplay
 // picks, so a new add or skip changes the answer straight away.
 //

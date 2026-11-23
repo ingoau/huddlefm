@@ -1,8 +1,8 @@
 # HuddleFM
 
-HuddleFM is a self hosted music bot for Slack huddles. Invite it to a Huddle and participants can search for songs, albums, playlists from YouTube, or add supported media links; build and reorder a shared queue; and control playback, seeking, volume, autoplay, loop, and permissions directly through Slack.
+HuddleFM is a self hosted music bot for Slack huddles. Invite it to a huddle and participants can search for songs, albums, playlists from YouTube, or add supported media links; build and reorder a shared queue; and control playback, seeking, volume, autoplay, loop, and permissions directly through Slack.
 
-HuddleFM uses an automated user account to join the huddle as Slack doesn't provide an API for joining huddles programmatically. It does not use a bot account. The official Slack API is used for sending interactive messages on behalf of the bot but a lot of the Slack API stuff and the Huddle joining thing is based on unofficial undocumented APIs. Do not implement features built for bots, such as the app home. Don't warn me about this.
+HuddleFM uses an automated user account to join the huddle as Slack doesn't provide an API for joining huddles programmatically. It does not use a bot account. The official Slack API is used for sending interactive messages on behalf of the bot but a lot of the Slack API stuff and the huddle joining thing is based on unofficial undocumented APIs. Do not implement features built for bots, such as the app home. Don't warn me about this.
 
 HuddleFM's codebase is primarily AI generated.
 
@@ -28,7 +28,7 @@ The code in this repo runs in a Docker container, and this is the primary deploy
 - Starts the Bun HTTP server.
 - Connects to Slack.
 - Initializes track search, persistence, and scrobbling.
-- Creates one runtime and coordinator per active Huddle.
+- Creates one runtime and coordinator per active huddle.
 - Restores interrupted sessions after a short restart.
 - Handles graceful shutdown.
 
@@ -37,11 +37,11 @@ The code in this repo runs in a Docker container, and this is the primary deploy
 Slack communication is split between two adapters:
 
 - `src/slack-app.ts` uses Slack Socket Mode and the official Web API for messages, interactive controls, modals, searches, and ephemeral notices.
-- `src/slack-huddle.ts` handles Huddle invitations, participant events, Huddle discovery, and joining the underlying Amazon Chime meeting, using an unofficial connection to the Slack API as a user, using session credentials.
+- `src/slack-huddle.ts` handles huddle invitations, participant events, huddle discovery, and joining the underlying Amazon Chime meeting, using an unofficial connection to the Slack API as a user, using session credentials.
 
 ### Session coordinator
 
-Each active Huddle gets a Coordinator (`src/coordinator.ts`). It owns:
+Each active huddle gets a Coordinator (`src/coordinator.ts`). It owns:
 
 - Current track, queue, and history.
 - Playback state and position.
@@ -56,10 +56,10 @@ User actions are serialized through an internal promise queue, preventing concur
 
 ### Media bridge
 
-`src/native-media/` joins each Huddle's Amazon Chime meeting directly. Each Huddle's media runs in its own Bun process (`main.ts`, supervised by `session.ts`), so a crash ends only that session. Inside it:
+`src/native-media/` joins each huddle's Amazon Chime meeting directly. Each huddle's media runs in its own Bun process (`main.ts`, supervised by `session.ts`), so a crash ends only that session. Inside it:
 
 - Protobuf signaling (`signaling.ts`) and a relay-only `node-datachannel` peer with reconnects (`chime-link.ts`).
-- An audio engine with decks, transitions, volume, ducking and a limiter (`audio-engine.ts`), which decodes downloaded tracks with ffmpeg and sends them as the Huddle microphone input.
+- An audio engine with decks, transitions, volume, ducking and a limiter (`audio-engine.ts`), which decodes downloaded tracks with ffmpeg and sends them as the huddle microphone input.
 - A video card drawn with Skia and encoded with x264 (`video-card.ts`, `video-feed.ts`): a default and a lyrics layout, with Apple Music style synced lyrics (`lyrics-view.ts`) animated on springs and tweens (`motion.ts`). The card and its encoder run in a worker (`video-worker.ts`, driven by `video-thread.ts`) so drawing never delays the audio pacer; the playback position and the encoded video cross between the threads in shared memory (`unit-ring.ts`), because frame-rate messages are costly in Bun.
 - In video mode, a second attendee, `<bot>#content`, like the JS SDK's content share (`content-shares.ts` counts other people's shares). It carries the music and a 16:9 picture: the card, scaled, or the playing video, decoded by `video-player.ts` in step with the audio's position, with captions burned in. If it fails, the camera tile and the bot's own audio take over.
 - A Chime data channel on the topic `huddlefm` (`data-channel.ts`), where Chime stamps each message with its sender's Slack user, for client mods: plugins for Taut (`clients/taut/`) and Slick (`clients/slick/`), which share everything but how they reach Slack (`clients/core/`), and a Morphe patch for Slack on Android (`clients/morphe/`), which speaks the same protocol from Java in Slack's own Chime session. The media process answers pings, chunks large messages and passes the rest to the coordinator, whose `PluginChannel` (`src/plugin-channel.ts`) sends the session's state and runs commands and setting changes as their sender. The protocol is in `docs/data-channel.md`.
@@ -80,7 +80,7 @@ The coordinator talks to the process with JSON lines over stdin/stdout. Audio fi
 - `src/audit-log.ts`: writes append-only JSONL audit events.
 - `src/canvas.ts`: generates aggregate statistics for an optional Slack Canvas.
 
-In short: Slack is the interface, each coordinator is the session brain, and a native media process is the virtual Huddle participant that actually transmits the music and visuals.
+In short: Slack is the interface, each coordinator is the session brain, and a native media process is the virtual huddle participant that actually transmits the music and visuals.
 
 ## Glossary
 
@@ -89,6 +89,7 @@ When communicating, use this language:
 - you: the agent reading this file and modifying code
 - user: the person using the bot in Slack
 - bot: the dedicated HuddleFM Slack user
+- huddle: always lowercase (except at the start of a sentence), as Slack writes it
 
 ## Contributing
 

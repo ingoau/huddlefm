@@ -474,7 +474,7 @@ Be concise. After taking actions, briefly confirm what changed. Do not invent tr
 Do not use emojis.
 ${
   options.coordinator.videoMode
-    ? "The session is in video mode: people watch videos together on a screen share. Autoplay, Huddle mix, lyrics, crossfades, ducking and scrobbling are paused until the host switches back to music mode."
+    ? "The session is in video mode: people watch videos together on a screen share. Autoplay, huddle mix, lyrics, crossfades, ducking and scrobbling are paused until the host switches back to music mode."
     : `The session is in music mode. A video link added here plays as audio unless add_tracks is given withVideoMode. Display modes: ${displayModes.join(", ")}. Transition modes: ${transitionModes.join(", ")}.`
 }${
         options.coordinator.communismMode

@@ -65,7 +65,7 @@ export function checked(state: InputState | undefined) {
   );
 }
 
-// The settings modal's Huddle mix checkboxes name the sources they offer in
+// The settings modal's huddle mix checkboxes name the sources they offer in
 // their action ID. Only those sources are saved, so a service the user had
 // not connected keeps its choice for when they do, and a refreshed modal
 // that offers a different set starts from the saved ticks rather than Slack
@@ -73,10 +73,10 @@ export function checked(state: InputState | undefined) {
 const huddleMixActionPrefix = "sources:";
 
 // The services a user scrobbles to, named in the checkboxes' action ID as the
-// Huddle mix sources are, so only the services the form offered are saved.
+// huddle mix sources are, so only the services the form offered are saved.
 const scrobbleServicesPrefix = "services:";
 
-// The choice a settings form makes for each Huddle mix source it offered, or
+// The choice a settings form makes for each huddle mix source it offered, or
 // undefined when the checkboxes were not part of it.
 export function submittedHuddleMixSources(
   block: Record<string, InputState> | undefined,
@@ -311,7 +311,7 @@ export type SettingsViewOptions = {
     defaults?: { savedBy: string; savedAt: number };
     // The channel's saved sessions the viewer may delete.
     saves: ChannelSaveView[];
-    // Who turned on joining every new Huddle in the channel, when it is on.
+    // Who turned on joining every new huddle in the channel, when it is on.
     autoJoin?: { enabledBy: string; enabledAt: number };
   };
   integrations: { userId: string; requestId: string; permissions: string[] }[];
@@ -441,7 +441,7 @@ export function settingsView(options: SettingsViewOptions) {
 }
 
 // The action ID of each setting's input. Selects are `mode` and toggles
-// `enabled` unless named here; the Huddle mix and scrobbling checkboxes name
+// `enabled` unless named here; the huddle mix and scrobbling checkboxes name
 // what they offer after their prefix.
 const actionIds: Record<string, string> = {
   volume: "percent",
@@ -722,8 +722,8 @@ function channelBlocks(options: SettingsViewOptions) {
         text: {
           type: "mrkdwn",
           text: autoJoin
-            ? `*On.* I join every new Huddle in this channel by myself. Turned on by <@${autoJoin.enabledBy}> ${slackDate(autoJoin.enabledAt)}.`
-            : "*Off.* I join a Huddle in this channel when someone invites me.",
+            ? `*On.* I join every new huddle in this channel by myself. Turned on by <@${autoJoin.enabledBy}> ${slackDate(autoJoin.enabledAt)}.`
+            : "*Off.* I join a huddle in this channel when someone invites me.",
         },
         accessory: autoJoin
           ? button("disable_channel_auto_join", plain("Turn off"), { value })
@@ -732,7 +732,7 @@ function channelBlocks(options: SettingsViewOptions) {
               style: "primary",
               confirm: confirm(
                 "Turn on auto join?",
-                "I'll join every new Huddle in this channel as it starts, without waiting for an invite.",
+                "I'll join every new huddle in this channel as it starts, without waiting for an invite.",
                 "Turn on",
               ),
             }),
@@ -942,11 +942,11 @@ const userSongLabels: Record<UserSongKind, { title: string; effect: string }> =
     added: {
       title: "Songs you added",
       effect:
-        "Your name comes off the songs you added that have finished, and the Huddle mix stops drawing on them. Songs still queued or playing keep it.",
+        "Your name comes off the songs you added that have finished, and the huddle mix stops drawing on them. Songs still queued or playing keep it.",
     },
     plays: {
       title: "Songs you heard",
-      effect: "The Huddle mix forgets what you have listened to.",
+      effect: "The huddle mix forgets what you have listened to.",
     },
     likes: {
       title: "Songs you liked",
@@ -955,7 +955,7 @@ const userSongLabels: Record<UserSongKind, { title: string; effect: string }> =
     skips: {
       title: "Songs you skipped",
       effect:
-        "Autoplay forgets what you skipped. The Huddles you skipped in still remember that someone did, but not who.",
+        "Autoplay forgets what you skipped. The huddles you skipped in still remember that someone did, but not who.",
     },
   };
 

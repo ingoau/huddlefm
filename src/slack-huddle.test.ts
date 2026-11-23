@@ -153,7 +153,7 @@ test("does not leak a failed response", () => {
   ).toThrow("rooms.join failed: invalid_auth");
 });
 
-test("normalizes an invited Huddle from room metadata", () => {
+test("normalizes an invited huddle from room metadata", () => {
   expect(
     normalizeInvitedJoinResponse(
       {
@@ -183,7 +183,7 @@ test("normalizes an invited Huddle from room metadata", () => {
   });
 });
 
-test("normalizes a Huddle invitation with its actor", () => {
+test("normalizes a huddle invitation with its actor", () => {
   expect(
     normalizeRealtimeEvent({
       type: "huddle_invite",
@@ -280,7 +280,7 @@ test("normalizes top-level DMs including bot messages", () => {
   ).toBeUndefined();
 });
 
-test("normalizes a Huddle starting in a channel", () => {
+test("normalizes a huddle starting in a channel", () => {
   const started = {
     type: "message",
     subtype: "huddle_thread",
@@ -321,7 +321,7 @@ test("normalizes a Huddle starting in a channel", () => {
       room: { ...started.room, date_end: 2 },
     }),
   ).toBeUndefined();
-  // An edit to the thread root is not a Huddle starting.
+  // An edit to the thread root is not a huddle starting.
   expect(
     normalizeRealtimeEvent({
       type: "message",
@@ -333,7 +333,7 @@ test("normalizes a Huddle starting in a channel", () => {
   ).toBeUndefined();
 });
 
-test("only accepts active Huddle thread roots", () => {
+test("only accepts active huddle thread roots", () => {
   const active = {
     ok: true,
     messages: [
@@ -377,7 +377,7 @@ test("only accepts active Huddle thread roots", () => {
   ).toBeUndefined();
 });
 
-test("only counts listed Huddle participants as members", () => {
+test("only counts listed huddle participants as members", () => {
   const room = { callId: "R123", participantIds: ["U1", "U2"] };
   expect(huddleHasParticipant(room, "U1")).toBe(true);
   expect(huddleHasParticipant(room, "U3")).toBe(false);

@@ -138,7 +138,7 @@ export class DataChannel {
     }
   }
 
-  /** Tells clients already in the Huddle that the bot is here. */
+  /** Tells clients already in the huddle that the bot is here. */
   announce() {
     return this.broadcast({
       type: "hello",

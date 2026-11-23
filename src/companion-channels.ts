@@ -78,7 +78,7 @@ export class CompanionChannels {
                 userId,
                 err: error,
               },
-              "Could not add Huddle participant to companion channel",
+              "Could not add huddle participant to companion channel",
             );
             await this.notify(
               userId,
