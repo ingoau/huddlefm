@@ -55,7 +55,7 @@ The whole session, sent after every change (merged, at most every 250 ms) and af
     "volume": 50,
     "hostId": "U123",
     "communism": false,
-    "allowed": ["add", "remove-own"],
+    "allowed": ["add", "remove-own", "skip", "pause", "volume"],
     "loopMode": "off",
     "queueLimit": 50,
     "player": { "channel": "C123", "ts": "1793055831.760359" }
@@ -257,7 +257,7 @@ The bot's settings modal is drawn from the same list (`src/settings-schema.ts`),
 }
 ```
 
-- `kind` is `select` (one of `options`, `value` a string), `toggle` (`text` beside a checkbox, `value` a boolean), `multi` (any of `options`, `value` a list), or `user` (a Slack user id, or `null`).
+- `kind` is `select` (one of `options`, `value` a string), `number` (a number from `min` to `max`, `value` a string, set with a number), `toggle` (`text` beside a checkbox, `value` a boolean), `multi` (any of `options`, `value` a list), or `user` (a Slack user id, or `null`).
 - `section` starts a group of settings under a heading.
 - The `permissions` field also lists `presets`, each `{ value, label, permissions }`.
 

@@ -39,6 +39,7 @@ export type SettingField = {
   section?: string;
 } & (
   | { kind: "select"; options: SettingOption[]; value: string }
+  | { kind: "number"; min: number; max: number; value: string }
   | { kind: "toggle"; text: string; value: boolean }
   | {
       kind: "multi";

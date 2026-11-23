@@ -329,6 +329,13 @@ function throwIfAborted(signal?: AbortSignal) {
 // What the person who pressed the like button hears back. Nobody else sees it,
 // so it says what the like is for rather than announcing it to the room.
 const likedNotice = "This will be recommended to you more";
+// Shown once to each host, the first time they start a session after
+// everyone could skip, pause and change the volume by default.
+const openControlsNotice = "open-controls-v1";
+const openControlsNoticeText =
+  "Heads up: everyone in the huddle can now skip, pause and change the volume by default, not just the host. You can change this under Settings › Host › Permissions.";
+const openControlsCapabilities = ["skip", "pause", "volume"];
+
 const communismHostNotice =
   "Communism mode is on, so nobody can take over as host.";
 
@@ -373,6 +380,9 @@ const autoplayRecentWindow = 100;
 // this", so the room does not remember it.
 const lateSkipShare = 0.8;
 const autoplayBansCacheMs = 60_000;
+// How long a song that failed to prepare stays out of autoplay's picks,
+// unless it prepares for someone in the meantime.
+const autoplayFailedWindowMs = 7 * 24 * 60 * 60_000;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 // Where video mode's autoplay picks come from, as recorded on each pick.
@@ -802,6 +812,7 @@ export class Coordinator {
       [...this.participants].map((userId) => this.promptScrobbling(userId)),
     );
     this.prefetchRecommendations();
+    void this.announceOpenControls();
     this.audit.record("session.started", this.hostId, {
       sessionId: this.id,
       huddleId: this.room.huddleId,
@@ -813,6 +824,35 @@ export class Coordinator {
       { event: "started", durationMs: Date.now() - startedAt },
       "Session started",
     );
+  }
+
+  // Tells a host, once, that everyone can now skip, pause and change the
+  // volume, when this session lets them; a channel's defaults may not.
+  private async announceOpenControls() {
+    const hostId = this.hostId;
+    try {
+      if (
+        !hostId ||
+        this.communism ||
+        !openControlsCapabilities.every((capability) =>
+          this.allowed.has(capability),
+        ) ||
+        this.store.noticeShown(hostId, openControlsNotice)
+      )
+        return;
+      await this.slack.ephemeral(
+        this.room.uiChannelId,
+        hostId,
+        openControlsNoticeText,
+        this.room.uiThreadTs,
+      );
+      this.store.markNoticeShown(hostId, openControlsNotice);
+    } catch (error) {
+      this.log.warn(
+        { event: "notice_failed", userId: hostId, err: error },
+        "Could not send notice",
+      );
+    }
   }
 
   async resume(actorId?: string) {
@@ -1243,8 +1283,8 @@ export class Coordinator {
         approve_video_request: () => this.answerVideoRequest(interaction, true),
         decline_video_request: () =>
           this.answerVideoRequest(interaction, false),
-        volume_down: () => this.changeVolume(interaction, -0.05),
-        volume_up: () => this.changeVolume(interaction, 0.05),
+        volume_down: () => this.changeVolume(interaction, -0.1),
+        volume_up: () => this.changeVolume(interaction, 0.1),
         like_track: () => this.like(interaction),
         save_track: () => this.save(interaction),
         queue_move_up: () => this.reorder(interaction, -1),
@@ -2964,18 +3004,17 @@ export class Coordinator {
         : change.value;
     const invalid = { ok: false as const, error: "That value is invalid." };
     switch (field.kind) {
+      case "number": {
+        const number =
+          typeof value === "number"
+            ? value
+            : typeof value === "string" && /^\d+(\.\d+)?$/.test(value)
+              ? Number(value)
+              : NaN;
+        if (!(number >= field.min && number <= field.max)) return invalid;
+        break;
+      }
       case "select":
-        // any percent, as its steps grow to include the one it's at
-        if (field.id === "volume") {
-          const percent =
-            typeof value === "number"
-              ? value
-              : typeof value === "string" && /^\d+(\.\d+)?$/.test(value)
-                ? Number(value)
-                : NaN;
-          if (!(percent >= 0 && percent <= 100)) return invalid;
-          break;
-        }
         if (
           typeof value !== "string" ||
           !field.options.some((option) => option.value === value)
@@ -4905,6 +4944,7 @@ export class Coordinator {
         ...recent.map((track) => track.sourceId),
         ...this.autoplayRejected,
         ...bans.sourceIds,
+        ...this.store.failedSources(Date.now() - autoplayFailedWindowMs),
       ]);
       const ranked = new Map<
         string,
@@ -7575,7 +7615,7 @@ export class Coordinator {
       );
     const previous = this.settingsSnapshot();
     const previousScrobbling = this.scrobblingSnapshot(interaction.userId);
-    const value = state.volume?.percent?.selected_option?.value?.trim();
+    const value = state.volume?.percent?.value?.trim();
     if (value !== undefined && this.can(interaction.userId, "volume")) {
       const percent = Number(value);
       if (!value || !Number.isFinite(percent) || percent < 0 || percent > 100)
@@ -7807,7 +7847,7 @@ export class Coordinator {
     };
     if (fields.includes("volume")) {
       let volume = this.volume;
-      const percentText = state.volume?.percent?.selected_option?.value?.trim();
+      const percentText = state.volume?.percent?.value?.trim();
       if (percentText !== undefined) {
         const percent = Number(percentText);
         if (

@@ -2,11 +2,16 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { PostHog } from "posthog-node";
 import { redactSecrets, safeError } from "./error-message.ts";
+import { LlmTracing } from "./llm-tracing.ts";
 
 type Properties = Record<string, unknown>;
 type Client = Pick<
   PostHog,
-  "capture" | "captureException" | "setPersonProperties" | "shutdown"
+  | "capture"
+  | "captureException"
+  | "setPersonProperties"
+  | "shutdown"
+  | "withContext"
 >;
 type Context = {
   distinctId?: string;
@@ -50,6 +55,7 @@ export class Analytics {
     private client?: Client,
     readonly systemId = "",
     private onError: (error: unknown) => void = () => {},
+    private tracing?: Pick<LlmTracing, "telemetry" | "shutdown">,
   ) {}
 
   static async create(
@@ -72,7 +78,12 @@ export class Analytics {
           : null,
     });
     if (onError) client.on("error", onError);
-    return new Analytics(client, await installationId(idPath), onError);
+    return new Analytics(
+      client,
+      await installationId(idPath),
+      onError,
+      LlmTracing.create(apiKey, host, client),
+    );
   }
 
   // Client errors are reported, never thrown at the caller.
@@ -154,7 +165,29 @@ export class Analytics {
     );
   }
 
+  /** The AI SDK telemetry that traces the agent, when PostHog is set up. */
+  aiTelemetry() {
+    return this.tracing?.telemetry;
+  }
+
+  /**
+   * Runs `fn` as `distinctId`, in `sessionId`, so the AI traces it starts are
+   * theirs and sit with the session's other events.
+   */
+  withContext<T>(context: Omit<Context, "properties">, fn: () => T): T {
+    if (!this.client) return fn();
+    return this.client.withContext(
+      { distinctId: context.distinctId, sessionId: context.sessionId },
+      fn,
+    );
+  }
+
   async shutdown() {
+    try {
+      await this.tracing?.shutdown();
+    } catch (error) {
+      this.onError(error);
+    }
     try {
       await this.client?.shutdown(5_000);
     } catch (error) {
@@ -194,6 +227,17 @@ export function setPersonProperties(
 
 export function captureException(...args: Parameters<Analytics["exception"]>) {
   current.exception(...args);
+}
+
+export function aiTelemetry() {
+  return current.aiTelemetry();
+}
+
+export function withAnalyticsContext<T>(
+  context: Omit<Context, "properties">,
+  fn: () => T,
+) {
+  return current.withContext(context, fn);
 }
 
 export function shutdownAnalytics() {

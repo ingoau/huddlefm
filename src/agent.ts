@@ -6,7 +6,11 @@ import {
   type ToolExecutionOptions,
 } from "ai";
 import { z } from "zod";
-import { capture as captureAnalytics } from "./analytics.ts";
+import {
+  aiTelemetry,
+  capture as captureAnalytics,
+  withAnalyticsContext,
+} from "./analytics.ts";
 import type { Coordinator } from "./coordinator.ts";
 import {
   autoplayModes,
@@ -167,7 +171,10 @@ const settingsSchema = z.object({
         ...(keyof typeof permissionPresets)[],
       ],
     )
-    .optional(),
+    .optional()
+    .describe(
+      "What everyone but the host may do. default: add songs, remove their own, skip, pause, change volume; add-only: add songs and remove their own; host-only: nothing; collaborative: everything but clear the queue and end the session",
+    ),
   hostUserId: z
     .string()
     .optional()
@@ -486,10 +493,28 @@ Loop modes: ${loopModes.join(", ")}.`,
       stopWhen: stepCountIs(10),
       temperature: 0.2,
     });
-    const result = await agent.generate({
-      prompt,
-      abortSignal: AbortSignal.timeout(timeoutMs),
-    });
+    const telemetry = aiTelemetry();
+    // Traced to PostHog's LLM analytics as this user's, in this session.
+    const result = await withAnalyticsContext(
+      { distinctId: options.userId, sessionId: options.coordinator.id },
+      () =>
+        agent.generate({
+          prompt,
+          abortSignal: AbortSignal.timeout(timeoutMs),
+          ...(telemetry
+            ? {
+                telemetry: {
+                  isEnabled: true,
+                  // what people asked and were told stays out of analytics
+                  recordInputs: false,
+                  recordOutputs: false,
+                  functionId: "huddlefm-session",
+                  integrations: telemetry,
+                },
+              }
+            : {}),
+        }),
+    );
     reply = agentCommandResult(result);
   } catch (error) {
     log.error(

@@ -482,6 +482,8 @@ export function fieldFormState(
       return {
         [field.id]: { [id]: { selected_option: { value: String(value) } } },
       };
+    case "number":
+      return { [field.id]: { [id]: { value: String(value) } } };
     case "toggle":
       return {
         [field.id]: {
@@ -517,12 +519,12 @@ function draftValue(
     case "select": {
       const value = block[actionId(field)]?.selected_option?.value;
       if (value === undefined) return undefined;
-      // The volume keeps whatever it was, as its steps grow to include it.
-      return field.id === "volume" ||
-        field.options.some((option) => option.value === value)
+      return field.options.some((option) => option.value === value)
         ? value
         : undefined;
     }
+    case "number":
+      return block[actionId(field)]?.value?.trim() || undefined;
     case "toggle":
       return checked(block.enabled);
     case "user":
@@ -593,6 +595,20 @@ function settingInput(field: SettingField, revision: number) {
           })),
           field.value,
         ),
+        options,
+      );
+    case "number":
+      return input(
+        field.id,
+        field.label,
+        {
+          type: "number_input",
+          action_id: id,
+          is_decimal_allowed: true,
+          min_value: String(field.min),
+          max_value: String(field.max),
+          initial_value: field.value,
+        },
         options,
       );
     case "toggle":

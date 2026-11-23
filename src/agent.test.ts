@@ -88,6 +88,21 @@ test("the tools follow the mode, like the player does", () => {
   );
 });
 
+test("the agent offers each permission preset", () => {
+  const tools = agentTools(
+    { videoMode: false } as unknown as Coordinator,
+    "U1",
+  ) as unknown as Record<string, { inputSchema: z.ZodObject }>;
+  const preset = tools.update_settings!.inputSchema.shape
+    .permissionPreset as z.ZodOptional<z.ZodEnum>;
+  expect(preset.unwrap().options).toEqual([
+    "default",
+    "add-only",
+    "host-only",
+    "collaborative",
+  ]);
+});
+
 test("RateLimiter allows each window's limit, then says how long to wait", () => {
   let now = 0;
   const limiter = new RateLimiter(
