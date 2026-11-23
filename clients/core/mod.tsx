@@ -243,7 +243,11 @@ export class HuddleFMMod {
       () => botUser.get() || undefined,
     );
     this.mediaKeys = host.options.mediaKeys
-      ? new MediaKeys(this.client, say)
+      ? new MediaKeys(this.client, say, (userId) =>
+          members
+            .get(userId)
+            .then((member) => (member ? memberNames(member)[0] : undefined)),
+        )
       : undefined;
     this.platform = {
       client: this.client,
