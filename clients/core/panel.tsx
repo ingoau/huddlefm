@@ -2149,7 +2149,7 @@ function NumberField(props: {
           if (event.key !== "Enter") return;
           event.preventDefault();
           if (valid && draft.trim() !== field.value)
-            void props.onChange(number).then((ok) => {
+            props.onChange(number).then((ok) => {
               if (!ok) setDraft(field.value);
             });
         }}
