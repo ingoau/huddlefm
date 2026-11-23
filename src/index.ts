@@ -194,6 +194,12 @@ let companions: CompanionChannels;
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
 let canvasTimer: ReturnType<typeof setInterval> | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
+// Follow-up participant checks, one per session, pushed back by each request.
+const participantRecheckTimers = new Map<
+  string,
+  ReturnType<typeof setTimeout>
+>();
+const participantRecheckMs = 5_000;
 let canvasUpdate: Promise<void> | undefined;
 let canvasPending = false;
 let canvasDelay: ReturnType<typeof setTimeout> | undefined;
@@ -582,7 +588,8 @@ async function reconcileSessionParticipants(
     await slackHuddle.participants(callId),
     version,
   );
-  if (!diff) return;
+  // A member event overtook the snapshot, so it was dropped unapplied.
+  if (!diff) return coordinator.participantsVersion !== version;
   const companionChannelId = coordinator.room.companionChannelId;
   for (const userId of diff.added) {
     store.addSessionParticipant(coordinator.id, userId);
@@ -592,6 +599,7 @@ async function reconcileSessionParticipants(
     if (companionChannelId) companions.removeLater(companionChannelId, userId);
     store.removeSessionParticipant(coordinator.id, userId);
   }
+  return false;
 }
 
 // Sessions reconcile independently: one Huddle whose Slack call is slow, or
@@ -609,7 +617,11 @@ async function reconcileParticipants(runtime: Runtime) {
     do {
       reconcilePendingSessions.delete(coordinator.id);
       try {
-        await reconcileSessionParticipants(coordinator, runtime.callId);
+        // Check again shortly rather than leave a missed leave to the next
+        // timer. Not at once: Slack's list may not show a join that just
+        // overtook the snapshot, and would evict them.
+        if (await reconcileSessionParticipants(coordinator, runtime.callId))
+          recheckParticipants(runtime);
       } catch (error) {
         log.warn(
           {
@@ -626,6 +638,34 @@ async function reconcileParticipants(runtime: Runtime) {
     reconcilingSessions.delete(coordinator.id);
     reconcilePendingSessions.delete(coordinator.id);
   }
+}
+
+// Slack sends a leave for each connection, so someone in the Huddle on two
+// devices "leaves" when they close one while still in it. A leave event only
+// prompts a check of Slack's participant list, which removes them once they
+// are really gone. A second check a little later catches a leave the list
+// had not caught up with yet.
+function verifyLeave(runtime: Runtime) {
+  void reconcileParticipants(runtime);
+  recheckParticipants(runtime);
+}
+
+// Checks the session's participants again in a few seconds, timed from the
+// latest request so the list has had time to catch up with every leave.
+function recheckParticipants(runtime: Runtime) {
+  const sessionId = runtime.coordinator?.id;
+  if (!sessionId) return;
+  clearTimeout(participantRecheckTimers.get(sessionId));
+  const callId = runtime.callId;
+  participantRecheckTimers.set(
+    sessionId,
+    setTimeout(() => {
+      participantRecheckTimers.delete(sessionId);
+      const current = runtimeForCall(callId);
+      if (current?.coordinator?.id === sessionId)
+        void reconcileParticipants(current);
+    }, participantRecheckMs),
+  );
 }
 
 function reconcileAllParticipants() {
@@ -1924,15 +1964,7 @@ await slackHuddle.start((event) => {
         event.userId,
       );
   }
-  if (event.type === "MemberLeft") {
-    if (runtime.coordinator.room.companionChannelId)
-      companions.removeLater(
-        runtime.coordinator.room.companionChannelId,
-        event.userId,
-      );
-    runtime.coordinator.memberLeft(event.userId);
-    store.removeSessionParticipant(runtime.coordinator.id, event.userId);
-  }
+  if (event.type === "MemberLeft") verifyLeave(runtime);
   if (event.type === "HuddleEnded") void runtime.coordinator.endFromSlack();
 });
 if (config.canvasId) {
@@ -2014,6 +2046,8 @@ async function shutdownSteps() {
   clearInterval(canvasTimer);
   clearTimeout(canvasDelay);
   clearInterval(reconcileTimer);
+  for (const timer of participantRecheckTimers.values()) clearTimeout(timer);
+  participantRecheckTimers.clear();
   companions.stop();
   for (const timer of endCleanupTimers.values()) clearTimeout(timer);
   log.debug({ event: "shutdown_canvas_wait" }, "Waiting for Canvas update");
