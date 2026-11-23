@@ -52,7 +52,7 @@ const deletedNouns = {
   added: ["song", "songs"],
   plays: ["play", "plays"],
   likes: ["like", "likes"],
-  skips: ["skip", "skips"],
+  skips: ["skipped song", "skipped songs"],
   scrobbles: ["scrobble", "scrobbles"],
 } as const;
 

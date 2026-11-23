@@ -1118,6 +1118,135 @@ test("falls back to the Huddle's own channel when there is no source channel", (
   expect(store.recentRoomPlays("channel", 0)).toHaveLength(1);
 });
 
+test("remembers what each room skipped and who chose it", () => {
+  const store = new Store(":memory:");
+  store.recordRoomSkip({
+    roomId: "room",
+    sessionId: "session",
+    userId: "skipper",
+    sourceId: "source",
+    title: "Song",
+    artist: "Band",
+    skippedAt: 1_000,
+  });
+  store.recordRoomSkip({ roomId: "elsewhere", title: "Other", artist: "Band" });
+  expect(store.roomSkips("room")).toEqual([
+    {
+      userId: "skipper",
+      sourceId: "source",
+      title: "Song",
+      artist: "Band",
+      skippedAt: 1_000,
+    },
+  ]);
+  expect(store.roomSkips("another")).toEqual([]);
+
+  createSession(store, { id: "here", sourceChannelId: "room" });
+  createSession(store, { id: "there", sourceChannelId: "elsewhere" });
+  const add = (
+    id: string,
+    sessionId: string,
+    requesterId: string,
+    status = "played",
+    automatic = false,
+  ) =>
+    store.addTrack({
+      id,
+      sessionId,
+      requesterId,
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: `source-${id}`,
+      title: "Song",
+      artist: "Band",
+      status,
+      automatic,
+    });
+  add("chosen", "here", "U1");
+  add("broken", "here", "U2", "failed");
+  add("autoplay", "here", "bot", "played", true);
+  add("other-room", "there", "U3");
+  expect(store.roomAdds("room")).toEqual([
+    {
+      requesterId: "U1",
+      sourceId: "source-chosen",
+      title: "Song",
+      artist: "Band",
+    },
+  ]);
+});
+
+test("Your data lists each skipped song once, and forgetting keeps the room's memory", () => {
+  const store = new Store(":memory:");
+  store.recordAutoplaySkip({
+    sessionId: "session",
+    userId: "skipper",
+    title: "Song",
+    artist: "Band",
+    weight: 1,
+    skippedAt: 1_000,
+  });
+  for (const [title, skippedAt] of [
+    ["Song", 1_000],
+    ["Chosen", 2_000],
+  ] as const)
+    store.recordRoomSkip({
+      roomId: "room",
+      userId: "skipper",
+      title,
+      artist: "Band",
+      skippedAt,
+    });
+  expect(store.userData("skipper").skips).toEqual({
+    count: 2,
+    recent: [
+      { title: "Chosen", artist: "Band" },
+      { title: "Song", artist: "Band" },
+    ],
+  });
+  expect(store.deleteUserSkips("skipper")).toBe(2);
+  expect(store.userData("skipper").skips.count).toBe(0);
+  // The room still knows someone skipped them, just not who.
+  expect(store.roomSkips("room").map((skip) => skip.userId)).toEqual([
+    undefined,
+    undefined,
+  ]);
+});
+
+test("autoplay skips from before rooms kept their own become room skips", () => {
+  const dir = mkdtempSync(join(tmpdir(), "huddlefm-room-skips-"));
+  const path = join(dir, "state.db");
+  try {
+    const before = new Store(path);
+    createSession(before, { sourceChannelId: "room" });
+    for (const [userId, weight] of [
+      ["guest", 0.25],
+      ["host", 1],
+    ] as const)
+      before.recordAutoplaySkip({
+        sessionId: "session",
+        userId,
+        title: "Song",
+        artist: "Band",
+        weight,
+        skippedAt: 5_000,
+      });
+    before.close();
+    const raw = new Database(path);
+    raw.run("DELETE FROM room_skips");
+    raw.run("DELETE FROM data_migrations WHERE name = 'room-skips-v1'");
+    raw.close();
+    const store = new Store(path);
+    // One skip, credited to whoever pressed the button.
+    expect(store.roomSkips("room")).toEqual([
+      { userId: "host", title: "Song", artist: "Band", skippedAt: 5_000 },
+    ]);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("remembers skipped autoplay picks per listener", () => {
   const store = new Store(":memory:");
   store.recordAutoplaySkip({

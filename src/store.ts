@@ -278,6 +278,23 @@ type RecentTrack = Pick<
   | "live"
 >;
 
+export type RoomSkip = {
+  // Absent for skips recorded before who skipped was kept, or forgotten.
+  userId?: string;
+  sourceId?: string;
+  title: string;
+  artist: string;
+  skippedAt: number;
+};
+
+export type RoomAdd = {
+  // Empty once the adder asked to be forgotten.
+  requesterId: string;
+  sourceId: string;
+  title: string;
+  artist: string;
+};
+
 export type SavedSession = {
   id: string;
   huddleId: string;
@@ -464,6 +481,15 @@ const addedColumns = [
   ["tracks", "plays", "INTEGER NOT NULL DEFAULT 0"],
   ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
+
+// Every song one user (?1) skipped, once each, newest skip first: autoplay
+// skips the mix remembers, and the skips each room remembers.
+const skippedSongs = `
+  SELECT title, artist, MAX(at) AS at FROM (
+    SELECT title, artist, skipped_at AS at FROM autoplay_skips WHERE user_id = ?1
+    UNION ALL
+    SELECT title, artist, skipped_at AS at FROM room_skips WHERE user_id = ?1
+  ) GROUP BY title, artist`;
 
 // The SET clause and bindings for whichever of `fields` are present.
 function assignments(
@@ -841,6 +867,20 @@ export class Store {
         weight REAL NOT NULL,
         skipped_at INTEGER NOT NULL
       );
+      -- What each room skipped, whoever was listening: one row per skip,
+      -- or per autoplay pick removed from the queue. Autoplay weighs these
+      -- against how many people added the song (see autoplay-blocks.ts), so
+      -- rows are events, never verdicts, and are never pruned.
+      CREATE TABLE IF NOT EXISTS room_skips (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        session_id TEXT,
+        user_id TEXT,
+        source_id TEXT,
+        title TEXT NOT NULL,
+        artist TEXT NOT NULL,
+        skipped_at INTEGER NOT NULL
+      );
       -- An explicit "more of this" from one listener. The button is one way
       -- and shows nothing back, so it gets pressed again without meaning any
       -- more than the first time: one row per listener per song, and a repeat
@@ -926,6 +966,10 @@ export class Store {
         ON track_plays(session_id, played_at DESC);
       CREATE INDEX IF NOT EXISTS autoplay_skips_user_recent
         ON autoplay_skips(user_id, skipped_at DESC);
+      CREATE INDEX IF NOT EXISTS room_skips_room
+        ON room_skips(room_id);
+      CREATE INDEX IF NOT EXISTS room_skips_user
+        ON room_skips(user_id);
       CREATE INDEX IF NOT EXISTS track_likes_user_recent
         ON track_likes(user_id, liked_at DESC);
     `);
@@ -936,6 +980,12 @@ export class Store {
       this.ensureColumn(table, column, definition);
     this.migrateAutoplayModes();
     this.migrateScrobblesPerPlay();
+    this.migrateRoomSkips();
+    // Bans from an unreleased build of room skips, which followed the user.
+    this.db.run("DROP TABLE IF EXISTS autoplay_bans");
+    // A room's sessions, for what the room added and heard.
+    this.db.run(`CREATE INDEX IF NOT EXISTS sessions_room
+      ON sessions(COALESCE(source_channel_id, channel_id))`);
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
@@ -1958,6 +2008,66 @@ export class Store {
       .all(...userIds, since) as PlayRecord[];
   }
 
+  recordRoomSkip(skip: {
+    roomId: string;
+    sessionId?: string;
+    userId?: string;
+    sourceId?: string;
+    title: string;
+    artist: string;
+    skippedAt?: number;
+  }) {
+    this.db
+      .query(
+        `INSERT INTO room_skips
+          (id, room_id, session_id, user_id, source_id, title, artist, skipped_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        skip.roomId,
+        skip.sessionId ?? null,
+        skip.userId ?? null,
+        skip.sourceId ?? null,
+        skip.title,
+        skip.artist,
+        skip.skippedAt ?? Date.now(),
+      );
+  }
+
+  roomSkips(roomId: string): RoomSkip[] {
+    return (
+      this.db
+        .query(
+          `SELECT user_id, source_id, title, artist, skipped_at
+          FROM room_skips WHERE room_id = ?`,
+        )
+        .all(roomId) as Row[]
+    ).map((row) => ({
+      title: String(row.title),
+      artist: String(row.artist),
+      skippedAt: Number(row.skipped_at),
+      ...(row.user_id ? { userId: String(row.user_id) } : {}),
+      ...(row.source_id ? { sourceId: String(row.source_id) } : {}),
+    }));
+  }
+
+  // Every song someone chose in this room, by hand or by keeping an autoplay
+  // pick, one row per add. Tracks outlive their sessions, so this is the
+  // room's whole history.
+  roomAdds(roomId: string): RoomAdd[] {
+    return this.db
+      .query(
+        `SELECT t.requester_id AS requesterId, t.source_id AS sourceId,
+          t.title, t.artist
+        FROM tracks t
+        JOIN sessions s ON s.id = t.session_id
+        WHERE COALESCE(s.source_channel_id, s.channel_id) = ?
+        AND t.automatic = 0 AND t.status != 'failed'`,
+      )
+      .all(roomId) as RoomAdd[];
+  }
+
   // What has been heard in this room since `since`, whoever was listening, so
   // a Huddle full of listeners the mix knows nothing about still drifts.
   recentRoomPlays(roomId: string, since: number): RoomPlayRecord[] {
@@ -2050,13 +2160,13 @@ export class Store {
           ORDER BY liked_at DESC, rowid DESC LIMIT ?`,
         ),
       },
+      // Each song once, whether the mix remembers the skip, a room does, or
+      // both.
       skips: {
-        count: count(
-          "SELECT COUNT(*) AS count FROM autoplay_skips WHERE user_id = ?",
-        ),
+        count: count(`SELECT COUNT(*) AS count FROM (${skippedSongs})`),
         recent: songs(
-          `SELECT title, artist FROM autoplay_skips WHERE user_id = ?
-          ORDER BY skipped_at DESC, rowid DESC LIMIT ?`,
+          `SELECT title, artist FROM (${skippedSongs})
+          ORDER BY at DESC LIMIT ?2`,
         ),
       },
       scrobbles: count(
@@ -2102,10 +2212,20 @@ export class Store {
       .run(userId).changes;
   }
 
+  // A room still remembers that someone skipped a song there, but no longer
+  // who. Returns how many songs
+  // that was, counted as Your data lists them.
   deleteUserSkips(userId: string) {
-    return this.db
-      .query("DELETE FROM autoplay_skips WHERE user_id = ?")
-      .run(userId).changes;
+    return this.db.transaction(() => {
+      const { count } = this.db
+        .query(`SELECT COUNT(*) AS count FROM (${skippedSongs})`)
+        .get(userId) as { count: number };
+      this.db
+        .query("UPDATE room_skips SET user_id = NULL WHERE user_id = ?")
+        .run(userId);
+      this.db.query("DELETE FROM autoplay_skips WHERE user_id = ?").run(userId);
+      return count;
+    })();
   }
 
   deleteUserScrobbles(userId: string) {
@@ -2675,6 +2795,26 @@ export class Store {
         `);
       })();
     this.completeMigration("scrobbles-per-play-v1");
+  }
+
+  // Autoplay skips from before rooms kept their own become room skips, one
+  // per skip, credited to whoever pressed the button when that was kept.
+  private migrateRoomSkips() {
+    if (this.migrated("room-skips-v1")) return;
+    this.db.transaction(() => {
+      this.db.run(`
+        INSERT INTO room_skips
+          (id, room_id, session_id, user_id, source_id, title, artist, skipped_at)
+        SELECT lower(hex(randomblob(16))),
+          COALESCE(s.source_channel_id, s.channel_id), k.session_id,
+          MAX(CASE WHEN k.weight >= 1 THEN k.user_id END),
+          NULL, k.title, k.artist, MIN(k.skipped_at)
+        FROM autoplay_skips k
+        JOIN sessions s ON s.id = k.session_id
+        GROUP BY k.session_id, k.title, k.artist
+      `);
+      this.completeMigration("room-skips-v1");
+    })();
   }
 
   private migrated(name: string) {
