@@ -36,7 +36,7 @@ Every option HuddleFM reads from `.env`. Only the Slack credentials are required
 | `AGENT_USER_LIMIT_PER_MINUTE` / `AGENT_USER_LIMIT_PER_HOUR` | `3` / `20`                 | AI requests each person may make; mention commands like `skip` don't count                                            |
 | `AGENT_LIMIT_PER_HOUR`                                      | `100`                      | AI requests the whole bot may make an hour                                                                            |
 | `POSTHOG_API_KEY`                                           | unset                      | Enables PostHog analytics and error tracking                                                                          |
-| `POSTHOG_HOST`                                              | `https://us.i.posthog.com` | PostHog ingestion host                                                                                                |
+| `POSTHOG_HOST`                                              | `https://us.i.posthog.com` | PostHog ingestion host. Agent traces go to its origin, so a proxy path is ignored for them                            |
 | `LOCAL_CONTROL_TOKEN`                                       | unset                      | Bearer token for local `/join`, `/leave`, `/tone`, and `/data-message` routes; leave unset for typical Docker deploys |
 
 ## Playback and limits

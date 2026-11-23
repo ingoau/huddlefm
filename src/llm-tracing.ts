@@ -1,5 +1,5 @@
 import { OpenTelemetry } from "@ai-sdk/otel";
-import { context } from "@opentelemetry/api";
+import { context, diag, DiagLogLevel } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { PostHogSpanProcessor } from "@posthog/ai/otel";
@@ -26,7 +26,22 @@ export class LlmTracing {
     apiKey: string,
     host: string | undefined,
     client: Pick<PostHog, "getContext">,
+    onError: (error: unknown) => void = () => {},
   ) {
+    // A trace PostHog refused, or a host it couldn't reach, is only told to
+    // OpenTelemetry's logger; it's reported like the other analytics.
+    const report = (message: string, ...args: unknown[]) =>
+      onError(args.find((arg) => arg instanceof Error) ?? new Error(message));
+    diag.setLogger(
+      {
+        error: report,
+        warn: report,
+        info: () => {},
+        debug: () => {},
+        verbose: () => {},
+      },
+      DiagLogLevel.WARN,
+    );
     // A span's children find it through the active context, which needs a
     // manager that follows async calls; without one each span is a trace.
     context.setGlobalContextManager(

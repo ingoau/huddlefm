@@ -508,7 +508,6 @@ Loop modes: ${loopModes.join(", ")}.`,
                   // what people asked and were told stays out of analytics
                   recordInputs: false,
                   recordOutputs: false,
-                  functionId: "huddlefm-session",
                   integrations: telemetry,
                 },
               }

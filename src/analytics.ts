@@ -82,7 +82,7 @@ export class Analytics {
       client,
       await installationId(idPath),
       onError,
-      LlmTracing.create(apiKey, host, client),
+      LlmTracing.create(apiKey, host, client, onError),
     );
   }
 
@@ -182,17 +182,15 @@ export class Analytics {
     );
   }
 
+  // Both flush at once, and the traces for at most 5 s: their exporter would
+  // wait 10 s on an unresponsive PostHog, and shutdown has a deadline.
   async shutdown() {
-    try {
-      await this.tracing?.shutdown();
-    } catch (error) {
-      this.onError(error);
-    }
-    try {
-      await this.client?.shutdown(5_000);
-    } catch (error) {
-      this.onError(error);
-    }
+    const results = await Promise.allSettled([
+      this.tracing && Promise.race([this.tracing.shutdown(), Bun.sleep(5_000)]),
+      this.client?.shutdown(5_000),
+    ]);
+    for (const result of results)
+      if (result.status === "rejected") this.onError(result.reason);
   }
 }
 
