@@ -194,9 +194,12 @@ let companions: CompanionChannels;
 let restoreTimer: ReturnType<typeof setInterval> | undefined;
 let canvasTimer: ReturnType<typeof setInterval> | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
-// Follow-up participant checks after a leave event, one per session.
-const leaveRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const leaveRecheckMs = 5_000;
+// Follow-up participant checks, one per session, pushed back by each request.
+const participantRecheckTimers = new Map<
+  string,
+  ReturnType<typeof setTimeout>
+>();
+const participantRecheckMs = 5_000;
 let canvasUpdate: Promise<void> | undefined;
 let canvasPending = false;
 let canvasDelay: ReturnType<typeof setTimeout> | undefined;
@@ -585,11 +588,8 @@ async function reconcileSessionParticipants(
     await slackHuddle.participants(callId),
     version,
   );
-  // A member event overtook the snapshot, so it was dropped unapplied. Ask
-  // for another pass rather than leave a leave waiting on the next timer.
-  if (!diff && coordinator.participantsVersion !== version)
-    reconcilePendingSessions.add(coordinator.id);
-  if (!diff) return;
+  // A member event overtook the snapshot, so it was dropped unapplied.
+  if (!diff) return coordinator.participantsVersion !== version;
   const companionChannelId = coordinator.room.companionChannelId;
   for (const userId of diff.added) {
     store.addSessionParticipant(coordinator.id, userId);
@@ -599,6 +599,7 @@ async function reconcileSessionParticipants(
     if (companionChannelId) companions.removeLater(companionChannelId, userId);
     store.removeSessionParticipant(coordinator.id, userId);
   }
+  return false;
 }
 
 // Sessions reconcile independently: one Huddle whose Slack call is slow, or
@@ -616,7 +617,11 @@ async function reconcileParticipants(runtime: Runtime) {
     do {
       reconcilePendingSessions.delete(coordinator.id);
       try {
-        await reconcileSessionParticipants(coordinator, runtime.callId);
+        // Check again shortly rather than leave a missed leave to the next
+        // timer. Not at once: Slack's list may not show a join that just
+        // overtook the snapshot, and would evict them.
+        if (await reconcileSessionParticipants(coordinator, runtime.callId))
+          recheckParticipants(runtime);
       } catch (error) {
         log.warn(
           {
@@ -642,17 +647,24 @@ async function reconcileParticipants(runtime: Runtime) {
 // had not caught up with yet.
 function verifyLeave(runtime: Runtime) {
   void reconcileParticipants(runtime);
+  recheckParticipants(runtime);
+}
+
+// Checks the session's participants again in a few seconds, timed from the
+// latest request so the list has had time to catch up with every leave.
+function recheckParticipants(runtime: Runtime) {
   const sessionId = runtime.coordinator?.id;
-  if (!sessionId || leaveRecheckTimers.has(sessionId)) return;
+  if (!sessionId) return;
+  clearTimeout(participantRecheckTimers.get(sessionId));
   const callId = runtime.callId;
-  leaveRecheckTimers.set(
+  participantRecheckTimers.set(
     sessionId,
     setTimeout(() => {
-      leaveRecheckTimers.delete(sessionId);
+      participantRecheckTimers.delete(sessionId);
       const current = runtimeForCall(callId);
       if (current?.coordinator?.id === sessionId)
         void reconcileParticipants(current);
-    }, leaveRecheckMs),
+    }, participantRecheckMs),
   );
 }
 
@@ -2034,8 +2046,8 @@ async function shutdownSteps() {
   clearInterval(canvasTimer);
   clearTimeout(canvasDelay);
   clearInterval(reconcileTimer);
-  for (const timer of leaveRecheckTimers.values()) clearTimeout(timer);
-  leaveRecheckTimers.clear();
+  for (const timer of participantRecheckTimers.values()) clearTimeout(timer);
+  participantRecheckTimers.clear();
   companions.stop();
   for (const timer of endCleanupTimers.values()) clearTimeout(timer);
   log.debug({ event: "shutdown_canvas_wait" }, "Waiting for Canvas update");
