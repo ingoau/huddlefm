@@ -5,7 +5,13 @@ import type { AuditLog } from "./audit-log.ts";
 import { Coordinator } from "./coordinator.ts";
 import type { LyricsCatalog } from "./lyrics.ts";
 import type { SlackAppAdapter } from "./slack-app.ts";
-import { Store, type DuckingMode, type SavedSession } from "./store.ts";
+import {
+  Store,
+  type DuckingMode,
+  type RoomAdd,
+  type RoomSkip,
+  type SavedSession,
+} from "./store.ts";
 import type { TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
@@ -62,13 +68,8 @@ function setup(
   const sessionChanges: unknown[] = [];
   const recordedMessages: unknown[] = [];
   const rememberedSkips: unknown[] = [];
-  const bans: {
-    roomId: string;
-    userId?: string;
-    sourceId?: string;
-    title: string;
-    artist: string;
-  }[] = [];
+  const roomSkips: (RoomSkip & { roomId: string; sessionId?: string })[] = [];
+  const roomAdds: RoomAdd[] = [];
   const likes: unknown[] = [];
   const unlikes: unknown[] = [];
   let post = 0;
@@ -159,15 +160,12 @@ function setup(
       recentRoomPlays: () => [],
       recentSkips: () => [],
       recordTrackPlay: () => {},
-      banFromAutoplay: (value: (typeof bans)[number]) => {
-        bans.push(value);
+      recordRoomSkip: (value: (typeof roomSkips)[number]) => {
+        roomSkips.push({ ...value, skippedAt: value.skippedAt ?? Date.now() });
       },
-      autoplayBans: (roomId: string, userIds: readonly string[]) =>
-        bans.filter(
-          (ban) =>
-            ban.roomId === roomId ||
-            (ban.userId !== undefined && userIds.includes(ban.userId)),
-        ),
+      roomSkips: (roomId: string) =>
+        roomSkips.filter((skip) => skip.roomId === roomId),
+      roomAdds: () => roomAdds,
       recordAutoplaySkip: (value: unknown) => {
         rememberedSkips.push(value);
       },
@@ -265,7 +263,8 @@ function setup(
     sessionChanges,
     recordedMessages,
     rememberedSkips,
-    bans,
+    roomSkips,
+    roomAdds,
     likes,
     unlikes,
   };
@@ -7035,26 +7034,26 @@ test("a skipped autoplay pick is remembered for the room, not only the skipper",
     { userId: "host", title: "Not This One", weight: 1 },
     { userId: "guest", title: "Not This One", weight: 0.25 },
   ]);
-  // And it never comes back, here or wherever the skipper listens.
-  expect(test.bans).toEqual([
-    {
+  // The room remembers it too, which is what keeps it out of autoplay here.
+  expect(test.roomSkips).toEqual([
+    expect.objectContaining({
       roomId: Reflect.get(test.coordinator, "roomId"),
+      sessionId: test.coordinator.id,
       userId: "host",
       sourceId: "skipped0001",
       title: "Not This One",
-      artist: "Band",
-    },
+    }),
   ]);
   await test.coordinator.endFromSlack();
 });
 
-test("autoplay never picks a song skipped before, under any upload", async () => {
+test("autoplay leaves out a song this room skipped that only one person chose, under any upload", async () => {
   const calls: Record<string, unknown>[] = [];
   const catalog = huddleMixCatalog(
     [
       { sourceId: "banned00001", title: "Skipped Here" },
-      { sourceId: "reupload001", title: "Skipped Elsewhere (Official Audio)" },
-      { sourceId: "fine0000001", title: "Fine" },
+      { sourceId: "reupload001", title: "Skipped Again (Official Audio)" },
+      { sourceId: "loved000001", title: "Loved" },
     ],
     calls,
   );
@@ -7074,22 +7073,50 @@ test("autoplay never picks a song skipped before, under any upload", async () =>
     undefined,
     catalog,
   );
-  // Skipped in this room in an earlier Huddle, and, by a listener who is
-  // here now, in another room under a different upload.
-  test.bans.push(
+  // Skipped in this room in earlier Huddles: one song nobody chose, one
+  // that one person chose under another upload, and one that two people
+  // chose, skipped long enough ago to have rested.
+  const roomId = Reflect.get(test.coordinator, "roomId");
+  const longAgo = Date.now() - 30 * 24 * 60 * 60_000;
+  test.roomSkips.push(
     {
-      roomId: Reflect.get(test.coordinator, "roomId"),
+      roomId,
+      userId: "guest",
       sourceId: "banned00001",
       title: "Skipped Here",
       artist: "Band",
+      skippedAt: longAgo,
     },
     {
-      roomId: "another-room",
+      roomId,
       userId: "guest",
       sourceId: "original001",
-      title: "Skipped Elsewhere",
+      title: "Skipped Again",
       artist: "Band",
+      skippedAt: longAgo,
     },
+    {
+      roomId,
+      userId: "guest",
+      sourceId: "loved000001",
+      title: "Loved",
+      artist: "Band",
+      skippedAt: longAgo,
+    },
+  );
+  test.roomAdds.push(
+    ...["U1", "U1"].map((requesterId) => ({
+      requesterId,
+      sourceId: "original001",
+      title: "Skipped Again",
+      artist: "Band",
+    })),
+    ...["U1", "U2"].map((requesterId) => ({
+      requesterId,
+      sourceId: "loved000001",
+      title: "Loved",
+      artist: "Band",
+    })),
   );
   await test.coordinator.start();
   await enableHuddleMix(test.coordinator);
@@ -7100,10 +7127,10 @@ test("autoplay never picks a song skipped before, under any upload", async () =>
   );
   expect(
     (Reflect.get(test.coordinator, "current") as { sourceId: string }).sourceId,
-  ).toBe("fine0000001");
+  ).toBe("loved000001");
   expect((calls[0]!.exclude as Set<string>).has("banned00001")).toBeTrue();
   expect(calls[0]!.recent).toContainEqual(
-    expect.objectContaining({ title: "Skipped Elsewhere" }),
+    expect.objectContaining({ title: "Skipped Again" }),
   );
   await test.coordinator.endFromSlack();
 });
@@ -7155,12 +7182,12 @@ test("a manager who is not in the Huddle carries no skip of their own", async ()
   await test.coordinator.endFromSlack();
 });
 
-test("skipping a song someone chose keeps it out of autoplay, not out of the mix's taste", async () => {
+test("skipping a song someone else chose counts for the room, not the mix's taste", async () => {
   const test = setup();
   await test.coordinator.start();
   Reflect.set(test.coordinator, "current", {
     id: "manual",
-    requesterId: "host",
+    requesterId: "guest",
     sourceInput: "manual",
     canonicalUrl: "manual",
     sourceId: "manual",
@@ -7171,11 +7198,41 @@ test("skipping a song someone chose keeps it out of autoplay, not out of the mix
   });
   await test.coordinator.action(interaction(test.coordinator, "next_track"));
   // Someone deliberately queued it, so skipping says nothing about the mix's
-  // taste, but the room still never wants autoplay to bring it back.
+  // taste, but the room remembers someone did not want it.
   expect(test.rememberedSkips).toEqual([]);
-  expect(test.bans).toEqual([
+  expect(test.roomSkips).toEqual([
     expect.objectContaining({ userId: "host", sourceId: "manual" }),
   ]);
+  await test.coordinator.endFromSlack();
+});
+
+test("skipping your own song, or a song near its end, is not remembered by the room", async () => {
+  const test = setup();
+  await test.coordinator.start();
+  const play = (entry: Record<string, unknown>, seconds: number) => {
+    Reflect.set(test.coordinator, "current", {
+      requesterId: "guest",
+      sourceInput: "manual",
+      canonicalUrl: "manual",
+      title: "Chosen",
+      artist: "Artist",
+      status: "playing",
+      filePath: "manual.opus",
+      ...entry,
+    });
+    Reflect.set(test.coordinator, "playbackSeconds", seconds);
+  };
+  play({ id: "own", sourceId: "own", requesterId: "host" }, 5);
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  play({ id: "nearly", sourceId: "nearly", duration: 200 }, 185);
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  play({ id: "mostly", sourceId: "mostly", duration: 600 }, 500);
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  expect(test.roomSkips).toEqual([]);
+  // Early on, it counts.
+  play({ id: "early", sourceId: "early", duration: 200 }, 30);
+  await test.coordinator.action(interaction(test.coordinator, "next_track"));
+  expect(test.roomSkips.map((skip) => skip.sourceId)).toEqual(["early"]);
   await test.coordinator.endFromSlack();
 });
 

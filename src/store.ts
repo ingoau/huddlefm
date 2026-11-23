@@ -278,7 +278,22 @@ type RecentTrack = Pick<
   | "live"
 >;
 
-export type AutoplayBan = { sourceId?: string; title: string; artist: string };
+export type RoomSkip = {
+  // Absent for skips recorded before who skipped was kept, or forgotten.
+  userId?: string;
+  sourceId?: string;
+  title: string;
+  artist: string;
+  skippedAt: number;
+};
+
+export type RoomAdd = {
+  // Empty once the adder asked to be forgotten.
+  requesterId: string;
+  sourceId: string;
+  title: string;
+  artist: string;
+};
 
 export type SavedSession = {
   id: string;
@@ -468,12 +483,12 @@ const addedColumns = [
 ] as const;
 
 // Every song one user (?1) skipped, once each, newest skip first: autoplay
-// skips the mix remembers, and the bans that follow the user.
+// skips the mix remembers, and the skips each room remembers.
 const skippedSongs = `
   SELECT title, artist, MAX(at) AS at FROM (
     SELECT title, artist, skipped_at AS at FROM autoplay_skips WHERE user_id = ?1
     UNION ALL
-    SELECT title, artist, banned_at AS at FROM autoplay_bans WHERE user_id = ?1
+    SELECT title, artist, skipped_at AS at FROM room_skips WHERE user_id = ?1
   ) GROUP BY title, artist`;
 
 // The SET clause and bindings for whichever of `fields` are present.
@@ -852,19 +867,19 @@ export class Store {
         weight REAL NOT NULL,
         skipped_at INTEGER NOT NULL
       );
-      -- Songs autoplay never picks again: one row per skip or removal, for
-      -- the room it happened in and for whoever made it. Never pruned, since
-      -- a skip is someone saying "not this", and a song that comes back
-      -- weeks later is still the song they skipped. Matched by source and by
-      -- title and artist, so another upload of the same song stays out too.
-      CREATE TABLE IF NOT EXISTS autoplay_bans (
+      -- What each room skipped, whoever was listening: one row per skip,
+      -- or per autoplay pick removed from the queue. Autoplay weighs these
+      -- against how many people added the song (see autoplay-blocks.ts), so
+      -- rows are events, never verdicts, and are never pruned.
+      CREATE TABLE IF NOT EXISTS room_skips (
         id TEXT PRIMARY KEY,
         room_id TEXT NOT NULL,
+        session_id TEXT,
         user_id TEXT,
         source_id TEXT,
         title TEXT NOT NULL,
         artist TEXT NOT NULL,
-        banned_at INTEGER NOT NULL
+        skipped_at INTEGER NOT NULL
       );
       -- An explicit "more of this" from one listener. The button is one way
       -- and shows nothing back, so it gets pressed again without meaning any
@@ -951,10 +966,10 @@ export class Store {
         ON track_plays(session_id, played_at DESC);
       CREATE INDEX IF NOT EXISTS autoplay_skips_user_recent
         ON autoplay_skips(user_id, skipped_at DESC);
-      CREATE INDEX IF NOT EXISTS autoplay_bans_room
-        ON autoplay_bans(room_id);
-      CREATE INDEX IF NOT EXISTS autoplay_bans_user
-        ON autoplay_bans(user_id);
+      CREATE INDEX IF NOT EXISTS room_skips_room
+        ON room_skips(room_id);
+      CREATE INDEX IF NOT EXISTS room_skips_user
+        ON room_skips(user_id);
       CREATE INDEX IF NOT EXISTS track_likes_user_recent
         ON track_likes(user_id, liked_at DESC);
     `);
@@ -965,7 +980,7 @@ export class Store {
       this.ensureColumn(table, column, definition);
     this.migrateAutoplayModes();
     this.migrateScrobblesPerPlay();
-    this.migrateAutoplayBans();
+    this.migrateRoomSkips();
     if (!hadDisplayMode)
       this.db.run(
         "UPDATE sessions SET display_mode = CASE lyrics_enabled WHEN 1 THEN 'lyrics' ELSE 'off' END",
@@ -1988,51 +2003,64 @@ export class Store {
       .all(...userIds, since) as PlayRecord[];
   }
 
-  // Keeps a song out of autoplay for good, in this room and for whoever
-  // skipped or removed it.
-  banFromAutoplay(ban: {
+  recordRoomSkip(skip: {
     roomId: string;
+    sessionId?: string;
     userId?: string;
     sourceId?: string;
     title: string;
     artist: string;
-    bannedAt?: number;
+    skippedAt?: number;
   }) {
     this.db
       .query(
-        `INSERT INTO autoplay_bans
-          (id, room_id, user_id, source_id, title, artist, banned_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO room_skips
+          (id, room_id, session_id, user_id, source_id, title, artist, skipped_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         crypto.randomUUID(),
-        ban.roomId,
-        ban.userId ?? null,
-        ban.sourceId ?? null,
-        ban.title,
-        ban.artist,
-        ban.bannedAt ?? Date.now(),
+        skip.roomId,
+        skip.sessionId ?? null,
+        skip.userId ?? null,
+        skip.sourceId ?? null,
+        skip.title,
+        skip.artist,
+        skip.skippedAt ?? Date.now(),
       );
   }
 
-  // What autoplay must not pick here: anything skipped in this room, and
-  // anything one of these listeners skipped anywhere.
-  autoplayBans(roomId: string, userIds: readonly string[]): AutoplayBan[] {
+  roomSkips(roomId: string): RoomSkip[] {
+    return (
+      this.db
+        .query(
+          `SELECT user_id, source_id, title, artist, skipped_at
+          FROM room_skips WHERE room_id = ?`,
+        )
+        .all(roomId) as Row[]
+    ).map((row) => ({
+      title: String(row.title),
+      artist: String(row.artist),
+      skippedAt: Number(row.skipped_at),
+      ...(row.user_id ? { userId: String(row.user_id) } : {}),
+      ...(row.source_id ? { sourceId: String(row.source_id) } : {}),
+    }));
+  }
+
+  // Every song someone chose in this room, by hand or by keeping an autoplay
+  // pick, one row per add. Tracks outlive their sessions, so this is the
+  // room's whole history.
+  roomAdds(roomId: string): RoomAdd[] {
     return this.db
       .query(
-        `SELECT DISTINCT source_id AS sourceId, title, artist
-        FROM autoplay_bans
-        WHERE room_id = ?${userIds.length ? ` OR user_id IN (${slots(userIds)})` : ""}`,
+        `SELECT t.requester_id AS requesterId, t.source_id AS sourceId,
+          t.title, t.artist
+        FROM tracks t
+        JOIN sessions s ON s.id = t.session_id
+        WHERE COALESCE(s.source_channel_id, s.channel_id) = ?
+        AND t.automatic = 0 AND t.status != 'failed'`,
       )
-      .all(roomId, ...userIds)
-      .map((row) => {
-        const { sourceId, title, artist } = row as Row;
-        return {
-          title: String(title),
-          artist: String(artist),
-          ...(sourceId ? { sourceId: String(sourceId) } : {}),
-        };
-      });
+      .all(roomId) as RoomAdd[];
   }
 
   // What has been heard in this room since `since`, whoever was listening, so
@@ -2179,8 +2207,8 @@ export class Store {
       .run(userId).changes;
   }
 
-  // A ban stays with the room it happened in, which is the room's memory,
-  // but no longer follows the user anywhere else. Returns how many songs
+  // A room still remembers that someone skipped a song there, but no longer
+  // who. Returns how many songs
   // that was, counted as Your data lists them.
   deleteUserSkips(userId: string) {
     return this.db.transaction(() => {
@@ -2188,7 +2216,7 @@ export class Store {
         .query(`SELECT COUNT(*) AS count FROM (${skippedSongs})`)
         .get(userId) as { count: number };
       this.db
-        .query("UPDATE autoplay_bans SET user_id = NULL WHERE user_id = ?")
+        .query("UPDATE room_skips SET user_id = NULL WHERE user_id = ?")
         .run(userId);
       this.db.query("DELETE FROM autoplay_skips WHERE user_id = ?").run(userId);
       return count;
@@ -2764,23 +2792,23 @@ export class Store {
     this.completeMigration("scrobbles-per-play-v1");
   }
 
-  // Autoplay skips from before bans existed become bans for the room they
-  // happened in and for whoever skipped, so songs already skipped stay out.
-  private migrateAutoplayBans() {
-    if (this.migrated("autoplay-bans-v1")) return;
+  // Autoplay skips from before rooms kept their own become room skips, one
+  // per skip, credited to whoever pressed the button when that was kept.
+  private migrateRoomSkips() {
+    if (this.migrated("room-skips-v1")) return;
     this.db.transaction(() => {
       this.db.run(`
-        INSERT INTO autoplay_bans
-          (id, room_id, user_id, source_id, title, artist, banned_at)
+        INSERT INTO room_skips
+          (id, room_id, session_id, user_id, source_id, title, artist, skipped_at)
         SELECT lower(hex(randomblob(16))),
-          COALESCE(s.source_channel_id, s.channel_id),
+          COALESCE(s.source_channel_id, s.channel_id), k.session_id,
           MAX(CASE WHEN k.weight >= 1 THEN k.user_id END),
           NULL, k.title, k.artist, MIN(k.skipped_at)
         FROM autoplay_skips k
         JOIN sessions s ON s.id = k.session_id
         GROUP BY k.session_id, k.title, k.artist
       `);
-      this.completeMigration("autoplay-bans-v1");
+      this.completeMigration("room-skips-v1");
     })();
   }
 

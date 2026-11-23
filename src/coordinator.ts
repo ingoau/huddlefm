@@ -115,6 +115,7 @@ import {
   type IntegrationCommand,
 } from "./integration.ts";
 import { RecommendationCatalog, trackKey } from "./recommendations.ts";
+import { namesSong, roomBlocks } from "./autoplay-blocks.ts";
 import {
   isJellyfinStreamLink,
   parseJellyfinLink,
@@ -364,16 +365,10 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
-// Whether a title and artist say which song this is, so another upload of a
-// banned song can be told by them. A missing title, or the placeholder for an
-// unknown artist, would ban every song that shares the rest.
-function namesSong(track: { title: string; artist: string }) {
-  return (
-    Boolean(track.title.trim()) &&
-    Boolean(track.artist.trim()) &&
-    track.artist !== "Unknown artist"
-  );
-}
+// A skip this close to the end, by share or by seconds left, is someone
+// moving on rather than saying "not this", so the room does not remember it.
+const lateSkipShare = 0.8;
+const lateSkipSeconds = 20;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 // Where video mode's autoplay picks come from, as recorded on each pick.
@@ -4173,21 +4168,14 @@ export class Coordinator {
     return this.room.sourceChannelId ?? this.room.uiChannelId;
   }
 
-  // Songs autoplay must never pick: anything skipped in this room, and
-  // anything someone listening now has skipped anywhere.
+  // Songs this room's skips keep out of autoplay right now, weighed against
+  // how many people here chose them (see autoplay-blocks.ts).
   private autoplayBans() {
-    const tracks = this.store.autoplayBans(this.roomId, this.listenerIds());
-    return {
-      tracks,
-      sourceIds: new Set(
-        tracks.flatMap((track) => (track.sourceId ? [track.sourceId] : [])),
-      ),
-      keys: new Set(
-        tracks.flatMap((track) =>
-          namesSong(track) ? [trackKey(track.title, track.artist)] : [],
-        ),
-      ),
-    };
+    return roomBlocks(
+      this.store.roomSkips(this.roomId),
+      this.store.roomAdds(this.roomId),
+      { botUserId: this.botUserId },
+    );
   }
 
   private isBanned(
@@ -4200,21 +4188,35 @@ export class Coordinator {
     );
   }
 
-  // Skipping a song, or removing an autoplay pick from the queue, keeps it
-  // out of autoplay for good, in this room and for whoever did it, whether
-  // autoplay or someone chose it: nobody wants a skipped song back. People
-  // can still add it themselves. Its artist is also pushed down in this
-  // session's autoplay and in the rejecter's own recommendations, and a
+  // Skipping a song, or removing an autoplay pick from the queue, is
+  // remembered by the room, which may keep the song out of its autoplay for a
+  // while or for good, depending on how many people here chose it. A skip
+  // near the end, or of a song the skipper chose themselves, is not held
+  // against it. The song and its artist also stay out of this session's
+  // autoplay and are pushed down in the rejecter's own recommendations, and a
   // skipped discovery makes the next discovery turn wait longer. An autoplay
   // pick is also remembered as listening memory across Huddles.
-  private rejectSkipped(skipped: Entry, userId: string) {
-    this.store.banFromAutoplay({
-      roomId: this.roomId,
-      userId,
-      sourceId: skipped.sourceId,
-      title: skipped.title,
-      artist: skipped.artist,
-    });
+  private rejectSkipped(
+    skipped: Entry,
+    userId: string,
+    playedSeconds?: number,
+  ) {
+    const late =
+      playedSeconds !== undefined &&
+      !skipped.live &&
+      Boolean(skipped.duration) &&
+      (playedSeconds >= skipped.duration! * lateSkipShare ||
+        skipped.duration! - playedSeconds <= lateSkipSeconds);
+    const ownChoice = !skipped.automatic && skipped.requesterId === userId;
+    if (!late && !ownChoice)
+      this.store.recordRoomSkip({
+        roomId: this.roomId,
+        sessionId: this.id,
+        userId,
+        sourceId: skipped.sourceId,
+        title: skipped.title,
+        artist: skipped.artist,
+      });
     this.autoplayRejected = [
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
@@ -6028,7 +6030,7 @@ export class Coordinator {
     });
     this.notifyTrack("track.skipped", skipped);
     this.store.incrementUsage("next");
-    this.rejectSkipped(skipped, userId);
+    this.rejectSkipped(skipped, userId, this.playbackSeconds);
     await this.advance("skipped");
     this.scheduleAutoplay();
     return skipped;

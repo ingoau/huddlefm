@@ -11,6 +11,8 @@ import { normalizeToken } from "./tracks.ts";
 // exclusions do not survive contact with a room: the union of five listeners'
 // histories would starve the pool, and a song the whole room loves should come
 // back eventually.
+// The one hard rule, a room keeping out what it skipped, is per room and
+// weighed against who chose the song: see autoplay-blocks.ts.
 
 // A play stops mattering over a couple of weeks; a skip is a deliberate "not
 // this", so it is remembered much longer.

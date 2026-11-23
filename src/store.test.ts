@@ -1118,42 +1118,85 @@ test("falls back to the Huddle's own channel when there is no source channel", (
   expect(store.recentRoomPlays("channel", 0)).toHaveLength(1);
 });
 
-test("keeps skipped songs out of autoplay in their room and for the skipper", () => {
+test("remembers what each room skipped and who chose it", () => {
   const store = new Store(":memory:");
-  store.banFromAutoplay({
+  store.recordRoomSkip({
     roomId: "room",
+    sessionId: "session",
     userId: "skipper",
     sourceId: "source",
     title: "Song",
     artist: "Band",
+    skippedAt: 1_000,
   });
-  store.banFromAutoplay({
-    roomId: "elsewhere",
-    title: "Other",
-    artist: "Band",
-  });
-  const song = { sourceId: "source", title: "Song", artist: "Band" };
-  expect(store.autoplayBans("room", [])).toEqual([song]);
-  // The skipper carries it into other rooms; nobody else does.
-  expect(store.autoplayBans("another", ["skipper"])).toEqual([song]);
-  expect(store.autoplayBans("another", ["someone"])).toEqual([]);
-  expect(store.autoplayBans("elsewhere", [])).toEqual([
-    { title: "Other", artist: "Band" },
+  store.recordRoomSkip({ roomId: "elsewhere", title: "Other", artist: "Band" });
+  expect(store.roomSkips("room")).toEqual([
+    {
+      userId: "skipper",
+      sourceId: "source",
+      title: "Song",
+      artist: "Band",
+      skippedAt: 1_000,
+    },
   ]);
-  // Your data lists it, once, alongside the skips the mix remembers.
+  expect(store.roomSkips("another")).toEqual([]);
+
+  createSession(store, { id: "here", sourceChannelId: "room" });
+  createSession(store, { id: "there", sourceChannelId: "elsewhere" });
+  const add = (
+    id: string,
+    sessionId: string,
+    requesterId: string,
+    status = "played",
+    automatic = false,
+  ) =>
+    store.addTrack({
+      id,
+      sessionId,
+      requesterId,
+      sourceInput: id,
+      canonicalUrl: id,
+      sourceId: `source-${id}`,
+      title: "Song",
+      artist: "Band",
+      status,
+      automatic,
+    });
+  add("chosen", "here", "U1");
+  add("broken", "here", "U2", "failed");
+  add("autoplay", "here", "bot", "played", true);
+  add("other-room", "there", "U3");
+  expect(store.roomAdds("room")).toEqual([
+    {
+      requesterId: "U1",
+      sourceId: "source-chosen",
+      title: "Song",
+      artist: "Band",
+    },
+  ]);
+});
+
+test("Your data lists each skipped song once, and forgetting keeps the room's memory", () => {
+  const store = new Store(":memory:");
   store.recordAutoplaySkip({
     sessionId: "session",
     userId: "skipper",
     title: "Song",
     artist: "Band",
     weight: 1,
+    skippedAt: 1_000,
   });
-  store.banFromAutoplay({
-    roomId: "room",
-    userId: "skipper",
-    title: "Chosen",
-    artist: "Band",
-  });
+  for (const [title, skippedAt] of [
+    ["Song", 1_000],
+    ["Chosen", 2_000],
+  ] as const)
+    store.recordRoomSkip({
+      roomId: "room",
+      userId: "skipper",
+      title,
+      artist: "Band",
+      skippedAt,
+    });
   expect(store.userData("skipper").skips).toEqual({
     count: 2,
     recent: [
@@ -1161,32 +1204,21 @@ test("keeps skipped songs out of autoplay in their room and for the skipper", ()
       { title: "Song", artist: "Band" },
     ],
   });
-  // Clearing their skips stops it following them, but the room remembers.
   expect(store.deleteUserSkips("skipper")).toBe(2);
   expect(store.userData("skipper").skips.count).toBe(0);
-  expect(store.autoplayBans("another", ["skipper"])).toEqual([]);
-  expect(store.autoplayBans("room", [])).toEqual([
-    song,
-    { title: "Chosen", artist: "Band" },
+  // The room still knows someone skipped them, just not who.
+  expect(store.roomSkips("room").map((skip) => skip.userId)).toEqual([
+    undefined,
+    undefined,
   ]);
 });
 
-test("skips from before bans existed become bans", () => {
-  const dir = mkdtempSync(join(tmpdir(), "huddlefm-bans-"));
+test("autoplay skips from before rooms kept their own become room skips", () => {
+  const dir = mkdtempSync(join(tmpdir(), "huddlefm-room-skips-"));
   const path = join(dir, "state.db");
   try {
     const before = new Store(path);
-    before.createSession({
-      id: "session",
-      huddleId: "huddle",
-      callId: "call",
-      channelId: "thread-channel",
-      threadTs: "1.0",
-      sourceChannelId: "room",
-      creatorId: "creator",
-      hostId: "host",
-      volume: 0.5,
-    });
+    createSession(before, { sourceChannelId: "room" });
     for (const [userId, weight] of [
       ["guest", 0.25],
       ["host", 1],
@@ -1197,19 +1229,18 @@ test("skips from before bans existed become bans", () => {
         title: "Song",
         artist: "Band",
         weight,
+        skippedAt: 5_000,
       });
     before.close();
     const raw = new Database(path);
-    raw.run("DELETE FROM autoplay_bans");
-    raw.run("DELETE FROM data_migrations WHERE name = 'autoplay-bans-v1'");
+    raw.run("DELETE FROM room_skips");
+    raw.run("DELETE FROM data_migrations WHERE name = 'room-skips-v1'");
     raw.close();
     const store = new Store(path);
-    // One ban per song, for the room and for whoever pressed skip.
-    expect(store.autoplayBans("room", [])).toEqual([
-      { title: "Song", artist: "Band" },
+    // One skip, credited to whoever pressed the button.
+    expect(store.roomSkips("room")).toEqual([
+      { userId: "host", title: "Song", artist: "Band", skippedAt: 5_000 },
     ]);
-    expect(store.autoplayBans("another", ["host"])).toHaveLength(1);
-    expect(store.autoplayBans("another", ["guest"])).toEqual([]);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
