@@ -73,6 +73,7 @@ export class MediaKeys {
   stop() {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.names.clear();
     for (const win of this.windows) {
       this.clear(win);
       this.silence(win, "remove");
@@ -168,13 +169,16 @@ export class MediaKeys {
     if (!userId) return "";
     if (!this.names.has(userId)) {
       this.names.set(userId, undefined);
+      // a user Slack doesn't know stays nameless; one it failed to look up,
+      // or looked up after this stopped, is asked about again
       this.userName(userId)
         .then((name) => {
-          if (!name || !this.unsubscribe) return;
+          if (!this.unsubscribe) return this.names.delete(userId);
+          if (!name) return;
           this.names.set(userId, name);
           this.update();
         })
-        .catch(() => {});
+        .catch(() => this.names.delete(userId));
     }
     const name = this.names.get(userId);
     return name ? `Added by ${name}` : "";
