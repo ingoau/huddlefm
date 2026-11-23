@@ -364,6 +364,16 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
+// Whether a title and artist say which song this is, so another upload of a
+// banned song can be told by them. A missing title, or the placeholder for an
+// unknown artist, would ban every song that shares the rest.
+function namesSong(track: { title: string; artist: string }) {
+  return (
+    Boolean(track.title.trim()) &&
+    Boolean(track.artist.trim()) &&
+    track.artist !== "Unknown artist"
+  );
+}
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 // Where video mode's autoplay picks come from, as recorded on each pick.
@@ -4174,7 +4184,7 @@ export class Coordinator {
       ),
       keys: new Set(
         tracks.flatMap((track) =>
-          track.title.trim() ? [trackKey(track.title, track.artist)] : [],
+          namesSong(track) ? [trackKey(track.title, track.artist)] : [],
         ),
       ),
     };
@@ -4186,8 +4196,7 @@ export class Coordinator {
   ) {
     return (
       (track.sourceId !== undefined && bans.sourceIds.has(track.sourceId)) ||
-      (Boolean(track.title.trim()) &&
-        bans.keys.has(trackKey(track.title, track.artist)))
+      (namesSong(track) && bans.keys.has(trackKey(track.title, track.artist)))
     );
   }
 
@@ -4936,7 +4945,7 @@ export class Coordinator {
           recent: [
             ...recent,
             ...(this.current ? [this.current] : []),
-            ...bans.tracks,
+            ...bans.tracks.filter(namesSong),
           ],
           exclude: excluded,
           skipped: {
@@ -5056,7 +5065,6 @@ export class Coordinator {
     startedAt: number,
     mode: AutoplayMode,
   ): Promise<boolean | undefined> {
-    const bans = this.autoplayBans();
     for (const id of ids) {
       if (excluded.has(id)) continue;
       const discovery = ranked.get(id)?.discovery ?? false;
@@ -5082,8 +5090,9 @@ export class Coordinator {
         ]);
         if (currentIds.has(metadata.sourceId)) return false;
         // Candidates only come with a source, so a banned song under another
-        // one is only caught here, once its title and artist are known.
-        if (this.isBanned(metadata, bans)) return false;
+        // one is only caught here, once its title and artist are known. Read
+        // now, not before the loop, so a skip while candidates resolved counts.
+        if (this.isBanned(metadata, this.autoplayBans())) return false;
         const entry: Entry = {
           ...metadata,
           id: crypto.randomUUID(),

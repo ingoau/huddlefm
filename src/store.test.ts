@@ -1140,10 +1140,35 @@ test("keeps skipped songs out of autoplay in their room and for the skipper", ()
   expect(store.autoplayBans("elsewhere", [])).toEqual([
     { title: "Other", artist: "Band" },
   ]);
+  // Your data lists it, once, alongside the skips the mix remembers.
+  store.recordAutoplaySkip({
+    sessionId: "session",
+    userId: "skipper",
+    title: "Song",
+    artist: "Band",
+    weight: 1,
+  });
+  store.banFromAutoplay({
+    roomId: "room",
+    userId: "skipper",
+    title: "Chosen",
+    artist: "Band",
+  });
+  expect(store.userData("skipper").skips).toEqual({
+    count: 2,
+    recent: [
+      { title: "Chosen", artist: "Band" },
+      { title: "Song", artist: "Band" },
+    ],
+  });
   // Clearing their skips stops it following them, but the room remembers.
-  store.deleteUserSkips("skipper");
+  expect(store.deleteUserSkips("skipper")).toBe(2);
+  expect(store.userData("skipper").skips.count).toBe(0);
   expect(store.autoplayBans("another", ["skipper"])).toEqual([]);
-  expect(store.autoplayBans("room", [])).toEqual([song]);
+  expect(store.autoplayBans("room", [])).toEqual([
+    song,
+    { title: "Chosen", artist: "Band" },
+  ]);
 });
 
 test("skips from before bans existed become bans", () => {

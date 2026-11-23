@@ -953,8 +953,9 @@ const userSongLabels: Record<UserSongKind, { title: string; effect: string }> =
       effect: "Autoplay forgets the songs you asked for more of.",
     },
     skips: {
-      title: "Autoplay picks you skipped",
-      effect: "Autoplay forgets what you skipped.",
+      title: "Songs you skipped",
+      effect:
+        "Autoplay forgets what you skipped, though each Huddle you skipped a song in still keeps it out.",
     },
   };
 

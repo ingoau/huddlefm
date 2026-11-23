@@ -467,6 +467,15 @@ const addedColumns = [
   ["scrobbles", "play", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
+// Every song one user (?1) skipped, once each, newest skip first: autoplay
+// skips the mix remembers, and the bans that follow the user.
+const skippedSongs = `
+  SELECT title, artist, MAX(at) AS at FROM (
+    SELECT title, artist, skipped_at AS at FROM autoplay_skips WHERE user_id = ?1
+    UNION ALL
+    SELECT title, artist, banned_at AS at FROM autoplay_bans WHERE user_id = ?1
+  ) GROUP BY title, artist`;
+
 // The SET clause and bindings for whichever of `fields` are present.
 function assignments(
   columns: Record<string, string>,
@@ -2118,13 +2127,13 @@ export class Store {
           ORDER BY liked_at DESC, rowid DESC LIMIT ?`,
         ),
       },
+      // Each song once, whether the mix remembers the skip, autoplay keeps
+      // the song out wherever the user listens, or both.
       skips: {
-        count: count(
-          "SELECT COUNT(*) AS count FROM autoplay_skips WHERE user_id = ?",
-        ),
+        count: count(`SELECT COUNT(*) AS count FROM (${skippedSongs})`),
         recent: songs(
-          `SELECT title, artist FROM autoplay_skips WHERE user_id = ?
-          ORDER BY skipped_at DESC, rowid DESC LIMIT ?`,
+          `SELECT title, artist FROM (${skippedSongs})
+          ORDER BY at DESC LIMIT ?2`,
         ),
       },
       scrobbles: count(
@@ -2171,14 +2180,19 @@ export class Store {
   }
 
   // A ban stays with the room it happened in, which is the room's memory,
-  // but no longer follows the user anywhere else.
+  // but no longer follows the user anywhere else. Returns how many songs
+  // that was, counted as Your data lists them.
   deleteUserSkips(userId: string) {
-    this.db
-      .query("UPDATE autoplay_bans SET user_id = NULL WHERE user_id = ?")
-      .run(userId);
-    return this.db
-      .query("DELETE FROM autoplay_skips WHERE user_id = ?")
-      .run(userId).changes;
+    return this.db.transaction(() => {
+      const { count } = this.db
+        .query(`SELECT COUNT(*) AS count FROM (${skippedSongs})`)
+        .get(userId) as { count: number };
+      this.db
+        .query("UPDATE autoplay_bans SET user_id = NULL WHERE user_id = ?")
+        .run(userId);
+      this.db.query("DELETE FROM autoplay_skips WHERE user_id = ?").run(userId);
+      return count;
+    })();
   }
 
   deleteUserScrobbles(userId: string) {
