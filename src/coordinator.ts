@@ -114,7 +114,7 @@ import {
   wrapIntegrationResult,
   type IntegrationCommand,
 } from "./integration.ts";
-import { RecommendationCatalog } from "./recommendations.ts";
+import { RecommendationCatalog, trackKey } from "./recommendations.ts";
 import {
   isJellyfinStreamLink,
   parseJellyfinLink,
@@ -364,13 +364,6 @@ const autoplayCreditWindow = 10;
 // How far back in this session's history autoplay looks when deciding a
 // track has been heard too recently to come round again.
 const autoplayRecentWindow = 100;
-// A skipped or removed autoplay pick stays out of autoplay for the rest of the
-// session, long after it has left the recent window. The cap only bounds what
-// a session saves; a room skips far fewer songs than this in a day.
-const autoplayRejectedLimit = 500;
-// Rejected artists are only pushed down, and only the latest matter: an artist
-// skipped hours ago deserves another chance.
-const autoplayRejectedArtistLimit = 20;
 // How many random popular songs Play something tries before giving up.
 const autoplayPopularAttempts = 5;
 // Where video mode's autoplay picks come from, as recorded on each pick.
@@ -718,8 +711,6 @@ export class Coordinator {
       this.progressBar = restored.progressBar ?? true;
       this.communism = restored.communism ?? false;
       this.watchedSeconds = restored.watchedSeconds ?? 0;
-      this.autoplayRejected = restored.autoplayRejected?.sourceIds ?? [];
-      this.autoplayRejectedArtists = restored.autoplayRejected?.artists ?? [];
       this.revision = restored.revision;
       this.uiTs = restored.uiTs;
       this.allowed = new Set(restored.permissions);
@@ -4162,18 +4153,7 @@ export class Coordinator {
     this.autoplayRejectedArtists = [
       ...this.autoplayRejectedArtists.filter((value) => value !== name),
       name,
-    ].slice(-autoplayRejectedArtistLimit);
-  }
-
-  // Saved as they change, so a restart does not hand a skipped song back to
-  // autoplay.
-  private saveAutoplayRejections() {
-    this.store.setSession(this.id, {
-      autoplayRejected: {
-        sourceIds: this.autoplayRejected,
-        artists: this.autoplayRejectedArtists,
-      },
-    });
+    ].slice(-20);
   }
 
   // A room in a channel, which is what a recurring Huddle actually is. The
@@ -4183,20 +4163,56 @@ export class Coordinator {
     return this.room.sourceChannelId ?? this.room.uiChannelId;
   }
 
-  // Skipping an autoplay pick, or removing one from the queue, keeps the
-  // track and artist out of this session's autoplay, pushes them down in the
-  // rejecter's own recommendations, and, for a discovery, makes the next
-  // discovery turn wait longer. An autoplay pick is also remembered across
-  // Huddles, so the mix does not offer it to these listeners again next time.
+  // Songs autoplay must never pick: anything skipped in this room, and
+  // anything someone listening now has skipped anywhere.
+  private autoplayBans() {
+    const tracks = this.store.autoplayBans(this.roomId, this.listenerIds());
+    return {
+      tracks,
+      sourceIds: new Set(
+        tracks.flatMap((track) => (track.sourceId ? [track.sourceId] : [])),
+      ),
+      keys: new Set(
+        tracks.flatMap((track) =>
+          track.title.trim() ? [trackKey(track.title, track.artist)] : [],
+        ),
+      ),
+    };
+  }
+
+  private isBanned(
+    track: { sourceId?: string; title: string; artist: string },
+    bans: ReturnType<Coordinator["autoplayBans"]>,
+  ) {
+    return (
+      (track.sourceId !== undefined && bans.sourceIds.has(track.sourceId)) ||
+      (Boolean(track.title.trim()) &&
+        bans.keys.has(trackKey(track.title, track.artist)))
+    );
+  }
+
+  // Skipping a song, or removing an autoplay pick from the queue, keeps it
+  // out of autoplay for good, in this room and for whoever did it, whether
+  // autoplay or someone chose it: nobody wants a skipped song back. People
+  // can still add it themselves. Its artist is also pushed down in this
+  // session's autoplay and in the rejecter's own recommendations, and a
+  // skipped discovery makes the next discovery turn wait longer. An autoplay
+  // pick is also remembered as listening memory across Huddles.
   private rejectSkipped(skipped: Entry, userId: string) {
+    this.store.banFromAutoplay({
+      roomId: this.roomId,
+      userId,
+      sourceId: skipped.sourceId,
+      title: skipped.title,
+      artist: skipped.artist,
+    });
     this.autoplayRejected = [
       ...this.autoplayRejected.filter((id) => id !== skipped.sourceId),
       skipped.sourceId,
-    ].slice(-autoplayRejectedLimit);
+    ].slice(-20);
     // A related video says nothing about anyone's taste in music.
-    if (!skipped.relatedVideo) this.rejectAutoplayArtist(skipped.artist);
-    this.saveAutoplayRejections();
     if (skipped.relatedVideo) return;
+    this.rejectAutoplayArtist(skipped.artist);
     this.recommendations?.penalize(userId, skipped);
     if (skipped.automatic) this.rememberSkip(skipped, userId);
     if (skipped.discovery)
@@ -4840,11 +4856,13 @@ export class Coordinator {
     };
     try {
       const recent = this.history.slice(-autoplayRecentWindow);
+      const bans = this.autoplayBans();
       const excluded = new Set([
         this.current?.sourceId,
         ...this.queue.map((track) => track.sourceId),
         ...recent.map((track) => track.sourceId),
         ...this.autoplayRejected,
+        ...bans.sourceIds,
       ]);
       const ranked = new Map<
         string,
@@ -4913,7 +4931,13 @@ export class Coordinator {
             : nowPlaying
               ? [nowPlaying.requesterId]
               : [],
-          recent: [...recent, ...(this.current ? [this.current] : [])],
+          // Banned songs ride along with the recent ones, which the mix drops
+          // by title and artist, so another upload of one stays out too.
+          recent: [
+            ...recent,
+            ...(this.current ? [this.current] : []),
+            ...bans.tracks,
+          ],
           exclude: excluded,
           skipped: {
             sourceIds: this.autoplayRejected,
@@ -5032,6 +5056,7 @@ export class Coordinator {
     startedAt: number,
     mode: AutoplayMode,
   ): Promise<boolean | undefined> {
+    const bans = this.autoplayBans();
     for (const id of ids) {
       if (excluded.has(id)) continue;
       const discovery = ranked.get(id)?.discovery ?? false;
@@ -5056,6 +5081,9 @@ export class Coordinator {
           ...this.autoplayRejected,
         ]);
         if (currentIds.has(metadata.sourceId)) return false;
+        // Candidates only come with a source, so a banned song under another
+        // one is only caught here, once its title and artist are known.
+        if (this.isBanned(metadata, bans)) return false;
         const entry: Entry = {
           ...metadata,
           id: crypto.randomUUID(),

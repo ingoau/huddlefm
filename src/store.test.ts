@@ -1118,6 +1118,79 @@ test("falls back to the Huddle's own channel when there is no source channel", (
   expect(store.recentRoomPlays("channel", 0)).toHaveLength(1);
 });
 
+test("keeps skipped songs out of autoplay in their room and for the skipper", () => {
+  const store = new Store(":memory:");
+  store.banFromAutoplay({
+    roomId: "room",
+    userId: "skipper",
+    sourceId: "source",
+    title: "Song",
+    artist: "Band",
+  });
+  store.banFromAutoplay({
+    roomId: "elsewhere",
+    title: "Other",
+    artist: "Band",
+  });
+  const song = { sourceId: "source", title: "Song", artist: "Band" };
+  expect(store.autoplayBans("room", [])).toEqual([song]);
+  // The skipper carries it into other rooms; nobody else does.
+  expect(store.autoplayBans("another", ["skipper"])).toEqual([song]);
+  expect(store.autoplayBans("another", ["someone"])).toEqual([]);
+  expect(store.autoplayBans("elsewhere", [])).toEqual([
+    { title: "Other", artist: "Band" },
+  ]);
+  // Clearing their skips stops it following them, but the room remembers.
+  store.deleteUserSkips("skipper");
+  expect(store.autoplayBans("another", ["skipper"])).toEqual([]);
+  expect(store.autoplayBans("room", [])).toEqual([song]);
+});
+
+test("skips from before bans existed become bans", () => {
+  const dir = mkdtempSync(join(tmpdir(), "huddlefm-bans-"));
+  const path = join(dir, "state.db");
+  try {
+    const before = new Store(path);
+    before.createSession({
+      id: "session",
+      huddleId: "huddle",
+      callId: "call",
+      channelId: "thread-channel",
+      threadTs: "1.0",
+      sourceChannelId: "room",
+      creatorId: "creator",
+      hostId: "host",
+      volume: 0.5,
+    });
+    for (const [userId, weight] of [
+      ["guest", 0.25],
+      ["host", 1],
+    ] as const)
+      before.recordAutoplaySkip({
+        sessionId: "session",
+        userId,
+        title: "Song",
+        artist: "Band",
+        weight,
+      });
+    before.close();
+    const raw = new Database(path);
+    raw.run("DELETE FROM autoplay_bans");
+    raw.run("DELETE FROM data_migrations WHERE name = 'autoplay-bans-v1'");
+    raw.close();
+    const store = new Store(path);
+    // One ban per song, for the room and for whoever pressed skip.
+    expect(store.autoplayBans("room", [])).toEqual([
+      { title: "Song", artist: "Band" },
+    ]);
+    expect(store.autoplayBans("another", ["host"])).toHaveLength(1);
+    expect(store.autoplayBans("another", ["guest"])).toEqual([]);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("remembers skipped autoplay picks per listener", () => {
   const store = new Store(":memory:");
   store.recordAutoplaySkip({

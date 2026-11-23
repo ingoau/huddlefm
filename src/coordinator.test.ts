@@ -62,6 +62,13 @@ function setup(
   const sessionChanges: unknown[] = [];
   const recordedMessages: unknown[] = [];
   const rememberedSkips: unknown[] = [];
+  const bans: {
+    roomId: string;
+    userId?: string;
+    sourceId?: string;
+    title: string;
+    artist: string;
+  }[] = [];
   const likes: unknown[] = [];
   const unlikes: unknown[] = [];
   let post = 0;
@@ -152,6 +159,15 @@ function setup(
       recentRoomPlays: () => [],
       recentSkips: () => [],
       recordTrackPlay: () => {},
+      banFromAutoplay: (value: (typeof bans)[number]) => {
+        bans.push(value);
+      },
+      autoplayBans: (roomId: string, userIds: readonly string[]) =>
+        bans.filter(
+          (ban) =>
+            ban.roomId === roomId ||
+            (ban.userId !== undefined && userIds.includes(ban.userId)),
+        ),
       recordAutoplaySkip: (value: unknown) => {
         rememberedSkips.push(value);
       },
@@ -249,6 +265,7 @@ function setup(
     sessionChanges,
     recordedMessages,
     rememberedSkips,
+    bans,
     likes,
     unlikes,
   };
@@ -7018,13 +7035,27 @@ test("a skipped autoplay pick is remembered for the room, not only the skipper",
     { userId: "host", title: "Not This One", weight: 1 },
     { userId: "guest", title: "Not This One", weight: 0.25 },
   ]);
+  // And it never comes back, here or wherever the skipper listens.
+  expect(test.bans).toEqual([
+    {
+      roomId: Reflect.get(test.coordinator, "roomId"),
+      userId: "host",
+      sourceId: "skipped0001",
+      title: "Not This One",
+      artist: "Band",
+    },
+  ]);
   await test.coordinator.endFromSlack();
 });
 
-test("a skipped autoplay pick stays out of autoplay through a restart", async () => {
+test("autoplay never picks a song skipped before, under any upload", async () => {
   const calls: Record<string, unknown>[] = [];
   const catalog = huddleMixCatalog(
-    [{ sourceId: "skipped0003", title: "Not This One" }],
+    [
+      { sourceId: "banned00001", title: "Skipped Here" },
+      { sourceId: "reupload001", title: "Skipped Elsewhere (Official Audio)" },
+      { sourceId: "fine0000001", title: "Fine" },
+    ],
     calls,
   );
   const test = setup(
@@ -7043,78 +7074,37 @@ test("a skipped autoplay pick stays out of autoplay through a restart", async ()
     undefined,
     catalog,
   );
+  // Skipped in this room in an earlier Huddle, and, by a listener who is
+  // here now, in another room under a different upload.
+  test.bans.push(
+    {
+      roomId: Reflect.get(test.coordinator, "roomId"),
+      sourceId: "banned00001",
+      title: "Skipped Here",
+      artist: "Band",
+    },
+    {
+      roomId: "another-room",
+      userId: "guest",
+      sourceId: "original001",
+      title: "Skipped Elsewhere",
+      artist: "Band",
+    },
+  );
   await test.coordinator.start();
   await enableHuddleMix(test.coordinator);
   await until(
     () =>
       (Reflect.get(test.coordinator, "current") as { sourceId?: string })
-        ?.sourceId === "skipped0003",
+        ?.sourceId !== undefined,
   );
-  await test.coordinator.action(interaction(test.coordinator, "next_track"));
-  // Saved the moment it is skipped, since a restart can come at any time.
-  expect(test.sessions).toContainEqual({
-    autoplayRejected: { sourceIds: ["skipped0003"], artists: ["Band"] },
-  });
-  await test.coordinator.endFromSlack();
-
-  const store = new Store(":memory:");
-  store.createSession({
-    id: "saved",
-    huddleId: "huddle",
-    callId: "call",
-    channelId: "channel",
-    threadTs: "1.0",
-    creatorId: "creator",
-    hostId: "host",
-    volume: 0.4,
-  });
-  store.setSession("saved", {
-    autoplayRejected: { sourceIds: ["skipped0003"], artists: ["Band"] },
-  });
-  store.suspendSession(
-    "saved",
-    {
-      state: "paused",
-      playbackSeconds: 0,
-      displayMode: "default",
-      anchorEnabled: false,
-      queue: [],
-    },
-    180_000,
+  expect(
+    (Reflect.get(test.coordinator, "current") as { sourceId: string }).sourceId,
+  ).toBe("fine0000001");
+  expect((calls[0]!.exclude as Set<string>).has("banned00001")).toBeTrue();
+  expect(calls[0]!.recent).toContainEqual(
+    expect.objectContaining({ title: "Skipped Elsewhere" }),
   );
-  const saved = store.resumableSessions(1, 180_000).sessions[0];
-  const result = setup(undefined, undefined, saved, undefined, store);
-  expect(Reflect.get(result.coordinator, "autoplayRejected")).toEqual([
-    "skipped0003",
-  ]);
-  expect(Reflect.get(result.coordinator, "autoplayRejectedArtists")).toEqual([
-    "Band",
-  ]);
-});
-
-test("a long session keeps every skipped autoplay pick out of autoplay", async () => {
-  const test = setup();
-  await test.coordinator.start();
-  const reject = Reflect.get(test.coordinator, "rejectSkipped") as (
-    entry: unknown,
-    userId: string,
-  ) => void;
-  // Hours of a busy room: far more skips than the recent window holds.
-  for (let index = 0; index < 60; index++)
-    reject.call(
-      test.coordinator,
-      {
-        id: `entry${index}`,
-        sourceId: `source${index}`,
-        title: `Song ${index}`,
-        artist: `Artist ${index}`,
-        relatedVideo: true,
-      },
-      "host",
-    );
-  const rejected = Reflect.get(test.coordinator, "autoplayRejected");
-  expect(rejected).toHaveLength(60);
-  expect(rejected).toContain("source0");
   await test.coordinator.endFromSlack();
 });
 
@@ -7165,7 +7155,7 @@ test("a manager who is not in the Huddle carries no skip of their own", async ()
   await test.coordinator.endFromSlack();
 });
 
-test("skipping a song someone chose is not held against the mix", async () => {
+test("skipping a song someone chose keeps it out of autoplay, not out of the mix's taste", async () => {
   const test = setup();
   await test.coordinator.start();
   Reflect.set(test.coordinator, "current", {
@@ -7180,8 +7170,12 @@ test("skipping a song someone chose is not held against the mix", async () => {
     filePath: "manual.opus",
   });
   await test.coordinator.action(interaction(test.coordinator, "next_track"));
-  // Someone deliberately queued it, so skipping says nothing about the mix.
+  // Someone deliberately queued it, so skipping says nothing about the mix's
+  // taste, but the room still never wants autoplay to bring it back.
   expect(test.rememberedSkips).toEqual([]);
+  expect(test.bans).toEqual([
+    expect.objectContaining({ userId: "host", sourceId: "manual" }),
+  ]);
   await test.coordinator.endFromSlack();
 });
 
