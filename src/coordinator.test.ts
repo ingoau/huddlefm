@@ -8037,7 +8037,7 @@ test("liking a song records it, answers only the listener, and leaves the card a
   await test.coordinator.endFromSlack();
 });
 
-test("the save button sits with the seek controls and DMs a song.link link", async () => {
+test("the save button sits with the seek controls and DMs a Squigly link", async () => {
   const test = setup();
   await test.coordinator.start();
   Reflect.set(test.coordinator, "current", {
@@ -8061,7 +8061,7 @@ test("the save button sits with the seek controls and DMs a song.link link", asy
   const sent = test.dms.at(-1)!;
   expect(sent[0]).toBe("host");
   expect(sent[1]).toBe(
-    "<https://song.link/https://www.youtube.com/watch?v=likedlikedl|Worth Hearing Again — Band>",
+    "<https://squigly.link/?link=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dlikedlikedl|Worth Hearing Again — Band>",
   );
   const audited = test.audit.at(-1) as [
     string,
