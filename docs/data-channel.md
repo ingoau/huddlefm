@@ -176,7 +176,7 @@ Asks the client to send `sync` again: the bot has something for this user but do
 
 Asks for the session. The bot broadcasts `state` and answers the sender with `you`. `key`, the client's P-256 public key, raw and in base64, has what's for this user come [sealed](#sealed).
 
-`client` names the client mod: `taut`, `slick` or `morphe`, and `version` its version, if it has one, at most 32 characters. The bot keeps them for the sender's attendee, and its analytics count what each client mod does by them: the first `sync` from an attendee records `plugin.connected`, and each `command` and `setting` records `plugin.request`, with its type and how it went, by error code. A name the bot doesn't know counts as `other`, and a client that gives none as `unknown`.
+`client` names the client mod: `taut`, `slick` or `morphe`, and `version` its version, if it has one: up to 32 letters, digits, `.`, `+` or `-`. The bot keeps them for the sender's attendee, and its analytics count what each client mod does by them: the first `sync` from an attendee records `plugin.connected`, and each `command` and `setting` records `plugin.request`, with its type and how it went, by error code. A name the bot doesn't know counts as `other`, and a client that gives none as `unknown`.
 
 ```json
 { "v": 1, "type": "sync", "client": "taut", "key": "BHk…" }

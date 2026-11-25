@@ -68,10 +68,8 @@ function pluginClient(client: unknown, version: unknown): PluginClient {
       : (pluginClientNames as readonly string[]).includes(client)
         ? (client as PluginClient["name"])
         : "other";
-  // short, so it can't stand in for anything else in analytics
-  return typeof version === "string" &&
-    version.length > 0 &&
-    version.length <= 32
+  // shaped like a version, so it can't stand in for anything else in analytics
+  return typeof version === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(version)
     ? { name, version }
     : { name };
 }
@@ -403,8 +401,13 @@ export class PluginChannel {
         error: "rate_limited",
         message: "Searching too fast; try again in a moment.",
       });
-    await this.answer(userId, id, client, request, () =>
-      this.host.command(userId, command as PluginCommand, client),
+    await this.answer(
+      userId,
+      id,
+      client,
+      request,
+      { command: command.type },
+      () => this.host.command(userId, command as PluginCommand, client),
     );
   }
 
@@ -431,6 +434,7 @@ export class PluginChannel {
       id,
       client,
       { kind: "setting", name: requestName(setting) },
+      { setting },
       () =>
         this.host.setting(
           userId,
@@ -448,6 +452,8 @@ export class PluginChannel {
     id: string,
     client: PluginClient,
     request: Request,
+    /** what the answer repeats of the request, as the client sent it */
+    about: Record<string, unknown>,
     run: () => Promise<AgentResult>,
   ) {
     let result: AgentResult;
@@ -462,7 +468,7 @@ export class PluginChannel {
     }
     const body = resultBody(result);
     this.track(userId, client, request, body.ok ? undefined : body.error);
-    this.reply(userId, id, { [request.kind]: request.name, ...body });
+    this.reply(userId, id, { ...about, ...body });
     return result.ok;
   }
 

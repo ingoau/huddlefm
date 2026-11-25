@@ -143,7 +143,7 @@ describe("plugin channel", () => {
   });
 
   test("records each client's connection once, and how its requests went", async () => {
-    const { captured, receive } = setup();
+    const { captured, sent, receive } = setup();
     await receive({ type: "sync", client: "slick" });
     // syncs again after each hello and resync, but connected once
     await receive({ type: "sync", client: "slick" });
@@ -152,14 +152,20 @@ describe("plugin channel", () => {
       "U0789GHI",
       "b",
     );
+    await receive(
+      { type: "sync", client: "taut", version: "hi there" },
+      "U0789GHI",
+      "c",
+    );
     await receive({ type: "command", id: "r1", command: { type: "skip" } });
     await receive({ type: "setting", id: "r2", setting: "nope", value: 1 });
     await receive({ type: "command", id: "r3", command: { type: "hack" } });
     await receive({ type: "setting", id: "r4", setting: "<b>", value: 1 });
     expect(captured).toEqual([
       ["plugin.connected", user, { client: "slick", sealed: false }],
-      // a version that long isn't one
+      // a version that long isn't one, nor is a sentence
       ["plugin.connected", "U0789GHI", { client: "morphe", sealed: false }],
+      ["plugin.connected", "U0789GHI", { client: "taut", sealed: false }],
       [
         "plugin.request",
         user,
@@ -198,6 +204,10 @@ describe("plugin channel", () => {
         },
       ],
     ]);
+    // the answer still names the setting as the client sent it
+    expect(sent.find((message) => message.id === "r4")).toMatchObject({
+      setting: "<b>",
+    });
   });
 
   test("seals what's for one user to their client's key", async () => {
