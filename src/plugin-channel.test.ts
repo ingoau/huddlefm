@@ -161,6 +161,7 @@ describe("plugin channel", () => {
     await receive({ type: "setting", id: "r2", setting: "nope", value: 1 });
     await receive({ type: "command", id: "r3", command: { type: "hack" } });
     await receive({ type: "setting", id: "r4", setting: "<b>", value: 1 });
+    await receive({ type: "setting", id: "r5", setting: "loop", value: "off" });
     expect(captured).toEqual([
       ["plugin.connected", user, { client: "slick", sealed: false }],
       // a version that long isn't one, nor is a sentence
@@ -177,7 +178,8 @@ describe("plugin channel", () => {
         {
           client: "slick",
           kind: "setting",
-          setting: "nope",
+          // no setting has that id
+          setting: "unknown",
           ok: false,
           error: "missing_permission",
         },
@@ -203,8 +205,16 @@ describe("plugin channel", () => {
           ok: true,
         },
       ],
+      [
+        "plugin.request",
+        user,
+        { client: "slick", kind: "setting", setting: "loop", ok: true },
+      ],
     ]);
     // the answer still names the setting as the client sent it
+    expect(sent.find((message) => message.id === "r2")).toMatchObject({
+      setting: "nope",
+    });
     expect(sent.find((message) => message.id === "r4")).toMatchObject({
       setting: "<b>",
     });

@@ -1,5 +1,6 @@
 import { mapAgentError } from "./integration.ts";
 import { seal, sealingKeys, sharedKey } from "./plugin-seal.ts";
+import { settingFieldIds } from "./settings-schema.ts";
 
 /*
  * The bot's half of the data channel protocol in docs/data-channel.md, which
@@ -511,11 +512,11 @@ export class PluginChannel {
 type Request = { kind: "command" | "setting"; name: string };
 
 /**
- * A setting's id as analytics records it: what a client sent, if it could be
- * a field's id, so nothing else it puts there is kept.
+ * A setting's id as analytics records it: what a client sent, if it is a
+ * field's id, so nothing else it puts there is kept.
  */
 function requestName(setting: unknown) {
-  return typeof setting === "string" && /^[A-Za-z_]{1,40}$/.test(setting)
+  return typeof setting === "string" && settingFieldIds.has(setting)
     ? setting
     : "unknown";
 }
