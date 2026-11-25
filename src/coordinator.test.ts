@@ -9472,7 +9472,7 @@ async function pluginSetup(
       result.coordinator.dataMessage({
         userId,
         attendeeId: `${userId}-attendee`,
-        payload: { v: 1, type: "sync" },
+        payload: { v: 1, type: "sync", client: "taut" },
       });
     synced.add(userId);
     result.coordinator.dataMessage({
@@ -9596,14 +9596,67 @@ test("client mods use the player as their user, noted as over the data channel",
       message: "Join the huddle before using the player.",
     }),
   ]);
-  // the user's own pause, as the player's button records it
+  // the user's own pause, as the player's button records it, from their mod
   expect(result.audit).toContainEqual([
     "playback.paused",
     "host",
-    expect.objectContaining({ via: "data_channel" }),
+    expect.objectContaining({ via: "data_channel", client: "taut" }),
   ]);
   // and nothing posted in the thread for what the client was answered
   expect(result.ephemeral).toEqual([]);
+  await result.coordinator.endFromSlack();
+});
+
+test("client mods' audit records say which client mod each came from", async () => {
+  const result = await pluginSetup();
+  await result.send("host", {
+    type: "sync",
+    client: "morphe",
+    version: "1.4.0",
+  });
+  // an older client, which doesn't name itself
+  await result.send("guest", { type: "sync" });
+  await result.send("host", {
+    type: "setting",
+    id: "r1",
+    setting: "loop",
+    value: "queue",
+  });
+  await result.send("guest", {
+    type: "setting",
+    id: "r2",
+    setting: "volume",
+    value: "35",
+  });
+  const changes = (result.audit as [string, string, object][]).filter(
+    ([event]) => event === "settings.changed",
+  );
+  expect(changes).toEqual([
+    [
+      "settings.changed",
+      "host",
+      expect.objectContaining({
+        via: "data_channel",
+        client: "morphe",
+        clientVersion: "1.4.0",
+      }),
+    ],
+    [
+      "settings.changed",
+      "guest",
+      expect.objectContaining({ via: "data_channel", client: "unknown" }),
+    ],
+  ]);
+  expect(changes[1]![2]).not.toHaveProperty("clientVersion");
+  // what's done another way isn't the mod's
+  await result.coordinator.agentUpdateSettings("host", {
+    permissions: ["add"],
+  });
+  expect(result.audit.at(-1)).toEqual([
+    "settings.changed",
+    "host",
+    expect.not.objectContaining({ client: expect.anything() }),
+  ]);
   await result.coordinator.endFromSlack();
 });
 

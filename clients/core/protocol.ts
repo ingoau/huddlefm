@@ -8,6 +8,9 @@ import { Store } from "./store.ts";
 /** The data channel topic, and the protocol this client speaks. */
 export const TOPIC = "huddlefm";
 export const VERSION = 1;
+
+/** The client mods built on this core, as each names itself in `sync`. */
+export type ClientName = "taut" | "slick";
 export const PROTOCOL = 1;
 /** Chime refuses data messages larger than this. */
 const MAX_BYTES = 2048;
@@ -177,11 +180,18 @@ export class HuddleFMClient {
     private log: (text: string) => void = () => {},
     /** the HuddleFM user the client mod knows, the only one believed then */
     private knownBot: () => string | undefined = () => undefined,
-    options: { seal?: boolean } = {},
+    options: {
+      seal?: boolean;
+      /** which client mod this is, which `sync` tells the bot */
+      client?: ClientName;
+    } = {},
   ) {
     if (options.seal !== false && globalThis.crypto?.subtle)
       this.sealing = new Sealing();
+    this.client = options.client;
   }
+
+  private client: ClientName | undefined;
 
   /** The huddle's data channel opened, with a way to send on it. */
   connect(send: (data: Uint8Array) => void) {
@@ -487,18 +497,20 @@ export class HuddleFMClient {
     if (!this.send) return;
     // with this client's key, once it's made, so what's for this user comes
     // sealed
+    const sync = (key?: string) => ({
+      type: "sync",
+      ...(this.client ? { client: this.client } : {}),
+      ...(key ? { key } : {}),
+    });
     if (this.sealing && !this.key)
       this.sealing
         .publicKey()
         .then((key) => {
           this.key = key;
-          this.post({ type: "sync", key });
+          this.post(sync(key));
         })
-        .catch(() => this.post({ type: "sync" }));
-    else if (
-      !this.post({ type: "sync", ...(this.key ? { key: this.key } : {}) })
-    )
-      return;
+        .catch(() => this.post(sync()));
+    else if (!this.post(sync(this.key))) return;
     if (attempt + 1 >= SYNC_RETRIES) return;
     this.syncTimer = setTimeout(() => {
       if (this.presence.get() === "waiting") this.sync(attempt + 1);

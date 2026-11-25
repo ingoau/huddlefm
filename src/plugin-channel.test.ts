@@ -3,6 +3,7 @@ import { Sealing } from "../clients/core/seal.ts";
 import {
   PluginChannel,
   type AgentResult,
+  type PluginClient,
   type PluginCommand,
   type PluginHost,
   type PluginSettingChange,
@@ -16,6 +17,9 @@ function setup() {
   const sent: Record<string, any>[] = [];
   const commands: [string, PluginCommand][] = [];
   const settings: [string, string, PluginSettingChange][] = [];
+  // the client mod each command and setting came from, in order
+  const clients: PluginClient[] = [];
+  const captured: [string, string, Record<string, unknown>][] = [];
   let snapshots = 0;
   let commandResult: AgentResult = { ok: true, state: "paused" };
   const host: PluginHost = {
@@ -25,12 +29,14 @@ function setup() {
       admin: false,
       for: userId,
     }),
-    command: async (userId, command) => {
+    command: async (userId, command, client) => {
       commands.push([userId, command]);
+      clients.push(client);
       return commandResult;
     },
-    setting: async (userId, setting, change) => {
+    setting: async (userId, setting, change, client) => {
       settings.push([userId, setting, change]);
+      clients.push(client);
       return setting === "nope"
         ? { ok: false, error: "You do not have permission for that." }
         : { ok: true, changed: [setting] };
@@ -48,6 +54,8 @@ function setup() {
       const index = timers.indexOf(timer as (typeof timers)[number]);
       if (index >= 0) timers.splice(index, 1);
     },
+    capture: (event, userId, properties) =>
+      captured.push([event, userId, properties]),
   });
   const advance = async (ms: number) => {
     now += ms;
@@ -87,6 +95,8 @@ function setup() {
     sent,
     commands,
     settings,
+    clients,
+    captured,
     advance,
     receive,
     setResult: (result: AgentResult) => (commandResult = result),
@@ -94,6 +104,102 @@ function setup() {
 }
 
 describe("plugin channel", () => {
+  test("passes on which client mod each request came from", async () => {
+    const { clients, receive } = setup();
+    await receive({ type: "sync", client: "taut" }, user, "a");
+    await receive(
+      { type: "sync", client: "morphe", version: "1.4.0" },
+      user,
+      "b",
+    );
+    await receive({ type: "sync", client: "someone's own" }, user, "c");
+    await receive(
+      { type: "command", id: "r1", command: { type: "skip" } },
+      user,
+      "a",
+    );
+    await receive(
+      { type: "setting", id: "r2", setting: "loop", value: "queue" },
+      user,
+      "b",
+    );
+    await receive(
+      { type: "command", id: "r3", command: { type: "skip" } },
+      user,
+      "c",
+    );
+    // an attendee that never synced, as from before the bot restarted
+    await receive(
+      { type: "command", id: "r4", command: { type: "skip" } },
+      user,
+      "d",
+    );
+    expect(clients).toEqual([
+      { name: "taut" },
+      { name: "morphe", version: "1.4.0" },
+      { name: "other" },
+      { name: "unknown" },
+    ]);
+  });
+
+  test("records each client's connection once, and how its requests went", async () => {
+    const { captured, receive } = setup();
+    await receive({ type: "sync", client: "slick" });
+    // syncs again after each hello and resync, but connected once
+    await receive({ type: "sync", client: "slick" });
+    await receive(
+      { type: "sync", client: "morphe", version: "x".repeat(33) },
+      "U0789GHI",
+      "b",
+    );
+    await receive({ type: "command", id: "r1", command: { type: "skip" } });
+    await receive({ type: "setting", id: "r2", setting: "nope", value: 1 });
+    await receive({ type: "command", id: "r3", command: { type: "hack" } });
+    await receive({ type: "setting", id: "r4", setting: "<b>", value: 1 });
+    expect(captured).toEqual([
+      ["plugin.connected", user, { client: "slick", sealed: false }],
+      // a version that long isn't one
+      ["plugin.connected", "U0789GHI", { client: "morphe", sealed: false }],
+      [
+        "plugin.request",
+        user,
+        { client: "slick", kind: "command", command: "skip", ok: true },
+      ],
+      [
+        "plugin.request",
+        user,
+        {
+          client: "slick",
+          kind: "setting",
+          setting: "nope",
+          ok: false,
+          error: "missing_permission",
+        },
+      ],
+      [
+        "plugin.request",
+        user,
+        {
+          client: "slick",
+          kind: "command",
+          command: "unknown",
+          ok: false,
+          error: "unknown_type",
+        },
+      ],
+      [
+        "plugin.request",
+        user,
+        {
+          client: "slick",
+          kind: "setting",
+          setting: "unknown",
+          ok: true,
+        },
+      ],
+    ]);
+  });
+
   test("seals what's for one user to their client's key", async () => {
     const { sent, receive } = setup();
     const client = new Sealing();

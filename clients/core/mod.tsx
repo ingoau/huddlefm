@@ -6,7 +6,12 @@
 
 import { MediaKeys } from "./media-keys.ts";
 import { Panel, PlayerBar, say, type Kit, type Platform } from "./panel.tsx";
-import { HuddleFMClient, TOPIC, type DataMessage } from "./protocol.ts";
+import {
+  HuddleFMClient,
+  TOPIC,
+  type ClientName,
+  type DataMessage,
+} from "./protocol.ts";
 import { Store } from "./store.ts";
 import { panelCss } from "./styles.ts";
 
@@ -148,6 +153,8 @@ export type Kept<T> = {
 
 /** What a client mod gives HuddleFM to reach Slack with. */
 export type Host = {
+  /** which client mod this is, which the bot's analytics count by */
+  client: ClientName;
   options: Options;
   log(text: string): void;
   /** adds the stylesheet, in Slack's windows, until the plugin stops */
@@ -241,6 +248,7 @@ export class HuddleFMMod {
       () => members.selfId(),
       (text) => host.log(text),
       () => botUser.get() || undefined,
+      { client: host.client },
     );
     this.mediaKeys = host.options.mediaKeys
       ? new MediaKeys(this.client, say, (userId) =>

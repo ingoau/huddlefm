@@ -163,6 +163,7 @@ import {
 import {
   PluginChannel,
   type AgentResult,
+  type PluginClient,
   type PluginCommand,
   type PluginSettingChange,
 } from "./plugin-channel.ts";
@@ -434,6 +435,8 @@ function reshuffle<T>(items: T[]) {
 type DataChannelRun = {
   /** who asked: only what is done as them is theirs */
   userId: string;
+  /** the client mod they asked with */
+  client: PluginClient;
   notices: string[];
   /** notices that tell how it went, not that it failed */
   info: string[];
@@ -461,6 +464,8 @@ export class Coordinator {
   private playbackSeconds = 0;
   /** What client mods asked for, while it runs. */
   private dataChannelRuns = new AsyncLocalStorage<DataChannelRun>();
+  /** The client mod whose request is running, for the runs it starts. */
+  private pluginClients = new AsyncLocalStorage<PluginClient>();
   // The bot running a bot API command now, so its audit records say so.
   private integrationRuns = new AsyncLocalStorage<{
     userId: string;
@@ -649,7 +654,7 @@ export class Coordinator {
           event.startsWith("integration.")
             ? details
             : this.fromDataChannel(actorId)
-              ? { ...details, via: "data_channel" }
+              ? { ...details, ...this.dataChannelDetails() }
               : this.fromIntegration(actorId)
                 ? { ...details, via: "integration" }
                 : details,
@@ -666,14 +671,25 @@ export class Coordinator {
       {
         snapshot: () => this.pluginSnapshot(),
         you: (userId) => this.pluginYou(userId),
-        command: (userId, command) => this.pluginCommand(userId, command),
-        setting: (userId, setting, change) =>
-          this.pluginSetting(userId, setting, change),
+        command: (userId, command, client) =>
+          this.pluginClients.run(client, () =>
+            this.pluginCommand(userId, command),
+          ),
+        setting: (userId, setting, change, client) =>
+          this.pluginClients.run(client, () =>
+            this.pluginSetting(userId, setting, change),
+          ),
         send: (payload) => this.sendMedia({ type: "data_broadcast", payload }),
       },
       {
         log: (event, fields) =>
           this.log.warn({ event, ...fields }, "Client mod message failed"),
+        capture: (event, userId, properties) =>
+          captureAnalytics(event, {
+            distinctId: userId,
+            sessionId: this.id,
+            properties,
+          }),
       },
     );
     if (jellyfin)
@@ -2467,6 +2483,16 @@ export class Coordinator {
     );
   }
 
+  /** What an audit record made for a client mod says of how it came. */
+  private dataChannelDetails() {
+    const client = this.dataChannelRuns.getStore()?.client;
+    return {
+      via: "data_channel",
+      client: client?.name ?? "unknown",
+      ...(client?.version ? { clientVersion: client.version } : {}),
+    };
+  }
+
   /**
    * Does what a client mod asks as the player in Slack does it, as its
    * user: the same handler as the button or dialog, with an interaction
@@ -2509,6 +2535,7 @@ export class Coordinator {
   ) {
     const run: DataChannelRun = {
       userId,
+      client: this.pluginClients.getStore() ?? { name: "unknown" },
       notices: [],
       info: [],
       done: false,
