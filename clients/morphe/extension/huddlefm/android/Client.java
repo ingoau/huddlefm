@@ -457,6 +457,9 @@ final class Client {
     if (syncTimer != null) HuddleFM.main.removeCallbacks(syncTimer);
     if (sender == null) return;
     JSONObject message = object("type", "sync");
+    // which client mod this is, which the bot's analytics count by
+    put(message, "client", "morphe");
+    put(message, "version", Version.NAME);
     if (key != null) put(message, "key", key);
     // a send that failed is tried again too, while the channel's still waiting
     post(message);

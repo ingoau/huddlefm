@@ -472,6 +472,11 @@ const entries: Entry[] = [
   },
 ];
 
+/** Every setting's field id, whoever sees it and whenever. */
+export const settingFieldIds: ReadonlySet<string> = new Set(
+  entries.map((entry) => entry.id),
+);
+
 function allowed(entry: Entry, context: SettingsContext) {
   if (entry.requires === "self") return Boolean(context.user);
   return context.access[entry.requires];

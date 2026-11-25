@@ -1,5 +1,6 @@
 import { mapAgentError } from "./integration.ts";
 import { seal, sealingKeys, sharedKey } from "./plugin-seal.ts";
+import { settingFieldIds } from "./settings-schema.ts";
 
 /*
  * The bot's half of the data channel protocol in docs/data-channel.md, which
@@ -46,6 +47,34 @@ export type PluginCommand = {
 /** A setting change: a field's new value, or a preset for `permissions`. */
 export type PluginSettingChange = { value?: unknown; preset?: string };
 
+/** The client mods that name themselves in `sync`. */
+const pluginClientNames = ["taut", "slick", "morphe"] as const;
+
+/**
+ * Which client mod sent a message, as its `sync` said: one of ours, `other`
+ * for a name we don't know, or `unknown` for a client that gave none, as an
+ * older one.
+ */
+export type PluginClient = {
+  name: (typeof pluginClientNames)[number] | "other" | "unknown";
+  version?: string;
+};
+
+const unknownClient: PluginClient = { name: "unknown" };
+
+function pluginClient(client: unknown, version: unknown): PluginClient {
+  const name =
+    typeof client !== "string"
+      ? "unknown"
+      : (pluginClientNames as readonly string[]).includes(client)
+        ? (client as PluginClient["name"])
+        : "other";
+  // shaped like a version, so it can't stand in for anything else in analytics
+  return typeof version === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(version)
+    ? { name, version }
+    : { name };
+}
+
 /** What an `agent*` method returns. */
 export type AgentResult = {
   ok: boolean;
@@ -58,11 +87,16 @@ export interface PluginHost {
   snapshot(): Record<string, unknown>;
   /** What a user may do, and their own settings, as `you` carries them. */
   you(userId: string): Promise<Record<string, unknown>>;
-  command(userId: string, command: PluginCommand): Promise<AgentResult>;
+  command(
+    userId: string,
+    command: PluginCommand,
+    client: PluginClient,
+  ): Promise<AgentResult>;
   setting(
     userId: string,
     setting: string,
     change: PluginSettingChange,
+    client: PluginClient,
   ): Promise<AgentResult>;
   /** Broadcasts a message on the data channel. */
   send(payload: Record<string, unknown>): void;
@@ -73,6 +107,12 @@ export type PluginChannelOptions = {
   setTimer?: (run: () => void, ms: number) => unknown;
   clearTimer?: (timer: unknown) => void;
   log?: (event: string, fields: Record<string, unknown>) => void;
+  /** Records an analytics event for what a user's client mod did. */
+  capture?: (
+    event: string,
+    userId: string,
+    properties: Record<string, unknown>,
+  ) => void;
 };
 
 /** The least time between two `state` broadcasts. */
@@ -116,6 +156,8 @@ export class PluginChannel {
    * sealed with, or null for one that sent none, as it's worked out.
    */
   private keys = new Map<string, Map<string, Promise<CryptoKey | null>>>();
+  /** Each user's clients, by attendee, as each named itself in `sync`. */
+  private clients = new Map<string, Map<string, PluginClient>>();
   /** what's on its way to each user, so it goes in the order it was sent */
   private sending = new Map<string, Promise<void>>();
   private sealing = sealingKeys();
@@ -124,6 +166,7 @@ export class PluginChannel {
   private setTimer: (run: () => void, ms: number) => unknown;
   private clearTimer: (timer: unknown) => void;
   private log: (event: string, fields: Record<string, unknown>) => void;
+  private capture: NonNullable<PluginChannelOptions["capture"]>;
 
   constructor(
     private host: PluginHost,
@@ -135,6 +178,7 @@ export class PluginChannel {
       options.clearTimer ??
       ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
     this.log = options.log ?? (() => {});
+    this.capture = options.capture ?? (() => {});
   }
 
   /** Whether any client has synced, so whether `state` is worth sending. */
@@ -153,15 +197,19 @@ export class PluginChannel {
       this.log("plugin_message_dropped", { userId, messageType: type });
       return;
     }
+    const attendee = typeof attendeeId === "string" ? attendeeId : "";
     if (type === "sync")
       return this.sync(
         userId,
-        typeof attendeeId === "string" ? attendeeId : "",
+        attendee,
         payload.key,
+        pluginClient(payload.client, payload.version),
       );
     if (!validId(payload.id)) return;
-    if (type === "command") return this.command(userId, payload.id, payload);
-    return this.setting(userId, payload.id, payload);
+    const client = this.clients.get(userId)?.get(attendee) ?? unknownClient;
+    if (type === "command")
+      return this.command(userId, payload.id, payload, client);
+    return this.setting(userId, payload.id, payload, client);
   }
 
   /** Schedules a `state` broadcast, merging changes close together. */
@@ -192,6 +240,7 @@ export class PluginChannel {
   forget(userId: string) {
     this.users.delete(userId);
     this.keys.delete(userId);
+    this.clients.delete(userId);
     this.sending.delete(userId);
     this.recent.delete(userId);
     this.recent.delete(`${userId}/search`);
@@ -227,7 +276,22 @@ export class PluginChannel {
     return true;
   }
 
-  private sync(userId: string, attendeeId: string, key: unknown) {
+  private sync(
+    userId: string,
+    attendeeId: string,
+    key: unknown,
+    client: PluginClient,
+  ) {
+    const named = this.clients.get(userId) ?? new Map<string, PluginClient>();
+    // A client syncs again after each `hello` and `resync`; it connected once.
+    if (!named.has(attendeeId))
+      this.capture("plugin.connected", userId, {
+        client: client.name,
+        ...(client.version ? { clientVersion: client.version } : {}),
+        sealed: key !== undefined,
+      });
+    named.set(attendeeId, client);
+    this.clients.set(userId, named);
     // kept straight away, so what's sent before it's worked out waits for it
     const shared: Promise<CryptoKey | null> =
       key === undefined
@@ -311,6 +375,7 @@ export class PluginChannel {
     userId: string,
     id: string,
     payload: Record<string, unknown>,
+    client: PluginClient,
   ) {
     const command = payload.command;
     if (
@@ -318,22 +383,32 @@ export class PluginChannel {
       typeof command.type !== "string" ||
       !commandTypes.has(command.type)
     )
-      return this.reply(userId, id, {
-        ok: false,
-        error: "unknown_type",
-        message: "That command is not available here.",
-      });
+      return this.refuse(
+        userId,
+        id,
+        client,
+        { kind: "command", name: "unknown" },
+        {
+          error: "unknown_type",
+          message: "That command is not available here.",
+        },
+      );
+    const request: Request = { kind: "command", name: command.type };
     if (
       command.type === "search" &&
       !this.allow(`${userId}/search`, searchLimit)
     )
-      return this.reply(userId, id, {
-        ok: false,
+      return this.refuse(userId, id, client, request, {
         error: "rate_limited",
         message: "Searching too fast; try again in a moment.",
       });
-    await this.answer(userId, id, { command: command.type }, () =>
-      this.host.command(userId, command as PluginCommand),
+    await this.answer(
+      userId,
+      id,
+      client,
+      request,
+      { command: command.type },
+      () => this.host.command(userId, command as PluginCommand, client),
     );
   }
 
@@ -341,23 +416,33 @@ export class PluginChannel {
     userId: string,
     id: string,
     payload: Record<string, unknown>,
+    client: PluginClient,
   ) {
     const { setting, value, preset } = payload;
     if (
       typeof setting !== "string" ||
       (value === undefined && typeof preset !== "string")
     )
-      return this.reply(userId, id, {
-        ok: false,
-        error: "invalid",
-        message: "Name a setting and its new value.",
-      });
-    const ok = await this.answer(userId, id, { setting }, () =>
-      this.host.setting(
+      return this.refuse(
         userId,
-        setting,
-        typeof preset === "string" ? { preset } : { value },
-      ),
+        id,
+        client,
+        { kind: "setting", name: requestName(setting) },
+        { error: "invalid", message: "Name a setting and its new value." },
+      );
+    const ok = await this.answer(
+      userId,
+      id,
+      client,
+      { kind: "setting", name: requestName(setting) },
+      { setting },
+      () =>
+        this.host.setting(
+          userId,
+          setting,
+          typeof preset === "string" ? { preset } : { value },
+          client,
+        ),
     );
     // Their own settings are only in `you`.
     if (ok) await this.sendYou(userId);
@@ -366,6 +451,9 @@ export class PluginChannel {
   private async answer(
     userId: string,
     id: string,
+    client: PluginClient,
+    request: Request,
+    /** what the answer repeats of the request, as the client sent it */
     about: Record<string, unknown>,
     run: () => Promise<AgentResult>,
   ) {
@@ -379,12 +467,56 @@ export class PluginChannel {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    this.reply(userId, id, { ...about, ...resultBody(result) });
+    const body = resultBody(result);
+    this.track(userId, client, request, body.ok ? undefined : body.error);
+    this.reply(userId, id, { ...about, ...body });
     return result.ok;
+  }
+
+  /** Answers a request turned away before it reached the session. */
+  private refuse(
+    userId: string,
+    id: string,
+    client: PluginClient,
+    request: Request,
+    failure: { error: string; message: string },
+  ) {
+    this.track(userId, client, request, failure.error);
+    this.reply(userId, id, { ok: false, ...failure });
+  }
+
+  /** Records a request and how it went, by error code, never its message. */
+  private track(
+    userId: string,
+    client: PluginClient,
+    request: Request,
+    error?: string,
+  ) {
+    this.capture("plugin.request", userId, {
+      client: client.name,
+      ...(client.version ? { clientVersion: client.version } : {}),
+      kind: request.kind,
+      [request.kind]: request.name,
+      ok: error === undefined,
+      ...(error === undefined ? {} : { error }),
+    });
   }
 
   private reply(userId: string, id: string, body: Record<string, unknown>) {
     if (this.closed) return;
     void this.sendTo(userId, { type: "result", id, ...body });
   }
+}
+
+/** A client's request, as analytics records it. */
+type Request = { kind: "command" | "setting"; name: string };
+
+/**
+ * A setting's id as analytics records it: what a client sent, if it is a
+ * field's id, so nothing else it puts there is kept.
+ */
+function requestName(setting: unknown) {
+  return typeof setting === "string" && settingFieldIds.has(setting)
+    ? setting
+    : "unknown";
 }

@@ -42,6 +42,18 @@ const state = (seq: number, extra: Record<string, unknown> = {}) => ({
 });
 
 describe("HuddleFM client", () => {
+  test("names its client mod when it syncs", () => {
+    const sent: Record<string, unknown>[] = [];
+    const huddlefm = new HuddleFMClient(() => self, undefined, undefined, {
+      seal: false,
+      client: "slick",
+    });
+    huddlefm.connect((data) =>
+      sent.push(JSON.parse(new TextDecoder().decode(data))),
+    );
+    expect(sent).toEqual([{ type: "sync", client: "slick", v: 1 }]);
+  });
+
   test("syncs on connect and takes the bot's state", () => {
     const { huddlefm, sent, receive } = client();
     expect(sent).toEqual([{ type: "sync", v: 1 }]);

@@ -55,6 +55,7 @@ export default class HuddleFM extends SlickPlugin<typeof settings> {
     if (!api.isActive()) return;
     const huddle = activeHuddle(api);
     this.mod = new HuddleFMMod({
+      client: "slick",
       options: {
         collapsePlayer: config.collapsePlayer,
         hideTile: config.hideTile,

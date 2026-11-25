@@ -36,6 +36,7 @@ export default class HuddleFM extends TautPlugin<typeof HuddleFM> {
     const botUser = api.storage.store<string>("botUserId", "");
     const { elements } = api;
     this.mod = new HuddleFMMod({
+      client: "taut",
       options: {
         collapsePlayer: config.collapsePlayer,
         hideTile: config.hideTile,
