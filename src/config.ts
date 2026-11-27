@@ -122,6 +122,9 @@ export function loadConfig() {
     teamId: process.env.SLACK_TEAM_ID,
     port: Number(process.env.PORT ?? 3210),
     bindAddress: process.env.BIND_ADDRESS ?? "127.0.0.1",
+    // Where a media host's sockets are, when the media runs in its own
+    // container: see src/media-host/.
+    mediaHostDir: optionalText(process.env.MEDIA_HOST_DIR),
     mediaRegion: process.env.CHIME_MEDIA_REGION ?? "ap-southeast-2",
     queueLimit: Number(process.env.QUEUE_LIMIT ?? 50),
     durationSeconds: Number(process.env.TRACK_DURATION_LIMIT_SECONDS ?? 1_200),

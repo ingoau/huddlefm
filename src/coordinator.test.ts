@@ -970,6 +970,110 @@ test("suspends with a restart notice and restores playback", async () => {
   await second.coordinator.endFromSlack();
 });
 
+function pausedSaved(): SavedSession {
+  return {
+    id: "saved",
+    huddleId: "huddle",
+    callId: "call",
+    channelId: "channel",
+    threadTs: "1.0",
+    uiTs: "player",
+    revision: 2,
+    creatorId: "creator",
+    hostId: "host",
+    state: "paused",
+    volume: 0.4,
+    autoplay: "off",
+    loopMode: "off",
+    transitionMode: "none",
+    displayMode: "lyrics",
+    anchorEnabled: true,
+    playbackSeconds: 42,
+    listenedSeconds: 84,
+    mediaMode: "music",
+    captions: false,
+    watchedSeconds: 0,
+    resumeUntil: 600_000,
+    permissions: ["add"],
+    tracks: [
+      {
+        id: "track",
+        requesterId: "host",
+        sourceInput: "package.json",
+        canonicalUrl: "package.json",
+        sourceId: "source",
+        title: "Track",
+        artist: "Artist",
+        status: "playing",
+        filePath: "package.json",
+      },
+    ],
+  };
+}
+
+test("suspends with the media playing on, and says the player is updating", async () => {
+  const result = setup();
+  await result.coordinator.start();
+  const posts = result.posted.length;
+  expect(await result.coordinator.suspendForRestart(600_000, true)).toBe(true);
+  expect(result.posted.length).toBe(posts);
+  expect(result.media).not.toContainEqual({ type: "leave" });
+  expect(result.suspensions).toEqual([
+    [
+      result.coordinator.id,
+      expect.objectContaining({ state: "ready" }),
+      600_000,
+    ],
+  ]);
+  const player = JSON.stringify(result.updates.at(-1));
+  expect(player).toContain("Updating HuddleFM");
+  expect(player).not.toContain('"type":"actions"');
+});
+
+test("picks up media that played on through a restart without starting it again", async () => {
+  const result = setup(undefined, undefined, pausedSaved());
+  await result.coordinator.resume("restorer", true);
+  expect(result.media).not.toContainEqual(
+    expect.objectContaining({ type: "play" }),
+  );
+  expect(result.media).not.toContainEqual({ type: "seek", seconds: 42 });
+  expect(result.media).not.toContainEqual(
+    expect.objectContaining({ type: "display_mode" }),
+  );
+  await result.coordinator.requestMediaStatus();
+  expect(result.media.slice(-2)).toEqual([
+    { type: "status" },
+    { type: "announce" },
+  ]);
+  // Paused before the restart, but the media says it is playing.
+  await result.coordinator.mediaEvent("status", {
+    entryId: "track",
+    seconds: 50,
+    playing: true,
+  });
+  expect(result.media.at(-1)).toEqual({ type: "pause" });
+  // Only the status asked for is acted on.
+  const sent = result.media.length;
+  await result.coordinator.mediaEvent("status", {
+    entryId: "other",
+    playing: true,
+  });
+  expect(result.media.length).toBe(sent);
+  await result.coordinator.endFromSlack();
+});
+
+test("starts the song again when attached media lost it", async () => {
+  const result = setup(undefined, undefined, pausedSaved());
+  await result.coordinator.resume("restorer", true);
+  await result.coordinator.requestMediaStatus();
+  await result.coordinator.mediaEvent("status", { playing: false });
+  expect(result.media).toContainEqual(
+    expect.objectContaining({ type: "play", entryId: "track" }),
+  );
+  expect(result.media).toContainEqual({ type: "seek", seconds: 42 });
+  await result.coordinator.endFromSlack();
+});
+
 test("a Next click during first-track preparation does not skip it", async () => {
   let finish!: (path: string) => void;
   const prepared = new Promise<string>((resolve) => {

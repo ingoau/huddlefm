@@ -5,5 +5,15 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     env_file: .env
+    environment:
+      MEDIA_HOST_DIR: data/run
+    volumes:
+      - ./data:/app/data
+  # Plays the music, so it can stay up while huddlefm is updated.
+  media:
+    image: ghcr.io/ingoau/huddlefm:latest
+    command: bun run media-host
+    init: true
+    restart: unless-stopped
     volumes:
       - ./data:/app/data

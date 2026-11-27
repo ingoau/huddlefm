@@ -88,6 +88,10 @@ Chime media needs outbound UDP 3478 or TLS on port 443 to `*.chime.aws`.
 
 Each huddle's media runs in its own process, so a crash ends only that session. Live streams, YouTube videos in video mode and Jellyfin items stream as they play rather than downloading first; a YouTube video also downloads into the video cache behind it.
 
+The Compose file runs those processes in a second container, `media`, so the music keeps playing while `huddlefm` restarts. The player says HuddleFM is updating, and its controls come back once `huddlefm` attaches to the music again. A streamed item picks up again from where it was. `huddlefm` reaches `media` through sockets in `MEDIA_HOST_DIR` (`data/run`), which both containers mount. Without `MEDIA_HOST_DIR`, the media runs inside `huddlefm` and stops whenever it restarts. If nothing attaches within `MEDIA_HOST_ORPHAN_MINUTES` (10, set on the `media` service), the media host leaves the huddle.
+
+`huddlefm` logs `media_host_outdated` when the `media` container runs other media code than its own image. To update `media`, wait until no sessions are active, since restarting it stops their music. Both services use the same image, so after pulling a new one, a plain `docker compose up -d` recreates `media` too; name the service to recreate only that one.
+
 With `LOUDNESS_NORMALIZATION` on, songs are re-encoded at -14 LUFS as they download. Videos are measured instead and turned to the same level as they play (lifting a quiet one by at most 6 dB); each measurement is kept, so a video is levelled from its first second every time after.
 
 ## YouTube

@@ -1481,11 +1481,12 @@ export class Store {
     })();
   }
 
-  resumableSessions(now: number, ttlMs: number) {
+  /** `keep` lists sessions that never expire, whose media plays on. */
+  resumableSessions(now: number, ttlMs: number, keep = new Set<string>()) {
     const rows = this.db
       .query(`SELECT * FROM sessions WHERE status != 'ended'`)
       .all() as Row[];
-    return this.savedSessions(rows, now, ttlMs, true);
+    return this.savedSessions(rows, now, ttlMs, true, keep);
   }
 
   restorableSessions() {
@@ -1503,14 +1504,24 @@ export class Store {
     now: number,
     ttlMs: number,
     expire: boolean,
+    keep = new Set<string>(),
   ) {
     const expiredIds: string[] = [];
+    // The players those sessions left, to say they ended.
+    const expiredPlayers: { id: string; channelId: string; uiTs: string }[] =
+      [];
     const sessions = rows.flatMap((row) => {
       const deadline = Number(
         row.resume_until ?? Number(row.updated_at) + ttlMs,
       );
-      if (expire && deadline <= now) {
+      if (expire && deadline <= now && !keep.has(String(row.id))) {
         expiredIds.push(String(row.id));
+        if (row.ui_ts)
+          expiredPlayers.push({
+            id: String(row.id),
+            channelId: String(row.channel_id),
+            uiTs: String(row.ui_ts),
+          });
         return [];
       }
       const id = String(row.id);
@@ -1583,7 +1594,7 @@ export class Store {
           end.run(now, id);
         }
       })();
-    return { sessions, expiredIds };
+    return { sessions, expiredIds, expiredPlayers };
   }
 
   expireSession(sessionId: string) {
