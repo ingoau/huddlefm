@@ -62,7 +62,9 @@ SLACK_XOXD=xoxd-...   # Browser `d` cookie for that session
 docker compose up -d
 ```
 
-Data and logs live under `./data`. To update, run `docker compose pull && docker compose up -d`; active sessions resume after a short restart.
+Data and logs live under `./data`. To update, run `docker compose pull huddlefm && docker compose up -d huddlefm`. The music keeps playing, and the controls come back after a few seconds.
+
+The `media` container plays the music, and its code changes less often. When `huddlefm` logs `media_host_outdated`, update it while no sessions are active with `docker compose up -d media`.
 
 Everything else, from scrobbling to limits and YouTube sign-in, is in [docs/configuration.md](docs/configuration.md).
 

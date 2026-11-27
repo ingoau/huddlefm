@@ -548,6 +548,10 @@ export class Coordinator {
   private pausedTimer?: ReturnType<typeof setTimeout>;
   private pausedWarningTimer?: ReturnType<typeof setTimeout>;
   private renderTimer?: ReturnType<typeof setTimeout>;
+  // The app is restarting while the media plays on; see suspendForRestart.
+  private updating = false;
+  // A status was asked of media that played on through a restart.
+  private awaitingMediaStatus = false;
   // The player's newest blocks not yet sent to Slack, and the sending of
   // them; a retry waiting out a rate limit can be woken.
   private playerBlocks?: unknown[];
@@ -880,9 +884,15 @@ export class Coordinator {
     }
   }
 
-  async resume(actorId?: string) {
+  /**
+   * Picks the session back up after a restart. `attached` is for media that
+   * played on through it, on a media host: it still has the song, its
+   * settings and its lyrics, so none of them is sent again, and
+   * requestMediaStatus checks it afterwards.
+   */
+  async resume(actorId?: string, attached = false) {
     const startedAt = Date.now();
-    this.log.info({ event: "resume_started" }, "Resuming session");
+    this.log.info({ event: "resume_started", attached }, "Resuming session");
     // The player names who added each song; asked now, beside the checks
     // below, so the first song does not wait on it.
     for (const entry of [this.current, ...this.queue])
@@ -930,14 +940,21 @@ export class Coordinator {
       huddleId: this.room.huddleId,
     });
     this.sessionChanged();
-    this.sendMediaSettings();
+    if (!attached) this.sendMediaSettings();
     this.prefetchRecommendations();
     if (!this.current) await this.startNext();
     else {
       // Listeners were already asked about this track before the restart,
       // and that prompt still answers for it.
       this.startScrobbling(this.current, this.playbackSeconds, false);
-      await this.sendCurrent(this.current);
+      if (!attached) await this.sendCurrent(this.current);
+      else
+        this.jellyfinUi?.playing(
+          this.current,
+          this.playbackSeconds,
+          this.state === "paused",
+          true,
+        );
       await this.render();
       this.refreshIdle();
       this.scheduleAutoplay();
@@ -948,6 +965,7 @@ export class Coordinator {
     this.log.info(
       {
         event: "resumed",
+        attached,
         state: this.state,
         missingTracks: missingEntries.length,
         durationMs: Date.now() - startedAt,
@@ -1365,6 +1383,7 @@ export class Coordinator {
       seconds?: number;
       count?: number;
       reason?: string;
+      playing?: boolean;
     },
   ) {
     if (this.state === "suspended") return;
@@ -1418,6 +1437,8 @@ export class Coordinator {
       this.contentShares = Math.max(0, Number(details?.count) || 0);
       return;
     }
+    if (type === "status")
+      return this.enqueue(() => this.syncWithMedia(details));
     this.log.info(
       { event: "media_event", mediaEvent: type, entryId: details?.entryId },
       "Media event received",
@@ -1430,6 +1451,57 @@ export class Coordinator {
       return this.enqueue(() => this.advance(type, details?.entryId));
     if (type === "fatal" || type === "ended")
       return this.enqueue(() => this.end(undefined, "media connection ended"));
+  }
+
+  /**
+   * Asks media that played on through a restart where it is. It goes behind
+   * what the media said meanwhile, which the session has caught up on first.
+   */
+  requestMediaStatus() {
+    return this.enqueue(() => {
+      this.awaitingMediaStatus = true;
+      this.sendMedia({ type: "status" });
+    });
+  }
+
+  // Puts media that played on through a restart back in step with the
+  // session, where something it did then never reached the session.
+  private async syncWithMedia(details?: {
+    entryId?: string;
+    seconds?: number;
+    playing?: boolean;
+  }) {
+    if (!this.awaitingMediaStatus || this.inactive()) return;
+    this.awaitingMediaStatus = false;
+    const current = this.current;
+    const entryId = details?.entryId;
+    this.log.info(
+      {
+        event: "media_status",
+        entryId,
+        currentId: current?.id,
+        mediaPlaying: details?.playing,
+        state: this.state,
+      },
+      "Media status after attaching",
+    );
+    if (!current) {
+      if (entryId) this.sendMedia({ type: "stop" });
+      return;
+    }
+    if (entryId !== current.id) {
+      await this.sendCurrent(current);
+      return;
+    }
+    if (
+      typeof details?.seconds === "number" &&
+      Number.isFinite(details.seconds)
+    )
+      this.playbackSeconds = details.seconds;
+    if (this.state === "paused" && details?.playing)
+      this.sendMedia({ type: "pause" });
+    else if (this.state === "playing" && details?.playing === false)
+      this.sendMedia({ type: "resume" });
   }
 
   threadActivity(userId: string) {
@@ -3250,24 +3322,35 @@ export class Coordinator {
     return this.enqueue(() => this.end(this.hostId, "huddle ended"));
   }
 
-  suspendForRestart(resumeUntil: number) {
+  /**
+   * Saves the session for the app's restart. With `detach`, its media plays
+   * on, on a media host, and the caller detaches from it: the player says the
+   * controls are back shortly instead of a notice saying the music stops.
+   */
+  suspendForRestart(resumeUntil: number, detach = false) {
     return this.enqueue(async () => {
-      if (this.inactive()) return;
+      if (this.inactive()) return false;
       const startedAt = Date.now();
       this.log.info(
-        { event: "suspend_started" },
+        { event: "suspend_started", detach },
         "Suspending session for restart",
       );
-      const notice = this.post(
-        this.room.uiChannelId,
-        this.room.uiThreadTs,
-        "HuddleFM is restarting. Playback should resume shortly.",
-      ).catch((error) =>
-        this.log.error(
-          { event: "restart_notice_failed", err: error },
-          "Could not post restart notice",
-        ),
-      );
+      const notice = detach
+        ? undefined
+        : this.post(
+            this.room.uiChannelId,
+            this.room.uiThreadTs,
+            "HuddleFM is restarting. Playback should resume shortly.",
+          ).catch((error) =>
+            this.log.error(
+              { event: "restart_notice_failed", err: error },
+              "Could not post restart notice",
+            ),
+          );
+      if (detach) {
+        this.updating = true;
+        this.render();
+      }
       // The player shows what will resume, which the last click may not have
       // reached Slack with yet.
       await this.settlePlayer();
@@ -3291,12 +3374,15 @@ export class Coordinator {
         resumeUntil,
       });
       this.dropIntegrations("session.suspended");
-      this.sendMedia({ type: "leave" });
-      await Promise.all([this.leaveMedia(), notice]);
+      if (!detach) {
+        this.sendMedia({ type: "leave" });
+        await Promise.all([this.leaveMedia(), notice]);
+      }
       this.log.info(
-        { event: "suspended", durationMs: Date.now() - startedAt },
+        { event: "suspended", detach, durationMs: Date.now() - startedAt },
         "Session suspended for restart",
       );
+      return true;
     });
   }
 
@@ -8654,6 +8740,29 @@ export class Coordinator {
   }
 
   private blocks() {
+    const blocks = this.liveBlocks();
+    if (!this.updating) return blocks;
+    // The app is restarting with the music playing on: nothing would answer
+    // the controls, so the player says when they are back instead.
+    return blocks.map((block, index) => ({
+      ...block,
+      child_blocks: [
+        ...block.child_blocks.filter(
+          (child) => (child as { type?: string }).type !== "actions",
+        ),
+        ...(index === 0
+          ? [
+              context(
+                `updating_${this.id}_${this.revision}`,
+                "Updating HuddleFM. The controls are back in a few seconds.",
+              ),
+            ]
+          : []),
+      ],
+    }));
+  }
+
+  private liveBlocks() {
     const id = `${this.id}_${this.revision}`;
     const current = this.current;
     const next = this.queue[0];

@@ -1,4 +1,5 @@
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { join as joinPath } from "node:path";
 import {
   capture as captureAnalytics,
   captureAudit,
@@ -27,6 +28,12 @@ import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
 import { flushLogs, logger } from "./logger.ts";
 import { LyricsCatalog } from "./lyrics.ts";
+import { MediaHostClient } from "./media-host/client.ts";
+import {
+  appSocketName,
+  mediaCodeHash,
+  type HostedSession,
+} from "./media-host/protocol.ts";
 import {
   NativeMediaSession,
   type MediaMessage,
@@ -39,6 +46,7 @@ import {
   roomOwnsThread,
   verifySlackIdentity,
   type ChimeBootstrap,
+  type JoinedHuddle,
 } from "./slack-huddle.ts";
 import {
   integrationReply,
@@ -56,6 +64,9 @@ import { WorkspaceAdmins } from "./workspace-admins.ts";
 import { openPersonalSettingsAction, UserSettings } from "./user-settings.ts";
 
 const resumeTtlMs = 3 * 60_000;
+// Media on a media host plays on through a restart for as long as the host
+// waits for the app (MEDIA_HOST_ORPHAN_MINUTES, 10 by default).
+const hostedResumeTtlMs = 10 * 60_000;
 const log = logger.child({ component: "app" });
 process.on("uncaughtExceptionMonitor", (err) => {
   log.fatal({ event: "uncaught_exception", err }, "Uncaught exception");
@@ -111,7 +122,53 @@ store.pruneListeningMemory(
 );
 const scrobbling = new ScrobbleDispatcher(store, config);
 scrobbling.start();
-const saved = store.resumableSessions(Date.now(), resumeTtlMs);
+// With a media host, the media of the sessions that were playing when the
+// app went down may still be playing there, to be attached to again.
+const mediaHost = config.mediaHostDir
+  ? new MediaHostClient(config.mediaHostDir, config.port)
+  : undefined;
+const hosted = new Map<string, HostedSession>();
+const strayHosted: HostedSession[] = [];
+if (mediaHost) {
+  try {
+    const listed = await mediaHost.waitForList();
+    const appCode = await mediaCodeHash();
+    for (const session of listed.sessions)
+      if (session.tag) hosted.set(session.tag.owner, session);
+      else strayHosted.push(session);
+    log.info(
+      {
+        event: "media_host_connected",
+        sessions: listed.sessions.length,
+        hostCode: listed.code,
+        appCode,
+      },
+      "Media host connected",
+    );
+    if (listed.code !== appCode)
+      log.warn(
+        { event: "media_host_outdated", hostCode: listed.code, appCode },
+        "The media host runs other media code than this image; update it when no sessions are active",
+      );
+  } catch (error) {
+    log.error(
+      { event: "media_host_unavailable", err: error },
+      "Could not reach the media host",
+    );
+  }
+}
+const saved = store.resumableSessions(
+  Date.now(),
+  resumeTtlMs,
+  new Set(hosted.keys()),
+);
+// Media no saved session is waiting for leaves its huddle.
+for (const [owner, session] of hosted)
+  if (!saved.sessions.some((resumable) => resumable.id === owner)) {
+    hosted.delete(owner);
+    strayHosted.push(session);
+  }
+for (const session of strayHosted) void closeHosted(session.sessionId);
 log.info(
   {
     event: "resumable_sessions_loaded",
@@ -311,6 +368,8 @@ type Runtime = {
   media: NativeMediaSession;
   coordinator?: Coordinator;
   mediaState?: { type: string; details?: unknown };
+  /** What media attached again after a restart said before its session resumed. */
+  held?: MediaMessage[];
   joinGate?: Gate;
   leaveGate?: Gate;
 };
@@ -481,6 +540,71 @@ function runtimeForToken(token: string) {
 
 function notFound() {
   return new Response("Not found", { status: 404 });
+}
+
+function closeHosted(sessionId: string) {
+  return mediaHost?.closeSession(sessionId).catch((error) =>
+    log.warn(
+      {
+        event: "media_host_close_failed",
+        mediaSessionId: sessionId,
+        err: error,
+      },
+      "Could not end a media process on the media host",
+    ),
+  );
+}
+
+/** A saved session's huddle, for media attached to again after a restart. */
+function savedRoom(
+  saved: SavedSession,
+  bootstrap: ChimeBootstrap,
+  participantIds: string[],
+): JoinedHuddle {
+  return {
+    huddleCallId: saved.callId,
+    huddleId: saved.huddleId,
+    huddleCreatorId: saved.creatorId,
+    participantIds,
+    uiChannelId: saved.channelId,
+    uiThreadTs: saved.threadTs,
+    ...(saved.sourceChannelId
+      ? { sourceChannelId: saved.sourceChannelId }
+      : {}),
+    ...(saved.huddleThreadTs ? { huddleThreadTs: saved.huddleThreadTs } : {}),
+    ...(saved.companionChannelId
+      ? { companionChannelId: saved.companionChannelId }
+      : {}),
+    chimeMeeting: bootstrap.meeting,
+    chimeAttendee: bootstrap.attendee,
+  };
+}
+
+/** Attaches to media still playing on the media host; undefined when gone. */
+async function attachHosted(channelId: string, hostedSession: HostedSession) {
+  const runtime: Runtime = {
+    sourceChannelId: channelId,
+    callId: "",
+    bootstrap: hostedSession.bootstrap,
+    media: createMediaSession(() => runtime),
+    held: [],
+  };
+  runtimes.set(runtime.bootstrap.sessionId, runtime);
+  const attached = await runtime.media
+    .attach(runtime.bootstrap.sessionId)
+    .catch((error) => {
+      log.warn(
+        {
+          event: "media_attach_failed",
+          mediaSessionId: runtime.bootstrap.sessionId,
+          err: error,
+        },
+        "Could not attach to media on the media host",
+      );
+      return false;
+    });
+  if (attached) return runtime;
+  runtimes.delete(runtime.bootstrap.sessionId);
 }
 
 async function discardRuntime(runtime: Runtime) {
@@ -695,6 +819,8 @@ async function joinHuddle(
   restored?: SavedSession,
   resumeActorId?: string,
   autoJoined = false,
+  // Media for the restored session still playing on the media host.
+  reattach?: { session: HostedSession; participantIds: string[] },
 ) {
   if (shuttingDown) throw new Error("HuddleFM is shutting down");
   if (
@@ -766,71 +892,101 @@ async function joinHuddle(
       });
       return { declined: true };
     }
-    const joined =
-      callId && inviteFreeWilly
-        ? await slackHuddle.joinInvited(channelId, callId, inviteFreeWilly)
-        : await slackHuddle.join(channelId);
-    // Joining by channel takes whatever huddle is there now, which may not
-    // be the one asked for if it ended in the meantime.
-    if (callId && joined.huddleCallId !== callId)
-      throw new Error("The huddle ended before HuddleFM could join it");
-    const huddleThreadTs = joined.uiThreadTs;
-    preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
-      (userId) => !config.excludedUserIds.has(userId),
-    );
-    if (companionChannelId) {
-      await companions.activate(companionChannelId, preparedParticipantIds);
-      joined.uiChannelId = companionChannelId;
-      joined.uiThreadTs = "";
-      joined.companionChannelId = companionChannelId;
-    }
-    joined.sourceChannelId = channelId;
-    joined.huddleThreadTs = huddleThreadTs;
-    if (runtimeForCall(joined.huddleCallId))
-      throw new Error("HuddleFM is already active in this huddle");
-    const bootstrap = {
-      sessionId: crypto.randomUUID(),
-      meeting: joined.chimeMeeting,
-      attendee: joined.chimeAttendee,
-      initialVolume: restored?.volume ?? config.initialVolume,
-      duckingMode: restored?.duckingMode ?? config.duckingMode,
-      lyricsOffsetMs: config.lyricsOffsetMs,
-      bridgeToken: crypto.randomUUID(),
-      video: {
-        maxHeight: config.video.maxHeight,
-        maxFps: config.video.maxFps,
-      },
-    };
-    runtime = {
-      sourceChannelId: channelId,
-      callId: joined.huddleCallId,
-      bootstrap,
-      media: createMediaSession(() => runtime),
-    };
-    runtimes.set(bootstrap.sessionId, runtime);
-    log.debug(
-      {
-        event: "runtime_created",
-        mediaSessionId: bootstrap.sessionId,
-        channelId,
-        callId: joined.huddleCallId,
-      },
-      "Media runtime created",
-    );
-    try {
-      await joinMedia(runtime);
+    const reattached =
+      reattach && restored
+        ? await attachHosted(channelId, reattach.session)
+        : undefined;
+    let joined: JoinedHuddle;
+    if (reattached && restored && reattach) {
+      runtime = reattached;
+      joined = savedRoom(restored, runtime.bootstrap, reattach.participantIds);
+      runtime.callId = joined.huddleCallId;
+      joined.sourceChannelId ??= channelId;
+      preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
+        (userId) => !config.excludedUserIds.has(userId),
+      );
+      if (companionChannelId) {
+        await companions.activate(companionChannelId, preparedParticipantIds);
+        joined.uiChannelId = companionChannelId;
+        joined.uiThreadTs = "";
+        joined.companionChannelId = companionChannelId;
+      }
       log.info(
         {
-          event: "media_joined",
-          mediaSessionId: bootstrap.sessionId,
-          durationMs: Date.now() - startedAt,
+          event: "media_reattached",
+          mediaSessionId: runtime.bootstrap.sessionId,
+          sessionId: restored.id,
         },
-        "Media joined Chime",
+        "Attached to media that played on through the restart",
       );
-    } catch (error) {
-      await discardRuntime(runtime);
-      throw error;
+    } else {
+      joined =
+        callId && inviteFreeWilly
+          ? await slackHuddle.joinInvited(channelId, callId, inviteFreeWilly)
+          : await slackHuddle.join(channelId);
+      // Joining by channel takes whatever huddle is there now, which may not
+      // be the one asked for if it ended in the meantime.
+      if (callId && joined.huddleCallId !== callId)
+        throw new Error("The huddle ended before HuddleFM could join it");
+      const huddleThreadTs = joined.uiThreadTs;
+      preparedParticipantIds = [inviterUserId, ...joined.participantIds].filter(
+        (userId) => !config.excludedUserIds.has(userId),
+      );
+      if (companionChannelId) {
+        await companions.activate(companionChannelId, preparedParticipantIds);
+        joined.uiChannelId = companionChannelId;
+        joined.uiThreadTs = "";
+        joined.companionChannelId = companionChannelId;
+      }
+      joined.sourceChannelId = channelId;
+      joined.huddleThreadTs = huddleThreadTs;
+      if (runtimeForCall(joined.huddleCallId))
+        throw new Error("HuddleFM is already active in this huddle");
+      const bootstrap = {
+        sessionId: crypto.randomUUID(),
+        meeting: joined.chimeMeeting,
+        attendee: joined.chimeAttendee,
+        initialVolume: restored?.volume ?? config.initialVolume,
+        duckingMode: restored?.duckingMode ?? config.duckingMode,
+        lyricsOffsetMs: config.lyricsOffsetMs,
+        bridgeToken: crypto.randomUUID(),
+        video: {
+          maxHeight: config.video.maxHeight,
+          maxFps: config.video.maxFps,
+        },
+      };
+      runtime = {
+        sourceChannelId: channelId,
+        callId: joined.huddleCallId,
+        bootstrap,
+        media: createMediaSession(() => runtime),
+      };
+      runtimes.set(bootstrap.sessionId, runtime);
+      log.debug(
+        {
+          event: "runtime_created",
+          mediaSessionId: bootstrap.sessionId,
+          channelId,
+          callId: joined.huddleCallId,
+        },
+        "Media runtime created",
+      );
+      try {
+        await joinMedia(runtime);
+        log.info(
+          {
+            event: "media_joined",
+            mediaSessionId: bootstrap.sessionId,
+            durationMs: Date.now() - startedAt,
+          },
+          "Media joined Chime",
+        );
+      } catch (error) {
+        await discardRuntime(runtime);
+        throw error;
+      }
     }
+    const bootstrap = runtime.bootstrap;
     const coordinator = (runtime.coordinator = new Coordinator(
       joined,
       inviterUserId,
@@ -879,8 +1035,16 @@ async function joinHuddle(
       jellyfin,
     ));
     coordinator.autoJoined = autoJoined;
+    runtime.media.tag({ owner: coordinator.id });
     try {
-      if (restored) await coordinator.resume(resumeActorId);
+      if (reattached) {
+        await coordinator.resume(resumeActorId, true);
+        // What the media did while the app was down, then where it is now.
+        const held = runtime.held ?? [];
+        runtime.held = undefined;
+        for (const message of held) handleMediaMessage(runtime, message);
+        void coordinator.requestMediaStatus();
+      } else if (restored) await coordinator.resume(resumeActorId);
       else await coordinator.start();
       store.setSessionParticipants(
         coordinator.id,
@@ -919,6 +1083,14 @@ async function joinHuddle(
     });
     return { sessionId: coordinator.id, huddleId: joined.huddleId };
   } catch (err) {
+    // Media attached to again stays on the media host for the next attempt.
+    if (
+      runtime?.held &&
+      runtimes.get(runtime.bootstrap.sessionId) === runtime
+    ) {
+      runtimes.delete(runtime.bootstrap.sessionId);
+      await runtime.media.detach();
+    }
     if (companionChannelId) {
       companions.abortSetup(companionChannelId, preparedParticipantIds);
       if (runtime?.coordinator) {
@@ -960,12 +1132,19 @@ async function joinHuddle(
 }
 
 async function restoreSession(saved: SavedSession) {
+  // Media that played on through the restart, on the media host.
+  let hostedSession = hosted.get(saved.id);
   const abandon = async (event: string, analytics: string, message: string) => {
+    if (hostedSession) {
+      hosted.delete(saved.id);
+      await closeHosted(hostedSession.sessionId);
+    }
     await abandonSession(saved.id);
+    await endSavedPlayer(saved);
     log.info({ event, sessionId: saved.id }, message);
     captureAnalytics(analytics, { sessionId: saved.id });
   };
-  if (Date.now() >= saved.resumeUntil)
+  if (!hostedSession && Date.now() >= saved.resumeUntil)
     return abandon(
       "restore_expired",
       "session.restore_expired",
@@ -978,19 +1157,57 @@ async function restoreSession(saved: SavedSession) {
       "session.restore_huddle_ended",
       "Expired session because its huddle ended",
     );
+  // Another huddle in the same place: the media is in one that ended.
+  if (hostedSession && room.callId !== saved.callId) {
+    hosted.delete(saved.id);
+    await closeHosted(hostedSession.sessionId);
+    hostedSession = undefined;
+  }
   await joinHuddle(
     saved.sourceChannelId ?? saved.channelId,
     saved.hostId ?? saved.creatorId,
     room.callId,
     undefined,
     saved,
+    undefined,
+    false,
+    hostedSession
+      ? { session: hostedSession, participantIds: room.participantIds }
+      : undefined,
   );
+  hosted.delete(saved.id);
   pendingRestores.delete(saved.id);
   log.info(
     { event: "restore_completed", sessionId: saved.id },
     "Interrupted session restored",
   );
   captureAnalytics("session.restore_completed", { sessionId: saved.id });
+}
+
+// The player of a session that could not be restored, which would otherwise
+// keep its controls, or say HuddleFM is updating, with nothing behind them.
+async function endSavedPlayer(saved: SavedSession) {
+  if (!saved.uiTs) return;
+  await slackApp
+    .update(saved.channelId, saved.uiTs, "HuddleFM session ended", [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: "This session ended while HuddleFM was restarting.",
+        },
+      },
+    ])
+    .catch((error) =>
+      log.warn(
+        {
+          event: "ended_player_update_failed",
+          sessionId: saved.id,
+          err: error,
+        },
+        "Could not update the player of a session that ended",
+      ),
+    );
 }
 
 async function retryRestores() {
@@ -1014,7 +1231,13 @@ async function retryRestores() {
           );
           if (failures < maxRestoreAttempts) return;
           pendingRestores.delete(saved.id);
+          const hostedSession = hosted.get(saved.id);
+          if (hostedSession) {
+            hosted.delete(saved.id);
+            await closeHosted(hostedSession.sessionId);
+          }
           await abandonSession(saved.id);
+          await endSavedPlayer(saved);
           log.error(
             { event: "restore_abandoned", sessionId: saved.id, err: error },
             "Gave up restoring interrupted session",
@@ -1478,6 +1701,44 @@ async function autoJoinHuddle(
   );
 }
 
+/** The audio, stream and artwork routes the media processes fetch. */
+async function mediaRoutes(
+  request: Request,
+  server: { timeout(request: Request, seconds: number): void },
+) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token") ?? "";
+  const runtime = runtimeForToken(token);
+  if (url.pathname.startsWith("/audio/")) {
+    const path = runtime?.coordinator?.audioPath(url.pathname.slice(7), token);
+    return path && (await Bun.file(path).exists())
+      ? fileResponse(Bun.file(path), request, { "cache-control": "no-store" })
+      : notFound();
+  }
+  if (url.pathname.startsWith("/stream/")) {
+    const stream = url.pathname.slice(8);
+    // ffmpeg stops reading for a while once it is far enough ahead, which
+    // is not a dead connection; nothing else is let off the timeout.
+    if (relay.has(stream)) server.timeout(request, 0);
+    return relay.handle(request, stream);
+  }
+  if (url.pathname.startsWith("/artwork/")) {
+    const path = runtime?.coordinator?.artworkPath(
+      url.pathname.slice(9),
+      token,
+    );
+    return path && (await Bun.file(path).exists())
+      ? new Response(Bun.file(path), {
+          headers: {
+            "cache-control": "no-store",
+            "content-type": "image/jpeg",
+          },
+        })
+      : notFound();
+  }
+  return notFound();
+}
+
 const server = Bun.serve({
   hostname: config.bindAddress,
   port: config.port,
@@ -1592,43 +1853,20 @@ const server = Bun.serve({
       },
     },
   },
-  async fetch(request, server) {
-    const url = new URL(request.url);
-    const token = url.searchParams.get("token") ?? "";
-    const runtime = runtimeForToken(token);
-    if (url.pathname.startsWith("/audio/")) {
-      const path = runtime?.coordinator?.audioPath(
-        url.pathname.slice(7),
-        token,
-      );
-      return path && (await Bun.file(path).exists())
-        ? fileResponse(Bun.file(path), request, { "cache-control": "no-store" })
-        : notFound();
-    }
-    if (url.pathname.startsWith("/stream/")) {
-      const stream = url.pathname.slice(8);
-      // ffmpeg stops reading for a while once it is far enough ahead, which
-      // is not a dead connection; nothing else is let off the timeout.
-      if (relay.has(stream)) server.timeout(request, 0);
-      return relay.handle(request, stream);
-    }
-    if (url.pathname.startsWith("/artwork/")) {
-      const path = runtime?.coordinator?.artworkPath(
-        url.pathname.slice(9),
-        token,
-      );
-      return path && (await Bun.file(path).exists())
-        ? new Response(Bun.file(path), {
-            headers: {
-              "cache-control": "no-store",
-              "content-type": "image/jpeg",
-            },
-          })
-        : notFound();
-    }
-    return notFound();
-  },
+  fetch: mediaRoutes,
 });
+// A media host's processes reach the media routes through this socket, which
+// the host serves on its own loopback.
+const appSocket = config.mediaHostDir
+  ? joinPath(config.mediaHostDir, appSocketName)
+  : undefined;
+if (appSocket) {
+  await mkdir(config.mediaHostDir!, { recursive: true });
+  await rm(appSocket, { force: true });
+}
+const mediaServer = appSocket
+  ? Bun.serve({ unix: appSocket, fetch: mediaRoutes })
+  : undefined;
 
 /** The media process for a new runtime, which reports through handleMediaMessage. */
 function createMediaSession(current: () => Runtime | undefined) {
@@ -1644,11 +1882,16 @@ function createMediaSession(current: () => Runtime | undefined) {
         runtime.bootstrap.bridgeToken,
       );
     },
+    mediaHost,
   );
 }
 
 /** Handles an event from a runtime's media backend, whichever it is. */
 function handleMediaMessage(runtime: Runtime, message: MediaMessage) {
+  if (runtime.held) {
+    runtime.held.push(message);
+    return;
+  }
   const ownSession = message.sessionId === runtime.bootstrap.sessionId;
   // Client mods' messages say nothing about the media connection.
   if (message.type === "data_message") {
@@ -2067,17 +2310,31 @@ async function shutdownSteps() {
   await canvasUpdate;
   log.debug({ event: "shutdown_restore_wait" }, "Waiting for session restores");
   await Promise.allSettled([...restoreWork]);
-  const resumeUntil = Date.now() + resumeTtlMs;
+  const resumeUntil =
+    Date.now() + (mediaHost ? hostedResumeTtlMs : resumeTtlMs);
   log.info(
-    { event: "shutdown_suspending_sessions", activeSessions: runtimes.size },
+    {
+      event: "shutdown_suspending_sessions",
+      activeSessions: runtimes.size,
+      detaching: Boolean(mediaHost),
+    },
     "Suspending active sessions",
   );
   await Promise.allSettled(
-    [...runtimes.values()].map(
-      (runtime) =>
-        runtime.coordinator?.suspendForRestart(resumeUntil) ??
-        runtime.media.close(),
-    ),
+    [...runtimes.values()].map(async (runtime) => {
+      const coordinator = runtime.coordinator;
+      if (!coordinator) return runtime.media.close();
+      // On a media host the music plays on, and this app attaches to it
+      // again once it is back.
+      const detach = runtime.media.hosted;
+      const suspended = await coordinator.suspendForRestart(
+        resumeUntil,
+        detach,
+      );
+      if (!detach) return;
+      if (suspended) await runtime.media.detach();
+      else await runtime.media.close();
+    }),
   );
   // Suspended sessions are no longer active, so this clears them from the
   // canvas rather than leaving them listed as playing while the bot is down.
@@ -2088,6 +2345,7 @@ async function shutdownSteps() {
   }
   log.debug({ event: "shutdown_server" }, "Stopping server");
   server.stop();
+  mediaServer?.stop();
   log.debug({ event: "shutdown_slack_app" }, "Stopping Slack app");
   await slackApp.stop();
   log.debug(

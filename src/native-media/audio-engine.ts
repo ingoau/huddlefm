@@ -297,6 +297,18 @@ export class AudioEngine {
       case "seek":
         if (this.currentId) this.seek(message);
         return true;
+      case "status": {
+        // Where playback is, for an app that attached again after a restart.
+        const deck = this.currentId
+          ? this.decks.get(this.currentId)
+          : undefined;
+        this.emit("status", {
+          entryId: deck ? this.currentId : undefined,
+          seconds: deck?.position,
+          playing: deck?.playing ?? false,
+        });
+        return true;
+      }
       case "stop":
         this.stop();
         return true;
