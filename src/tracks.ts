@@ -1289,12 +1289,11 @@ export class TrackCatalog {
       return;
     const resolved = await this.resolveUrl(track.canonicalUrl);
     // yt-dlp gives the video its own URL, and the download looks the
-    // extraction up by the song's.
+    // extraction up by the song's. It stays under both, for anyone adding
+    // the video by yt-dlp's URL meanwhile.
     const extraction = this.extractions.get(resolved.canonicalUrl);
-    if (extraction && resolved.canonicalUrl !== track.canonicalUrl) {
-      this.extractions.delete(resolved.canonicalUrl);
+    if (extraction && resolved.canonicalUrl !== track.canonicalUrl)
       this.extractions.set(track.canonicalUrl, extraction);
-    }
   }
 
   /**

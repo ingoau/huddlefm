@@ -598,9 +598,9 @@ test("checks an autoplay pick before it is queued, extracting it only once", asy
   const reusable = (url: string) =>
     Reflect.apply(Reflect.get(catalog, "reusableExtraction"), catalog, [url]);
   expect(reusable(song.canonicalUrl)).toContain("aaaaaaaaaaa");
-  expect(
-    reusable("https://www.youtube.com/watch?v=aaaaaaaaaaa"),
-  ).toBeUndefined();
+  expect(reusable("https://www.youtube.com/watch?v=aaaaaaaaaaa")).toContain(
+    "aaaaaaaaaaa",
+  );
   // Checked again while its extraction keeps, it isn't extracted again.
   await catalog.checkPlayable(song);
   expect(extracted).toHaveLength(1);

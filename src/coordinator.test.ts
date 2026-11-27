@@ -8076,7 +8076,9 @@ test("autoplay passes over a pick that can't play before queuing it", async () =
   await test.coordinator.endFromSlack();
 });
 
-test("autoplay checks a pick again later when its check failed for a while", async () => {
+test("autoplay checks a pick again for the next song when its check failed for a while", async () => {
+  const checked: string[] = [];
+  let timedOut = false;
   const test = playSomethingSetup(
     [
       { sourceId: "flaky000001", title: "Flaky" },
@@ -8084,8 +8086,11 @@ test("autoplay checks a pick again later when its check failed for a while", asy
     ],
     async () => [],
     async (track) => {
-      if (track.sourceId === "flaky000001")
+      checked.push(track.sourceId);
+      if (track.sourceId === "flaky000001" && !timedOut) {
+        timedOut = true;
         throw new Error("The operation timed out.");
+      }
     },
   );
   await test.coordinator.start();
@@ -8093,12 +8098,19 @@ test("autoplay checks a pick again later when its check failed for a while", asy
     interaction(test.coordinator, "play_something"),
   );
   await until(() => Boolean(Reflect.get(test.coordinator, "current")));
-  expect(Reflect.get(test.coordinator, "current")).toMatchObject({
-    sourceId: "playable001",
-  });
-  expect(Reflect.get(test.coordinator, "autoplayUnplayable")).toEqual(
-    new Set(),
+  const first = Reflect.get(test.coordinator, "current") as {
+    id: string;
+    sourceId: string;
+  };
+  expect(first.sourceId).toBe("playable001");
+  await test.coordinator.mediaEvent("track_ended", { entryId: first.id });
+  await until(() =>
+    Boolean(
+      (Reflect.get(test.coordinator, "current") as { sourceId?: string })
+        ?.sourceId === "flaky000001",
+    ),
   );
+  expect(checked).toEqual(["flaky000001", "playable001", "flaky000001"]);
   await test.coordinator.endFromSlack();
 });
 

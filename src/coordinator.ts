@@ -5308,11 +5308,14 @@ export class Coordinator {
       } catch (error) {
         // An outage or a timeout may well pass, so only a lasting failure
         // keeps the song out for the rest of the session.
-        if (isLastingFailure(error))
-          this.autoplayUnplayable.add(metadata?.sourceId ?? id);
+        const sourceId = metadata?.sourceId ?? id;
+        if (isLastingFailure(error)) this.autoplayUnplayable.add(sourceId);
+        // Nor is it checked again in this pass, such as in the popular songs
+        // Play something falls back on.
+        excluded.add(sourceId);
         this.audit.record("autoplay.candidate_rejected", undefined, {
           sessionId: this.id,
-          sourceId: metadata?.sourceId ?? id,
+          sourceId,
           autoplayMode: mode,
           discovery,
           reason: safeAuditError(error),
