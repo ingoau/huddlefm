@@ -23,15 +23,22 @@ export const mediaHostProtocol = 1;
 export const hostSocketName = "media.sock";
 /** Where the app serves the media routes for the host's loopback proxy. */
 export const appSocketName = "app.sock";
+/** Where the app passes connections on to its public network proxy. */
+export const proxySocketName = "proxy.sock";
+
+/**
+ * The app's loopback ports the media processes use: its HTTP port, and its
+ * public network proxy's, which streams go through.
+ */
+type AppPorts = { httpPort: number; proxyPort?: number };
 
 export type HostHello =
-  | {
+  | ({
       host: "start";
       protocol: number;
-      httpPort: number;
       bootstrap: ChimeBootstrap;
-    }
-  | { host: "attach"; protocol: number; httpPort: number; sessionId: string }
+    } & AppPorts)
+  | ({ host: "attach"; protocol: number; sessionId: string } & AppPorts)
   | { host: "list"; protocol: number }
   | { host: "close"; protocol: number; sessionId: string };
 
@@ -62,30 +69,52 @@ export type HostReply =
   | { host: "exited"; code: number | null }
   | { host: "error"; message: string };
 
-/** The source directories whose changes need a media host restart. */
-const hostedSources = [
-  new URL("../native-media/", import.meta.url),
-  new URL("./", import.meta.url),
-];
+const mediaDirectory = new URL("../native-media/", import.meta.url);
+const root = new URL("../../", import.meta.url);
 
 let codeHash: Promise<string> | undefined;
 
+/** The media host's code: every file it and the media processes import. */
+async function hostedFiles() {
+  const roots = [
+    ...new Bun.Glob("*.{ts,proto}").scanSync({ cwd: mediaDirectory.pathname }),
+  ]
+    .filter((name) => !name.endsWith(".test.ts"))
+    .map((name) => new URL(name, mediaDirectory).pathname);
+  roots.push(
+    new URL("./main.ts", import.meta.url).pathname,
+    new URL("./host.ts", import.meta.url).pathname,
+  );
+  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const files = new Set<string>();
+  const visit = async (path: string) => {
+    if (files.has(path)) return;
+    files.add(path);
+    if (!path.endsWith(".ts")) return;
+    const source = await Bun.file(path).text();
+    for (const { path: specifier } of transpiler.scanImports(source))
+      if (specifier.startsWith("."))
+        await visit(new URL(specifier, `file://${path}`).pathname);
+  };
+  for (const path of roots) await visit(path);
+  return [...files].sort();
+}
+
 /**
- * A hash of the media host's own code, so the app can tell when the host runs
- * older media code than its own image has.
+ * A hash of the media host's code, its packages and its Bun, so the app can
+ * tell when the host runs other media code than its own image has.
  */
 export function mediaCodeHash() {
   codeHash ??= (async () => {
     const hasher = new Bun.CryptoHasher("sha256");
-    for (const directory of hostedSources) {
-      const glob = new Bun.Glob("*.{ts,proto}");
-      const names = [...glob.scanSync({ cwd: directory.pathname })]
-        .filter((name) => !name.endsWith(".test.ts"))
-        .sort();
-      for (const name of names) {
-        hasher.update(`${name}\0`);
-        hasher.update(await Bun.file(new URL(name, directory)).bytes());
-      }
+    hasher.update(`bun ${Bun.version}\0`);
+    const lockfile = Bun.file(new URL("bun.lock", root));
+    if (await lockfile.exists()) hasher.update(await lockfile.bytes());
+    for (const path of await hostedFiles()) {
+      const file = Bun.file(path);
+      if (!(await file.exists())) continue;
+      hasher.update(`${path.slice(root.pathname.length)}\0`);
+      hasher.update(await file.bytes());
     }
     return hasher.digest("hex").slice(0, 16);
   })();

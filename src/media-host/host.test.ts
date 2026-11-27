@@ -168,6 +168,27 @@ describe("media host", () => {
     await second.close();
   });
 
+  test("holds what the media says from a hold on, for the next app", async () => {
+    const { children, session } = await setup();
+    const messages: MediaMessage[] = [];
+    const first = session(messages);
+    await first.start(bootstrap());
+    await until(() => children.length === 1);
+    const child = children[0]!;
+    first.hold();
+    await Bun.sleep(20);
+    child.say({ type: "track_ended", details: { entryId: "a" } });
+    // Messages still reach the media while held.
+    first.send({ type: "pause" });
+    await until(() => child.written.length === 2);
+    await first.detach();
+    expect(messages).toEqual([]);
+    const replayed: MediaMessage[] = [];
+    expect(await session(replayed).attach("media-1")).toBe(true);
+    await until(() => replayed.length === 1);
+    expect(replayed[0]).toMatchObject({ type: "track_ended" });
+  });
+
   test("answers missing for media that ended while the app was away", async () => {
     const { children, session } = await setup();
     const first = session([]);

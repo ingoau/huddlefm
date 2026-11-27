@@ -1507,12 +1507,21 @@ export class Store {
     keep = new Set<string>(),
   ) {
     const expiredIds: string[] = [];
+    // The players those sessions left, to say they ended.
+    const expiredPlayers: { id: string; channelId: string; uiTs: string }[] =
+      [];
     const sessions = rows.flatMap((row) => {
       const deadline = Number(
         row.resume_until ?? Number(row.updated_at) + ttlMs,
       );
       if (expire && deadline <= now && !keep.has(String(row.id))) {
         expiredIds.push(String(row.id));
+        if (row.ui_ts)
+          expiredPlayers.push({
+            id: String(row.id),
+            channelId: String(row.channel_id),
+            uiTs: String(row.ui_ts),
+          });
         return [];
       }
       const id = String(row.id);
@@ -1585,7 +1594,7 @@ export class Store {
           end.run(now, id);
         }
       })();
-    return { sessions, expiredIds };
+    return { sessions, expiredIds, expiredPlayers };
   }
 
   expireSession(sessionId: string) {

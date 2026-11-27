@@ -39,7 +39,7 @@ export class LineSocket {
   }
 
   get open() {
-    return !this.closed && !this.socket.destroyed;
+    return !this.closed && !this.socket.destroyed && !this.socket.writableEnded;
   }
 
   /** Sends a line, a string as it is or anything else as JSON. */
@@ -66,6 +66,16 @@ export class LineSocket {
   }
 }
 
+/** Passes bytes both ways between two sockets until either closes. */
+export function pipeSockets(a: Socket, b: Socket) {
+  a.pipe(b);
+  b.pipe(a);
+  a.on("error", () => b.destroy());
+  b.on("error", () => a.destroy());
+  a.on("close", () => b.destroy());
+  b.on("close", () => a.destroy());
+}
+
 /** Parses a host line, or undefined for a media process's own. */
 export function hostReply(line: string): HostReply | undefined {
   if (!line.startsWith('{"host"')) return;
@@ -88,8 +98,19 @@ export class MediaHostClient {
   constructor(
     readonly directory: string,
     readonly httpPort: number,
+    // The app's public network proxy, once it is up.
+    private proxyPort: () => number | undefined = () => undefined,
   ) {
     this.socketPath = join(directory, hostSocketName);
+  }
+
+  /** The app's loopback ports, which the host serves for its processes. */
+  ports() {
+    const proxyPort = this.proxyPort();
+    return {
+      httpPort: this.httpPort,
+      ...(proxyPort ? { proxyPort } : {}),
+    };
   }
 
   /** Opens a connection and sends its hello; rejects when nothing answers. */

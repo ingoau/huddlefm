@@ -182,7 +182,7 @@ export class NativeMediaSession {
       const lines = await this.host.connect({
         host: "start",
         protocol: mediaHostProtocol,
-        httpPort: this.host.httpPort,
+        ...this.host.ports(),
         bootstrap,
       });
       this.link = this.hostLink(lines, childLog);
@@ -215,13 +215,18 @@ export class NativeMediaSession {
     const lines = await this.host.connect({
       host: "attach",
       protocol: mediaHostProtocol,
-      httpPort: this.host.httpPort,
+      ...this.host.ports(),
       sessionId,
     });
     // What the host replays can come in the same read as its answer.
     const early: string[] = [];
     let answered = false;
     const answer = await new Promise<"attached" | "missing">((resolve) => {
+      // A host that never answers counts as one without the session.
+      const timer = setTimeout(() => {
+        answered = true;
+        resolve("missing");
+      }, 5_000);
       lines.onLine = (line) => {
         if (answered) {
           early.push(line);
@@ -230,6 +235,7 @@ export class NativeMediaSession {
         const reply = hostReply(line);
         if (reply?.host === "attached" || reply?.host === "missing") {
           answered = true;
+          clearTimeout(timer);
           resolve(reply.host);
         } else if (reply?.host === "error") {
           childLog.warn(
@@ -252,6 +258,16 @@ export class NativeMediaSession {
       "Attached to the native media process on the media host",
     );
     return true;
+  }
+
+  /**
+   * Has the media host keep what the media says from here on for the next
+   * app, before the session is saved for a restart, so nothing it says in
+   * between is lost. Messages still go to the media.
+   */
+  hold() {
+    if (!this.host) return false;
+    return this.link?.write(JSON.stringify({ host: "detach" })) ?? false;
   }
 
   /** Tells the media host whose session this is, for attaching to it again. */

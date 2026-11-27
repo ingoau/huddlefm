@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:net";
+import { createConnection, createServer, type Server } from "node:net";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { logger } from "../logger.ts";
@@ -10,10 +10,11 @@ import {
   spawnMediaProcess,
   writeLine,
 } from "../native-media/session.ts";
-import { hostReply, LineSocket } from "./client.ts";
+import { hostReply, LineSocket, pipeSockets } from "./client.ts";
 import {
   appSocketName,
   hostSocketName,
+  proxySocketName,
   mediaCodeHash,
   mediaHostProtocol,
   type HostedSession,
@@ -87,9 +88,12 @@ export class MediaHost {
   private server?: Server;
   private proxy?: ReturnType<typeof Bun.serve>;
   private proxyPort?: number;
+  /** The app's network proxy ports this host forwards, by port. */
+  private forwards = new Map<number, Server>();
   private stopping = false;
   readonly socketPath: string;
   readonly appSocketPath: string;
+  readonly proxySocketPath: string;
 
   constructor(
     readonly directory: string,
@@ -103,6 +107,7 @@ export class MediaHost {
   ) {
     this.socketPath = join(directory, hostSocketName);
     this.appSocketPath = join(directory, appSocketName);
+    this.proxySocketPath = join(directory, proxySocketName);
   }
 
   private get orphanMs() {
@@ -134,6 +139,7 @@ export class MediaHost {
     this.stopping = true;
     this.server?.close();
     void this.proxy?.stop(true);
+    for (const forward of this.forwards.values()) forward.close();
     await Promise.allSettled(
       [...this.sessions.values()].map((session) => session.child.end()),
     );
@@ -146,9 +152,12 @@ export class MediaHost {
 
   private accept(lines: LineSocket) {
     let first = true;
+    const timer = setTimeout(() => lines.destroy(), 10_000);
+    lines.onClose = () => clearTimeout(timer);
     lines.onLine = (line) => {
       if (!first) return;
       first = false;
+      clearTimeout(timer);
       let hello: HostHello;
       try {
         hello = JSON.parse(line);
@@ -206,11 +215,11 @@ export class MediaHost {
       return;
     }
     if (hello.host === "start") {
-      this.serveApp(hello.httpPort);
+      this.serveApp(hello.httpPort, hello.proxyPort);
       return this.start(lines, hello.bootstrap);
     }
     if (hello.host === "attach") {
-      this.serveApp(hello.httpPort);
+      this.serveApp(hello.httpPort, hello.proxyPort);
       return this.attach(lines, hello.sessionId);
     }
     lines.write({ host: "error", message: "Unknown hello" });
@@ -379,8 +388,9 @@ export class MediaHost {
    * Serves the app's loopback port here, passing each request to the app's
    * socket, so the media processes' /audio, /artwork and /stream URLs work.
    */
-  private serveApp(port: number) {
+  private serveApp(port: number, networkPort?: number) {
     if (this.options.proxy === false) return;
+    if (networkPort) this.forwardNetwork(networkPort);
     if (this.proxyPort === port && this.proxy) return;
     void this.proxy?.stop(true);
     const appSocket = this.appSocketPath;
@@ -409,6 +419,32 @@ export class MediaHost {
     log.info(
       { event: "media_host_proxy_listening", port },
       "Serving the app's media routes on loopback",
+    );
+  }
+
+  /**
+   * Serves the app's public network proxy port here, which streams are
+   * fetched through, passing each connection to the app's proxy socket. An
+   * old app's port stays served: it reaches whichever app is up now.
+   */
+  private forwardNetwork(port: number) {
+    if (this.forwards.has(port)) return;
+    const proxySocket = this.proxySocketPath;
+    const server = createServer((client) =>
+      pipeSockets(client, createConnection({ path: proxySocket })),
+    );
+    server.on("error", (error) => {
+      this.forwards.delete(port);
+      log.error(
+        { event: "media_host_network_forward_failed", port, err: error },
+        "Could not serve the app's network proxy port",
+      );
+    });
+    server.listen(port, "127.0.0.1");
+    this.forwards.set(port, server);
+    log.info(
+      { event: "media_host_network_forward_listening", port },
+      "Serving the app's network proxy on loopback",
     );
   }
 }

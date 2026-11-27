@@ -1,4 +1,6 @@
+import { rmSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
+import { createConnection, createServer as createNetServer } from "node:net";
 import { join as joinPath } from "node:path";
 import {
   capture as captureAnalytics,
@@ -28,9 +30,10 @@ import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
 import { flushLogs, logger } from "./logger.ts";
 import { LyricsCatalog } from "./lyrics.ts";
-import { MediaHostClient } from "./media-host/client.ts";
+import { MediaHostClient, pipeSockets } from "./media-host/client.ts";
 import {
   appSocketName,
+  proxySocketName,
   mediaCodeHash,
   type HostedSession,
 } from "./media-host/protocol.ts";
@@ -125,7 +128,17 @@ scrobbling.start();
 // With a media host, the media of the sessions that were playing when the
 // app went down may still be playing there, to be attached to again.
 const mediaHost = config.mediaHostDir
-  ? new MediaHostClient(config.mediaHostDir, config.port)
+  ? new MediaHostClient(config.mediaHostDir, config.port, () => {
+      // Streams go through the app's public network proxy, which the media
+      // host reaches through proxySocket.
+      try {
+        const port = Number(new URL(catalog.streamProxy).port) || undefined;
+        if (port) serveProxySocket(port);
+        return port;
+      } catch {
+        return undefined;
+      }
+    })
   : undefined;
 const hosted = new Map<string, HostedSession>();
 const strayHosted: HostedSession[] = [];
@@ -134,7 +147,8 @@ if (mediaHost) {
     const listed = await mediaHost.waitForList();
     const appCode = await mediaCodeHash();
     for (const session of listed.sessions)
-      if (session.tag) hosted.set(session.tag.owner, session);
+      if (session.tag && !hosted.has(session.tag.owner))
+        hosted.set(session.tag.owner, session);
       else strayHosted.push(session);
     log.info(
       {
@@ -542,6 +556,25 @@ function notFound() {
   return new Response("Not found", { status: 404 });
 }
 
+let proxySocketServer: ReturnType<typeof createNetServer> | undefined;
+
+/** Passes the media host's connections on to the public network proxy. */
+function serveProxySocket(port: number) {
+  if (proxySocketServer || !config.mediaHostDir) return;
+  const path = joinPath(config.mediaHostDir, proxySocketName);
+  rmSync(path, { force: true });
+  proxySocketServer = createNetServer((connection) =>
+    pipeSockets(connection, createConnection({ host: "127.0.0.1", port })),
+  );
+  proxySocketServer.on("error", (error) =>
+    log.error(
+      { event: "proxy_socket_failed", err: error },
+      "Could not serve the network proxy to the media host",
+    ),
+  );
+  proxySocketServer.listen(path);
+}
+
 function closeHosted(sessionId: string) {
   return mediaHost?.closeSession(sessionId).catch((error) =>
     log.warn(
@@ -896,6 +929,11 @@ async function joinHuddle(
       reattach && restored
         ? await attachHosted(channelId, reattach.session)
         : undefined;
+    // Media that could not be attached to must not play on beside the new.
+    if (reattach && !reattached) {
+      hosted.delete(restored?.id ?? "");
+      await closeHosted(reattach.session.sessionId);
+    }
     let joined: JoinedHuddle;
     if (reattached && restored && reattach) {
       runtime = reattached;
@@ -1055,7 +1093,11 @@ async function joinHuddle(
         properties: { mediaSessionId: bootstrap.sessionId },
       });
     } catch (error) {
-      await discardRuntime(runtime);
+      // Media attached to again stays on the media host for the next attempt.
+      if (reattached) {
+        runtimes.delete(runtime.bootstrap.sessionId);
+        await runtime.media.detach();
+      } else await discardRuntime(runtime);
       throw error;
     }
     log.info(
@@ -1163,7 +1205,7 @@ async function restoreSession(saved: SavedSession) {
     await closeHosted(hostedSession.sessionId);
     hostedSession = undefined;
   }
-  await joinHuddle(
+  const result = await joinHuddle(
     saved.sourceChannelId ?? saved.channelId,
     saved.hostId ?? saved.creatorId,
     room.callId,
@@ -1175,6 +1217,9 @@ async function restoreSession(saved: SavedSession) {
       ? { session: hostedSession, participantIds: room.participantIds }
       : undefined,
   );
+  // Counted as a failed attempt, so retrying or giving up ends it properly.
+  if ("declined" in result)
+    throw new Error("Could not prepare the session's controls channel");
   hosted.delete(saved.id);
   pendingRestores.delete(saved.id);
   log.info(
@@ -1186,7 +1231,11 @@ async function restoreSession(saved: SavedSession) {
 
 // The player of a session that could not be restored, which would otherwise
 // keep its controls, or say HuddleFM is updating, with nothing behind them.
-async function endSavedPlayer(saved: SavedSession) {
+async function endSavedPlayer(saved: {
+  id: string;
+  channelId: string;
+  uiTs: string;
+}) {
   if (!saved.uiTs) return;
   await slackApp
     .update(saved.channelId, saved.uiTs, "HuddleFM session ended", [
@@ -1864,8 +1913,16 @@ if (appSocket) {
   await mkdir(config.mediaHostDir!, { recursive: true });
   await rm(appSocket, { force: true });
 }
+// A stream's reader stops for a while once it is far enough ahead, and the
+// per-request timeout does not reach a Unix socket's requests, so it has no
+// idle timeout. Bun's types leave idleTimeout out for Unix sockets, but it
+// applies.
 const mediaServer = appSocket
-  ? Bun.serve({ unix: appSocket, fetch: mediaRoutes })
+  ? Bun.serve({
+      unix: appSocket,
+      fetch: mediaRoutes,
+      ...({ idleTimeout: 0 } as object),
+    })
   : undefined;
 
 /** The media process for a new runtime, which reports through handleMediaMessage. */
@@ -1976,6 +2033,7 @@ companions.start();
 for (const sessionId of saved.expiredIds) {
   companions.abandonSession(sessionId);
 }
+for (const player of saved.expiredPlayers) void endSavedPlayer(player);
 started.resolve();
 // Huddle member events ride the private realtime gateway, which drops them
 // whenever its socket cycles, so periodically and after every reconnect the
@@ -2327,6 +2385,8 @@ async function shutdownSteps() {
       // On a media host the music plays on, and this app attaches to it
       // again once it is back.
       const detach = runtime.media.hosted;
+      // The host keeps what the media says from now on for the next app.
+      if (detach) runtime.media.hold();
       const suspended = await coordinator.suspendForRestart(
         resumeUntil,
         detach,

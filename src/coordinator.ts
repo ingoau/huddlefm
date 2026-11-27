@@ -1461,6 +1461,9 @@ export class Coordinator {
     return this.enqueue(() => {
       this.awaitingMediaStatus = true;
       this.sendMedia({ type: "status" });
+      // Client mods dropped the session when it was suspended; this has them
+      // sync with this one.
+      this.sendMedia({ type: "announce" });
     });
   }
 
@@ -1486,7 +1489,9 @@ export class Coordinator {
       "Media status after attaching",
     );
     if (!current) {
-      if (entryId) this.sendMedia({ type: "stop" });
+      // A song being prepared again, a stream say, plays on until it is.
+      if (entryId && entryId !== this.interrupted?.id)
+        this.sendMedia({ type: "stop" });
       return;
     }
     if (entryId !== current.id) {
@@ -5992,6 +5997,7 @@ export class Coordinator {
   }
 
   private async advance(reason = "played", expectedId?: string) {
+    if (this.inactive()) return;
     if (expectedId && this.current?.id !== expectedId) return;
     if (this.current) {
       this.log.info(
@@ -6160,6 +6166,7 @@ export class Coordinator {
    * else, or a stream that keeps failing, moves on.
    */
   private async streamFailed(reason: string, entryId?: string) {
+    if (this.inactive()) return;
     const entry = this.current;
     if (!entry?.stream || entry.id !== entryId)
       return this.advance(reason, entryId);

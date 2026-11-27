@@ -427,6 +427,7 @@ test("restores suspended sessions for three minutes", () => {
   expect(store.resumableSessions(180_000, 180_000)).toEqual({
     sessions: [],
     expiredIds: ["session"],
+    expiredPlayers: expect.any(Array),
   });
   expect(
     store.db

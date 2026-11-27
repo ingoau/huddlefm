@@ -1041,7 +1041,10 @@ test("picks up media that played on through a restart without starting it again"
     expect.objectContaining({ type: "display_mode" }),
   );
   await result.coordinator.requestMediaStatus();
-  expect(result.media.at(-1)).toEqual({ type: "status" });
+  expect(result.media.slice(-2)).toEqual([
+    { type: "status" },
+    { type: "announce" },
+  ]);
   // Paused before the restart, but the media says it is playing.
   await result.coordinator.mediaEvent("status", {
     entryId: "track",

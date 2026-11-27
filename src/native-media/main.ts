@@ -350,6 +350,11 @@ function handle(message: Record<string, any>) {
     return;
   }
   if (!engine || leaving) return;
+  if (message.type === "announce") {
+    // An app attached again after a restart: client mods sync with it anew.
+    dataChannel?.announce();
+    return;
+  }
   if (message.type === "display_mode") {
     wantVideo = message.mode !== "off";
     card?.setDisplayMode(message.mode as DisplayMode);
