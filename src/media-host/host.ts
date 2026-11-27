@@ -309,7 +309,9 @@ export class MediaHost {
       if (control.host === "tag" && typeof control.owner === "string")
         session.tag = { owner: control.owner };
       else if (control.host === "detach") this.unbind(session, lines);
-      else if (control.host === "close") void session.child.end();
+      // The app hears of the exit by its connection ending, held or not.
+      else if (control.host === "close")
+        void session.child.end().then(() => lines.end());
     };
     lines.onClose = () => this.unbind(session, lines);
   }

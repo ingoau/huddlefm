@@ -1387,6 +1387,20 @@ export class Coordinator {
     },
   ) {
     if (this.state === "suspended") return;
+    // A song being prepared again after a restart, a stream say, that the
+    // media played on through: it picks up from where the media is by then.
+    const interrupted = this.interrupted;
+    if (
+      type === "playback_position" &&
+      !this.current &&
+      interrupted?.startAt !== undefined &&
+      details?.entryId === interrupted.id &&
+      typeof details.seconds === "number" &&
+      Number.isFinite(details.seconds)
+    ) {
+      interrupted.startAt = details.seconds;
+      return;
+    }
     if (
       type === "playback_position" &&
       details &&
@@ -1490,8 +1504,15 @@ export class Coordinator {
     );
     if (!current) {
       // A song being prepared again, a stream say, plays on until it is.
-      if (entryId && entryId !== this.interrupted?.id)
-        this.sendMedia({ type: "stop" });
+      const interrupted = this.interrupted;
+      if (entryId && entryId === interrupted?.id) {
+        if (
+          interrupted.startAt !== undefined &&
+          typeof details?.seconds === "number" &&
+          Number.isFinite(details.seconds)
+        )
+          interrupted.startAt = details.seconds;
+      } else if (entryId) this.sendMedia({ type: "stop" });
       return;
     }
     if (entryId !== current.id) {

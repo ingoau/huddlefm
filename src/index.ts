@@ -903,12 +903,14 @@ async function joinHuddle(
       // Only an invitation has anything to decline.
       if (callId && inviteFreeWilly)
         await slackHuddle.decline(channelId, callId).catch(() => {});
-      await slackApp
-        .dm(
-          inviterUserId,
-          `I couldn’t prepare a controls channel, so I didn’t join the huddle: ${safeError(error)}`,
-        )
-        .catch(() => {});
+      // A restore is tried again, and says so itself if it gives up.
+      if (!restored)
+        await slackApp
+          .dm(
+            inviterUserId,
+            `I couldn’t prepare a controls channel, so I didn’t join the huddle: ${safeError(error)}`,
+          )
+          .catch(() => {});
       log.warn(
         {
           event: "controls_channel_prepare_failed",
