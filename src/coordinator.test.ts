@@ -12,7 +12,7 @@ import {
   type RoomSkip,
   type SavedSession,
 } from "./store.ts";
-import type { TrackCatalog } from "./tracks.ts";
+import { TrackError, type TrackCatalog } from "./tracks.ts";
 import { ScrobbleDispatcher } from "./scrobbling.ts";
 import { parseIntegrationActionValue } from "./integration.ts";
 import { addedBy, parseLikeValue } from "./coordinator-ui.ts";
@@ -200,6 +200,9 @@ function setup(
   const lyrics =
     lyricsOverride ??
     ({ get: async () => undefined } as unknown as LyricsCatalog);
+  // Autoplay checks the picks a search found; most fakes have none to refuse.
+  if (!("checkPlayable" in tracks))
+    Object.assign(tracks, { checkPlayable: async () => {} });
   const coordinator = new Coordinator(
     {
       huddleCallId: "call",
@@ -7928,6 +7931,9 @@ test("settings selects offer an initial option Slack can match", async () => {
 function playSomethingSetup(
   candidates: { sourceId: string; title: string }[],
   popular: () => Promise<{ sourceId: string; title: string }[]>,
+  checkPlayable: (track: {
+    sourceId: string;
+  }) => Promise<void> = async () => {},
 ) {
   const calls: Record<string, unknown>[] = [];
   const catalog = huddleMixCatalog(candidates, calls);
@@ -7945,6 +7951,7 @@ function playSomethingSetup(
       resolveVideoId: async () => {
         throw new Error("play something should use cached metadata");
       },
+      checkPlayable,
       popularTracks: async () =>
         (await popular()).map((track) => ({
           sourceInput: `https://music.youtube.com/watch?v=${track.sourceId}`,
@@ -8018,6 +8025,80 @@ test("Play something turns on huddle mix and plays its pick", async () => {
   expect(test.calls[0]).toMatchObject({ userIds: ["host", "guest"] });
   expect(playSomethingButton(test.updates.at(-1))).toBeFalse();
   expect(test.ephemeral).toEqual([]);
+  await test.coordinator.endFromSlack();
+});
+
+test("autoplay passes over a pick that can't play before queuing it", async () => {
+  const checked: string[] = [];
+  const test = playSomethingSetup(
+    [
+      { sourceId: "restricted1", title: "Restricted" },
+      { sourceId: "playable001", title: "Playable" },
+    ],
+    async () => {
+      throw new Error("the mix had a playable pick, so no fallback");
+    },
+    async (track) => {
+      checked.push(track.sourceId);
+      if (track.sourceId === "restricted1")
+        throw new TrackError("That video is age-restricted");
+    },
+  );
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "play_something"),
+  );
+  await until(() => Boolean(Reflect.get(test.coordinator, "current")));
+  expect(Reflect.get(test.coordinator, "current")).toMatchObject({
+    sourceId: "playable001",
+    automatic: true,
+  });
+  expect(checked).toEqual(["restricted1", "playable001"]);
+  const events = test.audit.map((value) => (value as unknown[])[0]);
+  // Nobody saw the refused pick, so it was never queued or failed.
+  expect(
+    events.filter((event) => event === "track.autoplay_added"),
+  ).toHaveLength(1);
+  expect(events).not.toContain("track.failed");
+  expect(test.audit).toContainEqual([
+    "autoplay.candidate_rejected",
+    undefined,
+    expect.objectContaining({
+      sourceId: "restricted1",
+      autoplayMode: "huddle",
+      reason: "That video is age-restricted",
+    }),
+  ]);
+  // It won't play this session, so it isn't checked again.
+  expect(Reflect.get(test.coordinator, "autoplayUnplayable")).toEqual(
+    new Set(["restricted1"]),
+  );
+  await test.coordinator.endFromSlack();
+});
+
+test("autoplay checks a pick again later when its check failed for a while", async () => {
+  const test = playSomethingSetup(
+    [
+      { sourceId: "flaky000001", title: "Flaky" },
+      { sourceId: "playable001", title: "Playable" },
+    ],
+    async () => [],
+    async (track) => {
+      if (track.sourceId === "flaky000001")
+        throw new Error("The operation timed out.");
+    },
+  );
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "play_something"),
+  );
+  await until(() => Boolean(Reflect.get(test.coordinator, "current")));
+  expect(Reflect.get(test.coordinator, "current")).toMatchObject({
+    sourceId: "playable001",
+  });
+  expect(Reflect.get(test.coordinator, "autoplayUnplayable")).toEqual(
+    new Set(),
+  );
   await test.coordinator.endFromSlack();
 });
 

@@ -180,6 +180,12 @@ export class MediaCache {
     });
   }
 
+  /** Whether `restore` would find the track, unless its file has gone. */
+  has(key: string) {
+    const entry = this.entries.get(key);
+    return Boolean(this.enabled && entry && !this.expired(entry));
+  }
+
   /** Keeps a copy of a prepared track, linking it where the disk allows. */
   store(key: string, audioPath: string, coverPath: string, media: CachedMedia) {
     if (!this.enabled) return Promise.resolve();
