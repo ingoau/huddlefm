@@ -1287,7 +1287,18 @@ export class TrackCatalog {
       this.reusableExtraction(track.canonicalUrl)
     )
       return;
-    const resolved = await this.resolveUrl(track.canonicalUrl);
+    let resolved: TrackMetadata;
+    try {
+      resolved = await this.resolveUrl(track.canonicalUrl);
+    } catch (error) {
+      // The download tries a 403 again with the embedded player, which often
+      // gets through, so the pick is left to it.
+      if (
+        (trackFailureDetail(error) ?? String(error)).includes("HTTP Error 403")
+      )
+        return;
+      throw error;
+    }
     // yt-dlp gives the video its own URL, and the download looks the
     // extraction up by the song's. It stays under both, for anyone adding
     // the video by yt-dlp's URL meanwhile.

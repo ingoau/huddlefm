@@ -8076,6 +8076,33 @@ test("autoplay passes over a pick that can't play before queuing it", async () =
   await test.coordinator.endFromSlack();
 });
 
+test("autoplay keeps a song too long for music out only in music mode", async () => {
+  const test = playSomethingSetup(
+    [
+      { sourceId: "longsong001", title: "Long" },
+      { sourceId: "playable001", title: "Playable" },
+    ],
+    async () => [],
+    async (track) => {
+      if (track.sourceId === "longsong001")
+        throw new TrackError("Track exceeds the duration limit");
+    },
+  );
+  await test.coordinator.start();
+  await test.coordinator.action(
+    interaction(test.coordinator, "play_something"),
+  );
+  await until(() => Boolean(Reflect.get(test.coordinator, "current")));
+  expect(Reflect.get(test.coordinator, "autoplayTooLong")).toEqual(
+    new Set(["longsong001"]),
+  );
+  // Video mode's longer limit may allow it.
+  expect(Reflect.get(test.coordinator, "autoplayUnplayable")).toEqual(
+    new Set(),
+  );
+  await test.coordinator.endFromSlack();
+});
+
 test("autoplay checks a pick again for the next song when its check failed for a while", async () => {
   const checked: string[] = [];
   let timedOut = false;

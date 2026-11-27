@@ -524,6 +524,9 @@ export class Coordinator {
   // Picks that failed their check before queuing, so the mix, which may rank
   // them first again for the next song, doesn't check them again.
   private autoplayUnplayable = new Set<string>();
+  // Picks over music's duration limit, which video mode's longer one may
+  // still allow.
+  private autoplayTooLong = new Set<string>();
   // Room skips this session has recorded, so cached blocks know when they
   // are out of date.
   private roomSkipCount = 0;
@@ -5098,6 +5101,7 @@ export class Coordinator {
         ...recent.map((track) => track.sourceId),
         ...this.autoplayRejected,
         ...this.autoplayUnplayable,
+        ...(this.videoMode ? [] : this.autoplayTooLong),
         ...bans.sourceIds,
         ...this.store.failedSources(Date.now() - autoplayFailedWindowMs),
       ]);
@@ -5309,7 +5313,13 @@ export class Coordinator {
         // An outage or a timeout may well pass, so only a lasting failure
         // keeps the song out for the rest of the session.
         const sourceId = metadata?.sourceId ?? id;
-        if (isLastingFailure(error)) this.autoplayUnplayable.add(sourceId);
+        // Picks are only checked like this in music mode, so a duration
+        // refusal is music's limit.
+        if (isLastingFailure(error))
+          (message(error) === "Track exceeds the duration limit"
+            ? this.autoplayTooLong
+            : this.autoplayUnplayable
+          ).add(sourceId);
         // Nor is it checked again in this pass, such as in the popular songs
         // Play something falls back on.
         excluded.add(sourceId);

@@ -638,6 +638,22 @@ test("turns down an autoplay pick yt-dlp or the duration limit refuses", async (
   expect(extractions).toBe(1);
 });
 
+test("leaves an autoplay pick YouTube answered with a 403 to the download's retry", async () => {
+  const catalog = testCatalog();
+  catalog.resolveUrl = async () => {
+    throw new TrackError("Track could not be downloaded", {
+      detail: "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+    });
+  };
+  await catalog.checkPlayable({
+    sourceInput: "https://music.youtube.com/watch?v=ddddddddddd",
+    canonicalUrl: "https://music.youtube.com/watch?v=ddddddddddd",
+    sourceId: "ddddddddddd",
+    title: "Song",
+    artist: "Artist",
+  });
+});
+
 test("doesn't extract an autoplay pick that is already cached", async () => {
   const catalog = testCatalog();
   const song: TrackMetadata = {
