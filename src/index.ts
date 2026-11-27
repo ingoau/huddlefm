@@ -141,15 +141,22 @@ const mediaHost = config.mediaHostDir
     })
   : undefined;
 const hosted = new Map<string, HostedSession>();
-const strayHosted: HostedSession[] = [];
-if (mediaHost) {
-  try {
-    const listed = await mediaHost.waitForList();
+// Until the host has said what it runs, no session is restored: rejoining
+// would put the bot in beside its own music.
+let hostedListed = !mediaHost;
+let hostedListing: Promise<HostedSession[]> | undefined;
+
+/** Reads what the media host runs into `hosted`; returns the untagged. */
+function listHosted(waitMs: number) {
+  hostedListing ??= (async () => {
+    const listed = await mediaHost!.waitForList(waitMs);
     const appCode = await mediaCodeHash();
+    const stray: HostedSession[] = [];
     for (const session of listed.sessions)
       if (session.tag && !hosted.has(session.tag.owner))
         hosted.set(session.tag.owner, session);
-      else strayHosted.push(session);
+      else stray.push(session);
+    hostedListed = true;
     log.info(
       {
         event: "media_host_connected",
@@ -164,13 +171,23 @@ if (mediaHost) {
         { event: "media_host_outdated", hostCode: listed.code, appCode },
         "The media host runs other media code than this image; update it when no sessions are active",
       );
+    return stray;
+  })().finally(() => {
+    hostedListing = undefined;
+  });
+  return hostedListing;
+}
+
+const strayHosted: HostedSession[] = [];
+if (mediaHost)
+  try {
+    strayHosted.push(...(await listHosted(15_000)));
   } catch (error) {
     log.error(
       { event: "media_host_unavailable", err: error },
-      "Could not reach the media host",
+      "Could not reach the media host; sessions are restored once it answers",
     );
   }
-}
 const saved = store.resumableSessions(
   Date.now(),
   resumeTtlMs,
@@ -622,7 +639,6 @@ async function attachHosted(channelId: string, hostedSession: HostedSession) {
     media: createMediaSession(() => runtime),
     held: [],
   };
-  runtimes.set(runtime.bootstrap.sessionId, runtime);
   const attached = await runtime.media
     .attach(runtime.bootstrap.sessionId)
     .catch((error) => {
@@ -637,7 +653,6 @@ async function attachHosted(channelId: string, hostedSession: HostedSession) {
       return false;
     });
   if (attached) return runtime;
-  runtimes.delete(runtime.bootstrap.sessionId);
 }
 
 async function discardRuntime(runtime: Runtime) {
@@ -852,8 +867,8 @@ async function joinHuddle(
   restored?: SavedSession,
   resumeActorId?: string,
   autoJoined = false,
-  // Media for the restored session still playing on the media host.
-  reattach?: { session: HostedSession; participantIds: string[] },
+  // Media for the restored session that played on, attached to again.
+  reattach?: { runtime: Runtime; participantIds: string[] },
 ) {
   if (shuttingDown) throw new Error("HuddleFM is shutting down");
   if (
@@ -927,18 +942,11 @@ async function joinHuddle(
       });
       return { declined: true };
     }
-    const reattached =
-      reattach && restored
-        ? await attachHosted(channelId, reattach.session)
-        : undefined;
-    // Media that could not be attached to must not play on beside the new.
-    if (reattach && !reattached) {
-      hosted.delete(restored?.id ?? "");
-      await closeHosted(reattach.session.sessionId);
-    }
+    const reattached = restored ? reattach?.runtime : undefined;
     let joined: JoinedHuddle;
     if (reattached && restored && reattach) {
       runtime = reattached;
+      runtimes.set(runtime.bootstrap.sessionId, runtime);
       joined = savedRoom(restored, runtime.bootstrap, reattach.participantIds);
       runtime.callId = joined.huddleCallId;
       joined.sourceChannelId ??= channelId;
@@ -1127,14 +1135,6 @@ async function joinHuddle(
     });
     return { sessionId: coordinator.id, huddleId: joined.huddleId };
   } catch (err) {
-    // Media attached to again stays on the media host for the next attempt.
-    if (
-      runtime?.held &&
-      runtimes.get(runtime.bootstrap.sessionId) === runtime
-    ) {
-      runtimes.delete(runtime.bootstrap.sessionId);
-      await runtime.media.detach();
-    }
     if (companionChannelId) {
       companions.abortSetup(companionChannelId, preparedParticipantIds);
       if (runtime?.coordinator) {
@@ -1176,6 +1176,16 @@ async function joinHuddle(
 }
 
 async function restoreSession(saved: SavedSession) {
+  if (!hostedListed) {
+    // Throws while the host is still unreachable, so this is tried again.
+    const stray = await listHosted(2_000);
+    for (const [owner, session] of hosted)
+      if (!pendingRestores.has(owner)) {
+        hosted.delete(owner);
+        stray.push(session);
+      }
+    for (const session of stray) void closeHosted(session.sessionId);
+  }
   // Media that played on through the restart, on the media host.
   let hostedSession = hosted.get(saved.id);
   const abandon = async (event: string, analytics: string, message: string) => {
@@ -1207,21 +1217,49 @@ async function restoreSession(saved: SavedSession) {
     await closeHosted(hostedSession.sessionId);
     hostedSession = undefined;
   }
-  const result = await joinHuddle(
-    saved.sourceChannelId ?? saved.channelId,
-    saved.hostId ?? saved.creatorId,
-    room.callId,
-    undefined,
-    saved,
-    undefined,
-    false,
-    hostedSession
-      ? { session: hostedSession, participantIds: room.participantIds }
-      : undefined,
-  );
-  // Counted as a failed attempt, so retrying or giving up ends it properly.
-  if ("declined" in result)
-    throw new Error("Could not prepare the session's controls channel");
+  const reattached = hostedSession
+    ? await attachHosted(
+        saved.sourceChannelId ?? saved.channelId,
+        hostedSession,
+      )
+    : undefined;
+  if (hostedSession && !reattached) {
+    // Media that could not be attached to must not play on beside the new.
+    hosted.delete(saved.id);
+    await closeHosted(hostedSession.sessionId);
+    // Only media still playing kept the session past its deadline.
+    if (Date.now() >= saved.resumeUntil)
+      return abandon(
+        "restore_expired",
+        "session.restore_expired",
+        "Expired interrupted session",
+      );
+  }
+  try {
+    const result = await joinHuddle(
+      saved.sourceChannelId ?? saved.channelId,
+      saved.hostId ?? saved.creatorId,
+      room.callId,
+      undefined,
+      saved,
+      undefined,
+      false,
+      reattached
+        ? { runtime: reattached, participantIds: room.participantIds }
+        : undefined,
+    );
+    // Counted as a failed attempt, so retrying or giving up ends it properly.
+    if ("declined" in result)
+      throw new Error("Could not prepare the session's controls channel");
+  } catch (error) {
+    // Media attached to again stays on the media host for the next attempt.
+    if (reattached?.held) {
+      const id = reattached.bootstrap.sessionId;
+      if (runtimes.get(id) === reattached) runtimes.delete(id);
+      await reattached.media.detach();
+    }
+    throw error;
+  }
   hosted.delete(saved.id);
   pendingRestores.delete(saved.id);
   log.info(
