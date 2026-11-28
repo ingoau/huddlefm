@@ -206,6 +206,7 @@ const suggestionWaitMs = 3_000;
 const recentSuggestionLimit = 20;
 // The longest a search waits for the same user's last one to finish.
 const searchDebounceMs = 300;
+const openerUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 // How long, and how many, search results are kept for the same words typed
 // again.
 const searchCacheMs = 60_000;
@@ -632,6 +633,7 @@ export class Coordinator {
       excludedUserIds: Set<string>;
       footer?: string;
       video?: { sessionLimit: number };
+      aprilFools?: boolean;
     },
     private mediaToken: string,
     private sendMedia: (message: unknown) => void,
@@ -835,6 +837,7 @@ export class Coordinator {
       this.blocks(),
     );
     this.store.setUi(this.id, this.uiTs, this.revision);
+    if (this.config.aprilFools) void this.queueOpener();
     await Promise.all(
       [...this.participants].map((userId) => this.promptScrobbling(userId)),
     );
@@ -851,6 +854,21 @@ export class Coordinator {
       { event: "started", durationMs: Date.now() - startedAt },
       "Session started",
     );
+  }
+
+  private async queueOpener() {
+    try {
+      const metadata = await this.tracks.resolveUrl(openerUrl, this.videoMode);
+      const staged = await this.enqueue(async () => {
+        if (this.inactive() || this.current) return;
+        const [item] = this.stageEntries(this.botUserId, [metadata]);
+        await this.render();
+        return item;
+      });
+      if (staged) await this.prepareManual(staged.entry, staged.controller);
+    } catch (error) {
+      this.log.warn({ event: "opener_failed", err: error }, "Opener failed");
+    }
   }
 
   // Tells a host, once, that everyone can now skip, pause and change the
