@@ -231,7 +231,12 @@ export class MediaHost {
   }
 
   private start(lines: LineSocket, bootstrap: ChimeBootstrap) {
-    if (this.stopping) throw new Error("The media host is stopping");
+    if (this.stopping) {
+      // The app waits for the next host instead.
+      lines.write({ host: "stopping" });
+      lines.end();
+      return;
+    }
     if (this.sessions.has(bootstrap.sessionId))
       throw new Error("That media session is already running");
     const spawn = this.options.spawn ?? spawnChild;

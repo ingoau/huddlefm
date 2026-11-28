@@ -407,6 +407,8 @@ type Runtime = {
   held?: MediaMessage[];
   /** Its media host stopped; see mediaHostLost. */
   hostLost?: boolean;
+  /** Its coordinator is still starting or resuming. */
+  starting?: boolean;
   joinGate?: Gate;
   leaveGate?: Gate;
 };
@@ -1092,6 +1094,8 @@ async function joinHuddle(
     ));
     coordinator.autoJoined = autoJoined;
     runtime.media.tag({ owner: coordinator.id });
+    // A media host lost meanwhile is dealt with once this is done.
+    runtime.starting = true;
     try {
       if (reattached) {
         await coordinator.resume(resumeActorId, true);
@@ -1102,6 +1106,7 @@ async function joinHuddle(
         void coordinator.requestMediaStatus();
       } else if (restored) await coordinator.resume(resumeActorId);
       else await coordinator.start();
+      runtime.starting = false;
       // The media host stopped while the session was starting.
       if (runtime.hostLost) {
         runtime.hostLost = false;
@@ -1116,6 +1121,7 @@ async function joinHuddle(
         properties: { mediaSessionId: bootstrap.sessionId },
       });
     } catch (error) {
+      runtime.starting = false;
       // Media attached to again stays on the media host for the next attempt.
       if (reattached) {
         runtimes.delete(runtime.bootstrap.sessionId);
@@ -1276,7 +1282,8 @@ async function restoreSession(saved: SavedSession) {
     throw error;
   }
   hosted.delete(saved.id);
-  pendingRestores.delete(saved.id);
+  // A media host lost as it finished queued the session again.
+  if (pendingRestores.get(saved.id) === saved) pendingRestores.delete(saved.id);
   log.info(
     { event: "restore_completed", sessionId: saved.id },
     "Interrupted session restored",
@@ -1326,8 +1333,9 @@ async function mediaHostLost(runtime: Runtime) {
     new MediaHostUnavailableError("The media host stopped"),
   );
   const coordinator = runtime.coordinator;
-  // Shutting down saves it anyway, and a join under way fails and is retried.
-  if (shuttingDown || !coordinator) return;
+  // Shutting down saves it anyway, a join under way fails and is retried,
+  // and a session still starting is dealt with once it has.
+  if (shuttingDown || !coordinator || runtime.starting) return;
   log.warn(
     {
       event: "media_host_lost",
@@ -2396,7 +2404,7 @@ for (const session of store.restorableSessions())
 for (const session of saved.sessions) pendingRestores.set(session.id, session);
 await retryRestores();
 if (pendingRestores.size)
-  restoreTimer = setInterval(() => void retryRestores(), 5_000);
+  restoreTimer ??= setInterval(() => void retryRestores(), 5_000);
 log.info(
   {
     event: "ready",

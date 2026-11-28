@@ -344,6 +344,8 @@ export class NativeMediaSession {
     let exited: ReturnType<typeof Promise.withResolvers<void>> | undefined =
       Promise.withResolvers<void>();
     let exitCode: number | null = null;
+    // The host turned the session down, which is no host going away.
+    let refused = false;
     const gone = () => {
       exited?.resolve();
       exited = undefined;
@@ -381,6 +383,7 @@ export class NativeMediaSession {
         return this.hostGone ? undefined : this.receive(line, childLog);
       if (reply.host === "stopping") this.lostHost(childLog);
       if (reply.host === "exited") exitCode = reply.code;
+      if (reply.host === "error") refused = true;
       if (reply.host === "error")
         childLog.error(
           { event: "media_host_refused", error: reply.message },
@@ -391,7 +394,7 @@ export class NativeMediaSession {
       gone();
       // The host went without the process exiting first: it crashed, or
       // its container was stopped.
-      if (exitCode === null && !this.closing && !this.ended)
+      if (exitCode === null && !refused && !this.closing && !this.ended)
         this.lostHost(childLog);
       if (this.hostGone) {
         if (this.link === link) this.link = undefined;
