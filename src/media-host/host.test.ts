@@ -220,6 +220,57 @@ describe("media host", () => {
     expect(messages[0]).toMatchObject({ type: "ended", sessionId: "media-1" });
   });
 
+  test("reports a stopping host as lost, not as the session ending", async () => {
+    const { host, children, session } = await setup();
+    const messages: MediaMessage[] = [];
+    const media = session(messages);
+    await media.start(bootstrap());
+    await until(() => children.length === 1);
+    await host.stop();
+    await until(() => messages.length > 0 && !media.connected);
+    await Bun.sleep(20);
+    expect(messages).toEqual([
+      { type: "media_host_lost", sessionId: "media-1" },
+    ]);
+  });
+
+  test("reports a host that went away as lost", async () => {
+    const { host, children, session } = await setup();
+    const messages: MediaMessage[] = [];
+    const media = session(messages);
+    await media.start(bootstrap());
+    await until(() => children.length === 1);
+    const hosted = Reflect.get(host, "sessions").get("media-1");
+    hosted.connection.destroy();
+    await until(() => messages.length === 1);
+    expect(messages[0]).toEqual({
+      type: "media_host_lost",
+      sessionId: "media-1",
+    });
+  });
+
+  test("tells media leaving unasked from media asked to leave", async () => {
+    const { children, session } = await setup();
+    const left = { type: "ended", details: { code: 1 }, sessionId: "media-1" };
+    // An older host stops its media without saying so first.
+    const unasked: MediaMessage[] = [];
+    const first = session(unasked);
+    await first.start(bootstrap());
+    await until(() => children.length === 1);
+    children[0]!.say(left);
+    await until(() => unasked.length === 1);
+    expect(unasked[0]?.type).toBe("media_host_lost");
+
+    const asked: MediaMessage[] = [];
+    const second = session(asked);
+    await second.start(bootstrap("media-2"));
+    await until(() => children.length === 2);
+    second.send({ type: "leave" });
+    children[1]!.say({ ...left, sessionId: "media-2" });
+    await until(() => asked.length === 1);
+    expect(asked[0]?.type).toBe("ended");
+  });
+
   test("closes a media process for a control connection", async () => {
     const { client, children, session } = await setup();
     const media = session([]);

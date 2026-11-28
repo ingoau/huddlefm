@@ -137,6 +137,10 @@ export class MediaHost {
   /** Ends every media process, as the host itself is going away. */
   async stop() {
     this.stopping = true;
+    // The app restores these sessions once a host is back, rather than
+    // ending them as their media leaves.
+    for (const session of this.sessions.values())
+      session.connection?.write({ host: "stopping" });
     this.server?.close();
     void this.proxy?.stop(true);
     for (const forward of this.forwards.values()) forward.close();
@@ -227,7 +231,12 @@ export class MediaHost {
   }
 
   private start(lines: LineSocket, bootstrap: ChimeBootstrap) {
-    if (this.stopping) throw new Error("The media host is stopping");
+    if (this.stopping) {
+      // The app waits for the next host instead.
+      lines.write({ host: "stopping" });
+      lines.end();
+      return;
+    }
     if (this.sessions.has(bootstrap.sessionId))
       throw new Error("That media session is already running");
     const spawn = this.options.spawn ?? spawnChild;
