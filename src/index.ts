@@ -30,7 +30,11 @@ import { fileResponse } from "./file-response.ts";
 import { controlDenied } from "./local-control.ts";
 import { flushLogs, logger } from "./logger.ts";
 import { LyricsCatalog } from "./lyrics.ts";
-import { MediaHostClient, pipeSockets } from "./media-host/client.ts";
+import {
+  MediaHostClient,
+  MediaHostUnavailableError,
+  pipeSockets,
+} from "./media-host/client.ts";
 import {
   appSocketName,
   proxySocketName,
@@ -401,6 +405,8 @@ type Runtime = {
   mediaState?: { type: string; details?: unknown };
   /** What media attached again after a restart said before its session resumed. */
   held?: MediaMessage[];
+  /** Its media host stopped; see mediaHostLost. */
+  hostLost?: boolean;
   joinGate?: Gate;
   leaveGate?: Gate;
 };
@@ -1048,6 +1054,8 @@ async function joinHuddle(
       bootstrap.bridgeToken,
       (message) => void runtime?.media.send(message),
       async () => {
+        // Media that is gone has nothing to say on its way out.
+        if (!runtime!.media.connected) return discardRuntime(runtime!);
         const gate = (runtime!.leaveGate = Promise.withResolvers<void>());
         const timer = setTimeout(gate.resolve, 5_000);
         try {
@@ -1094,6 +1102,11 @@ async function joinHuddle(
         void coordinator.requestMediaStatus();
       } else if (restored) await coordinator.resume(resumeActorId);
       else await coordinator.start();
+      // The media host stopped while the session was starting.
+      if (runtime.hostLost) {
+        runtime.hostLost = false;
+        void mediaHostLost(runtime);
+      }
       store.setSessionParticipants(
         coordinator.id,
         coordinator.participantIds(),
@@ -1176,6 +1189,8 @@ async function joinHuddle(
 }
 
 async function restoreSession(saved: SavedSession) {
+  // Throws MediaHostUnavailableError while the host is restarting.
+  if (mediaHost && hostedListed) await mediaHost.list();
   if (!hostedListed) {
     // Throws while the host is still unreachable, so this is tried again.
     const stray = await listHosted(2_000);
@@ -1299,6 +1314,41 @@ async function endSavedPlayer(saved: {
     );
 }
 
+/**
+ * The media host stopped, or crashed, with a session's media: the session is
+ * saved with the usual restart notice and rejoined once a host is back.
+ */
+async function mediaHostLost(runtime: Runtime) {
+  if (runtime.hostLost) return;
+  runtime.hostLost = true;
+  runtime.leaveGate?.resolve();
+  runtime.joinGate?.reject(
+    new MediaHostUnavailableError("The media host stopped"),
+  );
+  const coordinator = runtime.coordinator;
+  // Shutting down saves it anyway, and a join under way fails and is retried.
+  if (shuttingDown || !coordinator) return;
+  log.warn(
+    {
+      event: "media_host_lost",
+      sessionId: coordinator.id,
+      mediaSessionId: runtime.bootstrap.sessionId,
+    },
+    "The media host stopped; restoring the session once it is back",
+  );
+  const suspended = await coordinator.suspendForRestart(
+    Date.now() + hostedResumeTtlMs,
+  );
+  if (runtimes.get(runtime.bootstrap.sessionId) === runtime)
+    runtimes.delete(runtime.bootstrap.sessionId);
+  if (!suspended || shuttingDown) return;
+  const saved = store.savedSession(coordinator.id);
+  if (!saved) return;
+  restoreFailures.delete(saved.id);
+  pendingRestores.set(saved.id, saved);
+  restoreTimer ??= setInterval(() => void retryRestores(), 5_000);
+}
+
 async function retryRestores() {
   if (shuttingDown) return;
   const work = [...pendingRestores.values()]
@@ -1307,6 +1357,18 @@ async function retryRestores() {
       restoring.add(saved.id);
       const task = restoreSession(saved)
         .catch(async (error) => {
+          // Waiting on the media host, as it restarts, is no failed attempt
+          // until the session's time is up.
+          if (
+            error instanceof MediaHostUnavailableError &&
+            Date.now() < saved.resumeUntil
+          ) {
+            log.info(
+              { event: "restore_waiting_for_media_host", sessionId: saved.id },
+              "Waiting for the media host to restore a session",
+            );
+            return;
+          }
           const failures = (restoreFailures.get(saved.id) ?? 0) + 1;
           restoreFailures.set(saved.id, failures);
           log.warn(
@@ -1985,6 +2047,10 @@ function createMediaSession(current: () => Runtime | undefined) {
 
 /** Handles an event from a runtime's media backend, whichever it is. */
 function handleMediaMessage(runtime: Runtime, message: MediaMessage) {
+  if (message.type === "media_host_lost") {
+    void mediaHostLost(runtime);
+    return;
+  }
   if (runtime.held) {
     runtime.held.push(message);
     return;
@@ -2424,7 +2490,8 @@ async function shutdownSteps() {
       if (!coordinator) return runtime.media.close();
       // On a media host the music plays on, and this app attaches to it
       // again once it is back.
-      const detach = runtime.media.hosted;
+      // Media whose host went is restored by rejoining instead.
+      const detach = runtime.media.hosted && runtime.media.connected;
       // The host keeps what the media says from now on for the next app.
       if (detach) runtime.media.hold();
       const suspended = await coordinator.suspendForRestart(

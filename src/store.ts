@@ -1489,6 +1489,15 @@ export class Store {
     return this.savedSessions(rows, now, ttlMs, true, keep);
   }
 
+  /** One saved session, whatever its deadline. */
+  savedSession(id: string) {
+    const rows = this.db
+      .query(`SELECT * FROM sessions WHERE id = ? AND status != 'ended'`)
+      .all(id) as Row[];
+    return this.savedSessions(rows, Number.NEGATIVE_INFINITY, 0, false)
+      .sessions[0];
+  }
+
   restorableSessions() {
     const rows = this.db
       .query(

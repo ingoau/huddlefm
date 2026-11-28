@@ -158,6 +158,10 @@ export class NativeMediaSession {
   // The child exits by itself after reporting `ended`; that exit is expected.
   private ended = false;
   private sessionId?: string;
+  // The app asked the media to leave, so its leaving is not the host's doing.
+  private leaveAsked = false;
+  // The media host is going away, or went, with this session's media.
+  private hostGone = false;
 
   constructor(
     private onMessage: (message: MediaMessage) => void,
@@ -172,11 +176,22 @@ export class NativeMediaSession {
     return Boolean(this.host);
   }
 
-  async start(bootstrap: ChimeBootstrap) {
-    await this.close();
+  /** Whether media is running and reachable. */
+  get connected() {
+    return Boolean(this.link) && !this.hostGone;
+  }
+
+  private reset(sessionId: string) {
     this.closing = false;
     this.ended = false;
-    this.sessionId = bootstrap.sessionId;
+    this.leaveAsked = false;
+    this.hostGone = false;
+    this.sessionId = sessionId;
+  }
+
+  async start(bootstrap: ChimeBootstrap) {
+    await this.close();
+    this.reset(bootstrap.sessionId);
     const childLog = log.child({ mediaSessionId: bootstrap.sessionId });
     if (this.host) {
       const lines = await this.host.connect({
@@ -208,9 +223,7 @@ export class NativeMediaSession {
   async attach(sessionId: string) {
     if (!this.host) return false;
     await this.close();
-    this.closing = false;
-    this.ended = false;
-    this.sessionId = sessionId;
+    this.reset(sessionId);
     const childLog = log.child({ mediaSessionId: sessionId });
     const lines = await this.host.connect({
       host: "attach",
@@ -278,6 +291,8 @@ export class NativeMediaSession {
 
   /** Sends a coordinator message; false when no media process is running. */
   send(message: unknown) {
+    if ((message as { type?: unknown } | null)?.type === "leave")
+      this.leaveAsked = true;
     return this.write(withLocalAudio(message, this.audioPath));
   }
 
@@ -298,6 +313,7 @@ export class NativeMediaSession {
     const link = this.link;
     if (!link) return;
     this.closing = true;
+    this.leaveAsked = true;
     await link.close();
     if (this.link === link) this.link = undefined;
     log.debug(
@@ -336,6 +352,11 @@ export class NativeMediaSession {
       write: (line) => lines.write(line),
       close: async () => {
         if (!exited) return;
+        // A host that is stopping ends the process itself.
+        if (this.hostGone) {
+          lines.destroy();
+          return;
+        }
         lines.write({ host: "close" });
         const done = exited.promise;
         const ended = await Promise.race([
@@ -355,7 +376,10 @@ export class NativeMediaSession {
     };
     lines.onLine = (line) => {
       const reply = hostReply(line);
-      if (!reply) return this.receive(line, childLog);
+      // What the media says as the host stops it is not the session ending.
+      if (!reply)
+        return this.hostGone ? undefined : this.receive(line, childLog);
+      if (reply.host === "stopping") this.lostHost(childLog);
       if (reply.host === "exited") exitCode = reply.code;
       if (reply.host === "error")
         childLog.error(
@@ -365,9 +389,32 @@ export class NativeMediaSession {
     };
     lines.onClose = () => {
       gone();
+      // The host went without the process exiting first: it crashed, or
+      // its container was stopped.
+      if (exitCode === null && !this.closing && !this.ended)
+        this.lostHost(childLog);
+      if (this.hostGone) {
+        if (this.link === link) this.link = undefined;
+        return;
+      }
       this.exited(link, exitCode, childLog);
     };
     return link;
+  }
+
+  /**
+   * The media host is stopping, or went, taking this session's media with
+   * it. That is reported once, as `media_host_lost`, so the session is
+   * restored once a host is back instead of ending.
+   */
+  private lostHost(childLog: typeof log) {
+    if (this.hostGone) return;
+    this.hostGone = true;
+    childLog.warn(
+      { event: "media_host_lost" },
+      "The media host stopped with this session's media",
+    );
+    this.onMessage({ type: "media_host_lost", sessionId: this.sessionId });
   }
 
   private exited(
@@ -426,6 +473,16 @@ export class NativeMediaSession {
       return;
     }
     if (typeof parsed.type !== "string") return;
+    // Media that leaves without being asked, on a host, was stopped by it:
+    // a host from before it said it was stopping does that.
+    if (
+      this.hosted &&
+      parsed.type === "ended" &&
+      !this.leaveAsked &&
+      (parsed.details as { code?: unknown } | undefined)?.code ===
+        statusCodes.left
+    )
+      return this.lostHost(childLog);
     if (parsed.type === "ended") this.ended = true;
     this.onMessage(parsed);
   }

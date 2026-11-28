@@ -12,7 +12,8 @@
 //
 // On a session's connection, the app may also send `tag` (who the session
 // belongs to, which `list` reports), `detach` (the app is going away and will
-// attach again) and `close`; the host sends `exited` when the process ends.
+// attach again) and `close`; the host sends `exited` when the process ends,
+// and `stopping` before it stops, ending every process.
 // Every other line is the media process's own.
 
 import type { ChimeBootstrap } from "../slack-huddle.ts";
@@ -67,6 +68,7 @@ export type HostReply =
     }
   | { host: "closed" }
   | { host: "exited"; code: number | null }
+  | { host: "stopping" }
   | { host: "error"; message: string };
 
 const mediaDirectory = new URL("../native-media/", import.meta.url);

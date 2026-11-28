@@ -8,6 +8,9 @@ import {
   type HostReply,
 } from "./protocol.ts";
 
+/** The media host is not answering: not up yet, or restarting. */
+export class MediaHostUnavailableError extends Error {}
+
 /** JSON lines over a stream socket, both ways. */
 export class LineSocket {
   onLine: (line: string) => void = () => {};
@@ -119,14 +122,19 @@ export class MediaHostClient {
       const socket = createConnection({ path: this.socketPath });
       const timer = setTimeout(() => {
         socket.destroy();
-        reject(new Error("Timed out connecting to the media host"));
+        reject(
+          new MediaHostUnavailableError(
+            "Timed out connecting to the media host",
+          ),
+        );
       }, timeoutMs);
       socket.once("error", (error) => {
         clearTimeout(timer);
         reject(
-          new Error(`Could not reach the media host: ${error.message}`, {
-            cause: error,
-          }),
+          new MediaHostUnavailableError(
+            `Could not reach the media host: ${error.message}`,
+            { cause: error },
+          ),
         );
       });
       socket.once("connect", () => {

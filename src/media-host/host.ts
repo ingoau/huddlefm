@@ -137,6 +137,10 @@ export class MediaHost {
   /** Ends every media process, as the host itself is going away. */
   async stop() {
     this.stopping = true;
+    // The app restores these sessions once a host is back, rather than
+    // ending them as their media leaves.
+    for (const session of this.sessions.values())
+      session.connection?.write({ host: "stopping" });
     this.server?.close();
     void this.proxy?.stop(true);
     for (const forward of this.forwards.values()) forward.close();
