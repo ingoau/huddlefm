@@ -181,5 +181,6 @@ export function loadConfig() {
     // Off unless asked for: what people ask the agent stays out of PostHog.
     posthogLlmContent: process.env.POSTHOG_LLM_CONTENT === "true",
     openRouterApiKey: optionalText(process.env.OPENROUTER_API_KEY),
+    aprilFools: process.env.APRIL_FOOLS === "true",
   };
 }
