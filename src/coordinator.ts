@@ -521,6 +521,12 @@ export class Coordinator {
   private autoplayCredits: string[][] = [];
   private autoplayPending = false;
   private autoplayRejected: string[] = [];
+  // Picks that failed their check before queuing, so the mix, which may rank
+  // them first again for the next song, doesn't check them again.
+  private autoplayUnplayable = new Set<string>();
+  // Picks over music's duration limit, which video mode's longer one may
+  // still allow.
+  private autoplayTooLong = new Set<string>();
   // Room skips this session has recorded, so cached blocks know when they
   // are out of date.
   private roomSkipCount = 0;
@@ -5094,6 +5100,8 @@ export class Coordinator {
         ...this.queue.map((track) => track.sourceId),
         ...recent.map((track) => track.sourceId),
         ...this.autoplayRejected,
+        ...this.autoplayUnplayable,
+        ...(this.videoMode ? [] : this.autoplayTooLong),
         ...bans.sourceIds,
         ...this.store.failedSources(Date.now() - autoplayFailedWindowMs),
       ]);
@@ -5295,12 +5303,35 @@ export class Coordinator {
       const listenerIds = ranked.get(id)?.listenerIds ?? [];
       const autoplaySources = ranked.get(id)?.sources;
       let metadata = ranked.get(id)?.metadata;
-      if (!metadata) {
-        try {
-          metadata = await this.tracks.resolveVideoId(id);
-        } catch {
-          continue;
-        }
+      try {
+        if (!metadata) metadata = await this.tracks.resolveVideoId(id);
+        // A pick that came with its metadata hasn't been near yt-dlp yet.
+        // Video mode's picks are checked as they prepare, and fall back to
+        // audio rather than fail.
+        else if (!this.videoMode) await this.tracks.checkPlayable(metadata);
+      } catch (error) {
+        // An outage or a timeout may well pass, so only a lasting failure
+        // keeps the song out for the rest of the session.
+        const sourceId = metadata?.sourceId ?? id;
+        // Picks are only checked like this in music mode, so a duration
+        // refusal is music's limit.
+        if (isLastingFailure(error))
+          (message(error) === "Track exceeds the duration limit"
+            ? this.autoplayTooLong
+            : this.autoplayUnplayable
+          ).add(sourceId);
+        // Nor is it checked again in this pass, such as in the popular songs
+        // Play something falls back on.
+        excluded.add(sourceId);
+        this.audit.record("autoplay.candidate_rejected", undefined, {
+          sessionId: this.id,
+          sourceId,
+          autoplayMode: mode,
+          discovery,
+          reason: safeAuditError(error),
+        });
+        if (!this.canAddAutoplay(context, generation)) return false;
+        continue;
       }
       const pending = await this.enqueue(async () => {
         if (!this.canAddAutoplay(context, generation)) return;

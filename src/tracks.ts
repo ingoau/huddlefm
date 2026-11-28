@@ -1271,6 +1271,43 @@ export class TrackCatalog {
   }
 
   /**
+   * Turns down a song autoplay found by searching before it is queued, so
+   * nobody sees it come and go: one longer than the limit by what the search
+   * said, and a YouTube song not cached yet that yt-dlp refuses, such as an
+   * unavailable, age-restricted or members-only one. The extraction is kept
+   * for the download that follows, so it isn't made twice.
+   */
+  async checkPlayable(track: TrackMetadata) {
+    this.validate(track);
+    if (
+      track.live ||
+      !isYoutubeVideoId(track.sourceId) ||
+      !youtubeUrl(track.canonicalUrl) ||
+      this.cache.has(this.cacheKey(track)) ||
+      this.reusableExtraction(track.canonicalUrl)
+    )
+      return;
+    let resolved: TrackMetadata;
+    try {
+      resolved = await this.resolveUrl(track.canonicalUrl);
+    } catch (error) {
+      // The download tries a 403 again with the embedded player, which often
+      // gets through, so the pick is left to it.
+      if (
+        (trackFailureDetail(error) ?? String(error)).includes("HTTP Error 403")
+      )
+        return;
+      throw error;
+    }
+    // yt-dlp gives the video its own URL, and the download looks the
+    // extraction up by the song's. It stays under both, for anyone adding
+    // the video by yt-dlp's URL meanwhile.
+    const extraction = this.extractions.get(resolved.canonicalUrl);
+    if (extraction && resolved.canonicalUrl !== track.canonicalUrl)
+      this.extractions.set(track.canonicalUrl, extraction);
+  }
+
+  /**
    * Videos on YouTube itself rather than YouTube Music, for video mode,
    * through the web player's search. YouTube Music's video search stands in
    * if that fails.

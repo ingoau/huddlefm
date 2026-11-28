@@ -114,6 +114,25 @@ test("sanitizes and deduplicates exceptions", () => {
   });
 });
 
+test("copies a value that appears twice, and marks only real cycles", () => {
+  const fake = fakeClient();
+  const analytics = new Analytics(fake.client, "installation");
+  const permissions = ["add", "remove-own"];
+  const loop: Record<string, unknown> = { name: "loop" };
+  loop.self = loop;
+  analytics.capture("settings.changed", {
+    properties: { permissions, previous: permissions, loop },
+  });
+
+  expect(fake.events[0]).toMatchObject({
+    properties: {
+      permissions: ["add", "remove-own"],
+      previous: ["add", "remove-own"],
+      loop: { self: "[circular]" },
+    },
+  });
+});
+
 test("attributes a song whose adder took their name off it to the installation", () => {
   const fake = fakeClient();
   const analytics = new Analytics(fake.client, "installation");

@@ -571,6 +571,108 @@ test("uses search metadata without extracting it again", async () => {
   expect(await catalog.resolve("reference")).toBe(track);
 });
 
+test("checks an autoplay pick before it is queued, extracting it only once", async () => {
+  const catalog = testCatalog();
+  const song: TrackMetadata = {
+    sourceInput: "https://music.youtube.com/watch?v=aaaaaaaaaaa",
+    canonicalUrl: "https://music.youtube.com/watch?v=aaaaaaaaaaa",
+    sourceId: "aaaaaaaaaaa",
+    title: "Song",
+    artist: "Artist",
+    duration: 200,
+  };
+  const extracted: string[] = [];
+  catalog.resolveUrl = async (url: string) => {
+    extracted.push(url);
+    // yt-dlp names the video by its own URL, not YouTube Music's.
+    const canonicalUrl = "https://www.youtube.com/watch?v=aaaaaaaaaaa";
+    Reflect.apply(Reflect.get(catalog, "rememberExtraction"), catalog, [
+      canonicalUrl,
+      { id: "aaaaaaaaaaa" },
+    ]);
+    return { ...song, canonicalUrl };
+  };
+  await catalog.checkPlayable(song);
+  expect(extracted).toEqual([song.canonicalUrl]);
+  // The download looks the extraction up by the song's own URL.
+  const reusable = (url: string) =>
+    Reflect.apply(Reflect.get(catalog, "reusableExtraction"), catalog, [url]);
+  expect(reusable(song.canonicalUrl)).toContain("aaaaaaaaaaa");
+  expect(reusable("https://www.youtube.com/watch?v=aaaaaaaaaaa")).toContain(
+    "aaaaaaaaaaa",
+  );
+  // Checked again while its extraction keeps, it isn't extracted again.
+  await catalog.checkPlayable(song);
+  expect(extracted).toHaveLength(1);
+});
+
+test("turns down an autoplay pick yt-dlp or the duration limit refuses", async () => {
+  const catalog = testCatalog();
+  const song: TrackMetadata = {
+    sourceInput: "https://music.youtube.com/watch?v=bbbbbbbbbbb",
+    canonicalUrl: "https://music.youtube.com/watch?v=bbbbbbbbbbb",
+    sourceId: "bbbbbbbbbbb",
+    title: "Song",
+    artist: "Artist",
+    duration: 200,
+  };
+  let extractions = 0;
+  catalog.resolveUrl = async () => {
+    extractions++;
+    throw new TrackError("That video is age-restricted");
+  };
+  await expect(catalog.checkPlayable(song)).rejects.toThrow(
+    "That video is age-restricted",
+  );
+  // A search that says it's too long is enough; yt-dlp isn't asked.
+  await expect(
+    catalog.checkPlayable({ ...song, duration: 5_000 }),
+  ).rejects.toThrow("Track exceeds the duration limit");
+  // Only YouTube songs are extracted to check them.
+  await catalog.checkPlayable({
+    ...song,
+    sourceInput: "https://example.com/song.mp3",
+    canonicalUrl: "https://example.com/song.mp3",
+    sourceId: "https://example.com/song.mp3",
+  });
+  expect(extractions).toBe(1);
+});
+
+test("leaves an autoplay pick YouTube answered with a 403 to the download's retry", async () => {
+  const catalog = testCatalog();
+  catalog.resolveUrl = async () => {
+    throw new TrackError("Track could not be downloaded", {
+      detail: "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+    });
+  };
+  await catalog.checkPlayable({
+    sourceInput: "https://music.youtube.com/watch?v=ddddddddddd",
+    canonicalUrl: "https://music.youtube.com/watch?v=ddddddddddd",
+    sourceId: "ddddddddddd",
+    title: "Song",
+    artist: "Artist",
+  });
+});
+
+test("doesn't extract an autoplay pick that is already cached", async () => {
+  const catalog = testCatalog();
+  const song: TrackMetadata = {
+    sourceInput: "https://music.youtube.com/watch?v=ccccccccccc",
+    canonicalUrl: "https://music.youtube.com/watch?v=ccccccccccc",
+    sourceId: "ccccccccccc",
+    title: "Song",
+    artist: "Artist",
+  };
+  const cache = Reflect.get(catalog, "cache") as { has: unknown };
+  const keys: string[] = [];
+  cache.has = (key: string) => (keys.push(key), true);
+  catalog.resolveUrl = async () => {
+    throw new Error("unexpected extraction");
+  };
+  await catalog.checkPlayable(song);
+  expect(keys).toHaveLength(1);
+});
+
 test("limits track preparation globally and prioritizes queued work", async () => {
   const catalog = testCatalog();
   const gates = new Map(

@@ -24,19 +24,32 @@ const secret =
 const userName =
   /(?:^|_)(?:user_?name|display_?name|real_?name|actor_?name)$|^name$/i;
 
-function sanitize(value: unknown, seen = new WeakSet<object>()): unknown {
+// `ancestors` holds only the objects above this one, so a value that appears
+// twice side by side, like the same permissions array before and after a
+// change, is copied twice; only a value inside itself is circular.
+function sanitize(value: unknown, ancestors = new WeakSet<object>()): unknown {
   if (typeof value === "string") return redactSecrets(value);
   if (!value || typeof value !== "object") return value;
-  if (seen.has(value)) return "[circular]";
-  seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => sanitize(item, seen));
-  return Object.fromEntries(
-    Object.entries(value).flatMap(([key, item]) =>
-      userName.test(key)
-        ? []
-        : [[key, secret.test(key) ? "[redacted]" : sanitize(item, seen)]],
-    ),
-  );
+  if (ancestors.has(value)) return "[circular]";
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value))
+      return value.map((item) => sanitize(item, ancestors));
+    return Object.fromEntries(
+      Object.entries(value).flatMap(([key, item]) =>
+        userName.test(key)
+          ? []
+          : [
+              [
+                key,
+                secret.test(key) ? "[redacted]" : sanitize(item, ancestors),
+              ],
+            ],
+      ),
+    );
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 async function installationId(path: string) {

@@ -51,6 +51,8 @@ test("restores a stored track and its cover into a session", () =>
       join(session, "a.cover.jpg"),
       { ...media, embedded, cover: true },
     );
+    expect(cache.has(key(1))).toBeTrue();
+    expect(cache.has(key(2))).toBeFalse();
     // The session's own copy goes away without taking the cached one with it.
     await rm(session, { recursive: true });
     await mkdir(session);
